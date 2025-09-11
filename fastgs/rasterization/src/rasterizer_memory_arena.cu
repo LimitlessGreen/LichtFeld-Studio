@@ -9,7 +9,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <algorithm>
-#include <c10/cuda/CUDACachingAllocator.h>
+#include <thread>
+#include <cstring>
 
 namespace fast_gs::rasterization {
 
@@ -61,6 +62,11 @@ RasterizerMemoryArena::~RasterizerMemoryArena() {
         if (arena.d_ptr) {
             cuMemAddressFree(arena.d_ptr, arena.virtual_size);
         }
+
+        // Free fallback buffer if exists
+        if (arena.fallback_buffer) {
+            cudaFree(arena.fallback_buffer);
+        }
     }
 
     device_arenas_.clear();
@@ -93,7 +99,7 @@ RasterizerMemoryArena& RasterizerMemoryArena::operator=(RasterizerMemoryArena&& 
     return *this;
 }
 
-    bool RasterizerMemoryArena::is_vmm_supported(int device) const {
+bool RasterizerMemoryArena::is_vmm_supported(int device) const {
     // Check compute capability
     int major = 0, minor = 0;
     cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
@@ -103,10 +109,6 @@ RasterizerMemoryArena& RasterizerMemoryArena::operator=(RasterizerMemoryArena&& 
     if (major < 6) {
         return false;
     }
-
-    // Instead of checking an attribute that may not exist,
-    // try to actually use VMM and see if it works
-    // This is more reliable across different CUDA versions
 
     // Check if we can get allocation granularity (VMM function)
     CUmemAllocationProp prop = {};
@@ -329,6 +331,17 @@ void RasterizerMemoryArena::cleanup_frames(int keep_recent) {
     }
 }
 
+void RasterizerMemoryArena::empty_cuda_cache() {
+    // Try to force CUDA to release cached memory
+    // This is less aggressive than cudaDeviceReset()
+    cudaDeviceSynchronize();
+
+    // Allocate and immediately free a small buffer to trigger cleanup
+    void* dummy;
+    cudaMalloc(&dummy, 1);
+    cudaFree(dummy);
+}
+
 void RasterizerMemoryArena::emergency_cleanup() {
     std::lock_guard<std::mutex> lock1(arena_mutex_);
     std::lock_guard<std::mutex> lock2(frame_mutex_);
@@ -355,8 +368,8 @@ void RasterizerMemoryArena::emergency_cleanup() {
         }
     }
 
-    // Force PyTorch to release cached memory
-    c10::cuda::CUDACachingAllocator::emptyCache();
+    // Try to free cached memory
+    empty_cuda_cache();
 
     // Synchronize all devices
     for (const auto& [device, arena] : device_arenas_) {
@@ -455,13 +468,8 @@ RasterizerMemoryArena::Arena& RasterizerMemoryArena::get_or_create_arena(int dev
         // Try to allocate with fallback to smaller sizes
         bool allocated = false;
         while (initial_size >= (64 << 20) && !allocated) {
-            try {
-                auto options = torch::TensorOptions()
-                    .dtype(torch::kUInt8)
-                    .device(torch::kCUDA, device)
-                    .requires_grad(false);
-
-                arena.buffer = torch::empty({static_cast<long long>(initial_size)}, options);
+            err = cudaMalloc(&arena.fallback_buffer, initial_size);
+            if (err == cudaSuccess) {
                 arena.capacity = initial_size;
                 arena.committed_size = initial_size;
                 arena.generation = generation_counter_.fetch_add(1, std::memory_order_relaxed);
@@ -477,8 +485,7 @@ RasterizerMemoryArena::Arena& RasterizerMemoryArena::get_or_create_arena(int dev
                 cudaMemGetInfo(&free_memory, &total_memory);
                 std::cout << "  GPU free after: " << (free_memory >> 20) << " MB\n"
                           << "========================================\n" << std::endl;
-
-            } catch (const c10::Error& e) {
+            } else {
                 initial_size /= 2;
                 std::cout << "[RasterizerMemoryArena] Allocation failed, trying "
                           << (initial_size >> 20) << " MB" << std::endl;
@@ -493,7 +500,7 @@ RasterizerMemoryArena::Arena& RasterizerMemoryArena::get_or_create_arena(int dev
     return *arena_ptr;
 }
 
-    bool RasterizerMemoryArena::commit_more_memory(Arena& arena, size_t required_size) {
+bool RasterizerMemoryArena::commit_more_memory(Arena& arena, size_t required_size) {
     // Only for VMM-enabled arenas
     if (arena.d_ptr == 0) {
         return false;
@@ -528,7 +535,7 @@ RasterizerMemoryArena::Arena& RasterizerMemoryArena::get_or_create_arena(int dev
 
     if (free_memory < commit_size + buffer_needed) {
         // Try cleanup
-        c10::cuda::CUDACachingAllocator::emptyCache();
+        empty_cuda_cache();
         cudaMemGetInfo(&free_memory, &total_memory);
 
         if (free_memory < commit_size + buffer_needed) {
@@ -541,7 +548,6 @@ RasterizerMemoryArena::Arena& RasterizerMemoryArena::get_or_create_arena(int dev
         }
     }
 
-    // Rest of the function remains the same...
     CUmemAllocationProp prop = {};
     prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
     prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
@@ -593,10 +599,9 @@ RasterizerMemoryArena::Arena& RasterizerMemoryArena::get_or_create_arena(int dev
 
 void RasterizerMemoryArena::decommit_unused_memory(Arena& arena) {
     // Called with arena_mutex_ held
+    // For now, we don't decommit to avoid fragmentation
     return;
 }
-
-// In rasterizer_memory_arena.cu, update allocate_internal to handle this properly:
 
 char* RasterizerMemoryArena::allocate_internal(Arena& arena, size_t size, uint64_t frame_id) {
     size_t aligned_size = align_size(size);
@@ -619,7 +624,7 @@ char* RasterizerMemoryArena::allocate_internal(Arena& arena, size_t size, uint64
             if (arena.d_ptr != 0) {
                 ptr = reinterpret_cast<char*>(arena.d_ptr) + offset;
             } else {
-                ptr = static_cast<char*>(arena.buffer.data_ptr()) + offset;
+                ptr = static_cast<char*>(arena.fallback_buffer) + offset;
             }
 
             // Update peak usage
@@ -702,7 +707,7 @@ char* RasterizerMemoryArena::allocate_internal(Arena& arena, size_t size, uint64
                 std::cout << "[RasterizerMemoryArena] Growth failed, attempting cleanup and retry "
                           << (retry + 1) << "/" << MAX_RETRIES << "\n";
 
-                c10::cuda::CUDACachingAllocator::emptyCache();
+                empty_cuda_cache();
                 cudaDeviceSynchronize();
 
                 // Small delay to let other operations complete
@@ -772,7 +777,7 @@ bool RasterizerMemoryArena::grow_arena(Arena& arena, size_t required_size) {
     if (free_memory_before < additional_needed + (200 << 20)) {  // Keep 200MB free
         std::cout << "  ⚠️  Low memory - attempting cleanup...\n";
         // Try to free cached memory
-        c10::cuda::CUDACachingAllocator::emptyCache();
+        empty_cuda_cache();
         cudaMemGetInfo(&free_memory_before, &total_memory);
         std::cout << "  GPU free after cleanup: " << (free_memory_before >> 20) << " MB\n";
 
@@ -783,46 +788,47 @@ bool RasterizerMemoryArena::grow_arena(Arena& arena, size_t required_size) {
         }
     }
 
-    try {
-        // Allocate new buffer
-        auto options = torch::TensorOptions()
-            .dtype(torch::kUInt8)
-            .device(torch::kCUDA, arena.device)
-            .requires_grad(false);
-
-        torch::Tensor new_buffer = torch::empty({static_cast<long long>(new_capacity)}, options);
-
-        // Copy existing data
-        size_t copy_size = arena.offset.load(std::memory_order_acquire);
-        if (copy_size > 0 && arena.buffer.defined()) {
-            new_buffer.slice(0, 0, copy_size).copy_(
-                arena.buffer.slice(0, 0, copy_size)
-            );
-        }
-
-        // Replace buffer - old one automatically freed by PyTorch's reference counting
-        arena.buffer = std::move(new_buffer);
-        arena.capacity = new_capacity;
-        arena.committed_size = new_capacity;
-        arena.generation = generation_counter_.fetch_add(1, std::memory_order_relaxed);
-        arena.realloc_count.fetch_add(1, std::memory_order_relaxed);
-
-        // Get memory after allocation
-        size_t free_memory_after;
-        cudaMemGetInfo(&free_memory_after, &total_memory);
-
-        std::cout << "  ✅ GROWTH SUCCESSFUL\n"
-                  << "  GPU free after growth: " << (free_memory_after >> 20) << " MB\n"
-                  << "  Memory used for growth: " << ((free_memory_before - free_memory_after) >> 20) << " MB\n"
-                  << "========================================\n" << std::endl;
-
-        return true;
-
-    } catch (const c10::Error& e) {
-        std::cout << "  ❌ GROWTH FAILED: " << e.what() << "\n"
+    // Allocate new buffer
+    void* new_buffer = nullptr;
+    err = cudaMalloc(&new_buffer, new_capacity);
+    if (err != cudaSuccess) {
+        std::cout << "  ❌ GROWTH FAILED: " << cudaGetErrorString(err) << "\n"
                   << "========================================\n" << std::endl;
         return false;
     }
+
+    // Copy existing data
+    size_t copy_size = arena.offset.load(std::memory_order_acquire);
+    if (copy_size > 0 && arena.fallback_buffer) {
+        err = cudaMemcpy(new_buffer, arena.fallback_buffer, copy_size, cudaMemcpyDeviceToDevice);
+        if (err != cudaSuccess) {
+            cudaFree(new_buffer);
+            std::cout << "  ❌ COPY FAILED: " << cudaGetErrorString(err) << "\n"
+                      << "========================================\n" << std::endl;
+            return false;
+        }
+    }
+
+    // Free old buffer and replace
+    if (arena.fallback_buffer) {
+        cudaFree(arena.fallback_buffer);
+    }
+    arena.fallback_buffer = new_buffer;
+    arena.capacity = new_capacity;
+    arena.committed_size = new_capacity;
+    arena.generation = generation_counter_.fetch_add(1, std::memory_order_relaxed);
+    arena.realloc_count.fetch_add(1, std::memory_order_relaxed);
+
+    // Get memory after allocation
+    size_t free_memory_after;
+    cudaMemGetInfo(&free_memory_after, &total_memory);
+
+    std::cout << "  ✅ GROWTH SUCCESSFUL\n"
+              << "  GPU free after growth: " << (free_memory_after >> 20) << " MB\n"
+              << "  Memory used for growth: " << ((free_memory_before - free_memory_after) >> 20) << " MB\n"
+              << "========================================\n" << std::endl;
+
+    return true;
 }
 
 size_t RasterizerMemoryArena::align_size(size_t size) const {

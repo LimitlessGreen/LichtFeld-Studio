@@ -32,9 +32,11 @@ namespace gs::training {
         constexpr float near_plane = 0.01f;
         constexpr float far_plane = 1e10f;
 
+        // Get camera position tensor
+        torch::Tensor cam_position_tensor = viewpoint_camera.cam_position();
+
         fast_gs::rasterization::FastGSSettings settings;
-        auto w2c = viewpoint_camera.world_view_transform();
-        settings.cam_position = viewpoint_camera.cam_position();
+        settings.cam_position_ptr = cam_position_tensor.data_ptr<float>();
         settings.active_sh_bases = active_sh_bases;
         settings.width = width;
         settings.height = height;
@@ -44,6 +46,8 @@ namespace gs::training {
         settings.center_y = cy;
         settings.near_plane = near_plane;
         settings.far_plane = far_plane;
+
+        auto w2c = viewpoint_camera.world_view_transform();
 
         auto raster_outputs = FastGSRasterize::apply(
             means,

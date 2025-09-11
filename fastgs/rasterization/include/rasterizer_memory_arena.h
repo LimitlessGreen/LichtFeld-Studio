@@ -5,7 +5,6 @@
 
 #pragma once
 
-#include <torch/torch.h>
 #include <cuda_runtime.h>
 #include <cuda.h>
 #include <atomic>
@@ -82,8 +81,8 @@ private:
         std::vector<PhysicalChunk> chunks;         // Physical memory chunks
         std::mutex chunks_mutex;
 
-        // Original fields kept for compatibility
-        torch::Tensor buffer;                      // Dummy tensor for compatibility
+        // Traditional allocation fallback
+        void* fallback_buffer = nullptr;           // Raw CUDA memory for non-VMM
         std::atomic<size_t> offset{0};            // Current allocation offset
         size_t capacity = 0;                       // Same as committed_size for compatibility
         uint64_t generation = 0;
@@ -162,6 +161,7 @@ private:
     bool commit_more_memory(Arena& arena, size_t required_size);
     void decommit_unused_memory(Arena& arena);
     bool is_vmm_supported(int device) const;
+    void empty_cuda_cache();
 };
 
 // Global singleton for arena access
