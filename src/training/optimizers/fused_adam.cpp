@@ -4,6 +4,7 @@
 
 #include "fused_adam.hpp"
 #include "adam_api.h"
+#include <cmath>
 
 // TODO: This is just a gimmick for the bounty. I don't think it should be integrated into the main codebase.
 // TODO: Removing the SH step skipping also means that the custom zero_grad() method is no longer needed.
@@ -78,12 +79,13 @@ namespace gs::training {
                 auto bias_correction1_rcp = 1.0 / (1.0 - std::pow(beta1, state.step_count));
                 auto bias_correction2_sqrt_rcp = 1.0 / std::sqrt(1.0 - std::pow(beta2, state.step_count));
 
-                // Call the fused CUDA kernel from fastgs
-                fast_gs::optimizer::adam_step_wrapper(
-                    param,
-                    state.exp_avg,
-                    state.exp_avg_sq,
-                    param.grad(),
+                // Call the pure CUDA kernel from fastgs
+                fast_gs::optimizer::adam_step_raw(
+                    param.data_ptr<float>(),
+                    state.exp_avg.data_ptr<float>(),
+                    state.exp_avg_sq.data_ptr<float>(),
+                    param.grad().data_ptr<float>(),
+                    param.numel(),
                     static_cast<float>(lr),
                     static_cast<float>(beta1),
                     static_cast<float>(beta2),

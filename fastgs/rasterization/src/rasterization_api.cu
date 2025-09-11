@@ -10,6 +10,7 @@
 #include "rasterizer_memory_arena.h"
 #include "buffer_utils.h"
 #include "utils.h"
+#include "cuda_utils.h"
 #include <cuda_runtime.h>
 #include <functional>
 #include <stdexcept>
@@ -41,24 +42,20 @@ ForwardContext forward_raw(
     float near_plane,
     float far_plane) {
 
-    // Validate inputs
-    if (!means_ptr || !scales_raw_ptr || !rotations_raw_ptr ||
-        !opacities_raw_ptr || !sh_coefficients_0_ptr || !sh_coefficients_rest_ptr ||
-        !w2c_ptr || !cam_position_ptr || !image_ptr || !alpha_ptr) {
-        throw std::runtime_error("Null pointer passed to forward_raw");
-    }
+    // Validate inputs using pure CUDA validation
+    CHECK_CUDA_PTR(means_ptr, "means_ptr");
+    CHECK_CUDA_PTR(scales_raw_ptr, "scales_raw_ptr");
+    CHECK_CUDA_PTR(rotations_raw_ptr, "rotations_raw_ptr");
+    CHECK_CUDA_PTR(opacities_raw_ptr, "opacities_raw_ptr");
+    CHECK_CUDA_PTR(sh_coefficients_0_ptr, "sh_coefficients_0_ptr");
+    CHECK_CUDA_PTR(sh_coefficients_rest_ptr, "sh_coefficients_rest_ptr");
+    CHECK_CUDA_PTR(w2c_ptr, "w2c_ptr");
+    CHECK_CUDA_PTR(cam_position_ptr, "cam_position_ptr");
+    CHECK_CUDA_PTR(image_ptr, "image_ptr");
+    CHECK_CUDA_PTR(alpha_ptr, "alpha_ptr");
 
     if (n_primitives <= 0 || width <= 0 || height <= 0) {
         throw std::runtime_error("Invalid dimensions in forward_raw");
-    }
-
-    // Simple validation - just check if it's accessible from device
-    // We'll do a simple test read instead of using cudaPointerGetAttributes which can be problematic
-    float test_value;
-    cudaError_t err = cudaMemcpy(&test_value, means_ptr, sizeof(float), cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-        cudaGetLastError(); // Clear error
-        throw std::runtime_error("means_ptr is not accessible from device: " + std::string(cudaGetErrorString(err)));
     }
 
     // Calculate grid dimensions
@@ -238,21 +235,29 @@ BackwardOutputs backward_raw(
     outputs.success = false;
     outputs.error_message = nullptr;
 
-    // Validate required inputs
-    if (!grad_image_ptr || !grad_alpha_ptr || !image_ptr || !alpha_ptr ||
-        !means_ptr || !scales_raw_ptr || !rotations_raw_ptr ||
-        !sh_coefficients_rest_ptr || !w2c_ptr || !cam_position_ptr) {
-        outputs.error_message = "Null input pointer in backward_raw";
-        return outputs;
-    }
+    // Validate required inputs using pure CUDA validation
+    CHECK_CUDA_PTR(grad_image_ptr, "grad_image_ptr");
+    CHECK_CUDA_PTR(grad_alpha_ptr, "grad_alpha_ptr");
+    CHECK_CUDA_PTR(image_ptr, "image_ptr");
+    CHECK_CUDA_PTR(alpha_ptr, "alpha_ptr");
+    CHECK_CUDA_PTR(means_ptr, "means_ptr");
+    CHECK_CUDA_PTR(scales_raw_ptr, "scales_raw_ptr");
+    CHECK_CUDA_PTR(rotations_raw_ptr, "rotations_raw_ptr");
+    CHECK_CUDA_PTR(sh_coefficients_rest_ptr, "sh_coefficients_rest_ptr");
+    CHECK_CUDA_PTR(w2c_ptr, "w2c_ptr");
+    CHECK_CUDA_PTR(cam_position_ptr, "cam_position_ptr");
 
     // Validate required outputs
-    if (!grad_means_ptr || !grad_scales_raw_ptr || !grad_rotations_raw_ptr ||
-        !grad_opacities_raw_ptr || !grad_sh_coefficients_0_ptr ||
-        !grad_sh_coefficients_rest_ptr) {
-        outputs.error_message = "Null output gradient pointer in backward_raw";
-        return outputs;
-    }
+    CHECK_CUDA_PTR(grad_means_ptr, "grad_means_ptr");
+    CHECK_CUDA_PTR(grad_scales_raw_ptr, "grad_scales_raw_ptr");
+    CHECK_CUDA_PTR(grad_rotations_raw_ptr, "grad_rotations_raw_ptr");
+    CHECK_CUDA_PTR(grad_opacities_raw_ptr, "grad_opacities_raw_ptr");
+    CHECK_CUDA_PTR(grad_sh_coefficients_0_ptr, "grad_sh_coefficients_0_ptr");
+    CHECK_CUDA_PTR(grad_sh_coefficients_rest_ptr, "grad_sh_coefficients_rest_ptr");
+    
+    // Optional pointer
+    CHECK_CUDA_PTR_OPTIONAL(densification_info_ptr, "densification_info_ptr");
+    CHECK_CUDA_PTR_OPTIONAL(grad_w2c_ptr, "grad_w2c_ptr");
 
     // Validate forward context
     if (!forward_ctx.per_primitive_buffers || !forward_ctx.per_tile_buffers) {

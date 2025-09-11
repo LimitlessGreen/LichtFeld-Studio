@@ -4,14 +4,6 @@
 
 cmake_minimum_required(VERSION 3.30)
 
-# TODO: This file is a bit of a mess and needs to be cleaned up.
-
-# Get torch from parent
-if(NOT DEFINED TORCH_INCLUDE_DIRS)
-    find_package(Torch REQUIRED)
-endif()
-
-# All fastgs sources together
 set(FASTGS_SOURCES
         # rasterizer
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/src/rasterization_api.cu
@@ -23,7 +15,7 @@ set(FASTGS_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/optimizer/src/adam.cu
 )
 
-# One unified library
+# One unified library - pure CUDA
 add_library(fastgs_backend STATIC ${FASTGS_SOURCES})
 
 set_target_properties(fastgs_backend PROPERTIES
@@ -40,18 +32,16 @@ target_include_directories(fastgs_backend
         ${CMAKE_CURRENT_SOURCE_DIR}/utils
         ${CMAKE_SOURCE_DIR}/include
         ${CUDAToolkit_INCLUDE_DIRS}
-        ${OPENGL_INCLUDE_DIRS}
-        ${TORCH_INCLUDE_DIRS}
         PRIVATE
 )
 
+# Pure CUDA libraries only
 target_link_libraries(fastgs_backend
         PUBLIC
         CUDA::cudart
         CUDA::curand
         CUDA::cublas
         ${CUDA_CUDA_LIBRARY}
-        ${TORCH_LIBRARIES}
 )
 
 target_compile_options(fastgs_backend PRIVATE
