@@ -56,29 +56,26 @@ namespace gs::training {
             return torch::cat({param, new_param}).set_requires_grad(param.requires_grad());
         };
 
-        const auto optimizer_fn = [&sampled_idxs](torch::optim::OptimizerParamState& state,
+        const auto optimizer_fn = [&sampled_idxs](FusedAdam::AdamState& state,
                                                   const torch::Tensor& full_param)
-            -> std::unique_ptr<torch::optim::OptimizerParamState> {
+            -> std::unique_ptr<FusedAdam::AdamState> {
             auto new_shape = full_param.sizes().vec();
             new_shape[0] = sampled_idxs.size(0);
-            if (auto* fused_adam_state = dynamic_cast<FusedAdam::AdamParamState*>(&state)) {
-                // FusedAdam state
-                auto zeros_to_add = torch::zeros(new_shape, fused_adam_state->exp_avg.options());
-                auto new_exp_avg = torch::cat({fused_adam_state->exp_avg, zeros_to_add}, 0);
-                auto new_exp_avg_sq = torch::cat({fused_adam_state->exp_avg_sq, zeros_to_add}, 0);
 
-                // Create new state
-                auto new_state = std::make_unique<FusedAdam::AdamParamState>();
-                new_state->step_count = fused_adam_state->step_count;
-                new_state->exp_avg = new_exp_avg;
-                new_state->exp_avg_sq = new_exp_avg_sq;
-                if (fused_adam_state->max_exp_avg_sq.defined()) {
-                    auto new_max_exp_avg_sq = torch::cat({fused_adam_state->max_exp_avg_sq, zeros_to_add}, 0);
-                    new_state->max_exp_avg_sq = new_max_exp_avg_sq;
-                }
-                return new_state;
+            auto zeros_to_add = torch::zeros(new_shape, state.exp_avg.options());
+            auto new_exp_avg = torch::cat({state.exp_avg, zeros_to_add}, 0);
+            auto new_exp_avg_sq = torch::cat({state.exp_avg_sq, zeros_to_add}, 0);
+
+            // Create new state
+            auto new_state = std::make_unique<FusedAdam::AdamState>();
+            new_state->step_count = state.step_count;
+            new_state->exp_avg = new_exp_avg;
+            new_state->exp_avg_sq = new_exp_avg_sq;
+            if (state.max_exp_avg_sq.defined()) {
+                auto new_max_exp_avg_sq = torch::cat({state.max_exp_avg_sq, zeros_to_add}, 0);
+                new_state->max_exp_avg_sq = new_max_exp_avg_sq;
             }
-            return nullptr;
+            return new_state;
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
@@ -129,33 +126,30 @@ namespace gs::training {
         };
 
         const auto optimizer_fn = [&sampled_idxs, &rest_idxs](
-                                      torch::optim::OptimizerParamState& state,
+                                      FusedAdam::AdamState& state,
                                       const torch::Tensor& full_param)
-            -> std::unique_ptr<torch::optim::OptimizerParamState> {
+            -> std::unique_ptr<FusedAdam::AdamState> {
             auto zero_shape = full_param.sizes().vec();
             zero_shape[0] = sampled_idxs.size(0) * split_size;
-            if (auto* fused_adam_state = dynamic_cast<FusedAdam::AdamParamState*>(&state)) {
-                // FusedAdam state
-                auto rest_exp_avg = fused_adam_state->exp_avg.index_select(0, rest_idxs);
-                auto rest_exp_avg_sq = fused_adam_state->exp_avg_sq.index_select(0, rest_idxs);
 
-                auto zeros_to_add = torch::zeros(zero_shape, fused_adam_state->exp_avg.options());
-                auto new_exp_avg = torch::cat({rest_exp_avg, zeros_to_add}, 0);
-                auto new_exp_avg_sq = torch::cat({rest_exp_avg_sq, zeros_to_add}, 0);
+            auto rest_exp_avg = state.exp_avg.index_select(0, rest_idxs);
+            auto rest_exp_avg_sq = state.exp_avg_sq.index_select(0, rest_idxs);
 
-                // Create new state
-                auto new_state = std::make_unique<FusedAdam::AdamParamState>();
-                new_state->step_count = fused_adam_state->step_count;
-                new_state->exp_avg = new_exp_avg;
-                new_state->exp_avg_sq = new_exp_avg_sq;
-                if (fused_adam_state->max_exp_avg_sq.defined()) {
-                    auto rest_max_exp_avg_sq = fused_adam_state->max_exp_avg_sq.index_select(0, rest_idxs);
-                    auto new_max_exp_avg_sq = torch::cat({rest_max_exp_avg_sq, zeros_to_add}, 0);
-                    new_state->max_exp_avg_sq = new_max_exp_avg_sq;
-                }
-                return new_state;
+            auto zeros_to_add = torch::zeros(zero_shape, state.exp_avg.options());
+            auto new_exp_avg = torch::cat({rest_exp_avg, zeros_to_add}, 0);
+            auto new_exp_avg_sq = torch::cat({rest_exp_avg_sq, zeros_to_add}, 0);
+
+            // Create new state
+            auto new_state = std::make_unique<FusedAdam::AdamState>();
+            new_state->step_count = state.step_count;
+            new_state->exp_avg = new_exp_avg;
+            new_state->exp_avg_sq = new_exp_avg_sq;
+            if (state.max_exp_avg_sq.defined()) {
+                auto rest_max_exp_avg_sq = state.max_exp_avg_sq.index_select(0, rest_idxs);
+                auto new_max_exp_avg_sq = torch::cat({rest_max_exp_avg_sq, zeros_to_add}, 0);
+                new_state->max_exp_avg_sq = new_max_exp_avg_sq;
             }
-            return nullptr;
+            return new_state;
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
@@ -201,26 +195,22 @@ namespace gs::training {
         };
 
         const auto optimizer_fn = [&sampled_idxs](
-                                      torch::optim::OptimizerParamState& state,
+                                      FusedAdam::AdamState& state,
                                       const torch::Tensor& new_param)
-            -> std::unique_ptr<torch::optim::OptimizerParamState> {
-            if (auto* fused_adam_state = dynamic_cast<FusedAdam::AdamParamState*>(&state)) {
-                // FusedAdam state
-                auto new_exp_avg = fused_adam_state->exp_avg.index_select(0, sampled_idxs);
-                auto new_exp_avg_sq = fused_adam_state->exp_avg_sq.index_select(0, sampled_idxs);
+            -> std::unique_ptr<FusedAdam::AdamState> {
+            auto new_exp_avg = state.exp_avg.index_select(0, sampled_idxs);
+            auto new_exp_avg_sq = state.exp_avg_sq.index_select(0, sampled_idxs);
 
-                // Create new state
-                auto new_state = std::make_unique<FusedAdam::AdamParamState>();
-                new_state->step_count = fused_adam_state->step_count;
-                new_state->exp_avg = new_exp_avg;
-                new_state->exp_avg_sq = new_exp_avg_sq;
-                if (fused_adam_state->max_exp_avg_sq.defined()) {
-                    auto new_max_exp_avg_sq = fused_adam_state->max_exp_avg_sq.index_select(0, sampled_idxs);
-                    new_state->max_exp_avg_sq = new_max_exp_avg_sq;
-                }
-                return new_state;
+            // Create new state
+            auto new_state = std::make_unique<FusedAdam::AdamState>();
+            new_state->step_count = state.step_count;
+            new_state->exp_avg = new_exp_avg;
+            new_state->exp_avg_sq = new_exp_avg_sq;
+            if (state.max_exp_avg_sq.defined()) {
+                auto new_max_exp_avg_sq = state.max_exp_avg_sq.index_select(0, sampled_idxs);
+                new_state->max_exp_avg_sq = new_max_exp_avg_sq;
             }
-            return nullptr;
+            return new_state;
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
@@ -263,27 +253,22 @@ namespace gs::training {
             throw std::runtime_error("Invalid parameter index for reset_opacity: " + std::to_string(i));
         };
 
-        const auto optimizer_fn = [](torch::optim::OptimizerParamState& state,
+        const auto optimizer_fn = [](FusedAdam::AdamState& state,
                                      const torch::Tensor& new_param)
-            -> std::unique_ptr<torch::optim::OptimizerParamState> {
-            if (auto* fused_adam_state = dynamic_cast<FusedAdam::AdamParamState*>(&state)) {
-                // FusedAdam state
-                auto new_exp_avg = torch::zeros_like(fused_adam_state->exp_avg);
-                auto new_exp_avg_sq = torch::zeros_like(fused_adam_state->exp_avg_sq);
+            -> std::unique_ptr<FusedAdam::AdamState> {
+            auto new_exp_avg = torch::zeros_like(state.exp_avg);
+            auto new_exp_avg_sq = torch::zeros_like(state.exp_avg_sq);
 
-                // Create new state
-                auto new_state = std::make_unique<FusedAdam::AdamParamState>();
-                new_state->step_count = fused_adam_state->step_count;
-                new_state->exp_avg = new_exp_avg;
-                new_state->exp_avg_sq = new_exp_avg_sq;
-                if (fused_adam_state->max_exp_avg_sq.defined()) {
-                    auto new_max_exp_avg_sq = torch::zeros_like(fused_adam_state->max_exp_avg_sq);
-                    new_state->max_exp_avg_sq = new_max_exp_avg_sq;
-                }
-                return new_state;
+            // Create new state
+            auto new_state = std::make_unique<FusedAdam::AdamState>();
+            new_state->step_count = state.step_count;
+            new_state->exp_avg = new_exp_avg;
+            new_state->exp_avg_sq = new_exp_avg_sq;
+            if (state.max_exp_avg_sq.defined()) {
+                auto new_max_exp_avg_sq = torch::zeros_like(state.max_exp_avg_sq);
+                new_state->max_exp_avg_sq = new_max_exp_avg_sq;
             }
-
-            return nullptr;
+            return new_state;
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data, {5});
@@ -327,9 +312,8 @@ namespace gs::training {
 
     void DefaultStrategy::step(int iter) {
         if (iter < _params->iterations) {
-            auto* fused_adam = dynamic_cast<FusedAdam*>(_optimizer.get());
-            fused_adam->step(iter);
-            fused_adam->zero_grad(true, iter);
+            _optimizer->step(iter);
+            _optimizer->zero_grad(true, iter);
             _scheduler->step();
         }
     }

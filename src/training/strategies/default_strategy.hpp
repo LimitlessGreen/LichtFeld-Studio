@@ -1,10 +1,11 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
- *
+*
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #pragma once
 
 #include "istrategy.hpp"
+#include "optimizers/fused_adam.hpp"
 #include "optimizers/scheduler.hpp"
 #include <memory>
 #include <torch/torch.h>
@@ -12,7 +13,6 @@
 namespace gs::training {
     // Forward declarations
     struct RenderOutput;
-    class FusedAdam;
 
     class DefaultStrategy : public IStrategy {
     public:
@@ -57,7 +57,7 @@ namespace gs::training {
         void reset_opacity();
 
         // Member variables
-        std::unique_ptr<torch::optim::Optimizer> _optimizer;
+        std::unique_ptr<FusedAdam> _optimizer;
         std::unique_ptr<ExponentialLR> _scheduler;
         gs::SplatData _splat_data;
         std::unique_ptr<const gs::param::OptimizationParameters> _params;

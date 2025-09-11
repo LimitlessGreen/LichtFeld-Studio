@@ -7,10 +7,13 @@
 #include <torch/torch.h>
 
 namespace gs::training {
-    // Simple ExponentialLR implementation since C++ API is different
+    // Forward declaration
+    class FusedAdam;
+
+    // Simple ExponentialLR implementation for FusedAdam
     class ExponentialLR {
     public:
-        ExponentialLR(torch::optim::Optimizer& optimizer, double gamma, int param_group_index = -1)
+        ExponentialLR(FusedAdam& optimizer, double gamma, int param_group_index = -1)
             : optimizer_(optimizer),
               gamma_(gamma),
               param_group_index_(param_group_index) {
@@ -19,7 +22,7 @@ namespace gs::training {
         void step();
 
     private:
-        torch::optim::Optimizer& optimizer_;
+        FusedAdam& optimizer_;
         double gamma_;
         int param_group_index_;
     };
@@ -32,7 +35,8 @@ namespace gs::training {
             int warmup_steps = 0,
             double warmup_start_factor = 1.0,
             int param_group_index = -1)
-            : optimizer_(optimizer),
+            : torch_optimizer_(&optimizer),
+              fused_adam_(nullptr),
               gamma_(gamma),
               warmup_steps_(warmup_steps),
               warmup_start_factor_(warmup_start_factor),
@@ -45,10 +49,19 @@ namespace gs::training {
             }
         }
 
+        // Constructor for FusedAdam
+        WarmupExponentialLR(
+            FusedAdam& optimizer,
+            double gamma,
+            int warmup_steps = 0,
+            double warmup_start_factor = 1.0,
+            int param_group_index = -1);
+
         void step();
 
     private:
-        torch::optim::Optimizer& optimizer_;
+        torch::optim::Optimizer* torch_optimizer_;
+        FusedAdam* fused_adam_;
         double gamma_;
         int warmup_steps_;
         double warmup_start_factor_;

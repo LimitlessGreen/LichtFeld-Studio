@@ -7,6 +7,7 @@
 #include "core/logger.hpp"
 #include "core/parameters.hpp"
 #include "optimizers/fused_adam.hpp"
+#include "optimizers/scheduler.hpp"
 #include "rasterization/rasterizer.hpp"
 #include "strategy_utils.hpp"
 #include <iostream>
@@ -17,24 +18,6 @@
 #endif
 
 namespace gs::training {
-    void MCMC::ExponentialLR::step() {
-        if (param_group_index_ >= 0) {
-            auto& group = optimizer_.param_groups()[param_group_index_];
-
-            // Try to cast to our custom Options first
-            auto* fused_adam_options = static_cast<FusedAdam::Options*>(&group.options());
-            double current_lr = fused_adam_options->lr();
-            fused_adam_options->lr(current_lr * gamma_);
-        } else {
-            // Update all param groups
-            for (auto& group : optimizer_.param_groups()) {
-                auto* fused_adam_options = static_cast<FusedAdam::Options*>(&group.options());
-                double current_lr = fused_adam_options->lr();
-                fused_adam_options->lr(current_lr * gamma_);
-            }
-        }
-    }
-
     MCMC::MCMC(gs::SplatData&& splat_data)
         : _splat_data(std::move(splat_data)) {
     }
@@ -82,12 +65,12 @@ namespace gs::training {
         return result.to(weights.device());
     }
 
-    void MCMC::update_optimizer_for_relocate(torch::optim::Optimizer* optimizer,
+    void MCMC::update_optimizer_for_relocate(FusedAdam* optimizer,
                                              const torch::Tensor& sampled_indices,
                                              const torch::Tensor& dead_indices,
                                              int param_position) {
         // Get the parameter
-        auto& param = optimizer->param_groups()[param_position].params()[0];
+        auto& param = optimizer->param_groups()[param_position].params[0];
         void* param_key = param.unsafeGetTensorImpl();
 
         // Check if optimizer state exists
@@ -98,14 +81,13 @@ namespace gs::training {
             return;
         }
 
-        // Get the optimizer state - handle both Adam types
-        auto& param_state = *state_it->second;
-        auto* fused_adam_state = static_cast<FusedAdam::AdamParamState*>(&param_state);
-        fused_adam_state->exp_avg.index_put_({sampled_indices}, 0);
-        fused_adam_state->exp_avg_sq.index_put_({sampled_indices}, 0);
+        // Get the optimizer state
+        auto& adam_state = *state_it->second;
+        adam_state.exp_avg.index_put_({sampled_indices}, 0);
+        adam_state.exp_avg_sq.index_put_({sampled_indices}, 0);
 
-        if (fused_adam_state->max_exp_avg_sq.defined()) {
-            fused_adam_state->max_exp_avg_sq.index_put_({sampled_indices}, 0);
+        if (adam_state.max_exp_avg_sq.defined()) {
+            adam_state.max_exp_avg_sq.index_put_({sampled_indices}, 0);
         }
     }
 
@@ -274,10 +256,10 @@ namespace gs::training {
 
         // Collect old parameter keys and states
         std::vector<void*> old_param_keys;
-        std::vector<std::unique_ptr<torch::optim::OptimizerParamState>> saved_states;
+        std::vector<std::unique_ptr<FusedAdam::AdamState>> saved_states;
 
         for (int i = 0; i < 6; ++i) {
-            auto& old_param = _optimizer->param_groups()[i].params()[0];
+            auto& old_param = _optimizer->param_groups()[i].params[0];
             void* old_param_key = old_param.unsafeGetTensorImpl();
             old_param_keys.push_back(old_param_key);
 
@@ -285,10 +267,11 @@ namespace gs::training {
             auto state_it = _optimizer->state().find(old_param_key);
             if (state_it == _optimizer->state().end()) {
                 saved_states.push_back(nullptr);
+                continue;
             }
 
-            auto* fused_adam_state = static_cast<FusedAdam::AdamParamState*>(state_it->second.get());
-            // FusedAdam state
+            auto& adam_state = *state_it->second;
+
             torch::IntArrayRef new_shape;
             if (i == 0)
                 new_shape = new_means.sizes();
@@ -303,17 +286,17 @@ namespace gs::training {
             else
                 new_shape = new_opacity.sizes();
 
-            auto zeros_to_add = torch::zeros(new_shape, fused_adam_state->exp_avg.options());
-            auto new_exp_avg = torch::cat({fused_adam_state->exp_avg, zeros_to_add}, 0);
-            auto new_exp_avg_sq = torch::cat({fused_adam_state->exp_avg_sq, zeros_to_add}, 0);
+            auto zeros_to_add = torch::zeros(new_shape, adam_state.exp_avg.options());
+            auto new_exp_avg = torch::cat({adam_state.exp_avg, zeros_to_add}, 0);
+            auto new_exp_avg_sq = torch::cat({adam_state.exp_avg_sq, zeros_to_add}, 0);
 
             // Create new state
-            auto new_state = std::make_unique<FusedAdam::AdamParamState>();
-            new_state->step_count = fused_adam_state->step_count;
+            auto new_state = std::make_unique<FusedAdam::AdamState>();
+            new_state->step_count = adam_state.step_count;
             new_state->exp_avg = new_exp_avg;
             new_state->exp_avg_sq = new_exp_avg_sq;
-            if (fused_adam_state->max_exp_avg_sq.defined()) {
-                auto new_max_exp_avg_sq = torch::cat({fused_adam_state->max_exp_avg_sq, zeros_to_add}, 0);
+            if (adam_state.max_exp_avg_sq.defined()) {
+                auto new_max_exp_avg_sq = torch::cat({adam_state.max_exp_avg_sq, zeros_to_add}, 0);
                 new_state->max_exp_avg_sq = new_max_exp_avg_sq;
             }
 
@@ -327,7 +310,7 @@ namespace gs::training {
 
         // Update parameters and add new states
         for (int i = 0; i < 6; ++i) {
-            _optimizer->param_groups()[i].params()[0] = *new_params[i];
+            _optimizer->param_groups()[i].params[0] = *new_params[i];
 
             if (saved_states[i]) {
                 void* new_param_key = new_params[i]->unsafeGetTensorImpl();
@@ -351,9 +334,7 @@ namespace gs::training {
         torch::NoGradGuard no_grad;
 
         // Get current learning rate from optimizer (after scheduler has updated it)
-        auto& group = _optimizer->param_groups()[0];
-        auto* fused_adam_options = static_cast<FusedAdam::Options*>(&group.options());
-        const float current_lr = static_cast<float>(fused_adam_options->lr()) * _noise_lr;
+        double current_lr = _optimizer->get_lr(0) * _noise_lr;
 
         // Generate noise
         noise_buffer_.normal_(0.0f, 1.0f);
@@ -364,7 +345,7 @@ namespace gs::training {
             _splat_data.rotation_raw(),
             noise_buffer_,
             _splat_data.means(),
-            current_lr);
+            static_cast<float>(current_lr));
     }
 
     void MCMC::post_backward(int iter, RenderOutput& render_output) {
@@ -395,9 +376,8 @@ namespace gs::training {
 
     void MCMC::step(int iter) {
         if (iter < _params->iterations) {
-            auto* fused_adam = dynamic_cast<FusedAdam*>(_optimizer.get());
-            fused_adam->step(iter);
-            fused_adam->zero_grad(true, iter);
+            _optimizer->step(iter);
+            _optimizer->zero_grad(true, iter);
             _scheduler->step();
         }
     }
@@ -419,26 +399,22 @@ namespace gs::training {
         };
 
         const auto optimizer_fn = [&sampled_idxs](
-                                      torch::optim::OptimizerParamState& state,
+                                      FusedAdam::AdamState& state,
                                       const torch::Tensor& new_param)
-            -> std::unique_ptr<torch::optim::OptimizerParamState> {
-            if (auto* fused_adam_state = dynamic_cast<FusedAdam::AdamParamState*>(&state)) {
-                // FusedAdam state
-                auto new_exp_avg = fused_adam_state->exp_avg.index_select(0, sampled_idxs);
-                auto new_exp_avg_sq = fused_adam_state->exp_avg_sq.index_select(0, sampled_idxs);
+            -> std::unique_ptr<FusedAdam::AdamState> {
+            auto new_exp_avg = state.exp_avg.index_select(0, sampled_idxs);
+            auto new_exp_avg_sq = state.exp_avg_sq.index_select(0, sampled_idxs);
 
-                // Create new state
-                auto new_state = std::make_unique<FusedAdam::AdamParamState>();
-                new_state->step_count = fused_adam_state->step_count;
-                new_state->exp_avg = new_exp_avg;
-                new_state->exp_avg_sq = new_exp_avg_sq;
-                if (fused_adam_state->max_exp_avg_sq.defined()) {
-                    auto new_max_exp_avg_sq = fused_adam_state->max_exp_avg_sq.index_select(0, sampled_idxs);
-                    new_state->max_exp_avg_sq = new_max_exp_avg_sq;
-                }
-                return new_state;
+            // Create new state
+            auto new_state = std::make_unique<FusedAdam::AdamState>();
+            new_state->step_count = state.step_count;
+            new_state->exp_avg = new_exp_avg;
+            new_state->exp_avg_sq = new_exp_avg_sq;
+            if (state.max_exp_avg_sq.defined()) {
+                auto new_max_exp_avg_sq = state.max_exp_avg_sq.index_select(0, sampled_idxs);
+                new_state->max_exp_avg_sq = new_max_exp_avg_sq;
             }
-            return nullptr;
+            return new_state;
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
@@ -475,16 +451,15 @@ namespace gs::training {
         _binoms = _binoms.to(dev);
 
         // Initialize optimizer
-        using Options = FusedAdam::Options;
-        std::vector<torch::optim::OptimizerParamGroup> groups;
+        std::vector<FusedAdam::ParamGroup> groups;
 
-        // Create groups with proper unique_ptr<Options>
+        // Create groups with proper Options
         auto add_param_group = [&groups](const torch::Tensor& param, double lr) {
-            auto options = std::make_unique<Options>(lr);
-            options->eps(1e-15).betas(std::make_tuple(0.9, 0.999));
-            groups.emplace_back(
-                std::vector<torch::Tensor>{param},
-                std::unique_ptr<torch::optim::OptimizerOptions>(std::move(options)));
+            FusedAdam::Options options;
+            options.lr = lr;
+            options.eps = 1e-15;
+            options.betas = {0.9, 0.999};
+            groups.emplace_back(std::vector<torch::Tensor>{param}, options);
         };
 
         add_param_group(_splat_data.means(), _params->means_lr * _splat_data.get_scene_scale());
@@ -494,9 +469,11 @@ namespace gs::training {
         add_param_group(_splat_data.rotation_raw(), _params->rotation_lr);
         add_param_group(_splat_data.opacity_raw(), _params->opacity_lr);
 
-        auto global_options = std::make_unique<Options>(0.f);
-        global_options->eps(1e-15);
-        _optimizer = std::make_unique<FusedAdam>(std::move(groups), std::move(global_options));
+        FusedAdam::Options global_options;
+        global_options.lr = 0.f;
+        global_options.eps = 1e-15;
+        _optimizer = std::make_unique<FusedAdam>(std::move(groups), global_options);
+
         const double gamma = std::pow(0.01, 1.0 / _params->iterations);
         _scheduler = std::make_unique<ExponentialLR>(*_optimizer, gamma, 0);
     }

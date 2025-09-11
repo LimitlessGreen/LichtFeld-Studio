@@ -15,36 +15,19 @@
 #define SKIP_SH_STEPS false
 
 namespace gs::training {
-    torch::Tensor FusedAdam::step(LossClosure closure) {
-        TORCH_CHECK(false, "FusedAdam does not support closures.");
-        return {};
-    }
-
     void FusedAdam::step(int iteration) {
         torch::NoGradGuard no_grad;
 
-        // Get global options
-        const auto& global_options = options();
-
         int i = 0; // HACK: counter to track what Gaussian parameter we are on
-        for (auto& group : param_groups()) {
+        for (auto& group : param_groups_) {
             ++i;
 
-            // For each group, check if it has specific options
-            double lr = global_options.lr();
-            double eps = global_options.eps();
-            auto [beta1, beta2] = global_options.betas();
+            // Use group's options
+            double lr = group.options.lr;
+            double eps = group.options.eps;
+            auto [beta1, beta2] = group.options.betas;
 
-            // If the group has its own options, use those
-            if (group.has_options()) {
-                if (auto* group_opts = dynamic_cast<const Options*>(&group.options())) {
-                    lr = group_opts->lr();
-                    eps = group_opts->eps();
-                    std::tie(beta1, beta2) = group_opts->betas();
-                }
-            }
-
-            for (auto& param : group.params()) {
+            for (auto& param : group.params) {
                 if (!param.grad().defined()) {
                     continue;
                 }
@@ -52,7 +35,7 @@ namespace gs::training {
                 // Lazy state initialization
                 auto state_ptr = state_.find(param.unsafeGetTensorImpl());
                 if (state_ptr == state_.end()) {
-                    auto new_state = std::make_unique<AdamParamState>();
+                    auto new_state = std::make_unique<AdamState>();
                     new_state->step_count = 0;
                     new_state->exp_avg = torch::zeros_like(param, torch::MemoryFormat::Preserve);
                     new_state->exp_avg_sq = torch::zeros_like(param, torch::MemoryFormat::Preserve);
@@ -61,7 +44,7 @@ namespace gs::training {
                     state_ptr = state_.find(param.unsafeGetTensorImpl());
                 }
 
-                auto& state = static_cast<AdamParamState&>(*state_ptr->second);
+                auto& state = *state_ptr->second;
 
                 // Increment step
                 state.step_count++;
@@ -96,13 +79,12 @@ namespace gs::training {
         }
     }
 
-    // Based on https://github.com/pytorch/pytorch/blob/ee343ce60ceb449da09d229db25fa9d425d85a4b/torch/csrc/api/src/optim/optimizer.cpp#L122
     void FusedAdam::zero_grad(bool set_to_none, int iteration) {
         if constexpr (SKIP_SH_STEPS) {
             int i = 0; // HACK: counter to track what Gaussian parameter we are on
-            for (auto& group : param_groups()) {
+            for (auto& group : param_groups_) {
                 ++i;
-                for (auto& p : group.params()) {
+                for (auto& p : group.params) {
                     // We want to keep accumulating if the optimizer step was skipped
                     if (i == 3 && (iteration % 2 != 0 && iteration <= 25000))
                         continue;
@@ -115,7 +97,19 @@ namespace gs::training {
                     }
                 }
             }
-        } else
-            Optimizer::zero_grad(set_to_none);
+        } else {
+            // Standard zero_grad implementation
+            for (auto& group : param_groups_) {
+                for (auto& p : group.params) {
+                    if (p.mutable_grad().defined()) {
+                        p.mutable_grad().detach_();
+                        if (set_to_none)
+                            p.mutable_grad().reset();
+                        else
+                            p.mutable_grad().zero_();
+                    }
+                }
+            }
+        }
     }
 } // namespace gs::training

@@ -17,19 +17,18 @@ namespace gs::training {
         splat_data._densification_info = torch::zeros({2, splat_data.means().size(0)}, splat_data.means().options()).set_requires_grad(false);
     }
 
-    std::unique_ptr<torch::optim::Optimizer> create_optimizer(
+    std::unique_ptr<FusedAdam> create_optimizer(
         gs::SplatData& splat_data,
         const gs::param::OptimizationParameters& params) {
-        using Options = FusedAdam::Options;
-        std::vector<torch::optim::OptimizerParamGroup> groups;
+        std::vector<FusedAdam::ParamGroup> groups;
 
-        // Create groups with proper unique_ptr<Options>
+        // Create groups with proper Options
         auto add_param_group = [&groups](const torch::Tensor& param, double lr) {
-            auto options = std::make_unique<Options>(lr);
-            options->eps(1e-15).betas(std::make_tuple(0.9, 0.999));
-            groups.emplace_back(
-                std::vector<torch::Tensor>{param},
-                std::unique_ptr<torch::optim::OptimizerOptions>(std::move(options)));
+            FusedAdam::Options options;
+            options.lr = lr;
+            options.eps = 1e-15;
+            options.betas = {0.9, 0.999};
+            groups.emplace_back(std::vector<torch::Tensor>{param}, options);
         };
 
         add_param_group(splat_data.means(), params.means_lr * splat_data.get_scene_scale());
@@ -39,14 +38,15 @@ namespace gs::training {
         add_param_group(splat_data.rotation_raw(), params.rotation_lr);
         add_param_group(splat_data.opacity_raw(), params.opacity_lr);
 
-        auto global_options = std::make_unique<Options>(0.f);
-        global_options->eps(1e-15);
-        return std::make_unique<FusedAdam>(std::move(groups), std::move(global_options));
+        FusedAdam::Options global_options;
+        global_options.lr = 0.f;
+        global_options.eps = 1e-15;
+        return std::make_unique<FusedAdam>(std::move(groups), global_options);
     }
 
     std::unique_ptr<ExponentialLR> create_scheduler(
         const gs::param::OptimizationParameters& params,
-        torch::optim::Optimizer* optimizer,
+        FusedAdam* optimizer,
         int param_group_index) {
         // Python: gamma = 0.01^(1/max_steps)
         // This means after max_steps, lr will be 0.01 * initial_lr
@@ -57,7 +57,7 @@ namespace gs::training {
     void update_param_with_optimizer(
         const ParamUpdateFn& param_fn,
         const OptimizerUpdateFn& optimizer_fn,
-        std::unique_ptr<torch::optim::Optimizer>& optimizer,
+        std::unique_ptr<FusedAdam>& optimizer,
         gs::SplatData& splat_data,
         std::vector<size_t> param_idxs) {
         std::array<torch::Tensor*, 6> params = {
@@ -72,22 +72,22 @@ namespace gs::training {
 
         // Collect old parameter keys and states
         std::vector<void*> old_param_keys;
-        std::array<std::unique_ptr<torch::optim::OptimizerParamState>, 6> saved_states;
+        std::array<std::unique_ptr<FusedAdam::AdamState>, 6> saved_states;
 
         for (auto i : param_idxs) {
             auto param = params[i];
             auto new_param = param_fn(i, *param);
             new_params[i] = new_param;
 
-            auto& old_param = optimizer->param_groups()[i].params()[0];
+            auto& old_param = optimizer->param_groups()[i].params[0];
             void* old_param_key = old_param.unsafeGetTensorImpl();
             old_param_keys.push_back(old_param_key);
 
             // Check if state exists
             auto state_it = optimizer->state().find(old_param_key);
             if (state_it != optimizer->state().end()) {
-                auto* fused_adam_state = static_cast<FusedAdam::AdamParamState*>(state_it->second.get());
-                auto new_state = optimizer_fn(*fused_adam_state, new_param);
+                auto* adam_state = state_it->second.get();
+                auto new_state = optimizer_fn(*adam_state, new_param);
                 saved_states[i] = std::move(new_state);
             } else {
                 saved_states[i] = nullptr;
@@ -101,7 +101,7 @@ namespace gs::training {
 
         // Update parameters and add new states
         for (auto i : param_idxs) {
-            optimizer->param_groups()[i].params()[0] = new_params[i];
+            optimizer->param_groups()[i].params[0] = new_params[i];
 
             if (saved_states[i]) {
                 void* new_param_key = new_params[i].unsafeGetTensorImpl();

@@ -7,91 +7,97 @@
 #include <memory>
 #include <torch/torch.h>
 #include <vector>
+#include <unordered_map>
 
 namespace gs::training {
     /**
-     * @brief FusedAdam optimizer
+     * @brief FusedAdam optimizer using composition instead of inheritance
      *
-     * The implementation uses fused CUDA kernels for better performance.
+     * This optimizer manages its own parameter groups and state without
+     * inheriting from torch::optim::Optimizer
      */
-    class FusedAdam : public torch::optim::Optimizer {
+    class FusedAdam {
     public:
-        struct Options : public torch::optim::OptimizerCloneableOptions<Options> {
-            Options(double lr = 1e-3) : lr_(lr) {
-            }
+        struct Options {
+            double lr = 1e-3;
+            std::tuple<double, double> betas = {0.9, 0.999};
+            double eps = 1e-8;
+            double weight_decay = 0.0;
 
-            Options& lr(double lr) {
-                lr_ = lr;
-                return *this;
-            }
+            Options() = default;
+            Options(double learning_rate) : lr(learning_rate) {}
 
-            Options& betas(const std::tuple<double, double>& betas) {
-                betas_ = betas;
-                return *this;
-            }
-
-            Options& eps(double eps) {
-                eps_ = eps;
-                return *this;
-            }
-
-            Options& weight_decay(double weight_decay) {
-                weight_decay_ = weight_decay;
-                return *this;
-            }
-
-            double lr() const { return lr_; }
-            const std::tuple<double, double>& betas() const { return betas_; }
-            double eps() const { return eps_; }
-            double weight_decay() const { return weight_decay_; }
-
-        private:
-            double lr_ = 1e-3;
-            std::tuple<double, double> betas_ = std::make_tuple(0.9, 0.999);
-            double eps_ = 1e-8;
-            double weight_decay_ = 0;
+            Options& set_lr(double val) { lr = val; return *this; }
+            Options& set_betas(std::tuple<double, double> val) { betas = val; return *this; }
+            Options& set_eps(double val) { eps = val; return *this; }
+            Options& set_weight_decay(double val) { weight_decay = val; return *this; }
         };
 
-        struct AdamParamState : public torch::optim::OptimizerParamState {
+        struct ParamGroup {
+            std::vector<torch::Tensor> params;
+            Options options;
+
+            ParamGroup(std::vector<torch::Tensor> p, Options opt)
+                : params(std::move(p)), options(opt) {}
+
+            ParamGroup(std::vector<torch::Tensor> p)
+                : params(std::move(p)), options() {}
+        };
+
+        struct AdamState {
             torch::Tensor exp_avg;
             torch::Tensor exp_avg_sq;
-            torch::Tensor max_exp_avg_sq; // For amsgrad variant (not used currently)
+            torch::Tensor max_exp_avg_sq; // For amsgrad variant
             int64_t step_count = 0;
-
-            void serialize(torch::serialize::OutputArchive& archive) const override {
-                archive.write("exp_avg", exp_avg);
-                archive.write("exp_avg_sq", exp_avg_sq);
-                archive.write("step", step_count);
-                if (max_exp_avg_sq.defined()) {
-                    archive.write("max_exp_avg_sq", max_exp_avg_sq);
-                }
-            }
         };
 
-        explicit FusedAdam(std::vector<torch::optim::OptimizerParamGroup> param_groups,
-                           std::unique_ptr<Options> options)
-            : Optimizer(std::move(param_groups),
-                        std::unique_ptr<torch::optim::OptimizerOptions>(std::move(options))) {
-        }
-
-        explicit FusedAdam(std::vector<torch::Tensor> params, std::unique_ptr<Options> options)
-            : Optimizer({torch::optim::OptimizerParamGroup(std::move(params))},
-                        std::unique_ptr<torch::optim::OptimizerOptions>(std::move(options))) {
-        }
-
-        // Override the base class step() with proper signature
-        torch::Tensor step(LossClosure closure) override;
-
-        /**
-         * @brief Perform optimization step
-         */
-        void step(int iteration);
-
-        void zero_grad(bool set_to_none, int iteration);
-
     private:
-        const Options& options() const {
-            return static_cast<const Options&>(defaults());
+        std::vector<ParamGroup> param_groups_;
+        std::unordered_map<void*, std::unique_ptr<AdamState>> state_;
+        Options global_options_;
+
+    public:
+        // Constructors
+        explicit FusedAdam(std::vector<ParamGroup> param_groups, Options global_options)
+            : param_groups_(std::move(param_groups)), global_options_(global_options) {}
+
+        explicit FusedAdam(std::vector<ParamGroup> param_groups)
+            : param_groups_(std::move(param_groups)), global_options_() {}
+
+        explicit FusedAdam(std::vector<torch::Tensor> params, Options options)
+            : param_groups_{{std::move(params), options}}, global_options_(options) {}
+
+        explicit FusedAdam(std::vector<torch::Tensor> params)
+            : param_groups_{{std::move(params), Options()}}, global_options_() {}
+
+        // Main interface
+        void step(int iteration = 0);
+        void zero_grad(bool set_to_none = true, int iteration = 0);
+
+        // Access to internals
+        std::vector<ParamGroup>& param_groups() { return param_groups_; }
+        const std::vector<ParamGroup>& param_groups() const { return param_groups_; }
+
+        std::unordered_map<void*, std::unique_ptr<AdamState>>& state() { return state_; }
+        const std::unordered_map<void*, std::unique_ptr<AdamState>>& state() const { return state_; }
+
+        // Get/set learning rate for specific group
+        void set_lr(double lr, int group_idx = -1) {
+            if (group_idx < 0) {
+                global_options_.lr = lr;
+                for (auto& group : param_groups_) {
+                    group.options.lr = lr;
+                }
+            } else if (group_idx < static_cast<int>(param_groups_.size())) {
+                param_groups_[group_idx].options.lr = lr;
+            }
+        }
+
+        double get_lr(int group_idx = 0) const {
+            if (group_idx < static_cast<int>(param_groups_.size())) {
+                return param_groups_[group_idx].options.lr;
+            }
+            return global_options_.lr;
         }
     };
 } // namespace gs::training
