@@ -50,6 +50,7 @@ target_link_libraries(fastgs_backend
         CUDA::cudart
         CUDA::curand
         CUDA::cublas
+        ${CUDA_CUDA_LIBRARY}
         ${TORCH_LIBRARIES}
 )
 

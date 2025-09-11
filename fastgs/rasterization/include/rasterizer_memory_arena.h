@@ -1,3 +1,4 @@
+// rasterizer_memory_arena.h
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
@@ -6,6 +7,7 @@
 
 #include <torch/torch.h>
 #include <cuda_runtime.h>
+#include <cuda.h>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -19,12 +21,13 @@ namespace fast_gs::rasterization {
 class RasterizerMemoryArena {
 public:
     struct Config {
-        size_t initial_size = 1ULL << 30;  // 1GB
-        size_t max_size = 4ULL << 30;      // 4GB
-        float growth_factor = 1.5f;
+        size_t virtual_size = 32ULL << 30;     // 32GB virtual address space (free!)
+        size_t initial_commit = 256 << 20;     // 256MB initial physical memory
+        size_t max_physical = 8ULL << 30;      // 8GB max physical memory
+        size_t granularity = 2 << 20;          // 2MB allocation granularity
         size_t alignment = 256;
         bool enable_profiling = false;
-        size_t log_interval = 1000;        // Log every N frames
+        size_t log_interval = 1000;            // Log every N frames
     };
 
     struct BufferHandle {
@@ -63,16 +66,32 @@ public:
     };
 
 private:
+    struct PhysicalChunk {
+        CUmemGenericAllocationHandle handle = 0;
+        size_t offset = 0;
+        size_t size = 0;
+        bool is_mapped = false;
+    };
+
     struct Arena {
-        torch::Tensor buffer;
-        std::atomic<size_t> offset{0};
-        size_t capacity = 0;
+        // VMM specific
+        CUdeviceptr d_ptr = 0;                     // Virtual base address
+        size_t virtual_size = 0;                   // Total virtual space
+        size_t committed_size = 0;                 // Actually committed physical memory
+        size_t granularity = 0;                    // Allocation granularity
+        std::vector<PhysicalChunk> chunks;         // Physical memory chunks
+        std::mutex chunks_mutex;
+
+        // Original fields kept for compatibility
+        torch::Tensor buffer;                      // Dummy tensor for compatibility
+        std::atomic<size_t> offset{0};            // Current allocation offset
+        size_t capacity = 0;                       // Same as committed_size for compatibility
         uint64_t generation = 0;
         int device = -1;
 
         // Statistics
         std::atomic<size_t> peak_usage{0};
-        std::atomic<size_t> peak_usage_period{0};  // Peak since last log
+        std::atomic<size_t> peak_usage_period{0};
         std::atomic<size_t> total_allocated{0};
         std::atomic<size_t> realloc_count{0};
         std::chrono::steady_clock::time_point last_log_time;
@@ -140,6 +159,9 @@ private:
     bool grow_arena(Arena& arena, size_t required_size);
     size_t align_size(size_t size) const;
     void record_allocation(uint64_t frame_id, const BufferHandle& handle);
+    bool commit_more_memory(Arena& arena, size_t required_size);
+    void decommit_unused_memory(Arena& arena);
+    bool is_vmm_supported(int device) const;
 };
 
 // Global singleton for arena access
