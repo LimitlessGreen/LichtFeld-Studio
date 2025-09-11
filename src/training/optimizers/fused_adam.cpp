@@ -80,34 +80,13 @@ namespace gs::training {
     }
 
     void FusedAdam::zero_grad(bool set_to_none, int iteration) {
-        if constexpr (SKIP_SH_STEPS) {
-            int i = 0; // HACK: counter to track what Gaussian parameter we are on
-            for (auto& group : param_groups_) {
-                ++i;
-                for (auto& p : group.params) {
-                    // We want to keep accumulating if the optimizer step was skipped
-                    if (i == 3 && (iteration % 2 != 0 && iteration <= 25000))
-                        continue;
-                    if (p.mutable_grad().defined()) {
-                        p.mutable_grad().detach_();
-                        if (set_to_none)
-                            p.mutable_grad().reset();
-                        else
-                            p.mutable_grad().zero_();
-                    }
-                }
-            }
-        } else {
-            // Standard zero_grad implementation
-            for (auto& group : param_groups_) {
-                for (auto& p : group.params) {
-                    if (p.mutable_grad().defined()) {
-                        p.mutable_grad().detach_();
-                        if (set_to_none)
-                            p.mutable_grad().reset();
-                        else
-                            p.mutable_grad().zero_();
-                    }
+        // This method now only zeros gradients, doesn't deallocate
+        // The actual gradient tensors remain allocated for direct writing
+        for (auto& group : param_groups_) {
+            for (auto& p : group.params) {
+                if (p.mutable_grad().defined()) {
+                    // Just zero the gradient, don't deallocate
+                    p.mutable_grad().zero_();
                 }
             }
         }

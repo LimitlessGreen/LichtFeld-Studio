@@ -103,104 +103,104 @@ namespace gs::training {
     }
 
     std::expected<torch::Tensor, std::string> Trainer::compute_photometric_loss(
-    const RenderOutput& render_output,
-    const torch::Tensor& gt_image,
-    const SplatData& splatData,
-    const param::OptimizationParameters& opt_params) {
-    try {
-        // Ensure images have same dimensions
-        torch::Tensor rendered = render_output.image;
-        torch::Tensor gt = gt_image;
+        const RenderOutput& render_output,
+        const torch::Tensor& gt_image,
+        const SplatData& splatData,
+        const param::OptimizationParameters& opt_params) {
+        try {
+            // Ensure images have same dimensions
+            torch::Tensor rendered = render_output.image;
+            torch::Tensor gt = gt_image;
 
-        // Ensure both tensors are 4D (batch, height, width, channels)
-        rendered = rendered.dim() == 3 ? rendered.unsqueeze(0) : rendered;
-        gt = gt.dim() == 3 ? gt.unsqueeze(0) : gt;
+            // Ensure both tensors are 4D (batch, height, width, channels)
+            rendered = rendered.dim() == 3 ? rendered.unsqueeze(0) : rendered;
+            gt = gt.dim() == 3 ? gt.unsqueeze(0) : gt;
 
-        TORCH_CHECK(rendered.sizes() == gt.sizes(),
-                    "ERROR: size mismatch – rendered ", rendered.sizes(),
-                    " vs. ground truth ", gt.sizes());
+            TORCH_CHECK(rendered.sizes() == gt.sizes(),
+                        "ERROR: size mismatch – rendered ", rendered.sizes(),
+                        " vs. ground truth ", gt.sizes());
 
-        // Base loss: L1 + SSIM
-        auto l1_loss = torch::l1_loss(rendered, gt);
-        auto ssim_loss = 1.f - fused_ssim(rendered, gt, "valid", /*train=*/true);
-        torch::Tensor loss = (1.f - opt_params.lambda_dssim) * l1_loss +
-                             opt_params.lambda_dssim * ssim_loss;
-        return loss;
-    } catch (const std::exception& e) {
-        return std::unexpected(std::format("Error computing photometric loss: {}", e.what()));
-    }
-}
-
-std::expected<torch::Tensor, std::string> Trainer::compute_scale_reg_loss(
-    const SplatData& splatData,
-    const param::OptimizationParameters& opt_params) {
-    try {
-        if (opt_params.scale_reg > 0.0f) {
-            auto scale_l1 = splatData.get_scaling().mean();
-            return opt_params.scale_reg * scale_l1;
+            // Base loss: L1 + SSIM
+            auto l1_loss = torch::l1_loss(rendered, gt);
+            auto ssim_loss = 1.f - fused_ssim(rendered, gt, "valid", /*train=*/true);
+            torch::Tensor loss = (1.f - opt_params.lambda_dssim) * l1_loss +
+                                 opt_params.lambda_dssim * ssim_loss;
+            return loss;
+        } catch (const std::exception& e) {
+            return std::unexpected(std::format("Error computing photometric loss: {}", e.what()));
         }
-        // Return zero scalar without requires_grad
-        return torch::zeros({}, torch::kFloat32);
-    } catch (const std::exception& e) {
-        return std::unexpected(std::format("Error computing scale regularization loss: {}", e.what()));
     }
-}
 
-std::expected<torch::Tensor, std::string> Trainer::compute_opacity_reg_loss(
-    const SplatData& splatData,
-    const param::OptimizationParameters& opt_params) {
-    try {
-        if (opt_params.opacity_reg > 0.0f) {
-            auto opacity_l1 = splatData.get_opacity().mean();
-            return opt_params.opacity_reg * opacity_l1;
+    std::expected<torch::Tensor, std::string> Trainer::compute_scale_reg_loss(
+        const SplatData& splatData,
+        const param::OptimizationParameters& opt_params) {
+        try {
+            if (opt_params.scale_reg > 0.0f) {
+                auto scale_l1 = splatData.get_scaling().mean();
+                return opt_params.scale_reg * scale_l1;
+            }
+            // Return zero scalar without requires_grad
+            return torch::zeros({}, torch::kFloat32);
+        } catch (const std::exception& e) {
+            return std::unexpected(std::format("Error computing scale regularization loss: {}", e.what()));
         }
-        // Return zero scalar without requires_grad
-        return torch::zeros({}, torch::kFloat32);
-    } catch (const std::exception& e) {
-        return std::unexpected(std::format("Error computing opacity regularization loss: {}", e.what()));
     }
-}
 
-std::expected<torch::Tensor, std::string> Trainer::compute_bilateral_grid_tv_loss(
-    const std::unique_ptr<BilateralGrid>& bilateral_grid,
-    const param::OptimizationParameters& opt_params) {
-    try {
-        if (opt_params.use_bilateral_grid && opt_params.tv_loss_weight > 0.0f) {
-            return opt_params.tv_loss_weight * bilateral_grid->tv_loss();
+    std::expected<torch::Tensor, std::string> Trainer::compute_opacity_reg_loss(
+        const SplatData& splatData,
+        const param::OptimizationParameters& opt_params) {
+        try {
+            if (opt_params.opacity_reg > 0.0f) {
+                auto opacity_l1 = splatData.get_opacity().mean();
+                return opt_params.opacity_reg * opacity_l1;
+            }
+            // Return zero scalar without requires_grad
+            return torch::zeros({}, torch::kFloat32);
+        } catch (const std::exception& e) {
+            return std::unexpected(std::format("Error computing opacity regularization loss: {}", e.what()));
         }
-        // Return zero scalar without requires_grad
-        return torch::zeros({}, torch::kFloat32);
-    } catch (const std::exception& e) {
-        return std::unexpected(std::format("Error computing bilateral grid TV loss: {}", e.what()));
     }
-}
 
-std::expected<torch::Tensor, std::string> Trainer::compute_sparsity_loss(
-    int iter,
-    const SplatData& splatData) {
-    try {
-        if (sparsity_optimizer_ && sparsity_optimizer_->should_apply_loss(iter)) {
-            // Initialize on first use (lazy initialization)
-            if (!sparsity_optimizer_->is_initialized()) {
-                auto init_result = sparsity_optimizer_->initialize(splatData.opacity_raw());
-                if (!init_result) {
-                    return std::unexpected(init_result.error());
+    std::expected<torch::Tensor, std::string> Trainer::compute_bilateral_grid_tv_loss(
+        const std::unique_ptr<BilateralGrid>& bilateral_grid,
+        const param::OptimizationParameters& opt_params) {
+        try {
+            if (opt_params.use_bilateral_grid && opt_params.tv_loss_weight > 0.0f) {
+                return opt_params.tv_loss_weight * bilateral_grid->tv_loss();
+            }
+            // Return zero scalar without requires_grad
+            return torch::zeros({}, torch::kFloat32);
+        } catch (const std::exception& e) {
+            return std::unexpected(std::format("Error computing bilateral grid TV loss: {}", e.what()));
+        }
+    }
+
+    std::expected<torch::Tensor, std::string> Trainer::compute_sparsity_loss(
+        int iter,
+        const SplatData& splatData) {
+        try {
+            if (sparsity_optimizer_ && sparsity_optimizer_->should_apply_loss(iter)) {
+                // Initialize on first use (lazy initialization)
+                if (!sparsity_optimizer_->is_initialized()) {
+                    auto init_result = sparsity_optimizer_->initialize(splatData.opacity_raw());
+                    if (!init_result) {
+                        return std::unexpected(init_result.error());
+                    }
+                    LOG_INFO("Sparsity optimizer initialized at iteration {}", iter);
                 }
-                LOG_INFO("Sparsity optimizer initialized at iteration {}", iter);
-            }
 
-            auto loss_result = sparsity_optimizer_->compute_loss(splatData.opacity_raw());
-            if (!loss_result) {
-                return std::unexpected(loss_result.error());
+                auto loss_result = sparsity_optimizer_->compute_loss(splatData.opacity_raw());
+                if (!loss_result) {
+                    return std::unexpected(loss_result.error());
+                }
+                return *loss_result;
             }
-            return *loss_result;
+            // Return zero scalar on CPU, then move to CUDA
+            return torch::zeros({}, torch::kFloat32).to(torch::kCUDA);
+        } catch (const std::exception& e) {
+            return std::unexpected(std::format("Error computing sparsity loss: {}", e.what()));
         }
-        // Return zero scalar on CPU, then move to CUDA
-        return torch::zeros({}, torch::kFloat32).to(torch::kCUDA);
-    } catch (const std::exception& e) {
-        return std::unexpected(std::format("Error computing sparsity loss: {}", e.what()));
     }
-}
 
     std::expected<void, std::string> Trainer::handle_sparsity_update(
         int iter,
@@ -657,8 +657,8 @@ std::expected<torch::Tensor, std::string> Trainer::compute_sparsity_loss(
 
         torch::Tensor& bg = background_for_step(iter);
 
+        // CRITICAL CHANGE: Use direct rasterization without autograd
         RenderOutput r_output;
-        // Use the render mode from parameters
         if (!params_.optimization.gut) {
             r_output = fast_rasterize(adjusted_cam, strategy_->get_model(), bg);
         } else {
@@ -667,72 +667,205 @@ std::expected<torch::Tensor, std::string> Trainer::compute_sparsity_loss(
         }
 
         // Apply bilateral grid if enabled
+        torch::Tensor processed_image = r_output.image;
+
         if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
-            r_output.image = bilateral_grid_->apply(r_output.image, cam->uid());
+            processed_image = bilateral_grid_->apply(r_output.image, cam->uid());
         }
 
-        // ============= FIXED LOSS COMPUTATION =============
-        // Compute all losses and sum them BEFORE calling backward()
+        // ============= MANUAL LOSS COMPUTATION WITHOUT AUTOGRAD =============
+        float total_loss_value = 0.0f;
+        torch::Tensor grad_image;
 
-        // Start with photometric loss
-        auto loss_result = compute_photometric_loss(r_output,
-                                                    gt_image,
-                                                    strategy_->get_model(),
-                                                    params_.optimization);
-        if (!loss_result) {
-            return std::unexpected(loss_result.error());
-        }
-        torch::Tensor total_loss = *loss_result;
+        {
+            torch::NoGradGuard no_grad;
 
-        // Add scale regularization if enabled
-        if (params_.optimization.scale_reg > 0.0f) {
-            auto scale_loss_result = compute_scale_reg_loss(strategy_->get_model(),
-                                                           params_.optimization);
-            if (!scale_loss_result) {
-                return std::unexpected(scale_loss_result.error());
+            // Ensure both tensors are 4D for loss computation [N, H, W, C] -> [N, C, H, W]
+            torch::Tensor rendered_4d = processed_image.dim() == 3 ?
+                processed_image.unsqueeze(0) : processed_image;
+            torch::Tensor gt_4d = gt_image.dim() == 3 ? gt_image.unsqueeze(0) : gt_image;
+
+            // Ensure contiguous
+            rendered_4d = rendered_4d.contiguous();
+            gt_4d = gt_4d.contiguous();
+
+            // Manual L1 loss computation
+            auto diff = rendered_4d - gt_4d;
+            auto abs_diff = torch::abs(diff);
+            auto l1_loss = abs_diff.mean();
+
+            // Manual L1 gradient: sign(rendered - gt) / N
+            auto l1_grad = torch::sign(diff) / static_cast<float>(diff.numel());
+
+            // SSIM loss using direct CUDA kernel calls
+            constexpr float kC1 = 0.01f * 0.01f;
+            constexpr float kC2 = 0.03f * 0.03f;
+
+            // Call the forward CUDA kernel directly
+            auto ssim_output = fusedssim(kC1, kC2, rendered_4d, gt_4d, true);
+            auto ssim_map = std::get<0>(ssim_output);
+            auto dm1 = std::get<1>(ssim_output);
+            auto ds1sq = std::get<2>(ssim_output);
+            auto ds12 = std::get<3>(ssim_output);
+
+            // Apply "valid" padding (always used according to your comment)
+            using torch::indexing::Slice;
+            int64_t h = ssim_map.size(2);
+            int64_t w = ssim_map.size(3);
+            if (h > 10 && w > 10) {
+                ssim_map = ssim_map.index({Slice(), Slice(), Slice(5, h - 5), Slice(5, w - 5)});
             }
-            total_loss = total_loss + *scale_loss_result;
+
+            // Compute SSIM loss
+            auto ssim_val = ssim_map.mean();
+            auto ssim_loss = 1.0f - ssim_val;
+
+            // Compute SSIM gradient using backward kernel
+            // Gradient of loss w.r.t. ssim_map: -1/N for each element (since loss = 1 - mean(ssim_map))
+            auto dL_dmap = -torch::ones_like(ssim_map) / static_cast<float>(ssim_map.numel());
+
+            // Pad the gradient back to full size for valid padding
+            auto full_dL_dmap = torch::zeros_like(rendered_4d);
+            h = full_dL_dmap.size(2);
+            w = full_dL_dmap.size(3);
+            if (h > 10 && w > 10) {
+                full_dL_dmap.index_put_({Slice(), Slice(), Slice(5, h - 5), Slice(5, w - 5)}, dL_dmap);
+            }
+
+            // Call the backward CUDA kernel directly
+            auto ssim_grad = fusedssim_backward(kC1, kC2, rendered_4d, gt_4d, full_dL_dmap, dm1, ds1sq, ds12);
+
+            // Combine losses and gradients
+            float l1_weight = 1.0f - params_.optimization.lambda_dssim;
+            float ssim_weight = params_.optimization.lambda_dssim;
+
+            total_loss_value = l1_weight * l1_loss.item<float>() +
+                              ssim_weight * ssim_loss.item<float>();
+
+            // Combine gradients
+            grad_image = l1_weight * l1_grad + ssim_weight * ssim_grad;
+
+            // Remove batch dimension if it was added
+            if (processed_image.dim() == 3 && grad_image.dim() == 4) {
+                grad_image = grad_image.squeeze(0);
+            }
         }
 
-        // Add opacity regularization if enabled
-        if (params_.optimization.opacity_reg > 0.0f) {
-            auto opacity_loss_result = compute_opacity_reg_loss(strategy_->get_model(),
-                                                               params_.optimization);
-            if (!opacity_loss_result) {
-                return std::unexpected(opacity_loss_result.error());
+        // Handle bilateral grid gradient if needed
+        if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
+            // For bilateral grid, we still need a small autograd graph
+            auto bilateral_input = r_output.image.detach().requires_grad_(true);
+            auto bilateral_output = bilateral_grid_->apply(bilateral_input, cam->uid());
+
+            // Add TV loss if enabled
+            if (params_.optimization.tv_loss_weight > 0.0f) {
+                auto tv_loss = params_.optimization.tv_loss_weight * bilateral_grid_->tv_loss();
+                total_loss_value += tv_loss.item<float>();
+                tv_loss.backward(torch::ones_like(tv_loss), true); // retain_graph=true
             }
-            total_loss = total_loss + *opacity_loss_result;
+
+            // Get gradient through bilateral grid
+            auto bilateral_grads = torch::autograd::grad(
+                {bilateral_output},
+                {bilateral_input},
+                {grad_image},
+                /*retain_graph=*/false,
+                /*create_graph=*/false,
+                /*allow_unused=*/false);
+
+            grad_image = bilateral_grads[0];
         }
 
-        // Add bilateral grid TV loss if enabled
-        if (bilateral_grid_ && params_.optimization.use_bilateral_grid &&
-            params_.optimization.tv_loss_weight > 0.0f) {
-            auto tv_loss_result = compute_bilateral_grid_tv_loss(bilateral_grid_,
-                                                                params_.optimization);
-            if (!tv_loss_result) {
-                return std::unexpected(tv_loss_result.error());
+        // Store the loss value
+        current_loss_ = total_loss_value;
+
+        // Create zero gradient for alpha
+        torch::Tensor grad_alpha = torch::zeros_like(r_output.alpha);
+
+        // ============= DIRECT BACKWARD PASS =============
+        {
+            torch::NoGradGuard no_grad;
+
+            // Ensure model has gradients allocated
+            strategy_->get_model().ensure_grad_allocated();
+
+            // Call backward with direct gradient writing
+            if (!params_.optimization.gut) {
+                fast_rasterize_backward(grad_image, grad_alpha, r_output,
+                                      strategy_->get_model(), adjusted_cam);
             }
-            total_loss = total_loss + *tv_loss_result;
+            // For gut rasterizer, you'd need to implement similar direct backward
+
+            // Debug: Print gradient statistics
+            if (iter % 100 == 0) {
+                auto means_grad = strategy_->get_model().means().grad();
+                if (means_grad.defined()) {
+                    LOG_DEBUG("Iter {} - Means grad: min={}, max={}, mean={}",
+                             iter,
+                             means_grad.min().item<float>(),
+                             means_grad.max().item<float>(),
+                             means_grad.mean().item<float>());
+                }
+            }
+
+            // Add regularization gradients directly with safety checks
+            if (params_.optimization.scale_reg > 0.0f) {
+                try {
+                    auto scale_grad = strategy_->get_model().scaling_raw().mutable_grad();
+                    auto scaling_raw = strategy_->get_model().scaling_raw();
+
+                    // Clamp to prevent overflow
+                    auto clamped_scaling = torch::clamp(scaling_raw, -10.0f, 10.0f);
+                    auto scales = torch::exp(clamped_scaling);
+
+                    const int N = scales.numel();
+                    auto reg_grad = params_.optimization.scale_reg * scales / static_cast<float>(N);
+                    scale_grad.add_(reg_grad);
+                } catch (const std::exception& e) {
+                    LOG_ERROR("Error computing scale regularization: {}", e.what());
+                }
+            }
+
+            if (params_.optimization.opacity_reg > 0.0f) {
+                try {
+                    auto opacity_grad = strategy_->get_model().opacity_raw().mutable_grad();
+                    auto opacity_raw = strategy_->get_model().opacity_raw();
+
+                    auto opacity = torch::sigmoid(opacity_raw);
+                    auto sigmoid_grad = opacity * (1.0f - opacity);
+
+                    // Handle shape
+                    if (opacity_grad.dim() == 2 && opacity_grad.size(1) == 1) {
+                        sigmoid_grad = sigmoid_grad.view({-1, 1});
+                    }
+
+                    const int N = sigmoid_grad.numel();
+                    auto reg_grad = params_.optimization.opacity_reg * sigmoid_grad / static_cast<float>(N);
+                    opacity_grad.add_(reg_grad);
+                } catch (const std::exception& e) {
+                    LOG_ERROR("Error computing opacity regularization: {}", e.what());
+                }
+            }
+
+            // Add sparsity gradients if applicable
+            if (sparsity_optimizer_ && sparsity_optimizer_->should_apply_loss(iter)) {
+                if (!sparsity_optimizer_->is_initialized()) {
+                    auto init_result = sparsity_optimizer_->initialize(strategy_->get_model().opacity_raw());
+                    if (!init_result) {
+                        return std::unexpected(init_result.error());
+                    }
+                }
+
+                // ADMM updates its internal state and computes loss
+                auto sparsity_loss_result = sparsity_optimizer_->compute_loss(strategy_->get_model().opacity_raw());
+                if (sparsity_loss_result) {
+                    total_loss_value += sparsity_loss_result->item<float>();
+                }
+            }
         }
 
-        // Add sparsity loss if applicable
-        if (sparsity_optimizer_) {
-            auto sparsity_loss_result = compute_sparsity_loss(iter, strategy_->get_model());
-            if (!sparsity_loss_result) {
-                return std::unexpected(sparsity_loss_result.error());
-            }
-            if (sparsity_loss_result->item<float>() > 0.0f) {
-                total_loss = total_loss + *sparsity_loss_result;
-            }
-        }
-
-        // Store the loss value before backward
-        current_loss_ = total_loss.item<float>();
-
-        // Single backward pass for all losses combined
-        total_loss.backward();
-
-        // ============= END OF FIXED LOSS COMPUTATION =============
+        // Update the stored loss value with all components
+        current_loss_ = total_loss_value;
 
         // Update progress synchronously if needed
         if (progress_) {
@@ -743,7 +876,6 @@ std::expected<torch::Tensor, std::string> Trainer::compute_sparsity_loss(
 
         // Emit training progress event (throttled to reduce GUI updates)
         if (iter % 10 == 0 || iter == 1) {
-            // Only update every 10 iterations
             events::state::TrainingProgress{
                 .iteration = iter,
                 .loss = current_loss_.load(),
@@ -766,9 +898,7 @@ std::expected<torch::Tensor, std::string> Trainer::compute_sparsity_loss(
                     if (iter <= base_iterations) {
                         strategy_->post_backward(iter, r_output);
                     }
-                    // During sparsification phase, skip post_backward entirely
                 } else {
-                    // No sparsity, always call post_backward
                     strategy_->post_backward(iter, r_output);
                     if (iter % 100 == 0)
                         c10::cuda::CUDACachingAllocator::emptyCache();

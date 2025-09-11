@@ -8,6 +8,8 @@
 #include "core/splat_data.hpp"
 #include "geometry/bounding_box.hpp"
 #include <torch/torch.h>
+#include <memory>
+#include <cstring>
 
 namespace gs::training {
     struct RenderOutput {
@@ -20,6 +22,32 @@ namespace gs::training {
         torch::Tensor visibility; // [..., N]
         int width;
         int height;
+
+        // Store forward context as raw bytes to avoid incomplete type issues
+        // We know ForwardContext is a POD struct with fixed size
+        static constexpr size_t FORWARD_CONTEXT_SIZE = 256; // Adjust based on actual size
+        alignas(8) char forward_context_storage[FORWARD_CONTEXT_SIZE];
+        bool has_context = false;
+
+        // Helper to get context as the actual type (used only in fast_rasterizer.cpp where type is complete)
+        template<typename T>
+        T* get_context() {
+            static_assert(sizeof(T) <= FORWARD_CONTEXT_SIZE, "Context size mismatch");
+            return reinterpret_cast<T*>(forward_context_storage);
+        }
+
+        template<typename T>
+        const T* get_context() const {
+            static_assert(sizeof(T) <= FORWARD_CONTEXT_SIZE, "Context size mismatch");
+            return reinterpret_cast<const T*>(forward_context_storage);
+        }
+
+        template<typename T>
+        void set_context(const T& ctx) {
+            static_assert(sizeof(T) <= FORWARD_CONTEXT_SIZE, "Context size mismatch");
+            std::memcpy(forward_context_storage, &ctx, sizeof(T));
+            has_context = true;
+        }
     };
 
     enum class RenderMode {

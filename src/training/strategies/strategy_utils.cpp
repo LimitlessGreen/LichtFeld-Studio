@@ -8,13 +8,17 @@
 namespace gs::training {
     void initialize_gaussians(gs::SplatData& splat_data) {
         const auto dev = torch::kCUDA;
-        splat_data.means() = splat_data.means().to(dev).set_requires_grad(true);
-        splat_data.scaling_raw() = splat_data.scaling_raw().to(dev).set_requires_grad(true);
-        splat_data.rotation_raw() = splat_data.rotation_raw().to(dev).set_requires_grad(true);
-        splat_data.opacity_raw() = splat_data.opacity_raw().to(dev).set_requires_grad(true);
-        splat_data.sh0() = splat_data.sh0().to(dev).set_requires_grad(true);
-        splat_data.shN() = splat_data.shN().to(dev).set_requires_grad(true);
-        splat_data._densification_info = torch::zeros({2, splat_data.means().size(0)}, splat_data.means().options()).set_requires_grad(false);
+        // Move to CUDA but DON'T set requires_grad - we'll manage gradients manually
+        splat_data.means() = splat_data.means().to(dev);
+        splat_data.scaling_raw() = splat_data.scaling_raw().to(dev);
+        splat_data.rotation_raw() = splat_data.rotation_raw().to(dev);
+        splat_data.opacity_raw() = splat_data.opacity_raw().to(dev);
+        splat_data.sh0() = splat_data.sh0().to(dev);
+        splat_data.shN() = splat_data.shN().to(dev);
+        splat_data._densification_info = torch::zeros({2, splat_data.means().size(0)}, splat_data.means().options());
+
+        // Pre-allocate gradients for optimizer
+        splat_data.ensure_grad_allocated();
     }
 
     std::unique_ptr<FusedAdam> create_optimizer(
@@ -125,5 +129,8 @@ namespace gs::training {
                 splat_data.opacity_raw() = new_params[i];
             }
         }
+
+        // Ensure gradients are still allocated after parameter update
+        splat_data.ensure_grad_allocated();
     }
 } // namespace gs::training

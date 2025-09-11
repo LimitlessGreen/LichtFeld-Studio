@@ -80,6 +80,11 @@ namespace gs {
         // Utility methods
         void increment_sh_degree();
 
+        // Ensure all parameter gradients are allocated
+        void ensure_grad_allocated();
+
+        // Manual zero_grad without autograd
+        void zero_grad_manual();
         // Export methods - join_threads controls sync vs async
         void save_ply(const std::filesystem::path& root, int iteration, bool join_threads = true) const;
         void save_sog(const std::filesystem::path& root, int iteration, int kmeans_iterations = 10, bool join_threads = true) const;

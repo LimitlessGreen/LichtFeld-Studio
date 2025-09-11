@@ -53,7 +53,8 @@ namespace gs::training {
 
         const auto param_fn = [&sampled_idxs](const int i, const torch::Tensor& param) {
             const torch::Tensor new_param = param.index_select(0, sampled_idxs);
-            return torch::cat({param, new_param}).set_requires_grad(param.requires_grad());
+            // Don't set requires_grad
+            return torch::cat({param, new_param});
         };
 
         const auto optimizer_fn = [&sampled_idxs](FusedAdam::AdamState& state,
@@ -122,7 +123,8 @@ namespace gs::training {
             }
 
             const torch::Tensor rest_param = param.index_select(0, rest_idxs);
-            return torch::cat({rest_param, split_param}, 0).set_requires_grad(param.requires_grad());
+            // Don't set requires_grad
+            return torch::cat({rest_param, split_param}, 0);
         };
 
         const auto optimizer_fn = [&sampled_idxs, &rest_idxs](
@@ -191,7 +193,8 @@ namespace gs::training {
         const torch::Tensor sampled_idxs = is_prune.logical_not().nonzero().squeeze(-1);
 
         const auto param_fn = [&sampled_idxs](const int i, const torch::Tensor& param) {
-            return param.index_select(0, sampled_idxs).set_requires_grad(param.requires_grad());
+            // Don't set requires_grad
+            return param.index_select(0, sampled_idxs);
         };
 
         const auto optimizer_fn = [&sampled_idxs](
@@ -248,7 +251,8 @@ namespace gs::training {
                 const torch::Tensor new_opacities = torch::clamp_max(
                     param,
                     torch::logit(torch::tensor(threshold)).item());
-                return new_opacities.set_requires_grad(param.requires_grad());
+                // Don't set requires_grad
+                return new_opacities;
             }
             throw std::runtime_error("Invalid parameter index for reset_opacity: " + std::to_string(i));
         };
@@ -295,8 +299,7 @@ namespace gs::training {
             prune_gs(iter);
 
             _splat_data._densification_info = torch::zeros({2, _splat_data.means().size(0)},
-                                                           _splat_data.means().options())
-                                                  .set_requires_grad(false);
+                                                           _splat_data.means().options());
         }
 
         if (iter % _params->reset_every == 0 && iter > 0) {
@@ -313,7 +316,8 @@ namespace gs::training {
     void DefaultStrategy::step(int iter) {
         if (iter < _params->iterations) {
             _optimizer->step(iter);
-            _optimizer->zero_grad(true, iter);
+            // Use manual zero_grad instead
+            _splat_data.zero_grad_manual();
             _scheduler->step();
         }
     }

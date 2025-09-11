@@ -240,13 +240,13 @@ namespace gs::training {
         auto new_rotation = _splat_data.rotation_raw().index_select(0, sampled_idxs);
         auto new_opacity = _splat_data.opacity_raw().index_select(0, sampled_idxs);
 
-        // Step 1: Concatenate all parameters
-        auto concat_means = torch::cat({_splat_data.means(), new_means}, 0).set_requires_grad(true);
-        auto concat_sh0 = torch::cat({_splat_data.sh0(), new_sh0}, 0).set_requires_grad(true);
-        auto concat_shN = torch::cat({_splat_data.shN(), new_shN}, 0).set_requires_grad(true);
-        auto concat_scaling = torch::cat({_splat_data.scaling_raw(), new_scaling}, 0).set_requires_grad(true);
-        auto concat_rotation = torch::cat({_splat_data.rotation_raw(), new_rotation}, 0).set_requires_grad(true);
-        auto concat_opacity = torch::cat({_splat_data.opacity_raw(), new_opacity}, 0).set_requires_grad(true);
+        // Step 1: Concatenate all parameters (without requires_grad)
+        auto concat_means = torch::cat({_splat_data.means(), new_means}, 0);
+        auto concat_sh0 = torch::cat({_splat_data.sh0(), new_sh0}, 0);
+        auto concat_shN = torch::cat({_splat_data.shN(), new_shN}, 0);
+        auto concat_scaling = torch::cat({_splat_data.scaling_raw(), new_scaling}, 0);
+        auto concat_rotation = torch::cat({_splat_data.rotation_raw(), new_rotation}, 0);
+        auto concat_opacity = torch::cat({_splat_data.opacity_raw(), new_opacity}, 0);
 
         // Step 2: SAFER optimizer state update
         // Store the new parameters in a temporary array first
@@ -326,6 +326,9 @@ namespace gs::training {
         _splat_data.rotation_raw() = concat_rotation;
         _splat_data.opacity_raw() = concat_opacity;
 
+        // Ensure gradients are allocated for new parameters
+        _splat_data.ensure_grad_allocated();
+
         noise_buffer_ = torch::empty_like(_splat_data.means());
         return n_new;
     }
@@ -377,7 +380,8 @@ namespace gs::training {
     void MCMC::step(int iter) {
         if (iter < _params->iterations) {
             _optimizer->step(iter);
-            _optimizer->zero_grad(true, iter);
+            // Use manual zero_grad instead of optimizer's zero_grad
+            _splat_data.zero_grad_manual();
             _scheduler->step();
         }
     }
@@ -395,7 +399,8 @@ namespace gs::training {
         const torch::Tensor sampled_idxs = mask.logical_not().nonzero().squeeze(-1);
 
         const auto param_fn = [&sampled_idxs](const int i, const torch::Tensor& param) {
-            return param.index_select(0, sampled_idxs).set_requires_grad(param.requires_grad());
+            // Don't set requires_grad anymore
+            return param.index_select(0, sampled_idxs);
         };
 
         const auto optimizer_fn = [&sampled_idxs](
@@ -425,14 +430,18 @@ namespace gs::training {
         _params = std::make_unique<const gs::param::OptimizationParameters>(optimParams);
 
         const auto dev = torch::kCUDA;
-        _splat_data.means() = _splat_data.means().to(dev).set_requires_grad(true);
-        _splat_data.scaling_raw() = _splat_data.scaling_raw().to(dev).set_requires_grad(true);
-        _splat_data.rotation_raw() = _splat_data.rotation_raw().to(dev).set_requires_grad(true);
-        _splat_data.opacity_raw() = _splat_data.opacity_raw().to(dev).set_requires_grad(true);
-        _splat_data.sh0() = _splat_data.sh0().to(dev).set_requires_grad(true);
-        _splat_data.shN() = _splat_data.shN().to(dev).set_requires_grad(true);
+        // Move to CUDA but DON'T set requires_grad
+        _splat_data.means() = _splat_data.means().to(dev);
+        _splat_data.scaling_raw() = _splat_data.scaling_raw().to(dev);
+        _splat_data.rotation_raw() = _splat_data.rotation_raw().to(dev);
+        _splat_data.opacity_raw() = _splat_data.opacity_raw().to(dev);
+        _splat_data.sh0() = _splat_data.sh0().to(dev);
+        _splat_data.shN() = _splat_data.shN().to(dev);
         _splat_data._densification_info = torch::empty({0});
         noise_buffer_ = torch::empty_like(_splat_data.means());
+
+        // Pre-allocate gradients
+        _splat_data.ensure_grad_allocated();
 
         // Initialize binomial coefficients
         const int n_max = 51;

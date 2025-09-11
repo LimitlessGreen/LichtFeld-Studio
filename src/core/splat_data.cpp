@@ -596,4 +596,47 @@ namespace gs {
             return std::unexpected(std::format("Failed to initialize SplatData: {}", e.what()));
         }
     }
+    void SplatData::ensure_grad_allocated() {
+        // Use accessor methods to get the tensors
+        if (!means().grad().defined()) {
+            means().mutable_grad() = torch::zeros_like(means());
+        }
+        if (!scaling_raw().grad().defined()) {
+            scaling_raw().mutable_grad() = torch::zeros_like(scaling_raw());
+        }
+        if (!rotation_raw().grad().defined()) {
+            rotation_raw().mutable_grad() = torch::zeros_like(rotation_raw());
+        }
+        if (!opacity_raw().grad().defined()) {
+            opacity_raw().mutable_grad() = torch::zeros_like(opacity_raw());
+        }
+        if (!sh0().grad().defined()) {
+            sh0().mutable_grad() = torch::zeros_like(sh0());
+        }
+        if (!shN().grad().defined()) {
+            shN().mutable_grad() = torch::zeros_like(shN());
+        }
+    }
+
+    void SplatData::zero_grad_manual() {
+        // Zero all gradients manually without using autograd
+        if (means().grad().defined()) {
+            means().mutable_grad().zero_();
+        }
+        if (scaling_raw().grad().defined()) {
+            scaling_raw().mutable_grad().zero_();
+        }
+        if (rotation_raw().grad().defined()) {
+            rotation_raw().mutable_grad().zero_();
+        }
+        if (opacity_raw().grad().defined()) {
+            opacity_raw().mutable_grad().zero_();
+        }
+        if (sh0().grad().defined()) {
+            sh0().mutable_grad().zero_();
+        }
+        if (shN().grad().defined()) {
+            shN().mutable_grad().zero_();
+        }
+    }
 } // namespace gs
