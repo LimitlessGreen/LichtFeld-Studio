@@ -6,6 +6,7 @@
 
 #include <torch/torch.h>
 #include <tuple>
+#include <cstdint>
 
 namespace fast_gs::rasterization {
 
@@ -22,7 +23,7 @@ namespace fast_gs::rasterization {
         float far_plane;
     };
 
-    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int, int, int, int, int>
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int, int, int, int, int, uint64_t>
     forward_wrapper(
         const torch::Tensor& means,
         const torch::Tensor& scales_raw,
@@ -72,6 +73,7 @@ namespace fast_gs::rasterization {
         const int n_instances,
         const int n_buckets,
         const int primitive_primitive_indices_selector,
-        const int instance_primitive_indices_selector);
+        const int instance_primitive_indices_selector,
+        const uint64_t frame_id);
 
 } // namespace fast_gs::rasterization

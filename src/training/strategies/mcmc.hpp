@@ -77,7 +77,7 @@ namespace gs::training {
 
         // MCMC specific parameters
         const float _noise_lr = 5e5;
-
+        torch::Tensor noise_buffer_;
         // State variables
         torch::Tensor _binoms;
 

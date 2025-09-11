@@ -49,6 +49,7 @@ namespace gs::training {
         int n_buckets = std::get<8>(outputs);
         int primitive_primitive_indices_selector = std::get<9>(outputs);
         int instance_primitive_indices_selector = std::get<10>(outputs);
+        uint64_t frame_id = std::get<11>(outputs);  // New: frame_id from arena
 
         // Mark non-differentiable tensors
         ctx->mark_non_differentiable({per_primitive_buffers,
@@ -86,6 +87,7 @@ namespace gs::training {
         ctx->saved_data["n_buckets"] = n_buckets;
         ctx->saved_data["primitive_primitive_indices_selector"] = primitive_primitive_indices_selector;
         ctx->saved_data["instance_primitive_indices_selector"] = instance_primitive_indices_selector;
+        ctx->saved_data["frame_id"] = static_cast<int64_t>(frame_id);  // Store frame_id
 
         return {image, alpha};
     }
@@ -109,6 +111,9 @@ namespace gs::training {
         const torch::Tensor& per_bucket_buffers = saved[9];
         const torch::Tensor& w2c = saved[10];
         torch::Tensor& densification_info = saved[11];
+
+        // Retrieve frame_id
+        uint64_t frame_id = static_cast<uint64_t>(ctx->saved_data["frame_id"].toInt());
 
         auto outputs = fast_gs::rasterization::backward_wrapper(
             densification_info,
@@ -139,7 +144,8 @@ namespace gs::training {
             ctx->saved_data["n_instances"].toInt(),
             ctx->saved_data["n_buckets"].toInt(),
             ctx->saved_data["primitive_primitive_indices_selector"].toInt(),
-            ctx->saved_data["instance_primitive_indices_selector"].toInt());
+            ctx->saved_data["instance_primitive_indices_selector"].toInt(),
+            frame_id);  // Pass frame_id to backward
 
         auto grad_means = std::get<0>(outputs);
         auto grad_scales_raw = std::get<1>(outputs);

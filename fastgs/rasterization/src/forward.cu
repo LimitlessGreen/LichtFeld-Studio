@@ -36,15 +36,17 @@ std::tuple<int, int, int, int, int> fast_gs::rasterization::forward(
     const float fy,
     const float cx,
     const float cy,
-    const float near_, // near and far are macros in windowns
+    const float near_, // near and far are macros in windows
     const float far_) {
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const dim3 block(config::tile_width, config::tile_height, 1);
     const int n_tiles = grid.x * grid.y;
 
+    // Allocate per-tile buffers through arena
     char* per_tile_buffers_blob = per_tile_buffers_func(required<PerTileBuffers>(n_tiles));
     PerTileBuffers per_tile_buffers = PerTileBuffers::from_blob(per_tile_buffers_blob, n_tiles);
 
+    // Initialize tile instance ranges
     static cudaStream_t memset_stream = 0;
     if constexpr (!config::debug) {
         static bool memset_stream_initialized = false;
@@ -53,15 +55,18 @@ std::tuple<int, int, int, int, int> fast_gs::rasterization::forward(
             memset_stream_initialized = true;
         }
         cudaMemsetAsync(per_tile_buffers.instance_ranges, 0, sizeof(uint2) * n_tiles, memset_stream);
-    } else
+    } else {
         cudaMemset(per_tile_buffers.instance_ranges, 0, sizeof(uint2) * n_tiles);
+    }
 
+    // Allocate per-primitive buffers through arena
     char* per_primitive_buffers_blob = per_primitive_buffers_func(required<PerPrimitiveBuffers>(n_primitives));
     PerPrimitiveBuffers per_primitive_buffers = PerPrimitiveBuffers::from_blob(per_primitive_buffers_blob, n_primitives);
 
     cudaMemset(per_primitive_buffers.n_visible_primitives, 0, sizeof(uint));
     cudaMemset(per_primitive_buffers.n_instances, 0, sizeof(uint));
 
+    // Preprocess primitives
     kernels::forward::preprocess_cu<<<div_round_up(n_primitives, config::block_size_preprocess), config::block_size_preprocess>>>(
         means,
         scales_raw,
@@ -95,11 +100,13 @@ std::tuple<int, int, int, int, int> fast_gs::rasterization::forward(
         far_);
     CHECK_CUDA(config::debug, "preprocess")
 
+    // Get counts from device
     int n_visible_primitives;
     cudaMemcpy(&n_visible_primitives, per_primitive_buffers.n_visible_primitives, sizeof(uint), cudaMemcpyDeviceToHost);
     int n_instances;
     cudaMemcpy(&n_instances, per_primitive_buffers.n_instances, sizeof(uint), cudaMemcpyDeviceToHost);
 
+    // Sort by depth
     cub::DeviceRadixSort::SortPairs(
         per_primitive_buffers.cub_workspace,
         per_primitive_buffers.cub_workspace_size,
@@ -108,6 +115,7 @@ std::tuple<int, int, int, int, int> fast_gs::rasterization::forward(
         n_visible_primitives);
     CHECK_CUDA(config::debug, "cub::DeviceRadixSort::SortPairs (Depth)")
 
+    // Apply depth ordering
     kernels::forward::apply_depth_ordering_cu<<<div_round_up(n_visible_primitives, config::block_size_apply_depth_ordering), config::block_size_apply_depth_ordering>>>(
         per_primitive_buffers.primitive_indices.Current(),
         per_primitive_buffers.n_touched_tiles,
@@ -115,6 +123,7 @@ std::tuple<int, int, int, int, int> fast_gs::rasterization::forward(
         n_visible_primitives);
     CHECK_CUDA(config::debug, "apply_depth_ordering")
 
+    // Compute exclusive sum for offsets
     cub::DeviceScan::ExclusiveSum(
         per_primitive_buffers.cub_workspace,
         per_primitive_buffers.cub_workspace_size,
@@ -123,9 +132,11 @@ std::tuple<int, int, int, int, int> fast_gs::rasterization::forward(
         n_visible_primitives);
     CHECK_CUDA(config::debug, "cub::DeviceScan::ExclusiveSum (Primitive Offsets)")
 
+    // Allocate per-instance buffers through arena
     char* per_instance_buffers_blob = per_instance_buffers_func(required<PerInstanceBuffers>(n_instances));
     PerInstanceBuffers per_instance_buffers = PerInstanceBuffers::from_blob(per_instance_buffers_blob, n_instances);
 
+    // Create instances
     kernels::forward::create_instances_cu<<<div_round_up(n_visible_primitives, config::block_size_create_instances), config::block_size_create_instances>>>(
         per_primitive_buffers.primitive_indices.Current(),
         per_primitive_buffers.offset,
@@ -138,6 +149,7 @@ std::tuple<int, int, int, int, int> fast_gs::rasterization::forward(
         n_visible_primitives);
     CHECK_CUDA(config::debug, "create_instances")
 
+    // Sort by tile
     cub::DeviceRadixSort::SortPairs(
         per_instance_buffers.cub_workspace,
         per_instance_buffers.cub_workspace_size,
@@ -146,9 +158,12 @@ std::tuple<int, int, int, int, int> fast_gs::rasterization::forward(
         n_instances);
     CHECK_CUDA(config::debug, "cub::DeviceRadixSort::SortPairs (Tile)")
 
-    if constexpr (!config::debug)
+    // Synchronize memset stream if needed
+    if constexpr (!config::debug) {
         cudaStreamSynchronize(memset_stream);
+    }
 
+    // Extract instance ranges
     if (n_instances > 0) {
         kernels::forward::extract_instance_ranges_cu<<<div_round_up(n_instances, config::block_size_extract_instance_ranges), config::block_size_extract_instance_ranges>>>(
             per_instance_buffers.keys.Current(),
@@ -157,12 +172,14 @@ std::tuple<int, int, int, int, int> fast_gs::rasterization::forward(
         CHECK_CUDA(config::debug, "extract_instance_ranges")
     }
 
+    // Extract bucket counts
     kernels::forward::extract_bucket_counts<<<div_round_up(n_tiles, config::block_size_extract_bucket_counts), config::block_size_extract_bucket_counts>>>(
         per_tile_buffers.instance_ranges,
         per_tile_buffers.n_buckets,
         n_tiles);
     CHECK_CUDA(config::debug, "extract_bucket_counts")
 
+    // Compute inclusive sum for bucket offsets
     cub::DeviceScan::InclusiveSum(
         per_tile_buffers.cub_workspace,
         per_tile_buffers.cub_workspace_size,
@@ -171,12 +188,15 @@ std::tuple<int, int, int, int, int> fast_gs::rasterization::forward(
         n_tiles);
     CHECK_CUDA(config::debug, "cub::DeviceScan::InclusiveSum (Bucket Counts)")
 
+    // Get number of buckets
     int n_buckets;
     cudaMemcpy(&n_buckets, per_tile_buffers.bucket_offsets + n_tiles - 1, sizeof(uint), cudaMemcpyDeviceToHost);
 
+    // Allocate per-bucket buffers through arena
     char* per_bucket_buffers_blob = per_bucket_buffers_func(required<PerBucketBuffers>(n_buckets));
     PerBucketBuffers per_bucket_buffers = PerBucketBuffers::from_blob(per_bucket_buffers_blob, n_buckets);
 
+    // Perform blending
     kernels::forward::blend_cu<<<grid, block>>>(
         per_tile_buffers.instance_ranges,
         per_tile_buffers.bucket_offsets,
@@ -195,5 +215,7 @@ std::tuple<int, int, int, int, int> fast_gs::rasterization::forward(
         grid.x);
     CHECK_CUDA(config::debug, "blend")
 
-    return {n_visible_primitives, n_instances, n_buckets, per_primitive_buffers.primitive_indices.selector, per_instance_buffers.primitive_indices.selector};
+    return {n_visible_primitives, n_instances, n_buckets,
+            per_primitive_buffers.primitive_indices.selector,
+            per_instance_buffers.primitive_indices.selector};
 }

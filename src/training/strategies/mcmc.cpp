@@ -343,6 +343,7 @@ namespace gs::training {
         _splat_data.rotation_raw() = concat_rotation;
         _splat_data.opacity_raw() = concat_opacity;
 
+        noise_buffer_ = torch::empty_like(_splat_data.means());
         return n_new;
     }
 
@@ -355,13 +356,13 @@ namespace gs::training {
         const float current_lr = static_cast<float>(fused_adam_options->lr()) * _noise_lr;
 
         // Generate noise
-        auto noise = torch::randn_like(_splat_data.means());
+        noise_buffer_.normal_(0.0f, 1.0f);
 
         gsplat::add_noise(
             _splat_data.opacity_raw(),
             _splat_data.scaling_raw(),
             _splat_data.rotation_raw(),
-            noise,
+            noise_buffer_,
             _splat_data.means(),
             current_lr);
     }
@@ -441,6 +442,7 @@ namespace gs::training {
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
+        noise_buffer_ = torch::empty_like(_splat_data.means());
     }
 
     void MCMC::initialize(const gs::param::OptimizationParameters& optimParams) {
@@ -454,6 +456,7 @@ namespace gs::training {
         _splat_data.sh0() = _splat_data.sh0().to(dev).set_requires_grad(true);
         _splat_data.shN() = _splat_data.shN().to(dev).set_requires_grad(true);
         _splat_data._densification_info = torch::empty({0});
+        noise_buffer_ = torch::empty_like(_splat_data.means());
 
         // Initialize binomial coefficients
         const int n_max = 51;

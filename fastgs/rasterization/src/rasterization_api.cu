@@ -7,12 +7,18 @@
 #include "helper_math.h"
 #include "rasterization_api.h"
 #include "rasterization_config.h"
+#include "rasterizer_memory_arena.h"
 #include "torch_utils.h"
 #include <functional>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_map>
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int, int, int, int, int>
+// Global frame contexts (not thread_local - CUDA doesn't support that well)
+static std::unordered_map<void*, uint64_t> g_frame_contexts;
+static std::mutex g_frame_contexts_mutex;
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int, int, int, int, int, uint64_t>
 fast_gs::rasterization::forward_wrapper(
     const torch::Tensor& means,
     const torch::Tensor& scales_raw,
@@ -31,6 +37,7 @@ fast_gs::rasterization::forward_wrapper(
     const float center_y,
     const float near_plane,
     const float far_plane) {
+
     // all optimizable tensors must be contiguous CUDA float tensors
     CHECK_INPUT(config::debug, means, "means");
     CHECK_INPUT(config::debug, scales_raw, "scales_raw");
@@ -43,16 +50,65 @@ fast_gs::rasterization::forward_wrapper(
     const int total_bases_sh_rest = sh_coefficients_rest.size(1);
     const torch::TensorOptions float_options = torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA);
     const torch::TensorOptions byte_options = torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA);
+
     torch::Tensor image = torch::empty({3, height, width}, float_options);
     torch::Tensor alpha = torch::empty({1, height, width}, float_options);
+
+    // Get global arena and begin frame
+    auto& arena = GlobalArenaManager::instance().get_arena();
+    uint64_t frame_id = arena.begin_frame();
+
+    // Store frame ID for this forward pass (thread-safe)
+    {
+        std::lock_guard<std::mutex> lock(g_frame_contexts_mutex);
+        g_frame_contexts[means.data_ptr()] = frame_id;
+    }
+
+    // Create buffer tensors that will be managed by arena
     torch::Tensor per_primitive_buffers = torch::empty({0}, byte_options);
     torch::Tensor per_tile_buffers = torch::empty({0}, byte_options);
     torch::Tensor per_instance_buffers = torch::empty({0}, byte_options);
     torch::Tensor per_bucket_buffers = torch::empty({0}, byte_options);
-    const std::function<char*(size_t)> per_primitive_buffers_func = resize_function_wrapper(per_primitive_buffers);
-    const std::function<char*(size_t)> per_tile_buffers_func = resize_function_wrapper(per_tile_buffers);
-    const std::function<char*(size_t)> per_instance_buffers_func = resize_function_wrapper(per_instance_buffers);
-    const std::function<char*(size_t)> per_bucket_buffers_func = resize_function_wrapper(per_bucket_buffers);
+
+    // Get arena allocator for this frame
+    auto arena_allocator = arena.get_allocator(frame_id);
+
+    // Create allocation wrappers that store buffer references
+    const std::function<char*(size_t)> per_primitive_buffers_func = [&per_primitive_buffers, &arena_allocator, byte_options](size_t size) -> char* {
+        if (size == 0) return nullptr;
+        char* ptr = arena_allocator(size);
+        if (ptr) {
+            per_primitive_buffers = torch::from_blob(ptr, {static_cast<long long>(size)}, byte_options);
+        }
+        return ptr;
+    };
+
+    const std::function<char*(size_t)> per_tile_buffers_func = [&per_tile_buffers, &arena_allocator, byte_options](size_t size) -> char* {
+        if (size == 0) return nullptr;
+        char* ptr = arena_allocator(size);
+        if (ptr) {
+            per_tile_buffers = torch::from_blob(ptr, {static_cast<long long>(size)}, byte_options);
+        }
+        return ptr;
+    };
+
+    const std::function<char*(size_t)> per_instance_buffers_func = [&per_instance_buffers, &arena_allocator, byte_options](size_t size) -> char* {
+        if (size == 0) return nullptr;
+        char* ptr = arena_allocator(size);
+        if (ptr) {
+            per_instance_buffers = torch::from_blob(ptr, {static_cast<long long>(size)}, byte_options);
+        }
+        return ptr;
+    };
+
+    const std::function<char*(size_t)> per_bucket_buffers_func = [&per_bucket_buffers, &arena_allocator, byte_options](size_t size) -> char* {
+        if (size == 0) return nullptr;
+        char* ptr = arena_allocator(size);
+        if (ptr) {
+            per_bucket_buffers = torch::from_blob(ptr, {static_cast<long long>(size)}, byte_options);
+        }
+        return ptr;
+    };
 
     auto [n_visible_primitives, n_instances, n_buckets, primitive_primitive_indices_selector, instance_primitive_indices_selector] = forward(
         per_primitive_buffers_func,
@@ -85,7 +141,9 @@ fast_gs::rasterization::forward_wrapper(
         image, alpha,
         per_primitive_buffers, per_tile_buffers, per_instance_buffers, per_bucket_buffers,
         n_visible_primitives, n_instances, n_buckets,
-        primitive_primitive_indices_selector, instance_primitive_indices_selector};
+        primitive_primitive_indices_selector, instance_primitive_indices_selector,
+        frame_id  // Return frame_id for backward pass
+    };
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
@@ -118,10 +176,13 @@ fast_gs::rasterization::backward_wrapper(
     const int n_instances,
     const int n_buckets,
     const int primitive_primitive_indices_selector,
-    const int instance_primitive_indices_selector) {
+    const int instance_primitive_indices_selector,
+    const uint64_t frame_id) {  // frame_id passed from forward
+
     const int n_primitives = means.size(0);
     const int total_bases_sh_rest = sh_coefficients_rest.size(1);
     const torch::TensorOptions float_options = torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA);
+
     torch::Tensor grad_means = torch::zeros({n_primitives, 3}, float_options);
     torch::Tensor grad_scales_raw = torch::zeros({n_primitives, 3}, float_options);
     torch::Tensor grad_rotations_raw = torch::zeros({n_primitives, 4}, float_options);
@@ -137,6 +198,7 @@ fast_gs::rasterization::backward_wrapper(
 
     const bool update_densification_info = densification_info.size(0) > 0;
 
+    // Buffers are already valid from forward pass - just use them directly
     backward(
         grad_image.data_ptr<float>(),
         grad_alpha.data_ptr<float>(),
@@ -177,5 +239,16 @@ fast_gs::rasterization::backward_wrapper(
         center_x,
         center_y);
 
-    return {grad_means, grad_scales_raw, grad_rotations_raw, grad_opacities_raw, grad_sh_coefficients_0, grad_sh_coefficients_rest, grad_w2c};
+    // Mark frame as complete
+    auto& arena = GlobalArenaManager::instance().get_arena();
+    arena.end_frame(frame_id);
+
+    // Clean up frame context (thread-safe)
+    {
+        std::lock_guard<std::mutex> lock(g_frame_contexts_mutex);
+        g_frame_contexts.erase(means.data_ptr());
+    }
+
+    return {grad_means, grad_scales_raw, grad_rotations_raw, grad_opacities_raw,
+            grad_sh_coefficients_0, grad_sh_coefficients_rest, grad_w2c};
 }
