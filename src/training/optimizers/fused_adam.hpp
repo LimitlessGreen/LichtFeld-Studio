@@ -5,16 +5,17 @@
 #pragma once
 
 #include <memory>
-#include <torch/torch.h>
 #include <vector>
 #include <unordered_map>
+#include <cuda_runtime.h>
+#include <tuple>
+#include <cstdint>
 
 namespace gs::training {
     /**
-     * @brief FusedAdam optimizer using composition instead of inheritance
+     * @brief FusedAdam optimizer using raw CUDA memory instead of torch tensors
      *
-     * This optimizer manages its own parameter groups and state without
-     * inheriting from torch::optim::Optimizer
+     * This optimizer manages its own parameter groups and state using raw CUDA memory
      */
     class FusedAdam {
     public:
@@ -33,28 +34,55 @@ namespace gs::training {
             Options& set_weight_decay(double val) { weight_decay = val; return *this; }
         };
 
+        // Raw parameter info - no torch dependency
+        struct RawParam {
+            float* data_ptr;           // Parameter data pointer
+            float* grad_ptr;           // Gradient data pointer
+            size_t num_elements;       // Number of elements
+            int param_id;              // Unique ID for this parameter
+        };
+
         struct ParamGroup {
-            std::vector<torch::Tensor> params;
+            std::vector<RawParam> params;
             Options options;
 
-            ParamGroup(std::vector<torch::Tensor> p, Options opt)
+            ParamGroup(std::vector<RawParam> p, Options opt)
                 : params(std::move(p)), options(opt) {}
 
-            ParamGroup(std::vector<torch::Tensor> p)
+            ParamGroup(std::vector<RawParam> p)
                 : params(std::move(p)), options() {}
         };
 
+        // Raw CUDA memory for Adam state
         struct AdamState {
-            torch::Tensor exp_avg;
-            torch::Tensor exp_avg_sq;
-            torch::Tensor max_exp_avg_sq; // For amsgrad variant
+            float* exp_avg = nullptr;        // Raw CUDA memory
+            float* exp_avg_sq = nullptr;     // Raw CUDA memory
+            float* max_exp_avg_sq = nullptr; // For amsgrad variant (unused)
+            size_t num_elements = 0;
             int64_t step_count = 0;
+
+            AdamState() = default;
+
+            AdamState(size_t n_elements);
+
+            ~AdamState();
+
+            // Delete copy, allow move
+            AdamState(const AdamState&) = delete;
+            AdamState& operator=(const AdamState&) = delete;
+
+            AdamState(AdamState&& other) noexcept;
+            AdamState& operator=(AdamState&& other) noexcept;
+
+            void allocate(size_t n_elements);
+            void free();
         };
 
     private:
         std::vector<ParamGroup> param_groups_;
-        std::unordered_map<void*, std::unique_ptr<AdamState>> state_;
+        std::unordered_map<int, std::unique_ptr<AdamState>> state_;  // Use param_id as key
         Options global_options_;
+        int next_param_id_ = 0;
 
     public:
         // Constructors
@@ -64,12 +92,6 @@ namespace gs::training {
         explicit FusedAdam(std::vector<ParamGroup> param_groups)
             : param_groups_(std::move(param_groups)), global_options_() {}
 
-        explicit FusedAdam(std::vector<torch::Tensor> params, Options options)
-            : param_groups_{{std::move(params), options}}, global_options_(options) {}
-
-        explicit FusedAdam(std::vector<torch::Tensor> params)
-            : param_groups_{{std::move(params), Options()}}, global_options_() {}
-
         // Main interface
         void step(int iteration = 0);
         void zero_grad(bool set_to_none = true, int iteration = 0);
@@ -78,8 +100,8 @@ namespace gs::training {
         std::vector<ParamGroup>& param_groups() { return param_groups_; }
         const std::vector<ParamGroup>& param_groups() const { return param_groups_; }
 
-        std::unordered_map<void*, std::unique_ptr<AdamState>>& state() { return state_; }
-        const std::unordered_map<void*, std::unique_ptr<AdamState>>& state() const { return state_; }
+        std::unordered_map<int, std::unique_ptr<AdamState>>& state() { return state_; }
+        const std::unordered_map<int, std::unique_ptr<AdamState>>& state() const { return state_; }
 
         // Get/set learning rate for specific group
         void set_lr(double lr, int group_idx = -1) {
@@ -99,5 +121,8 @@ namespace gs::training {
             }
             return global_options_.lr;
         }
+
+        // Helper to get next param ID
+        int get_next_param_id() { return next_param_id_++; }
     };
 } // namespace gs::training

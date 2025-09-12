@@ -5,6 +5,9 @@
 #include "fused_adam.hpp"
 #include "adam_api.h"
 #include <cmath>
+#include <cuda_runtime.h>
+#include <stdexcept>
+#include <cstring>
 
 // TODO: This is just a gimmick for the bounty. I don't think it should be integrated into the main codebase.
 // TODO: Removing the SH step skipping also means that the custom zero_grad() method is no longer needed.
@@ -15,9 +18,87 @@
 #define SKIP_SH_STEPS false
 
 namespace gs::training {
-    void FusedAdam::step(int iteration) {
-        torch::NoGradGuard no_grad;
 
+    // AdamState implementation
+    FusedAdam::AdamState::AdamState(size_t n_elements) {
+        allocate(n_elements);
+    }
+
+    FusedAdam::AdamState::~AdamState() {
+        free();
+    }
+
+    FusedAdam::AdamState::AdamState(AdamState&& other) noexcept
+        : exp_avg(other.exp_avg),
+          exp_avg_sq(other.exp_avg_sq),
+          max_exp_avg_sq(other.max_exp_avg_sq),
+          num_elements(other.num_elements),
+          step_count(other.step_count) {
+        other.exp_avg = nullptr;
+        other.exp_avg_sq = nullptr;
+        other.max_exp_avg_sq = nullptr;
+        other.num_elements = 0;
+    }
+
+    FusedAdam::AdamState& FusedAdam::AdamState::operator=(AdamState&& other) noexcept {
+        if (this != &other) {
+            free();
+            exp_avg = other.exp_avg;
+            exp_avg_sq = other.exp_avg_sq;
+            max_exp_avg_sq = other.max_exp_avg_sq;
+            num_elements = other.num_elements;
+            step_count = other.step_count;
+
+            other.exp_avg = nullptr;
+            other.exp_avg_sq = nullptr;
+            other.max_exp_avg_sq = nullptr;
+            other.num_elements = 0;
+        }
+        return *this;
+    }
+
+    void FusedAdam::AdamState::allocate(size_t n_elements) {
+        if (exp_avg || exp_avg_sq) {
+            free();
+        }
+
+        num_elements = n_elements;
+        size_t bytes = n_elements * sizeof(float);
+
+        cudaError_t err = cudaMalloc(&exp_avg, bytes);
+        if (err != cudaSuccess) {
+            throw std::runtime_error("Failed to allocate exp_avg: " + std::string(cudaGetErrorString(err)));
+        }
+
+        err = cudaMalloc(&exp_avg_sq, bytes);
+        if (err != cudaSuccess) {
+            cudaFree(exp_avg);
+            exp_avg = nullptr;
+            throw std::runtime_error("Failed to allocate exp_avg_sq: " + std::string(cudaGetErrorString(err)));
+        }
+
+        // Initialize to zero
+        cudaMemset(exp_avg, 0, bytes);
+        cudaMemset(exp_avg_sq, 0, bytes);
+    }
+
+    void FusedAdam::AdamState::free() {
+        if (exp_avg) {
+            cudaFree(exp_avg);
+            exp_avg = nullptr;
+        }
+        if (exp_avg_sq) {
+            cudaFree(exp_avg_sq);
+            exp_avg_sq = nullptr;
+        }
+        if (max_exp_avg_sq) {
+            cudaFree(max_exp_avg_sq);
+            max_exp_avg_sq = nullptr;
+        }
+        num_elements = 0;
+    }
+
+    void FusedAdam::step(int iteration) {
         int i = 0; // HACK: counter to track what Gaussian parameter we are on
         for (auto& group : param_groups_) {
             ++i;
@@ -28,20 +109,17 @@ namespace gs::training {
             auto [beta1, beta2] = group.options.betas;
 
             for (auto& param : group.params) {
-                if (!param.grad().defined()) {
+                if (!param.grad_ptr) {
                     continue;
                 }
 
-                // Lazy state initialization
-                auto state_ptr = state_.find(param.unsafeGetTensorImpl());
+                // Lazy state initialization using param_id
+                auto state_ptr = state_.find(param.param_id);
                 if (state_ptr == state_.end()) {
-                    auto new_state = std::make_unique<AdamState>();
+                    auto new_state = std::make_unique<AdamState>(param.num_elements);
                     new_state->step_count = 0;
-                    new_state->exp_avg = torch::zeros_like(param, torch::MemoryFormat::Preserve);
-                    new_state->exp_avg_sq = torch::zeros_like(param, torch::MemoryFormat::Preserve);
-
-                    state_[param.unsafeGetTensorImpl()] = std::move(new_state);
-                    state_ptr = state_.find(param.unsafeGetTensorImpl());
+                    state_[param.param_id] = std::move(new_state);
+                    state_ptr = state_.find(param.param_id);
                 }
 
                 auto& state = *state_ptr->second;
@@ -64,11 +142,11 @@ namespace gs::training {
 
                 // Call the pure CUDA kernel from fastgs
                 fast_gs::optimizer::adam_step_raw(
-                    param.data_ptr<float>(),
-                    state.exp_avg.data_ptr<float>(),
-                    state.exp_avg_sq.data_ptr<float>(),
-                    param.grad().data_ptr<float>(),
-                    param.numel(),
+                    param.data_ptr,
+                    state.exp_avg,
+                    state.exp_avg_sq,
+                    param.grad_ptr,
+                    param.num_elements,
                     static_cast<float>(lr),
                     static_cast<float>(beta1),
                     static_cast<float>(beta2),
@@ -80,13 +158,11 @@ namespace gs::training {
     }
 
     void FusedAdam::zero_grad(bool set_to_none, int iteration) {
-        // This method now only zeros gradients, doesn't deallocate
-        // The actual gradient tensors remain allocated for direct writing
+        // Zero gradients using raw CUDA memory
         for (auto& group : param_groups_) {
-            for (auto& p : group.params) {
-                if (p.mutable_grad().defined()) {
-                    // Just zero the gradient, don't deallocate
-                    p.mutable_grad().zero_();
+            for (auto& param : group.params) {
+                if (param.grad_ptr) {
+                    cudaMemset(param.grad_ptr, 0, param.num_elements * sizeof(float));
                 }
             }
         }

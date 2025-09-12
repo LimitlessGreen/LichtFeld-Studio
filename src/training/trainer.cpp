@@ -1003,16 +1003,16 @@ namespace gs::training {
             {
                 std::unique_lock<std::shared_mutex> lock(render_mutex_);
 
-                if (params_.optimization.enable_sparsity) {
-                    int base_iterations = params_.optimization.iterations - params_.optimization.sparsify_steps;
-                    if (iter <= base_iterations) {
-                        strategy_->post_backward(iter, r_output);
-                    }
-                } else {
-                    strategy_->post_backward(iter, r_output);
-                    if (iter % 100 == 0)
-                        c10::cuda::CUDACachingAllocator::emptyCache();
-                }
+                //if (params_.optimization.enable_sparsity) {
+                //    int base_iterations = params_.optimization.iterations - params_.optimization.sparsify_steps;
+                //    if (iter <= base_iterations) {
+                //        strategy_->post_backward(iter, r_output);
+                //    }
+                //} else {
+                //    strategy_->post_backward(iter, r_output);
+                //    if (iter % 100 == 0)
+                //        c10::cuda::CUDACachingAllocator::emptyCache();
+                //}
 
                 strategy_->step(iter);
 

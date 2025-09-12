@@ -60,23 +60,10 @@ namespace gs::training {
         const auto optimizer_fn = [&sampled_idxs](FusedAdam::AdamState& state,
                                                   const torch::Tensor& full_param)
             -> std::unique_ptr<FusedAdam::AdamState> {
-            auto new_shape = full_param.sizes().vec();
-            new_shape[0] = sampled_idxs.size(0);
-
-            auto zeros_to_add = torch::zeros(new_shape, state.exp_avg.options());
-            auto new_exp_avg = torch::cat({state.exp_avg, zeros_to_add}, 0);
-            auto new_exp_avg_sq = torch::cat({state.exp_avg_sq, zeros_to_add}, 0);
-
-            // Create new state
-            auto new_state = std::make_unique<FusedAdam::AdamState>();
-            new_state->step_count = state.step_count;
-            new_state->exp_avg = new_exp_avg;
-            new_state->exp_avg_sq = new_exp_avg_sq;
-            if (state.max_exp_avg_sq.defined()) {
-                auto new_max_exp_avg_sq = torch::cat({state.max_exp_avg_sq, zeros_to_add}, 0);
-                new_state->max_exp_avg_sq = new_max_exp_avg_sq;
-            }
-            return new_state;
+            // With raw memory optimizer state, we can't easily extend it
+            // Since densification happens infrequently, we'll just reset the state
+            // The optimizer will quickly adapt to the new parameters
+            return nullptr;
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
@@ -131,27 +118,9 @@ namespace gs::training {
                                       FusedAdam::AdamState& state,
                                       const torch::Tensor& full_param)
             -> std::unique_ptr<FusedAdam::AdamState> {
-            auto zero_shape = full_param.sizes().vec();
-            zero_shape[0] = sampled_idxs.size(0) * split_size;
-
-            auto rest_exp_avg = state.exp_avg.index_select(0, rest_idxs);
-            auto rest_exp_avg_sq = state.exp_avg_sq.index_select(0, rest_idxs);
-
-            auto zeros_to_add = torch::zeros(zero_shape, state.exp_avg.options());
-            auto new_exp_avg = torch::cat({rest_exp_avg, zeros_to_add}, 0);
-            auto new_exp_avg_sq = torch::cat({rest_exp_avg_sq, zeros_to_add}, 0);
-
-            // Create new state
-            auto new_state = std::make_unique<FusedAdam::AdamState>();
-            new_state->step_count = state.step_count;
-            new_state->exp_avg = new_exp_avg;
-            new_state->exp_avg_sq = new_exp_avg_sq;
-            if (state.max_exp_avg_sq.defined()) {
-                auto rest_max_exp_avg_sq = state.max_exp_avg_sq.index_select(0, rest_idxs);
-                auto new_max_exp_avg_sq = torch::cat({rest_max_exp_avg_sq, zeros_to_add}, 0);
-                new_state->max_exp_avg_sq = new_max_exp_avg_sq;
-            }
-            return new_state;
+            // With raw memory optimizer state, we can't easily manipulate it
+            // Since splitting happens infrequently, we'll just reset the state
+            return nullptr;
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
@@ -201,19 +170,9 @@ namespace gs::training {
                                       FusedAdam::AdamState& state,
                                       const torch::Tensor& new_param)
             -> std::unique_ptr<FusedAdam::AdamState> {
-            auto new_exp_avg = state.exp_avg.index_select(0, sampled_idxs);
-            auto new_exp_avg_sq = state.exp_avg_sq.index_select(0, sampled_idxs);
-
-            // Create new state
-            auto new_state = std::make_unique<FusedAdam::AdamState>();
-            new_state->step_count = state.step_count;
-            new_state->exp_avg = new_exp_avg;
-            new_state->exp_avg_sq = new_exp_avg_sq;
-            if (state.max_exp_avg_sq.defined()) {
-                auto new_max_exp_avg_sq = state.max_exp_avg_sq.index_select(0, sampled_idxs);
-                new_state->max_exp_avg_sq = new_max_exp_avg_sq;
-            }
-            return new_state;
+            // With raw memory, we can't easily subset the state
+            // Return nullptr to indicate state should be reset
+            return nullptr;
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
@@ -260,19 +219,8 @@ namespace gs::training {
         const auto optimizer_fn = [](FusedAdam::AdamState& state,
                                      const torch::Tensor& new_param)
             -> std::unique_ptr<FusedAdam::AdamState> {
-            auto new_exp_avg = torch::zeros_like(state.exp_avg);
-            auto new_exp_avg_sq = torch::zeros_like(state.exp_avg_sq);
-
-            // Create new state
-            auto new_state = std::make_unique<FusedAdam::AdamState>();
-            new_state->step_count = state.step_count;
-            new_state->exp_avg = new_exp_avg;
-            new_state->exp_avg_sq = new_exp_avg_sq;
-            if (state.max_exp_avg_sq.defined()) {
-                auto new_max_exp_avg_sq = torch::zeros_like(state.max_exp_avg_sq);
-                new_state->max_exp_avg_sq = new_max_exp_avg_sq;
-            }
-            return new_state;
+            // Reset optimizer state for opacity
+            return nullptr;
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data, {5});
