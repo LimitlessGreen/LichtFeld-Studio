@@ -123,15 +123,21 @@ public:
 // Pre-allocated buffers for training
 class TrainingMemory {
 private:
-    // Image-related buffers
+    // Render buffers (for forward pass)
+    CUDABuffer render_image_;
+    CUDABuffer render_alpha_;
+
+    // Gradient buffers (for backward pass)
     CUDABuffer grad_image_;
     CUDABuffer grad_alpha_;
+
+    // Loss computation buffers
     CUDABuffer diff_buffer_;
     CUDABuffer abs_diff_buffer_;
     CUDABuffer l1_grad_buffer_;
     CUDABuffer ones_buffer_;
 
-    // SSIM-specific buffers (NEW)
+    // SSIM-specific buffers
     CUDABuffer ssim_map_;           // SSIM values per pixel
     CUDABuffer ssim_dm_dmu1_;        // Partial derivatives
     CUDABuffer ssim_dm_dsigma1_sq_;
@@ -143,9 +149,9 @@ private:
     CUDABuffer background_;
     CUDABuffer bg_mix_buffer_;
 
-    // Loss computation buffers
-    CUDABuffer loss_value_;  // Single float for loss reduction
-    CUDABuffer ssim_loss_value_; // Single float for SSIM loss
+    // Loss value buffers (single floats)
+    CUDABuffer loss_value_;
+    CUDABuffer ssim_loss_value_;
 
     // Dimensions
     int width_ = 0;
@@ -165,15 +171,21 @@ public:
         const size_t image_size = batch * channels * height * width;
         const size_t alpha_size = batch * height * width;
 
-        // Allocate all buffers
+        // Allocate render buffers
+        render_image_.allocate(image_size);
+        render_alpha_.allocate(alpha_size);
+
+        // Allocate gradient buffers
         grad_image_.allocate(image_size);
         grad_alpha_.allocate(alpha_size);
+
+        // Allocate loss computation buffers
         diff_buffer_.allocate(image_size);
         abs_diff_buffer_.allocate(image_size);
         l1_grad_buffer_.allocate(image_size);
         ones_buffer_.allocate(image_size);
 
-        // SSIM buffers
+        // Allocate SSIM buffers
         ssim_map_.allocate(image_size);
         ssim_dm_dmu1_.allocate(image_size);
         ssim_dm_dsigma1_sq_.allocate(image_size);
@@ -197,7 +209,7 @@ public:
     }
 
     bool allocated() const {
-        return background_.allocated() && grad_image_.allocated();
+        return background_.allocated() && render_image_.allocated() && grad_image_.allocated();
     }
 
     // Check if we need to reallocate for new dimensions
@@ -207,15 +219,23 @@ public:
         }
     }
 
-    // Accessors - return raw pointers for kernel calls
+    // Render buffer accessors (for forward pass)
+    float* render_image() { return render_image_.data(); }
+    float* render_alpha() { return render_alpha_.data(); }
+    const float* render_image() const { return render_image_.data(); }
+    const float* render_alpha() const { return render_alpha_.data(); }
+
+    // Gradient buffer accessors (for backward pass)
     float* grad_image() { return grad_image_.data(); }
     float* grad_alpha() { return grad_alpha_.data(); }
+
+    // Loss computation buffer accessors
     float* diff_buffer() { return diff_buffer_.data(); }
     float* abs_diff_buffer() { return abs_diff_buffer_.data(); }
     float* l1_grad() { return l1_grad_buffer_.data(); }
     float* ones() { return ones_buffer_.data(); }
 
-    // SSIM accessors
+    // SSIM buffer accessors
     float* ssim_map() { return ssim_map_.data(); }
     float* ssim_dm_dmu1() { return ssim_dm_dmu1_.data(); }
     float* ssim_dm_dsigma1_sq() { return ssim_dm_dsigma1_sq_.data(); }
@@ -223,8 +243,11 @@ public:
     float* ssim_grad() { return ssim_grad_image_.data(); }
     float* ssim_dL_dmap() { return ssim_dL_dmap_.data(); }
 
+    // Background buffer accessors
     float* background() { return background_.data(); }
     float* bg_mix() { return bg_mix_buffer_.data(); }
+
+    // Loss value accessors
     float* loss_value() { return loss_value_.data(); }
     float* ssim_loss_value() { return ssim_loss_value_.data(); }
 
@@ -232,6 +255,11 @@ public:
     void zero_gradients() {
         grad_image_.zero();
         grad_alpha_.zero();
+    }
+
+    void zero_render_buffers() {
+        render_image_.zero();
+        render_alpha_.zero();
     }
 
     void set_background(float r, float g, float b) {

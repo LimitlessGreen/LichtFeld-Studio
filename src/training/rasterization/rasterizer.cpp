@@ -397,41 +397,41 @@ namespace gs::training {
         RenderOutput result;
 
         // Handle image output
-        if (final_image.defined() && final_image.numel() > 0) {
-            result.image = torch::clamp(final_image.squeeze(0).permute({2, 0, 1}), 0.0f, 1.0f);
-        } else {
-            result.image = torch::Tensor();
-        }
+        //if (final_image.defined() && final_image.numel() > 0) {
+        //    result.image = torch::clamp(final_image.squeeze(0).permute({2, 0, 1}), 0.0f, 1.0f);
+        //} else {
+        //    result.image = torch::Tensor();
+        //}
 
-        // Handle alpha output - always present
-        result.alpha = rendered_alpha.squeeze(0).permute({2, 0, 1});
+        //// Handle alpha output - always present
+        //result.alpha = rendered_alpha.squeeze(0).permute({2, 0, 1});
 
-        // Handle depth output
-        if (final_depth.defined() && final_depth.numel() > 0) {
-            result.depth = final_depth.squeeze(0).permute({2, 0, 1});
-        } else {
-            result.depth = torch::Tensor();
-        }
+        //// Handle depth output
+        //if (final_depth.defined() && final_depth.numel() > 0) {
+        //    result.depth = final_depth.squeeze(0).permute({2, 0, 1});
+        //} else {
+        //    result.depth = torch::Tensor();
+        //}
 
-        result.means2d = means2d_with_grad;
-        result.depths = depths.squeeze(0);
-        result.radii = std::get<0>(radii.squeeze(0).max(-1));
-        result.visibility = (result.radii > 0);
-        result.width = image_width;
-        result.height = image_height;
+        //result.means2d = means2d_with_grad;
+        //result.depths = depths.squeeze(0);
+        //result.radii = std::get<0>(radii.squeeze(0).max(-1));
+        //result.visibility = (result.radii > 0);
+        //result.width = image_width;
+        //result.height = image_height;
 
-        // Final device checks for outputs
-        if (result.image.defined() && result.image.numel() > 0) {
-            TORCH_CHECK(result.image.is_cuda(), "result.image must be on CUDA");
-        }
-        TORCH_CHECK(result.alpha.is_cuda(), "result.alpha must be on CUDA");
-        if (result.depth.defined() && result.depth.numel() > 0) {
-            TORCH_CHECK(result.depth.is_cuda(), "result.depth must be on CUDA");
-        }
-        TORCH_CHECK(result.means2d.is_cuda(), "result.means2d must be on CUDA");
-        TORCH_CHECK(result.depths.is_cuda(), "result.depths must be on CUDA");
-        TORCH_CHECK(result.radii.is_cuda(), "result.radii must be on CUDA");
-        TORCH_CHECK(result.visibility.is_cuda(), "result.visibility must be on CUDA");
+        //// Final device checks for outputs
+        //if (result.image.defined() && result.image.numel() > 0) {
+        //    TORCH_CHECK(result.image.is_cuda(), "result.image must be on CUDA");
+        //}
+        //TORCH_CHECK(result.alpha.is_cuda(), "result.alpha must be on CUDA");
+        //if (result.depth.defined() && result.depth.numel() > 0) {
+        //    TORCH_CHECK(result.depth.is_cuda(), "result.depth must be on CUDA");
+        //}
+        //TORCH_CHECK(result.means2d.is_cuda(), "result.means2d must be on CUDA");
+        //TORCH_CHECK(result.depths.is_cuda(), "result.depths must be on CUDA");
+        //TORCH_CHECK(result.radii.is_cuda(), "result.radii must be on CUDA");
+        //TORCH_CHECK(result.visibility.is_cuda(), "result.visibility must be on CUDA");
 
         return result;
     }

@@ -109,6 +109,7 @@ namespace gs {
         float* scaling_grad_cuda_ptr() { return _scaling_grad_cuda; }
         float* sh0_grad_cuda_ptr() { return _sh0_grad_cuda; }
         float* shN_grad_cuda_ptr() { return _shN_grad_cuda; }
+        int get_shN_dim1() const { return _shN_dims[1]; }
 
         // Utility methods
         void increment_sh_degree();

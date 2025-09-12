@@ -6,20 +6,23 @@
 
 #include "core/camera.hpp"
 #include "core/splat_data.hpp"
-#include "rasterization_api.h"
 #include "rasterizer.hpp"
 
 namespace gs::training {
-    // Forward rendering without autograd
+    // Forward declaration
+    class TrainingMemory;
+
+    // Forward rendering without any torch dependency
     RenderOutput fast_rasterize(
         Camera& viewpoint_camera,
         SplatData& gaussian_model,
-        torch::Tensor& bg_color);
+        float* bg_color,  // Raw pointer to 3 floats
+        TrainingMemory& cuda_memory);
 
     // Backward pass with direct gradient writing
     void fast_rasterize_backward(
-        const torch::Tensor& grad_image,
-        const torch::Tensor& grad_alpha,
+        const float* grad_image,
+        const float* grad_alpha,
         const RenderOutput& render_output,
         SplatData& gaussian_model,
         Camera& viewpoint_camera);

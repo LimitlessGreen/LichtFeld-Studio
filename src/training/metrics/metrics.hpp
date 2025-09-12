@@ -15,7 +15,9 @@
 #include <string>
 #include <torch/script.h>
 #include <vector>
-
+namespace gs::training {
+    class TrainingMemory;
+}
 class splatData;
 
 namespace gs::training {

@@ -7,29 +7,27 @@
 #include "core/camera.hpp"
 #include "core/splat_data.hpp"
 #include "geometry/bounding_box.hpp"
-#include <torch/torch.h>
 #include <memory>
 #include <cstring>
 
 namespace gs::training {
+    // Raw render output without torch dependency
     struct RenderOutput {
-        torch::Tensor image;      // [..., channels, H, W]
-        torch::Tensor alpha;      // [..., C, H, W, 1]
-        torch::Tensor depth;      // [..., C, H, W, 1] - accumulated or expected depth
-        torch::Tensor means2d;    // [..., C, N, 2]
-        torch::Tensor depths;     // [..., N] - per-gaussian depths
-        torch::Tensor radii;      // [..., N]
-        torch::Tensor visibility; // [..., N]
-        int width;
-        int height;
+        // Raw pointers to CUDA memory
+        float* image = nullptr;      // [C, H, W] in CUDA memory
+        float* alpha = nullptr;      // [1, H, W] in CUDA memory
 
-        // Store forward context as raw bytes to avoid incomplete type issues
-        // We know ForwardContext is a POD struct with fixed size
-        static constexpr size_t FORWARD_CONTEXT_SIZE = 256; // Adjust based on actual size
+        // Dimensions
+        int width = 0;
+        int height = 0;
+        int channels = 3;
+
+        // Store forward context as raw bytes for backward pass
+        static constexpr size_t FORWARD_CONTEXT_SIZE = 256;
         alignas(8) char forward_context_storage[FORWARD_CONTEXT_SIZE];
         bool has_context = false;
 
-        // Helper to get context as the actual type (used only in fast_rasterizer.cpp where type is complete)
+        // Helper to get context as the actual type
         template<typename T>
         T* get_context() {
             static_assert(sizeof(T) <= FORWARD_CONTEXT_SIZE, "Context size mismatch");
@@ -85,15 +83,4 @@ namespace gs::training {
         else
             throw std::runtime_error("Invalid render mode: " + mode);
     }
-
-    // Wrapper function to use gsplat backend for rendering
-    RenderOutput rasterize(
-        Camera& viewpoint_camera,
-        const SplatData& gaussian_model,
-        torch::Tensor& bg_color,
-        float scaling_modifier = 1.0,
-        bool packed = false,
-        bool antialiased = false,
-        RenderMode render_mode = RenderMode::RGB,
-        const gs::geometry::BoundingBox* = nullptr);
 } // namespace gs::training

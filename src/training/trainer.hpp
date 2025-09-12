@@ -111,10 +111,7 @@ namespace gs::training {
             Error
         };
 
-        // Returns the background color to use at a given iteration
-        torch::Tensor& background_for_step(int iter);
-
-        // Raw background computation
+        // Returns raw pointer to background color (3 floats)
         float* background_for_step_raw(int iter);
 
         // Protected method for processing a single training step
@@ -174,8 +171,7 @@ namespace gs::training {
         std::unique_ptr<IStrategy> strategy_;
         param::TrainingParameters params_;
 
-        // Temporary tensor wrapper for background (will be removed eventually)
-        torch::Tensor background_wrapper_;
+        // NO MORE background_wrapper_ tensor!
 
         std::unique_ptr<TrainingProgress> progress_;
         size_t train_dataset_size_ = 0;
