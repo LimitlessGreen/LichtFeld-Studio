@@ -36,6 +36,7 @@ set(TRAINING_KERNEL_SOURCES
         kernels/bilateral_grid_backward.cu
         kernels/bilateral_grid_tv.cu
         kernels/ssim.cu
+        kernels/training_kernels.cu
 )
 
 # Create training kernels library

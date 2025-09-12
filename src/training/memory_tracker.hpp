@@ -151,34 +151,6 @@ namespace gs::training {
                      bytes_to_mb(total_bytes), model.size());
         }
 
-        void log_optimizer_memory(torch::optim::Optimizer* optimizer) {
-            if (!enabled_ || !optimizer)
-                return;
-
-            size_t total_state_bytes = 0;
-            int state_count = 0;
-
-            for (const auto& [key, state] : optimizer->state()) {
-                state_count++;
-
-                // Try to cast to different optimizer states
-                if (auto* adam_state = dynamic_cast<FusedAdam::AdamParamState*>(state.get())) {
-                    if (adam_state->exp_avg.defined()) {
-                        total_state_bytes += adam_state->exp_avg.numel() * adam_state->exp_avg.element_size();
-                    }
-                    if (adam_state->exp_avg_sq.defined()) {
-                        total_state_bytes += adam_state->exp_avg_sq.numel() * adam_state->exp_avg_sq.element_size();
-                    }
-                    if (adam_state->max_exp_avg_sq.defined()) {
-                        total_state_bytes += adam_state->max_exp_avg_sq.numel() * adam_state->max_exp_avg_sq.element_size();
-                    }
-                }
-            }
-
-            LOG_INFO("[Memory] Optimizer: {} states, ~{:.2f}MB total",
-                     state_count, bytes_to_mb(total_state_bytes));
-        }
-
         void save_report(const std::filesystem::path& output_path) {
             if (snapshots_.empty())
                 return;

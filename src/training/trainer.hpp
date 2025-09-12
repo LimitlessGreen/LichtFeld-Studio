@@ -9,6 +9,7 @@
 #include "components/sparsity_optimizer.hpp"
 #include "core/events.hpp"
 #include "core/parameters.hpp"
+#include "cuda_memory.hpp"
 #include "dataset.hpp"
 #include "metrics/metrics.hpp"
 #include "optimizers/scheduler.hpp"
@@ -113,6 +114,9 @@ namespace gs::training {
         // Returns the background color to use at a given iteration
         torch::Tensor& background_for_step(int iter);
 
+        // Raw background computation
+        float* background_for_step_raw(int iter);
+
         // Protected method for processing a single training step
         std::expected<StepResult, std::string> train_step(
             int iter,
@@ -170,8 +174,9 @@ namespace gs::training {
         std::unique_ptr<IStrategy> strategy_;
         param::TrainingParameters params_;
 
-        torch::Tensor background_{};
-        torch::Tensor bg_mix_buffer_;
+        // Temporary tensor wrapper for background (will be removed eventually)
+        torch::Tensor background_wrapper_;
+
         std::unique_ptr<TrainingProgress> progress_;
         size_t train_dataset_size_ = 0;
 
@@ -220,5 +225,8 @@ namespace gs::training {
 
         // LichtFeld project
         std::shared_ptr<gs::management::Project> lf_project_ = nullptr;
+
+        // CUDA memory management
+        std::unique_ptr<TrainingMemory> cuda_memory_;
     };
 } // namespace gs::training

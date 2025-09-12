@@ -4,13 +4,15 @@
 
 #include "trainer.hpp"
 #include "components/bilateral_grid.hpp"
+#include "training_kernels.cuh"
+#include "memory_tracker.hpp"
 #include "components/poseopt.hpp"
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAAllocatorConfig.h>
 #include "components/sparsity_optimizer.hpp"
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
-#include "kernels/fused_ssim.cuh"
+#include "kernels/ssim.cuh"
 #include "rasterization/fast_rasterizer.hpp"
 #include "rasterization/rasterizer.hpp"
 #include <ATen/cuda/CUDAEvent.h>
@@ -99,35 +101,6 @@ namespace gs::training {
             return {};
         } catch (const std::exception& e) {
             return std::unexpected(std::format("Failed to initialize bilateral grid: {}", e.what()));
-        }
-    }
-
-    std::expected<torch::Tensor, std::string> Trainer::compute_photometric_loss(
-        const RenderOutput& render_output,
-        const torch::Tensor& gt_image,
-        const SplatData& splatData,
-        const param::OptimizationParameters& opt_params) {
-        try {
-            // Ensure images have same dimensions
-            torch::Tensor rendered = render_output.image;
-            torch::Tensor gt = gt_image;
-
-            // Ensure both tensors are 4D (batch, height, width, channels)
-            rendered = rendered.dim() == 3 ? rendered.unsqueeze(0) : rendered;
-            gt = gt.dim() == 3 ? gt.unsqueeze(0) : gt;
-
-            TORCH_CHECK(rendered.sizes() == gt.sizes(),
-                        "ERROR: size mismatch – rendered ", rendered.sizes(),
-                        " vs. ground truth ", gt.sizes());
-
-            // Base loss: L1 + SSIM
-            auto l1_loss = torch::l1_loss(rendered, gt);
-            auto ssim_loss = 1.f - fused_ssim(rendered, gt, "valid", /*train=*/true);
-            torch::Tensor loss = (1.f - opt_params.lambda_dssim) * l1_loss +
-                                 opt_params.lambda_dssim * ssim_loss;
-            return loss;
-        } catch (const std::exception& e) {
-            return std::unexpected(std::format("Error computing photometric loss: {}", e.what()));
         }
     }
 
@@ -364,8 +337,15 @@ namespace gs::training {
                 }
             }
 
-            background_ = torch::tensor({0.f, 0.f, 0.f},
-                                        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            if (!cuda_memory_) {
+                cuda_memory_ = std::make_unique<TrainingMemory>();
+                // We'll initialize with actual dimensions on first use
+            }
+
+            // Set default background
+            if (cuda_memory_->allocated()) {
+                cuda_memory_->set_background(0.0f, 0.0f, 0.0f);
+            }
 
             if (params.optimization.pose_optimization != "none") {
                 if (params.optimization.enable_eval) {
@@ -475,109 +455,76 @@ namespace gs::training {
         }
     }
 
+    // Replace the sine_background_for_step and background_for_step functions in trainer.cpp
+
     inline float inv_weight_piecewise(int step, int max_steps) {
-        // Phases by fraction of training
+        // Keep this function as-is, it's just CPU computation
         const float phase = std::max(0.f, std::min(1.f, step / float(std::max(1, max_steps))));
-
-        const float limit_hi = 1.0f / 4.0f;  // start limit
-        const float limit_mid = 2.0f / 4.0f; // middle limit
-        const float limit_lo = 3.0f / 4.0f;  // final limit
-
-        const float weight_hi = 1.0f;  // start weight
-        const float weight_mid = 0.5f; // middle weight
-        const float weight_lo = 0.0f;  // final weight
+        const float limit_hi = 1.0f / 4.0f;
+        const float limit_mid = 2.0f / 4.0f;
+        const float limit_lo = 3.0f / 4.0f;
+        const float weight_hi = 1.0f;
+        const float weight_mid = 0.5f;
+        const float weight_lo = 0.0f;
 
         if (phase < limit_hi) {
-            return weight_hi; // hold until bypasses the start limit
+            return weight_hi;
         } else if (phase < limit_mid) {
             const float t = (phase - limit_hi) / (limit_mid - limit_hi);
-            return weight_hi + (weight_mid - weight_hi) * t; // decay to mid value
+            return weight_hi + (weight_mid - weight_hi) * t;
         } else {
             const float t = (phase - limit_mid) / (limit_lo - limit_mid);
-            return weight_mid + (weight_lo - weight_mid) * t; // decay to final value
+            return weight_mid + (weight_lo - weight_mid) * t;
         }
     }
 
-    torch::Tensor sine_background_for_step(
-        int step, int periodR = 37, int periodG = 41, int periodB = 43, bool grayscale_only = false, float jitter_amp = 0.03f) {
-        const float eps = 1e-4f;
-        auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-        const float two_pi = M_PI * 2.0f;
 
-        // Phase 0..2PI
-        const float tR = (periodR > 0) ? float(step % periodR) / float(periodR) : 0.0f;
-        const float phaseR = two_pi * tR;
-
-        const float tG = (periodG > 0) ? float(step % periodG) / float(periodG) : 0.0f;
-        const float phaseG = two_pi * tG;
-
-        const float tB = (periodB > 0) ? float(step % periodB) / float(periodB) : 0.0f;
-        const float phaseB = two_pi * tB;
-
-        torch::Tensor bg;
-        if (grayscale_only) {
-            // Grayscale: g in [0,1]
-            float g = 0.5f * (1.0f + std::sin(phaseG));
-            bg = torch::tensor({g, g, g}, opts);
-        } else {
-            // Phase-shifted RGB: covers the color wheel over the cycle
-            float r = 0.5f * (1.0f + std::sin(phaseR + 0.0f * two_pi / 3.0f));
-            float g = 0.5f * (1.0f + std::sin(phaseG + 1.0f * two_pi / 3.0f));
-            float b = 0.5f * (1.0f + std::sin(phaseB + 2.0f * two_pi / 3.0f));
-            bg = torch::tensor({r, g, b}, opts);
-        }
-
-        // Small jitter to prevent exact periodic lock-in
-        if (jitter_amp > 0.0f) {
-            auto jitter = (torch::rand({3}, opts) - 0.5f) * (2.0f * jitter_amp);
-            bg = (bg + jitter).clamp(eps, 1.0f - eps);
-        } else {
-            bg = bg.clamp(eps, 1.0f - eps);
-        }
-        return bg;
-    }
-
-    // Helper to ensure buf matches base (defined, dtype, device, shape)
-    static inline void ensure_like(torch::Tensor& buf, const torch::Tensor& base) {
-        bool is_undefined = !buf.defined();
-        bool dtype_mismatch = (buf.dtype() != base.dtype());
-
-        bool need = (is_undefined || dtype_mismatch);
-        if (!need) {
-            bool device_mismatch = (buf.device() != base.device());
-            bool shape_mismatch = (buf.sizes().vec() != base.sizes().vec());
-            need = (device_mismatch || shape_mismatch);
-        }
-
-        if (need)
-            buf = torch::empty_like(base);
-    }
-
-    torch::Tensor& Trainer::background_for_step(int iter) {
-        torch::NoGradGuard no_grad;
+    float* Trainer::background_for_step_raw(int iter) {
         const auto& opt = params_.optimization;
 
-        // Fast path: modulation disabled: return base background_
         if (!opt.bg_modulation) {
-            return background_;
+            return cuda_memory_->background();
         }
 
         const float w_mix = inv_weight_piecewise(iter, opt.iterations);
         if (w_mix <= 0.0f) {
-            return background_;
+            return cuda_memory_->background();
         }
 
-        // Generate per-iteration sine background
-        auto sine_bg = sine_background_for_step(iter);
+        // Generate sine background in a temp buffer first
+        launch_compute_sine_background(
+            cuda_memory_->bg_mix(),  // Use bg_mix as temp storage
+            iter,
+            37, 41, 43,
+            0.03f,
+            0
+        );
 
-        // Ensure reusable buffer exists
-        ensure_like(bg_mix_buffer_, background_);
+        // Now blend base with sine
+        launch_background_blend(
+            cuda_memory_->bg_mix(),
+            cuda_memory_->background(),
+            cuda_memory_->bg_mix(),  // sine is already here
+            w_mix,
+            0
+        );
 
-        bg_mix_buffer_.copy_(background_); // d2d copy of 3 floats
-        bg_mix_buffer_.mul_(1.0f - w_mix);
-        bg_mix_buffer_.add_(sine_bg, w_mix);
+        cudaDeviceSynchronize();  // Ensure kernel completes
+        return cuda_memory_->bg_mix();
+    }
 
-        return bg_mix_buffer_; // const ref to mixed background
+    torch::Tensor& Trainer::background_for_step(int iter) {
+        // For now, create a tensor wrapper around the raw background
+        float* bg_raw = background_for_step_raw(iter);
+
+        // Create a tensor that wraps the raw memory (no copy)
+        background_wrapper_ = torch::from_blob(
+            bg_raw,
+            {3},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
+        );
+
+        return background_wrapper_;
     }
 
     std::expected<Trainer::StepResult, std::string> Trainer::train_step(
@@ -587,12 +534,22 @@ namespace gs::training {
     RenderMode render_mode,
     std::stop_token stop_token) {
     try {
+        // Memory tracking for critical iterations
+        bool track_memory = (iter <= 10) || (iter % 100 == 0) || (iter % 1000 == 0);
+
+        if (track_memory) {
+            auto step_start = MemoryTracker::get().capture(iter, "step_start");
+            if (iter <= 5) {
+                MemoryTracker::get().log_snapshot(step_start);
+            }
+        }
+
+        // Camera model checks
         if (params_.optimization.gut) {
             if (cam->camera_model_type() == gsplat::CameraModelType::ORTHO) {
                 return std::unexpected("Training on cameras with ortho model is not supported yet.");
             }
         } else {
-            // Flag is workaround for non-RC datasets with distortion. By default it is off.
             if (!params_.optimization.rc) {
                 if (cam->radial_distortion().numel() != 0 ||
                     cam->tangential_distortion().numel() != 0) {
@@ -609,28 +566,23 @@ namespace gs::training {
         // Check control requests at the beginning
         handle_control_requests(iter, stop_token);
 
-        // If stop requested, return Stop
         if (stop_requested_.load() || stop_token.stop_requested()) {
             return StepResult::Stop;
         }
 
-        // If paused, wait
+        // Handle pause
         while (is_paused_.load() && !stop_requested_.load() && !stop_token.stop_requested()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             handle_control_requests(iter, stop_token);
         }
 
-        // Check stop again after potential pause
         if (stop_requested_.load() || stop_token.stop_requested()) {
             return StepResult::Stop;
         }
 
-        // Add phase transition logging for sparsity
+        // Sparsity phase logging
         if (params_.optimization.enable_sparsity) {
-            // Calculate base iterations (original iterations before extension)
             int base_iterations = params_.optimization.iterations - params_.optimization.sparsify_steps;
-
-            // Log phase transition
             if (iter == base_iterations + 1) {
                 LOG_INFO("=== Entering Sparsification Phase ===");
                 LOG_INFO("Base training complete at iteration {}", base_iterations);
@@ -639,14 +591,10 @@ namespace gs::training {
                 LOG_INFO("Current model size: {} Gaussians", strategy_->get_model().size());
                 LOG_INFO("Target pruning: {}% of Gaussians", params_.optimization.prune_ratio * 100);
             }
-
-            // Log when approaching pruning
             if (iter == params_.optimization.iterations - 100) {
                 LOG_INFO("Approaching final pruning in 100 iterations (at iteration {})",
                          params_.optimization.iterations);
             }
-
-            // Log when pruning will occur
             if (iter == params_.optimization.iterations - 1) {
                 LOG_INFO("Final pruning will occur next iteration");
             }
@@ -655,97 +603,166 @@ namespace gs::training {
         auto adjusted_cam_pos = poseopt_module_->forward(cam->world_view_transform(), torch::tensor({cam->uid()}));
         auto adjusted_cam = Camera(*cam, adjusted_cam_pos);
 
+        // Initialize CUDA memory on first use or when dimensions change
+        const int width = adjusted_cam.image_width();
+        const int height = adjusted_cam.image_height();
+
+        if (!cuda_memory_) {
+            cuda_memory_ = std::make_unique<TrainingMemory>();
+            cuda_memory_->initialize(width, height, 3);
+            cuda_memory_->set_background(0.0f, 0.0f, 0.0f);
+            LOG_DEBUG("Initialized CUDA memory for {}x{} images", width, height);
+        } else {
+            cuda_memory_->ensure_size(width, height, 3);
+        }
+
+        // Get background using our new system
         torch::Tensor& bg = background_for_step(iter);
 
-        // CRITICAL CHANGE: Use direct rasterization without autograd
+        // Track memory before forward pass
+        if (track_memory) {
+            auto pre_forward = MemoryTracker::get().capture(iter, "pre_forward");
+            if (iter <= 5) {
+                LOG_DEBUG("[Memory] Pre-forward - Allocated: {:.2f}MB",
+                         pre_forward.cuda_allocated_bytes / (1024.0 * 1024.0));
+            }
+        }
+
+        // Forward pass
         RenderOutput r_output;
-        if (!params_.optimization.gut) {
-            r_output = fast_rasterize(adjusted_cam, strategy_->get_model(), bg);
-        } else {
-            r_output = rasterize(adjusted_cam, strategy_->get_model(), bg, 1.0f, false, false, render_mode,
-                                nullptr);
+        {
+            ScopedMemoryTracker forward_tracker(iter, "forward_pass", track_memory);
+            if (!params_.optimization.gut) {
+                r_output = fast_rasterize(adjusted_cam, strategy_->get_model(), bg);
+            } else {
+                r_output = rasterize(adjusted_cam, strategy_->get_model(), bg, 1.0f, false, false, render_mode,
+                                    nullptr);
+            }
         }
 
         // Apply bilateral grid if enabled
         torch::Tensor processed_image = r_output.image;
-
         if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
+            ScopedMemoryTracker bilateral_tracker(iter, "bilateral_grid", track_memory);
             processed_image = bilateral_grid_->apply(r_output.image, cam->uid());
         }
 
-        // ============= MANUAL LOSS COMPUTATION WITHOUT AUTOGRAD =============
+        // Track memory after forward pass
+        if (track_memory) {
+            auto post_forward = MemoryTracker::get().capture(iter, "post_forward");
+            if (iter <= 5 || iter % 1000 == 0) {
+                LOG_INFO("[Memory] Iter {} post-forward - Allocated: {:.2f}MB",
+                        iter,
+                        post_forward.cuda_allocated_bytes / (1024.0 * 1024.0));
+            }
+        }
+
+        // ============= LOSS COMPUTATION - Using CUDA memory =============
         float total_loss_value = 0.0f;
         torch::Tensor grad_image;
 
         {
-            torch::NoGradGuard no_grad;
+            ScopedMemoryTracker loss_tracker(iter, "loss_computation", track_memory);
 
-            // Ensure both tensors are 4D for loss computation [N, H, W, C] -> [N, C, H, W]
+            // Get dimensions
+            const int batch = 1;
+            const int channels = 3;
+            const int h = height;
+            const int w = width;
+            const size_t image_elements = channels * h * w;
+
+            // Prepare 4D tensors for SSIM (it needs 4D)
             torch::Tensor rendered_4d = processed_image.dim() == 3 ?
                 processed_image.unsqueeze(0) : processed_image;
             torch::Tensor gt_4d = gt_image.dim() == 3 ? gt_image.unsqueeze(0) : gt_image;
 
-            // Ensure contiguous
             rendered_4d = rendered_4d.contiguous();
             gt_4d = gt_4d.contiguous();
 
-            // Manual L1 loss computation
-            auto diff = rendered_4d - gt_4d;
-            auto abs_diff = torch::abs(diff);
-            auto l1_loss = abs_diff.mean();
+            // Compute L1 loss using CUDA kernels
+            launch_compute_l1_loss_forward(
+                rendered_4d.data_ptr<float>(),
+                gt_4d.data_ptr<float>(),
+                cuda_memory_->diff_buffer(),
+                cuda_memory_->abs_diff_buffer(),
+                cuda_memory_->l1_grad(),
+                image_elements,
+                0
+            );
 
-            // Manual L1 gradient: sign(rendered - gt) / N
-            auto l1_grad = torch::sign(diff) / static_cast<float>(diff.numel());
+            // Compute mean for L1 loss value
+            launch_compute_mean(
+                cuda_memory_->abs_diff_buffer(),
+                cuda_memory_->loss_value(),
+                image_elements,
+                0
+            );
+            cudaDeviceSynchronize();
+            float l1_loss_value = cuda_memory_->get_loss_value();
 
-            // SSIM loss using direct CUDA kernel calls
+            // SSIM loss - call kernel directly without wrapper
             constexpr float kC1 = 0.01f * 0.01f;
             constexpr float kC2 = 0.03f * 0.03f;
 
-            // Call the forward CUDA kernel directly
-            auto ssim_output = fusedssim(kC1, kC2, rendered_4d, gt_4d, true);
-            auto ssim_map = std::get<0>(ssim_output);
-            auto dm1 = std::get<1>(ssim_output);
-            auto ds1sq = std::get<2>(ssim_output);
-            auto ds12 = std::get<3>(ssim_output);
+            // Call SSIM forward directly
+            auto [ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12] = fusedssim(
+                kC1, kC2, rendered_4d, gt_4d, true  // train=true to get derivatives
+            );
 
-            // Apply "valid" padding (always used according to your comment)
+            // Apply "valid" padding
             using torch::indexing::Slice;
-            int64_t h = ssim_map.size(2);
-            int64_t w = ssim_map.size(3);
-            if (h > 10 && w > 10) {
-                ssim_map = ssim_map.index({Slice(), Slice(), Slice(5, h - 5), Slice(5, w - 5)});
+            int64_t ssim_h = ssim_map.size(2);
+            int64_t ssim_w = ssim_map.size(3);
+            torch::Tensor ssim_map_cropped = ssim_map;
+            if (ssim_h > 10 && ssim_w > 10) {
+                ssim_map_cropped = ssim_map.index({Slice(), Slice(), Slice(5, ssim_h - 5), Slice(5, ssim_w - 5)});
             }
 
-            // Compute SSIM loss
-            auto ssim_val = ssim_map.mean();
-            auto ssim_loss = 1.0f - ssim_val;
+            // Get SSIM mean value
+            auto ssim_val = ssim_map_cropped.mean();
+            float ssim_loss_value = 1.0f - ssim_val.item<float>();
 
-            // Compute SSIM gradient using backward kernel
-            // Gradient of loss w.r.t. ssim_map: -1/N for each element (since loss = 1 - mean(ssim_map))
-            auto dL_dmap = -torch::ones_like(ssim_map) / static_cast<float>(ssim_map.numel());
-
-            // Pad the gradient back to full size for valid padding
-            auto full_dL_dmap = torch::zeros_like(rendered_4d);
-            h = full_dL_dmap.size(2);
-            w = full_dL_dmap.size(3);
-            if (h > 10 && w > 10) {
-                full_dL_dmap.index_put_({Slice(), Slice(), Slice(5, h - 5), Slice(5, w - 5)}, dL_dmap);
+            // Create gradient for SSIM backward
+            torch::Tensor dL_dmap = torch::zeros_like(ssim_map);
+            if (ssim_h > 10 && ssim_w > 10) {
+                // Only put gradient in the valid region
+                float grad_val = -1.0f / static_cast<float>(ssim_map_cropped.numel());
+                dL_dmap.index_put_({Slice(), Slice(), Slice(5, ssim_h - 5), Slice(5, ssim_w - 5)},
+                                   torch::full_like(ssim_map_cropped, grad_val));
+            } else {
+                dL_dmap.fill_(-1.0f / static_cast<float>(ssim_map.numel()));
             }
 
-            // Call the backward CUDA kernel directly
-            auto ssim_grad = fusedssim_backward(kC1, kC2, rendered_4d, gt_4d, full_dL_dmap, dm1, ds1sq, ds12);
+            // Call SSIM backward directly
+            torch::Tensor ssim_grad = fusedssim_backward(
+                kC1, kC2, rendered_4d, gt_4d, dL_dmap, dm_dmu1, dm_dsigma1_sq, dm_dsigma12
+            );
 
-            // Combine losses and gradients
+            // Combine losses
             float l1_weight = 1.0f - params_.optimization.lambda_dssim;
             float ssim_weight = params_.optimization.lambda_dssim;
 
-            total_loss_value = l1_weight * l1_loss.item<float>() +
-                              ssim_weight * ssim_loss.item<float>();
+            total_loss_value = l1_weight * l1_loss_value + ssim_weight * ssim_loss_value;
 
-            // Combine gradients
-            grad_image = l1_weight * l1_grad + ssim_weight * ssim_grad;
+            // Combine gradients using CUDA kernel
+            launch_combine_gradients(
+                cuda_memory_->grad_image(),
+                cuda_memory_->l1_grad(),
+                l1_weight,
+                ssim_grad.data_ptr<float>(),
+                ssim_weight,
+                image_elements,
+                0
+            );
 
-            // Remove batch dimension if it was added
+            // Create tensor wrapper for backward pass
+            grad_image = torch::from_blob(
+                cuda_memory_->grad_image(),
+                rendered_4d.sizes(),
+                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
+            );
+
+            // Remove batch dimension if needed
             if (processed_image.dim() == 3 && grad_image.dim() == 4) {
                 grad_image = grad_image.squeeze(0);
             }
@@ -753,18 +770,16 @@ namespace gs::training {
 
         // Handle bilateral grid gradient if needed
         if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
-            // For bilateral grid, we still need a small autograd graph
+            ScopedMemoryTracker bilateral_backward_tracker(iter, "bilateral_backward", track_memory);
             auto bilateral_input = r_output.image.detach().requires_grad_(true);
             auto bilateral_output = bilateral_grid_->apply(bilateral_input, cam->uid());
 
-            // Add TV loss if enabled
             if (params_.optimization.tv_loss_weight > 0.0f) {
                 auto tv_loss = params_.optimization.tv_loss_weight * bilateral_grid_->tv_loss();
                 total_loss_value += tv_loss.item<float>();
-                tv_loss.backward(torch::ones_like(tv_loss), true); // retain_graph=true
+                tv_loss.backward(torch::ones_like(tv_loss), true);
             }
 
-            // Get gradient through bilateral grid
             auto bilateral_grads = torch::autograd::grad(
                 {bilateral_output},
                 {bilateral_input},
@@ -776,17 +791,33 @@ namespace gs::training {
             grad_image = bilateral_grads[0];
         }
 
-        // Store the loss value
         current_loss_ = total_loss_value;
 
-        // Create zero gradient for alpha
-        torch::Tensor grad_alpha = torch::zeros_like(r_output.alpha);
+        // Create zero gradient for alpha using CUDA memory
+        launch_zero_tensor(cuda_memory_->grad_alpha(), width * height, 0);
 
-        // ============= DIRECT BACKWARD PASS =============
+        // Create tensor wrapper for alpha gradient
+        torch::Tensor grad_alpha = torch::from_blob(
+            cuda_memory_->grad_alpha(),
+            r_output.alpha.sizes(),
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
+        );
+
+        // Track memory before backward pass
+        if (track_memory) {
+            auto pre_backward = MemoryTracker::get().capture(iter, "pre_backward");
+            if (iter <= 5 || iter % 1000 == 0) {
+                LOG_INFO("[Memory] Iter {} pre-backward - Allocated: {:.2f}MB",
+                        iter,
+                        pre_backward.cuda_allocated_bytes / (1024.0 * 1024.0));
+            }
+        }
+
+        // ============= BACKWARD PASS =============
         {
+            ScopedMemoryTracker backward_tracker(iter, "backward_pass", track_memory);
             torch::NoGradGuard no_grad;
 
-            // Ensure model has gradients allocated
             strategy_->get_model().ensure_grad_allocated();
 
             // Call backward with direct gradient writing
@@ -794,9 +825,8 @@ namespace gs::training {
                 fast_rasterize_backward(grad_image, grad_alpha, r_output,
                                       strategy_->get_model(), adjusted_cam);
             }
-            // For gut rasterizer, you'd need to implement similar direct backward
 
-            // Debug: Print gradient statistics
+            // Debug gradient statistics
             if (iter % 100 == 0) {
                 auto means_grad = strategy_->get_model().means().grad();
                 if (means_grad.defined()) {
@@ -808,19 +838,19 @@ namespace gs::training {
                 }
             }
 
-            // Add regularization gradients directly with safety checks
+            // Use CUDA kernels for regularization
             if (params_.optimization.scale_reg > 0.0f) {
                 try {
                     auto scale_grad = strategy_->get_model().scaling_raw().mutable_grad();
                     auto scaling_raw = strategy_->get_model().scaling_raw();
 
-                    // Clamp to prevent overflow
-                    auto clamped_scaling = torch::clamp(scaling_raw, -10.0f, 10.0f);
-                    auto scales = torch::exp(clamped_scaling);
-
-                    const int N = scales.numel();
-                    auto reg_grad = params_.optimization.scale_reg * scales / static_cast<float>(N);
-                    scale_grad.add_(reg_grad);
+                    launch_add_scale_regularization(
+                        scale_grad.data_ptr<float>(),
+                        scaling_raw.data_ptr<float>(),
+                        params_.optimization.scale_reg,
+                        scaling_raw.numel(),
+                        0
+                    );
                 } catch (const std::exception& e) {
                     LOG_ERROR("Error computing scale regularization: {}", e.what());
                 }
@@ -831,17 +861,13 @@ namespace gs::training {
                     auto opacity_grad = strategy_->get_model().opacity_raw().mutable_grad();
                     auto opacity_raw = strategy_->get_model().opacity_raw();
 
-                    auto opacity = torch::sigmoid(opacity_raw);
-                    auto sigmoid_grad = opacity * (1.0f - opacity);
-
-                    // Handle shape
-                    if (opacity_grad.dim() == 2 && opacity_grad.size(1) == 1) {
-                        sigmoid_grad = sigmoid_grad.view({-1, 1});
-                    }
-
-                    const int N = sigmoid_grad.numel();
-                    auto reg_grad = params_.optimization.opacity_reg * sigmoid_grad / static_cast<float>(N);
-                    opacity_grad.add_(reg_grad);
+                    launch_add_opacity_regularization(
+                        opacity_grad.data_ptr<float>(),
+                        opacity_raw.data_ptr<float>(),
+                        params_.optimization.opacity_reg,
+                        opacity_raw.size(0),
+                        0
+                    );
                 } catch (const std::exception& e) {
                     LOG_ERROR("Error computing opacity regularization: {}", e.what());
                 }
@@ -856,7 +882,6 @@ namespace gs::training {
                     }
                 }
 
-                // ADMM updates its internal state and computes loss
                 auto sparsity_loss_result = sparsity_optimizer_->compute_loss(strategy_->get_model().opacity_raw());
                 if (sparsity_loss_result) {
                     total_loss_value += sparsity_loss_result->item<float>();
@@ -864,17 +889,27 @@ namespace gs::training {
             }
         }
 
-        // Update the stored loss value with all components
+        // Track memory after backward pass
+        if (track_memory) {
+            auto post_backward = MemoryTracker::get().capture(iter, "post_backward");
+            if (iter <= 5 || iter % 1000 == 0) {
+                LOG_INFO("[Memory] Iter {} post-backward - Allocated: {:.2f}MB, Reserved: {:.2f}MB",
+                        iter,
+                        post_backward.cuda_allocated_bytes / (1024.0 * 1024.0),
+                        post_backward.cuda_reserved_bytes / (1024.0 * 1024.0));
+            }
+        }
+
         current_loss_ = total_loss_value;
 
-        // Update progress synchronously if needed
+        // Update progress
         if (progress_) {
             progress_->update(iter, current_loss_.load(),
                               static_cast<int>(strategy_->get_model().size()),
                               strategy_->is_refining(iter));
         }
 
-        // Emit training progress event (throttled to reduce GUI updates)
+        // Emit training progress event
         if (iter % 10 == 0 || iter == 1) {
             events::state::TrainingProgress{
                 .iteration = iter,
@@ -884,15 +919,15 @@ namespace gs::training {
                 .emit();
         }
 
+        // Optimizer step and model updates
         {
+            ScopedMemoryTracker optimizer_tracker(iter, "optimizer_step", track_memory);
             torch::NoGradGuard no_grad;
 
             DeferredEvents deferred;
             {
                 std::unique_lock<std::shared_mutex> lock(render_mutex_);
 
-                // Execute strategy post-backward and step
-                // Only call post_backward during base training (not during sparsification)
                 if (params_.optimization.enable_sparsity) {
                     int base_iterations = params_.optimization.iterations - params_.optimization.sparsify_steps;
                     if (iter <= base_iterations) {
@@ -916,42 +951,44 @@ namespace gs::training {
                     poseopt_optimizer_->zero_grad(true);
                 }
 
-                // Queue event for emission after lock release
                 deferred.add(events::state::ModelUpdated{
                     .iteration = iter,
                     .num_gaussians = static_cast<size_t>(strategy_->get_model().size())});
-            } // Lock released here
+            }
 
-            // Events automatically emitted here when deferred destructs
-
-            // Handle sparsity updates
             if (auto result = handle_sparsity_update(iter, strategy_->get_model()); !result) {
                 LOG_ERROR("Sparsity update failed: {}", result.error());
             }
 
-            // Apply sparsity pruning if needed
             if (auto result = apply_sparsity_pruning(iter, strategy_->get_model()); !result) {
                 LOG_ERROR("Sparsity pruning failed: {}", result.error());
             }
 
-            // Clean evaluation - let the evaluator handle everything
             if (evaluator_->is_enabled() && evaluator_->should_evaluate(iter)) {
+                ScopedMemoryTracker eval_tracker(iter, "evaluation", true);
                 evaluator_->print_evaluation_header(iter);
+
+                // Create tensor wrapper for evaluator
+                torch::Tensor bg_eval = torch::from_blob(
+                    cuda_memory_->background(),
+                    {3},
+                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
+                );
+
                 auto metrics = evaluator_->evaluate(iter,
                                                     strategy_->get_model(),
                                                     val_dataset_,
-                                                    background_);
+                                                    bg_eval);
                 LOG_INFO("{}", metrics.to_string());
             }
 
-            // Save model at specified steps
             if (!params_.optimization.skip_intermediate_saving) {
                 for (size_t save_step : params_.optimization.save_steps) {
                     if (iter == static_cast<int>(save_step) && iter != params_.optimization.iterations) {
+                        ScopedMemoryTracker save_tracker(iter, "checkpoint_save", true);
                         const bool join_threads = (iter == params_.optimization.save_steps.back());
                         auto save_path = params_.dataset.output_path;
-                        save_ply(save_path, iter, /*join=*/join_threads);
-                        // Emit checkpoint saved event
+                        save_ply(save_path, iter, join_threads);
                         events::state::CheckpointSaved{
                             .iteration = iter,
                             .path = save_path}
@@ -961,22 +998,27 @@ namespace gs::training {
             }
 
             if (!params_.dataset.timelapse_images.empty() && iter % params_.dataset.timelapse_every == 0) {
+                ScopedMemoryTracker timelapse_tracker(iter, "timelapse", true);
                 for (const auto& img_name : params_.dataset.timelapse_images) {
                     auto train_cam = train_dataset_->get_camera_by_filename(img_name);
                     auto val_cam = val_dataset_ ? val_dataset_->get_camera_by_filename(img_name) : std::nullopt;
                     if (train_cam.has_value() || val_cam.has_value()) {
                         Camera* cam_to_use = train_cam.has_value() ? train_cam.value() : val_cam.value();
 
-                        // Image size isn't correct until the image has been loaded once
-                        // If we use the camera before it's loaded, it will render images at the non-scaled size
                         if (cam_to_use->camera_height() == cam_to_use->image_height() && params_.dataset.resize_factor != 1) {
                             cam_to_use->load_image_size(params_.dataset.resize_factor);
                         }
 
-                        RenderOutput rendered_timelapse_output = fast_rasterize(
-                            *cam_to_use, strategy_->get_model(), background_);
+                        // Create background tensor for timelapse
+                        torch::Tensor bg_timelapse = torch::from_blob(
+                            cuda_memory_->background(),
+                            {3},
+                            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
+                        );
 
-                        // Get folder name to save in by stripping file extension
+                        RenderOutput rendered_timelapse_output = fast_rasterize(
+                            *cam_to_use, strategy_->get_model(), bg_timelapse);
+
                         std::string folder_name = img_name;
                         auto last_dot = folder_name.find_last_of('.');
                         if (last_dot != std::string::npos) {
@@ -995,7 +1037,17 @@ namespace gs::training {
             }
         }
 
-        // Return Continue if we should continue training
+        // Final memory tracking
+        if (track_memory) {
+            auto step_end = MemoryTracker::get().capture(iter, "step_end");
+            if (iter <= 5 || iter % 1000 == 0) {
+                LOG_INFO("[Memory] Iter {} complete - Allocated: {:.2f}MB, Reserved: {:.2f}MB",
+                        iter,
+                        step_end.cuda_allocated_bytes / (1024.0 * 1024.0),
+                        step_end.cuda_reserved_bytes / (1024.0 * 1024.0));
+            }
+        }
+
         if (iter < params_.optimization.iterations && !stop_requested_.load() && !stop_token.stop_requested()) {
             return StepResult::Continue;
         } else {
@@ -1005,6 +1057,7 @@ namespace gs::training {
         return std::unexpected(std::format("Training step failed: {}", e.what()));
     }
 }
+
 
     std::expected<void, std::string> Trainer::train(std::stop_token stop_token) {
         // Check if initialized
