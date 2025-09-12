@@ -18,6 +18,15 @@ namespace gs::training {
     struct CameraWithImage {
         Camera* camera;
         torch::Tensor image;
+
+        // Add raw pointer accessors for fast access
+        const float* world_view_transform_ptr() const {
+            return camera->world_view_transform_cuda_ptr();
+        }
+
+        const float* cam_position_ptr() const {
+            return camera->cam_position_cuda_ptr();
+        }
     };
 
     using CameraExample = torch::data::Example<CameraWithImage, torch::Tensor>;
@@ -69,7 +78,11 @@ namespace gs::training {
             size_t camera_idx = _indices[index];
             auto& cam = _cameras[camera_idx];
 
+            // Load image - this still returns a torch tensor but Camera internally doesn't use torch
             torch::Tensor image = cam->load_and_get_image(_datasetConfig.resize_factor);
+
+            // Return camera pointer and image
+            // The camera itself is torch-free internally
             return {{cam.get(), std::move(image)}, torch::empty({})};
         }
 
@@ -162,7 +175,7 @@ namespace gs::training {
 
             // Handle the result
             return std::visit(
-                [&result](
+                [&result, &datasetConfig](
                     auto&& data) -> std::expected<std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor>, std::string> {
                     using T = std::decay_t<decltype(data)>;
 
@@ -172,8 +185,15 @@ namespace gs::training {
                         if (!data.cameras) {
                             return std::unexpected("Loaded scene has no cameras");
                         }
-                        // Return the cameras that were already loaded
-                        return std::make_tuple(data.cameras, result->scene_center);
+
+                        // Create dataset with cameras that are internally torch-free
+                        auto dataset = std::make_shared<CameraDataset>(
+                            data.cameras->get_cameras(),
+                            datasetConfig,
+                            CameraDataset::Split::ALL
+                        );
+
+                        return std::make_tuple(dataset, result->scene_center);
                     } else {
                         return std::unexpected("Unknown data type returned from loader");
                     }
@@ -219,8 +239,15 @@ namespace gs::training {
                         if (!data.cameras) {
                             return std::unexpected("Loaded scene has no cameras");
                         }
-                        // Return the cameras that were already loaded
-                        return std::make_tuple(data.cameras, result->scene_center);
+
+                        // Create dataset with cameras that are internally torch-free
+                        auto dataset = std::make_shared<CameraDataset>(
+                            data.cameras->get_cameras(),
+                            datasetConfig,
+                            CameraDataset::Split::ALL
+                        );
+
+                        return std::make_tuple(dataset, result->scene_center);
                     } else {
                         return std::unexpected("Unknown data type returned from loader");
                     }

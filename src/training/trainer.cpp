@@ -609,11 +609,11 @@ namespace gs::training {
 
         if (!cuda_memory_) {
             cuda_memory_ = std::make_unique<TrainingMemory>();
-            cuda_memory_->initialize(width, height, 3);
+            cuda_memory_->initialize(width, height, 3, 1); // batch=1
             cuda_memory_->set_background(0.0f, 0.0f, 0.0f);
             LOG_DEBUG("Initialized CUDA memory for {}x{} images", width, height);
         } else {
-            cuda_memory_->ensure_size(width, height, 3);
+            cuda_memory_->ensure_size(width, height, 3, 1); // batch=1
         }
 
         // Get background using our new system
@@ -659,30 +659,42 @@ namespace gs::training {
 
         // ============= LOSS COMPUTATION - Using CUDA memory =============
         float total_loss_value = 0.0f;
-        torch::Tensor grad_image;
+
+        // Variables declared here for scope throughout function
+        const int batch = 1;
+        const int channels = 3;
+        const int h = height;
+        const int w = width;
+        const size_t image_elements = batch * channels * h * w;
 
         {
             ScopedMemoryTracker loss_tracker(iter, "loss_computation", track_memory);
 
-            // Get dimensions
-            const int batch = 1;
-            const int channels = 3;
-            const int h = height;
-            const int w = width;
-            const size_t image_elements = channels * h * w;
+            // Ensure CUDA memory is sized for batch dimension
+            cuda_memory_->ensure_size(w, h, channels, batch);
 
-            // Prepare 4D tensors for SSIM (it needs 4D)
-            torch::Tensor rendered_4d = processed_image.dim() == 3 ?
-                processed_image.unsqueeze(0) : processed_image;
-            torch::Tensor gt_4d = gt_image.dim() == 3 ? gt_image.unsqueeze(0) : gt_image;
+            // Prepare tensors in 4D format [B, C, H, W]
+            torch::Tensor rendered_4d = processed_image;
+            torch::Tensor gt_4d = gt_image;
+
+            if (processed_image.dim() == 3) {
+                rendered_4d = processed_image.unsqueeze(0);  // [C, H, W] -> [1, C, H, W]
+            }
+            if (gt_image.dim() == 3) {
+                gt_4d = gt_image.unsqueeze(0);  // [C, H, W] -> [1, C, H, W]
+            }
 
             rendered_4d = rendered_4d.contiguous();
             gt_4d = gt_4d.contiguous();
 
+            // Get raw pointers from 4D tensors
+            const float* rendered_ptr = rendered_4d.data_ptr<float>();
+            const float* gt_ptr = gt_4d.data_ptr<float>();
+
             // Compute L1 loss using CUDA kernels
             launch_compute_l1_loss_forward(
-                rendered_4d.data_ptr<float>(),
-                gt_4d.data_ptr<float>(),
+                rendered_ptr,
+                gt_ptr,
                 cuda_memory_->diff_buffer(),
                 cuda_memory_->abs_diff_buffer(),
                 cuda_memory_->l1_grad(),
@@ -700,42 +712,67 @@ namespace gs::training {
             cudaDeviceSynchronize();
             float l1_loss_value = cuda_memory_->get_loss_value();
 
-            // SSIM loss - call kernel directly without wrapper
+            // SSIM loss - now using raw pointers
             constexpr float kC1 = 0.01f * 0.01f;
             constexpr float kC2 = 0.03f * 0.03f;
+            constexpr int crop_border = 5;  // Crop 5 pixels from each side
 
-            // Call SSIM forward directly
-            auto [ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12] = fusedssim(
-                kC1, kC2, rendered_4d, gt_4d, true  // train=true to get derivatives
+            // Call raw SSIM forward
+            launch_ssim_forward(
+                rendered_ptr,
+                gt_ptr,
+                cuda_memory_->ssim_map(),
+                cuda_memory_->ssim_dm_dmu1(),
+                cuda_memory_->ssim_dm_dsigma1_sq(),
+                cuda_memory_->ssim_dm_dsigma12(),
+                batch, channels, h, w,
+                kC1, kC2,
+                0  // stream
             );
 
-            // Apply "valid" padding
-            using torch::indexing::Slice;
-            int64_t ssim_h = ssim_map.size(2);
-            int64_t ssim_w = ssim_map.size(3);
-            torch::Tensor ssim_map_cropped = ssim_map;
-            if (ssim_h > 10 && ssim_w > 10) {
-                ssim_map_cropped = ssim_map.index({Slice(), Slice(), Slice(5, ssim_h - 5), Slice(5, ssim_w - 5)});
+            // Compute mean of SSIM map with cropping
+            launch_ssim_reduce_mean(
+                cuda_memory_->ssim_map(),
+                cuda_memory_->ssim_loss_value(),
+                batch, channels, h, w,
+                (h > 10 && w > 10) ? crop_border : 0,  // Only crop if image is large enough
+                0  // stream
+            );
+            cudaDeviceSynchronize();
+            float ssim_val = cuda_memory_->get_ssim_loss_value();
+            float ssim_loss_value = 1.0f - ssim_val;
+
+            // Prepare gradient for SSIM backward
+            int valid_elements = batch * channels * h * w;
+            if (h > 10 && w > 10) {
+                // With cropping
+                int cropped_h = h - 2 * crop_border;
+                int cropped_w = w - 2 * crop_border;
+                valid_elements = batch * channels * cropped_h * cropped_w;
             }
+            float grad_val = -1.0f / static_cast<float>(valid_elements);
 
-            // Get SSIM mean value
-            auto ssim_val = ssim_map_cropped.mean();
-            float ssim_loss_value = 1.0f - ssim_val.item<float>();
+            // Fill gradient map with appropriate values
+            launch_ssim_fill_gradient(
+                cuda_memory_->ssim_dL_dmap(),
+                grad_val,
+                batch, channels, h, w,
+                (h > 10 && w > 10) ? crop_border : 0,
+                0  // stream
+            );
 
-            // Create gradient for SSIM backward
-            torch::Tensor dL_dmap = torch::zeros_like(ssim_map);
-            if (ssim_h > 10 && ssim_w > 10) {
-                // Only put gradient in the valid region
-                float grad_val = -1.0f / static_cast<float>(ssim_map_cropped.numel());
-                dL_dmap.index_put_({Slice(), Slice(), Slice(5, ssim_h - 5), Slice(5, ssim_w - 5)},
-                                   torch::full_like(ssim_map_cropped, grad_val));
-            } else {
-                dL_dmap.fill_(-1.0f / static_cast<float>(ssim_map.numel()));
-            }
-
-            // Call SSIM backward directly
-            torch::Tensor ssim_grad = fusedssim_backward(
-                kC1, kC2, rendered_4d, gt_4d, dL_dmap, dm_dmu1, dm_dsigma1_sq, dm_dsigma12
+            // Call raw SSIM backward
+            launch_ssim_backward(
+                rendered_ptr,
+                gt_ptr,
+                cuda_memory_->ssim_dL_dmap(),
+                cuda_memory_->ssim_dm_dmu1(),
+                cuda_memory_->ssim_dm_dsigma1_sq(),
+                cuda_memory_->ssim_dm_dsigma12(),
+                cuda_memory_->ssim_grad(),
+                batch, channels, h, w,
+                kC1, kC2,
+                0  // stream
             );
 
             // Combine losses
@@ -749,28 +786,33 @@ namespace gs::training {
                 cuda_memory_->grad_image(),
                 cuda_memory_->l1_grad(),
                 l1_weight,
-                ssim_grad.data_ptr<float>(),
+                cuda_memory_->ssim_grad(),
                 ssim_weight,
                 image_elements,
                 0
             );
+        }
 
-            // Create tensor wrapper for backward pass
-            grad_image = torch::from_blob(
+        current_loss_ = total_loss_value;
+
+        // Handle bilateral grid gradient if needed
+        float* final_grad_image_ptr = cuda_memory_->grad_image();
+
+        if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
+            ScopedMemoryTracker bilateral_backward_tracker(iter, "bilateral_backward", track_memory);
+
+            // Create minimal tensor wrappers for bilateral grid
+            torch::Tensor grad_image_tensor = torch::from_blob(
                 cuda_memory_->grad_image(),
-                rendered_4d.sizes(),
+                {batch, channels, h, w},
                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
             );
 
-            // Remove batch dimension if needed
-            if (processed_image.dim() == 3 && grad_image.dim() == 4) {
-                grad_image = grad_image.squeeze(0);
+            // Match dimensions with processed_image
+            if (processed_image.dim() == 3) {
+                grad_image_tensor = grad_image_tensor.squeeze(0);
             }
-        }
 
-        // Handle bilateral grid gradient if needed
-        if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
-            ScopedMemoryTracker bilateral_backward_tracker(iter, "bilateral_backward", track_memory);
             auto bilateral_input = r_output.image.detach().requires_grad_(true);
             auto bilateral_output = bilateral_grid_->apply(bilateral_input, cam->uid());
 
@@ -783,25 +825,26 @@ namespace gs::training {
             auto bilateral_grads = torch::autograd::grad(
                 {bilateral_output},
                 {bilateral_input},
-                {grad_image},
+                {grad_image_tensor},
                 /*retain_graph=*/false,
                 /*create_graph=*/false,
                 /*allow_unused=*/false);
 
-            grad_image = bilateral_grads[0];
+            // Copy result back to our buffer if needed
+            if (bilateral_grads[0].data_ptr<float>() != final_grad_image_ptr) {
+                // Adjust for potential dimension mismatch
+                size_t copy_elements = bilateral_grads[0].numel();
+                cudaMemcpy(final_grad_image_ptr,
+                          bilateral_grads[0].data_ptr<float>(),
+                          copy_elements * sizeof(float),
+                          cudaMemcpyDeviceToDevice);
+            }
         }
 
         current_loss_ = total_loss_value;
 
         // Create zero gradient for alpha using CUDA memory
-        launch_zero_tensor(cuda_memory_->grad_alpha(), width * height, 0);
-
-        // Create tensor wrapper for alpha gradient
-        torch::Tensor grad_alpha = torch::from_blob(
-            cuda_memory_->grad_alpha(),
-            r_output.alpha.sizes(),
-            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
-        );
+        launch_zero_tensor(cuda_memory_->grad_alpha(), batch * height * width, 0);
 
         // Track memory before backward pass
         if (track_memory) {
@@ -820,9 +863,22 @@ namespace gs::training {
 
             strategy_->get_model().ensure_grad_allocated();
 
+            // Create minimal tensor wrappers just for the backward call
+            torch::Tensor grad_image_tensor = torch::from_blob(
+                final_grad_image_ptr,
+                processed_image.sizes(),  // Use the actual processed_image dimensions
+                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
+            );
+
+            torch::Tensor grad_alpha_tensor = torch::from_blob(
+                cuda_memory_->grad_alpha(),
+                r_output.alpha.sizes(),
+                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
+            );
+
             // Call backward with direct gradient writing
             if (!params_.optimization.gut) {
-                fast_rasterize_backward(grad_image, grad_alpha, r_output,
+                fast_rasterize_backward(grad_image_tensor, grad_alpha_tensor, r_output,
                                       strategy_->get_model(), adjusted_cam);
             }
 
@@ -1060,133 +1116,138 @@ namespace gs::training {
 
 
     std::expected<void, std::string> Trainer::train(std::stop_token stop_token) {
-        // Check if initialized
-        if (!initialized_.load()) {
-            return std::unexpected("Trainer not initialized. Call initialize() before train()");
+    // Check if initialized
+    if (!initialized_.load()) {
+        return std::unexpected("Trainer not initialized. Call initialize() before train()");
+    }
+
+    is_running_ = false;
+    training_complete_ = false;
+    ready_to_start_ = false; // Reset the flag
+
+    // Event-based ready signaling
+    if (!params_.optimization.headless) {
+        // Subscribe to start signal (no need to store handle)
+        events::internal::TrainingReadyToStart::when([this](const auto&) {
+            ready_to_start_ = true;
+        });
+
+        // Signal we're ready
+        events::internal::TrainerReady{}.emit();
+
+        // Wait for start signal
+        LOG_DEBUG("Waiting for start signal from GUI...");
+        while (!ready_to_start_.load() && !stop_token.stop_requested()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+
+    is_running_ = true; // Now we can start
+    LOG_INFO("Starting training loop with {} workers", params_.optimization.num_workers);
+
+    try {
+        int iter = 1;
+        const int num_workers = params_.optimization.num_workers;
+        const RenderMode render_mode = stringToRenderMode(params_.optimization.render_mode);
+
+        if (progress_) {
+            progress_->update(iter, current_loss_.load(),
+                              static_cast<int>(strategy_->get_model().size()),
+                              strategy_->is_refining(iter));
         }
 
-        is_running_ = false;
-        training_complete_ = false;
-        ready_to_start_ = false; // Reset the flag
+        // Use infinite dataloader to avoid epoch restarts - WORKS EXACTLY THE SAME!
+        auto train_dataloader = create_infinite_dataloader_from_dataset(train_dataset_, num_workers);
+        auto loader = train_dataloader->begin();
 
-        // Event-based ready signaling
-        if (!params_.optimization.headless) {
-            // Subscribe to start signal (no need to store handle)
-            events::internal::TrainingReadyToStart::when([this](const auto&) {
-                ready_to_start_ = true;
-            });
-
-            // Signal we're ready
-            events::internal::TrainerReady{}.emit();
-
-            // Wait for start signal
-            LOG_DEBUG("Waiting for start signal from GUI...");
-            while (!ready_to_start_.load() && !stop_token.stop_requested()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-        }
-
-        is_running_ = true; // Now we can start
-        LOG_INFO("Starting training loop with {} workers", params_.optimization.num_workers);
-
-        try {
-            int iter = 1;
-            const int num_workers = params_.optimization.num_workers;
-            const RenderMode render_mode = stringToRenderMode(params_.optimization.render_mode);
-
-            if (progress_) {
-                progress_->update(iter, current_loss_.load(),
-                                  static_cast<int>(strategy_->get_model().size()),
-                                  strategy_->is_refining(iter));
+        LOG_DEBUG("Starting training iterations");
+        // Single loop without epochs
+        while (iter <= params_.optimization.iterations) {
+            if (stop_token.stop_requested() || stop_requested_.load()) {
+                break;
             }
 
-            // Use infinite dataloader to avoid epoch restarts
-            auto train_dataloader = create_infinite_dataloader_from_dataset(train_dataset_, num_workers);
-            auto loader = train_dataloader->begin();
-
-            LOG_DEBUG("Starting training iterations");
-            // Single loop without epochs
-            while (iter <= params_.optimization.iterations) {
-                if (stop_token.stop_requested() || stop_requested_.load()) {
-                    break;
-                }
-
-                // Wait for previous callback if still running
-                if (callback_busy_.load()) {
-                    callback_stream_.synchronize();
-                }
-
-                auto& batch = *loader;
-                auto camera_with_image = batch[0].data;
-                Camera* cam = camera_with_image.camera;
-                torch::Tensor gt_image = std::move(camera_with_image.image).to(torch::kCUDA, /*non_blocking=*/true);
-
-                auto step_result = train_step(iter, cam, gt_image, render_mode, stop_token);
-                if (!step_result) {
-                    return std::unexpected(step_result.error());
-                }
-
-                if (*step_result == StepResult::Stop) {
-                    break;
-                }
-
-                // Launch callback for async progress update (except first iteration)
-                if (iter > 1 && callback_) {
-                    callback_busy_ = true;
-                    auto err = cudaLaunchHostFunc(
-                        callback_stream_.stream(),
-                        [](void* self) {
-                            auto* trainer = static_cast<Trainer*>(self);
-                            if (trainer->callback_) {
-                                trainer->callback_();
-                            }
-                            trainer->callback_busy_ = false;
-                        },
-                        this);
-                    if (err != cudaSuccess) {
-                        LOG_WARN("Failed to launch callback: {}", cudaGetErrorString(err));
-                        callback_busy_ = false;
-                    }
-                }
-
-                ++iter;
-                ++loader;
-            }
-
-            // Ensure callback is finished before final save
+            // Wait for previous callback if still running
             if (callback_busy_.load()) {
                 callback_stream_.synchronize();
             }
 
-            // Final save if not already saved by stop request
-            if (!stop_requested_.load() && !stop_token.stop_requested()) {
-                auto final_path = params_.dataset.output_path;
-                save_ply(final_path, params_.optimization.iterations, /*join=*/true);
-                // Emit final checkpoint saved event
-                events::state::CheckpointSaved{
-                    static_cast<int>(params_.optimization.iterations),
-                    final_path}
-                    .emit();
+            // Get batch - EXACTLY THE SAME!
+            auto& batch = *loader;
+            auto camera_with_image = batch[0].data;
+
+            // Camera is now torch-free internally, but interface is the same
+            Camera* cam = camera_with_image.camera;
+            torch::Tensor gt_image = std::move(camera_with_image.image).to(torch::kCUDA, /*non_blocking=*/true);
+
+            // train_step will use cam's raw pointers internally via fast_rasterize
+            // cam->world_view_transform_cuda_ptr() and cam->cam_position_cuda_ptr()
+            auto step_result = train_step(iter, cam, gt_image, render_mode, stop_token);
+            if (!step_result) {
+                return std::unexpected(step_result.error());
             }
 
-            if (progress_) {
-                progress_->complete();
-            }
-            evaluator_->save_report();
-            if (progress_) {
-                progress_->print_final_summary(static_cast<int>(strategy_->get_model().size()));
+            if (*step_result == StepResult::Stop) {
+                break;
             }
 
-            is_running_ = false;
-            training_complete_ = true;
+            // Launch callback for async progress update (except first iteration)
+            if (iter > 1 && callback_) {
+                callback_busy_ = true;
+                auto err = cudaLaunchHostFunc(
+                    callback_stream_.stream(),
+                    [](void* self) {
+                        auto* trainer = static_cast<Trainer*>(self);
+                        if (trainer->callback_) {
+                            trainer->callback_();
+                        }
+                        trainer->callback_busy_ = false;
+                    },
+                    this);
+                if (err != cudaSuccess) {
+                    LOG_WARN("Failed to launch callback: {}", cudaGetErrorString(err));
+                    callback_busy_ = false;
+                }
+            }
 
-            LOG_INFO("Training completed successfully");
-            return {};
-        } catch (const std::exception& e) {
-            is_running_ = false;
-            return std::unexpected(std::format("Training failed: {}", e.what()));
+            ++iter;
+            ++loader;
         }
+
+        // Ensure callback is finished before final save
+        if (callback_busy_.load()) {
+            callback_stream_.synchronize();
+        }
+
+        // Final save if not already saved by stop request
+        if (!stop_requested_.load() && !stop_token.stop_requested()) {
+            auto final_path = params_.dataset.output_path;
+            save_ply(final_path, params_.optimization.iterations, /*join=*/true);
+            // Emit final checkpoint saved event
+            events::state::CheckpointSaved{
+                static_cast<int>(params_.optimization.iterations),
+                final_path}
+                .emit();
+        }
+
+        if (progress_) {
+            progress_->complete();
+        }
+        evaluator_->save_report();
+        if (progress_) {
+            progress_->print_final_summary(static_cast<int>(strategy_->get_model().size()));
+        }
+
+        is_running_ = false;
+        training_complete_ = true;
+
+        LOG_INFO("Training completed successfully");
+        return {};
+    } catch (const std::exception& e) {
+        is_running_ = false;
+        return std::unexpected(std::format("Training failed: {}", e.what()));
     }
+}
 
     std::shared_ptr<const Camera> Trainer::getCamById(int camId) const {
         const auto it = m_cam_id_to_cam.find(camId);

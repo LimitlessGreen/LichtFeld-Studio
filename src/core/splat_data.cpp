@@ -24,6 +24,8 @@
 #include <thread>
 #include <torch/torch.h>
 #include <vector>
+#include <cuda_runtime.h>
+#include <cstring>
 
 namespace {
     std::string tensor_sizes_to_string(const c10::ArrayRef<int64_t>& sizes) {
@@ -190,7 +192,115 @@ namespace {
 } // namespace
 
 namespace gs {
-    // Constructor from tensors
+
+    void SplatData::allocate_cuda_memory_and_tensors(int64_t num_points,
+                                                     int64_t sh0_dim1, int64_t sh0_dim2,
+                                                     int64_t shN_dim1, int64_t shN_dim2) {
+        _num_points = num_points;
+        _sh0_dims[0] = num_points;
+        _sh0_dims[1] = sh0_dim1;
+        _sh0_dims[2] = sh0_dim2;
+        _shN_dims[0] = num_points;
+        _shN_dims[1] = shN_dim1;
+        _shN_dims[2] = shN_dim2;
+
+        // Allocate raw CUDA memory
+        size_t means_size = num_points * 3 * sizeof(float);
+        size_t opacity_size = num_points * 1 * sizeof(float);
+        size_t rotation_size = num_points * 4 * sizeof(float);
+        size_t scaling_size = num_points * 3 * sizeof(float);
+        size_t sh0_size = _sh0_dims[0] * _sh0_dims[1] * _sh0_dims[2] * sizeof(float);
+        size_t shN_size = _shN_dims[0] * _shN_dims[1] * _shN_dims[2] * sizeof(float);
+
+        cudaMalloc(&_means_cuda, means_size);
+        cudaMalloc(&_opacity_cuda, opacity_size);
+        cudaMalloc(&_rotation_cuda, rotation_size);
+        cudaMalloc(&_scaling_cuda, scaling_size);
+        cudaMalloc(&_sh0_cuda, sh0_size);
+        cudaMalloc(&_shN_cuda, shN_size);
+
+        // Allocate gradient memory
+        cudaMalloc(&_means_grad_cuda, means_size);
+        cudaMalloc(&_opacity_grad_cuda, opacity_size);
+        cudaMalloc(&_rotation_grad_cuda, rotation_size);
+        cudaMalloc(&_scaling_grad_cuda, scaling_size);
+        cudaMalloc(&_sh0_grad_cuda, sh0_size);
+        cudaMalloc(&_shN_grad_cuda, shN_size);
+
+        // Initialize gradients to zero
+        cudaMemset(_means_grad_cuda, 0, means_size);
+        cudaMemset(_opacity_grad_cuda, 0, opacity_size);
+        cudaMemset(_rotation_grad_cuda, 0, rotation_size);
+        cudaMemset(_scaling_grad_cuda, 0, scaling_size);
+        cudaMemset(_sh0_grad_cuda, 0, sh0_size);
+        cudaMemset(_shN_grad_cuda, 0, shN_size);
+
+        // Create persistent tensor wrappers
+        const auto tensor_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+
+        _means_tensor = torch::from_blob(_means_cuda, {num_points, 3}, tensor_opts);
+        _opacity_tensor = torch::from_blob(_opacity_cuda, {num_points, 1}, tensor_opts);
+        _rotation_tensor = torch::from_blob(_rotation_cuda, {num_points, 4}, tensor_opts);
+        _scaling_tensor = torch::from_blob(_scaling_cuda, {num_points, 3}, tensor_opts);
+        _sh0_tensor = torch::from_blob(_sh0_cuda, {_sh0_dims[0], _sh0_dims[1], _sh0_dims[2]}, tensor_opts);
+        _shN_tensor = torch::from_blob(_shN_cuda, {_shN_dims[0], _shN_dims[1], _shN_dims[2]}, tensor_opts);
+
+        // Set requires_grad and assign gradient tensors
+        _means_tensor.set_requires_grad(true);
+        _means_tensor.mutable_grad() = torch::from_blob(_means_grad_cuda, {num_points, 3}, tensor_opts);
+
+        _opacity_tensor.set_requires_grad(true);
+        _opacity_tensor.mutable_grad() = torch::from_blob(_opacity_grad_cuda, {num_points, 1}, tensor_opts);
+
+        _rotation_tensor.set_requires_grad(true);
+        _rotation_tensor.mutable_grad() = torch::from_blob(_rotation_grad_cuda, {num_points, 4}, tensor_opts);
+
+        _scaling_tensor.set_requires_grad(true);
+        _scaling_tensor.mutable_grad() = torch::from_blob(_scaling_grad_cuda, {num_points, 3}, tensor_opts);
+
+        _sh0_tensor.set_requires_grad(true);
+        _sh0_tensor.mutable_grad() = torch::from_blob(_sh0_grad_cuda, {_sh0_dims[0], _sh0_dims[1], _sh0_dims[2]}, tensor_opts);
+
+        _shN_tensor.set_requires_grad(true);
+        _shN_tensor.mutable_grad() = torch::from_blob(_shN_grad_cuda, {_shN_dims[0], _shN_dims[1], _shN_dims[2]}, tensor_opts);
+    }
+
+    void SplatData::ensure_grad_allocated() {
+        // Gradients are always allocated with the data in our new design
+        // This function is kept for compatibility but doesn't need to do anything
+    }
+
+    void SplatData::free_cuda_memory() {
+        if (_means_cuda) cudaFree(_means_cuda);
+        if (_opacity_cuda) cudaFree(_opacity_cuda);
+        if (_rotation_cuda) cudaFree(_rotation_cuda);
+        if (_scaling_cuda) cudaFree(_scaling_cuda);
+        if (_sh0_cuda) cudaFree(_sh0_cuda);
+        if (_shN_cuda) cudaFree(_shN_cuda);
+
+        if (_means_grad_cuda) cudaFree(_means_grad_cuda);
+        if (_opacity_grad_cuda) cudaFree(_opacity_grad_cuda);
+        if (_rotation_grad_cuda) cudaFree(_rotation_grad_cuda);
+        if (_scaling_grad_cuda) cudaFree(_scaling_grad_cuda);
+        if (_sh0_grad_cuda) cudaFree(_sh0_grad_cuda);
+        if (_shN_grad_cuda) cudaFree(_shN_grad_cuda);
+
+        _means_cuda = nullptr;
+        _opacity_cuda = nullptr;
+        _rotation_cuda = nullptr;
+        _scaling_cuda = nullptr;
+        _sh0_cuda = nullptr;
+        _shN_cuda = nullptr;
+
+        _means_grad_cuda = nullptr;
+        _opacity_grad_cuda = nullptr;
+        _rotation_grad_cuda = nullptr;
+        _scaling_grad_cuda = nullptr;
+        _sh0_grad_cuda = nullptr;
+        _shN_grad_cuda = nullptr;
+    }
+
+    // Constructor from tensors - copies to raw CUDA memory
     SplatData::SplatData(int sh_degree,
                          torch::Tensor means,
                          torch::Tensor sh0,
@@ -201,29 +311,72 @@ namespace gs {
                          float scene_scale)
         : _max_sh_degree{sh_degree},
           _active_sh_degree{0},
-          _scene_scale{scene_scale},
-          _means{std::move(means)},
-          _sh0{std::move(sh0)},
-          _shN{std::move(shN)},
-          _scaling{std::move(scaling)},
-          _rotation{std::move(rotation)},
-          _opacity{std::move(opacity)} {}
+          _scene_scale{scene_scale} {
+
+        // Allocate memory and create tensor wrappers
+        allocate_cuda_memory_and_tensors(
+            means.size(0),
+            sh0.size(1), sh0.size(2),
+            shN.size(1), shN.size(2)
+        );
+
+        // Copy data from input tensors to raw CUDA memory
+        cudaMemcpy(_means_cuda, means.contiguous().data_ptr<float>(),
+                  means.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(_opacity_cuda, opacity.contiguous().data_ptr<float>(),
+                  opacity.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(_rotation_cuda, rotation.contiguous().data_ptr<float>(),
+                  rotation.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(_scaling_cuda, scaling.contiguous().data_ptr<float>(),
+                  scaling.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(_sh0_cuda, sh0.contiguous().data_ptr<float>(),
+                  sh0.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(_shN_cuda, shN.contiguous().data_ptr<float>(),
+                  shN.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+    }
 
     // Move constructor
     SplatData::SplatData(SplatData&& other) noexcept
         : _active_sh_degree(other._active_sh_degree),
           _max_sh_degree(other._max_sh_degree),
           _scene_scale(other._scene_scale),
-          _means(std::move(other._means)),
-          _sh0(std::move(other._sh0)),
-          _shN(std::move(other._shN)),
-          _scaling(std::move(other._scaling)),
-          _rotation(std::move(other._rotation)),
-          _opacity(std::move(other._opacity)),
-          _densification_info(std::move(other._densification_info))
-    // Note: _save_mutex and _save_futures are default constructed
-    {
-        // Don't move the mutex or futures - each instance should have its own
+          _num_points(other._num_points),
+          _means_cuda(other._means_cuda),
+          _sh0_cuda(other._sh0_cuda),
+          _shN_cuda(other._shN_cuda),
+          _scaling_cuda(other._scaling_cuda),
+          _rotation_cuda(other._rotation_cuda),
+          _opacity_cuda(other._opacity_cuda),
+          _means_grad_cuda(other._means_grad_cuda),
+          _sh0_grad_cuda(other._sh0_grad_cuda),
+          _shN_grad_cuda(other._shN_grad_cuda),
+          _scaling_grad_cuda(other._scaling_grad_cuda),
+          _rotation_grad_cuda(other._rotation_grad_cuda),
+          _opacity_grad_cuda(other._opacity_grad_cuda),
+          _means_tensor(std::move(other._means_tensor)),
+          _opacity_tensor(std::move(other._opacity_tensor)),
+          _rotation_tensor(std::move(other._rotation_tensor)),
+          _scaling_tensor(std::move(other._scaling_tensor)),
+          _sh0_tensor(std::move(other._sh0_tensor)),
+          _shN_tensor(std::move(other._shN_tensor)),
+          _densification_info(std::move(other._densification_info)) {
+
+        std::memcpy(_sh0_dims, other._sh0_dims, sizeof(_sh0_dims));
+        std::memcpy(_shN_dims, other._shN_dims, sizeof(_shN_dims));
+
+        // Clear source
+        other._means_cuda = nullptr;
+        other._sh0_cuda = nullptr;
+        other._shN_cuda = nullptr;
+        other._scaling_cuda = nullptr;
+        other._rotation_cuda = nullptr;
+        other._opacity_cuda = nullptr;
+        other._means_grad_cuda = nullptr;
+        other._sh0_grad_cuda = nullptr;
+        other._shN_grad_cuda = nullptr;
+        other._scaling_grad_cuda = nullptr;
+        other._rotation_grad_cuda = nullptr;
+        other._opacity_grad_cuda = nullptr;
     }
 
     // Move assignment operator
@@ -232,62 +385,95 @@ namespace gs {
             // Wait for any pending saves to complete
             wait_for_saves();
 
+            // Free existing memory
+            free_cuda_memory();
+
             // Move scalar members
             _active_sh_degree = other._active_sh_degree;
             _max_sh_degree = other._max_sh_degree;
             _scene_scale = other._scene_scale;
+            _num_points = other._num_points;
+
+            std::memcpy(_sh0_dims, other._sh0_dims, sizeof(_sh0_dims));
+            std::memcpy(_shN_dims, other._shN_dims, sizeof(_shN_dims));
+
+            // Move pointers
+            _means_cuda = other._means_cuda;
+            _sh0_cuda = other._sh0_cuda;
+            _shN_cuda = other._shN_cuda;
+            _scaling_cuda = other._scaling_cuda;
+            _rotation_cuda = other._rotation_cuda;
+            _opacity_cuda = other._opacity_cuda;
+            _means_grad_cuda = other._means_grad_cuda;
+            _sh0_grad_cuda = other._sh0_grad_cuda;
+            _shN_grad_cuda = other._shN_grad_cuda;
+            _scaling_grad_cuda = other._scaling_grad_cuda;
+            _rotation_grad_cuda = other._rotation_grad_cuda;
+            _opacity_grad_cuda = other._opacity_grad_cuda;
 
             // Move tensors
-            _means = std::move(other._means);
-            _sh0 = std::move(other._sh0);
-            _shN = std::move(other._shN);
-            _scaling = std::move(other._scaling);
-            _rotation = std::move(other._rotation);
-            _opacity = std::move(other._opacity);
+            _means_tensor = std::move(other._means_tensor);
+            _opacity_tensor = std::move(other._opacity_tensor);
+            _rotation_tensor = std::move(other._rotation_tensor);
+            _scaling_tensor = std::move(other._scaling_tensor);
+            _sh0_tensor = std::move(other._sh0_tensor);
+            _shN_tensor = std::move(other._shN_tensor);
+
             _densification_info = std::move(other._densification_info);
 
-            // Don't move the mutex or futures
+            // Clear source
+            other._means_cuda = nullptr;
+            other._sh0_cuda = nullptr;
+            other._shN_cuda = nullptr;
+            other._scaling_cuda = nullptr;
+            other._rotation_cuda = nullptr;
+            other._opacity_cuda = nullptr;
+            other._means_grad_cuda = nullptr;
+            other._sh0_grad_cuda = nullptr;
+            other._shN_grad_cuda = nullptr;
+            other._scaling_grad_cuda = nullptr;
+            other._rotation_grad_cuda = nullptr;
+            other._opacity_grad_cuda = nullptr;
         }
         return *this;
     }
 
     SplatData::~SplatData() {
         wait_for_saves();
+        free_cuda_memory();
     }
 
     // Computed getters
     torch::Tensor SplatData::get_means() const {
-        return _means;
+        return _means_tensor;
     }
 
     torch::Tensor SplatData::get_opacity() const {
-        return torch::sigmoid(_opacity).squeeze(-1);
+        return torch::sigmoid(_opacity_tensor).squeeze(-1);
     }
 
     torch::Tensor SplatData::get_rotation() const {
-        return torch::nn::functional::normalize(_rotation,
+        return torch::nn::functional::normalize(_rotation_tensor,
                                                 torch::nn::functional::NormalizeFuncOptions().dim(-1));
     }
 
     torch::Tensor SplatData::get_scaling() const {
-        return torch::exp(_scaling);
+        return torch::exp(_scaling_tensor);
     }
 
     torch::Tensor SplatData::get_shs() const {
-        return torch::cat({_sh0, _shN}, 1);
+        return torch::cat({_sh0_tensor, _shN_tensor}, 1);
     }
 
     SplatData& SplatData::transform(const glm::mat4& transform_matrix) {
         LOG_TIMER("SplatData::transform");
 
-        if (_means.size(0) == 0) {
+        if (_num_points == 0) {
             return *this; // Nothing to transform
         }
 
-        const int num_points = _means.size(0);
-
         // Keep everything on GPU for efficiency
-        auto device = _means.device();
+        auto device = _means_tensor.device();
 
         // 1. Transform positions (means)
         // Convert transform matrix to tensor
@@ -299,14 +485,14 @@ namespace gs {
                                     .reshape({4, 4});
 
         // Add homogeneous coordinate
-        auto means_homo = torch::cat({_means, torch::ones({num_points, 1}, _means.options())}, 1);
+        auto means_homo = torch::cat({_means_tensor, torch::ones({_num_points, 1}, _means_tensor.options())}, 1);
 
         // Apply transform: (4x4) @ (Nx4)^T = (4xN), then transpose back
         auto transformed_means = torch::matmul(transform_tensor, means_homo.t()).t();
 
         // Extract xyz and update in-place
-        _means.index_put_({torch::indexing::Slice(), torch::indexing::Slice(0, 3)},
-                          transformed_means.index({torch::indexing::Slice(), torch::indexing::Slice(0, 3)}));
+        _means_tensor.index_put_({torch::indexing::Slice(), torch::indexing::Slice(0, 3)},
+                                 transformed_means.index({torch::indexing::Slice(), torch::indexing::Slice(0, 3)}));
 
         // 2. Extract rotation from transform matrix (simple method without decompose)
         glm::mat3 rot_mat(transform_matrix);
@@ -329,10 +515,10 @@ namespace gs {
                                             torch::TensorOptions().dtype(torch::kFloat32).device(device));
 
             // Quaternion multiplication: q_new = q_transform * q_original
-            auto q = _rotation; // Shape: [N, 4] in [w, x, y, z] format
+            auto q = _rotation_tensor; // Shape: [N, 4] in [w, x, y, z] format
 
             // Expand rotation quaternion to match batch size
-            auto q_rot = rot_tensor.unsqueeze(0).expand({num_points, 4});
+            auto q_rot = rot_tensor.unsqueeze(0).expand({_num_points, 4});
 
             // Quaternion multiplication formula
             auto w1 = q_rot.index({torch::indexing::Slice(), 0});
@@ -345,10 +531,10 @@ namespace gs {
             auto y2 = q.index({torch::indexing::Slice(), 2});
             auto z2 = q.index({torch::indexing::Slice(), 3});
 
-            _rotation.index_put_({torch::indexing::Slice(), 0}, w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2);
-            _rotation.index_put_({torch::indexing::Slice(), 1}, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2);
-            _rotation.index_put_({torch::indexing::Slice(), 2}, w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2);
-            _rotation.index_put_({torch::indexing::Slice(), 3}, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2);
+            _rotation_tensor.index_put_({torch::indexing::Slice(), 0}, w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2);
+            _rotation_tensor.index_put_({torch::indexing::Slice(), 1}, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2);
+            _rotation_tensor.index_put_({torch::indexing::Slice(), 2}, w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2);
+            _rotation_tensor.index_put_({torch::indexing::Slice(), 3}, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2);
         }
 
         // 4. Transform scaling (if non-uniform scale is present)
@@ -360,18 +546,18 @@ namespace gs {
             float avg_scale = (scale.x + scale.y + scale.z) / 3.0f;
 
             // Since _scaling is log(scale), we add log of the scale factor
-            _scaling = _scaling + std::log(avg_scale);
+            _scaling_tensor = _scaling_tensor + std::log(avg_scale);
         }
 
         // 5. Update scene scale if significant change
-        torch::Tensor scene_center = _means.mean(0);
-        torch::Tensor dists = torch::norm(_means - scene_center, 2, 1);
+        torch::Tensor scene_center = _means_tensor.mean(0);
+        torch::Tensor dists = torch::norm(_means_tensor - scene_center, 2, 1);
         float new_scene_scale = dists.median().item<float>();
         if (std::abs(new_scene_scale - _scene_scale) > _scene_scale * 0.1f) {
             _scene_scale = new_scene_scale;
         }
 
-        LOG_DEBUG("Transformed {} gaussians", num_points);
+        LOG_DEBUG("Transformed {} gaussians", _num_points);
         return *this;
     }
 
@@ -386,16 +572,16 @@ namespace gs {
     std::vector<std::string> SplatData::get_attribute_names() const {
         std::vector<std::string> a{"x", "y", "z", "nx", "ny", "nz"};
 
-        for (int i = 0; i < _sh0.size(1) * _sh0.size(2); ++i)
+        for (int i = 0; i < _sh0_dims[1] * _sh0_dims[2]; ++i)
             a.emplace_back("f_dc_" + std::to_string(i));
-        for (int i = 0; i < _shN.size(1) * _shN.size(2); ++i)
+        for (int i = 0; i < _shN_dims[1] * _shN_dims[2]; ++i)
             a.emplace_back("f_rest_" + std::to_string(i));
 
         a.emplace_back("opacity");
 
-        for (int i = 0; i < _scaling.size(1); ++i)
+        for (int i = 0; i < 3; ++i)
             a.emplace_back("scale_" + std::to_string(i));
-        for (int i = 0; i < _rotation.size(1); ++i)
+        for (int i = 0; i < 4; ++i)
             a.emplace_back("rot_" + std::to_string(i));
 
         return a;
@@ -468,17 +654,17 @@ namespace gs {
     PointCloud SplatData::to_point_cloud() const {
         PointCloud pc;
 
-        // Basic attributes
-        pc.means = _means.cpu().contiguous();
+        // Create tensors from raw memory and move to CPU
+        pc.means = _means_tensor.cpu().contiguous();
         pc.normals = torch::zeros_like(pc.means);
 
         // Gaussian attributes
-        pc.sh0 = _sh0.transpose(1, 2).flatten(1).cpu();
-        pc.shN = _shN.transpose(1, 2).flatten(1).cpu();
-        pc.opacity = _opacity.cpu();
-        pc.scaling = _scaling.cpu();
+        pc.sh0 = _sh0_tensor.transpose(1, 2).flatten(1).cpu();
+        pc.shN = _shN_tensor.transpose(1, 2).flatten(1).cpu();
+        pc.opacity = _opacity_tensor.cpu();
+        pc.scaling = _scaling_tensor.cpu();
 
-        pc.rotation = torch::nn::functional::normalize(_rotation,
+        pc.rotation = torch::nn::functional::normalize(_rotation_tensor,
                                                        torch::nn::functional::NormalizeFuncOptions().dim(-1))
                           .cpu()
                           .contiguous();
@@ -524,10 +710,10 @@ namespace gs {
             // 1. means
             torch::Tensor means;
             if (params.optimization.random) {
-                // Scale positions before setting requires_grad
-                means = (positions * scene_scale).to(torch::kCUDA).set_requires_grad(true);
+                // Scale positions
+                means = (positions * scene_scale).to(torch::kCUDA);
             } else {
-                means = positions.to(torch::kCUDA).set_requires_grad(true);
+                means = positions.to(torch::kCUDA);
             }
 
             // 2. scaling (log(σ))
@@ -535,17 +721,14 @@ namespace gs {
             auto scaling = torch::log(torch::sqrt(nn_dist) * params.optimization.init_scaling)
                                .unsqueeze(-1)
                                .repeat({1, 3})
-                               .to(f32_cuda)
-                               .set_requires_grad(true);
+                               .to(f32_cuda);
 
-            // 3. rotation (quaternion, identity) - split into multiple lines to avoid compilation error
+            // 3. rotation (quaternion, identity)
             auto rotation = torch::zeros({means.size(0), 4}, f32_cuda);
             rotation.index_put_({torch::indexing::Slice(), 0}, 1);
-            rotation = rotation.set_requires_grad(true);
 
-            // 4. opacity (inverse sigmoid of 0.5)
-            auto opacity = torch::logit(params.optimization.init_opacity * torch::ones({means.size(0), 1}, f32_cuda))
-                               .set_requires_grad(true);
+            // 4. opacity (inverse sigmoid of init value)
+            auto opacity = torch::logit(params.optimization.init_opacity * torch::ones({means.size(0), 1}, f32_cuda));
 
             // 5. shs (SH coefficients)
             auto colors_float = colors.to(torch::kCUDA);
@@ -564,15 +747,13 @@ namespace gs {
                                   torch::indexing::Slice(),
                                   torch::indexing::Slice(0, 1)})
                            .transpose(1, 2)
-                           .contiguous()
-                           .set_requires_grad(true);
+                           .contiguous();
 
             auto shN = shs.index({torch::indexing::Slice(),
                                   torch::indexing::Slice(),
                                   torch::indexing::Slice(1, torch::indexing::None)})
                            .transpose(1, 2)
-                           .contiguous()
-                           .set_requires_grad(true);
+                           .contiguous();
 
             std::println("Scene scale: {}", scene_scale);
             std::println("Initialized SplatData with:");
@@ -596,47 +777,27 @@ namespace gs {
             return std::unexpected(std::format("Failed to initialize SplatData: {}", e.what()));
         }
     }
-    void SplatData::ensure_grad_allocated() {
-        // Use accessor methods to get the tensors
-        if (!means().grad().defined()) {
-            means().mutable_grad() = torch::zeros_like(means());
-        }
-        if (!scaling_raw().grad().defined()) {
-            scaling_raw().mutable_grad() = torch::zeros_like(scaling_raw());
-        }
-        if (!rotation_raw().grad().defined()) {
-            rotation_raw().mutable_grad() = torch::zeros_like(rotation_raw());
-        }
-        if (!opacity_raw().grad().defined()) {
-            opacity_raw().mutable_grad() = torch::zeros_like(opacity_raw());
-        }
-        if (!sh0().grad().defined()) {
-            sh0().mutable_grad() = torch::zeros_like(sh0());
-        }
-        if (!shN().grad().defined()) {
-            shN().mutable_grad() = torch::zeros_like(shN());
-        }
-    }
 
     void SplatData::zero_grad_manual() {
-        // Zero all gradients manually without using autograd
-        if (means().grad().defined()) {
-            means().mutable_grad().zero_();
+        // Zero all gradients using the tensor interface
+        // The tensor's grad() points to our raw gradient memory
+        if (_means_tensor.grad().defined()) {
+            _means_tensor.mutable_grad().zero_();
         }
-        if (scaling_raw().grad().defined()) {
-            scaling_raw().mutable_grad().zero_();
+        if (_opacity_tensor.grad().defined()) {
+            _opacity_tensor.mutable_grad().zero_();
         }
-        if (rotation_raw().grad().defined()) {
-            rotation_raw().mutable_grad().zero_();
+        if (_rotation_tensor.grad().defined()) {
+            _rotation_tensor.mutable_grad().zero_();
         }
-        if (opacity_raw().grad().defined()) {
-            opacity_raw().mutable_grad().zero_();
+        if (_scaling_tensor.grad().defined()) {
+            _scaling_tensor.mutable_grad().zero_();
         }
-        if (sh0().grad().defined()) {
-            sh0().mutable_grad().zero_();
+        if (_sh0_tensor.grad().defined()) {
+            _sh0_tensor.mutable_grad().zero_();
         }
-        if (shN().grad().defined()) {
-            shN().mutable_grad().zero_();
+        if (_shN_tensor.grad().defined()) {
+            _shN_tensor.mutable_grad().zero_();
         }
     }
 } // namespace gs

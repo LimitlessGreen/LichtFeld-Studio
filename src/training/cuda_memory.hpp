@@ -129,9 +129,15 @@ private:
     CUDABuffer diff_buffer_;
     CUDABuffer abs_diff_buffer_;
     CUDABuffer l1_grad_buffer_;
-    CUDABuffer ssim_grad_buffer_;
     CUDABuffer ones_buffer_;
-    CUDABuffer dL_dmap_buffer_;
+
+    // SSIM-specific buffers (NEW)
+    CUDABuffer ssim_map_;           // SSIM values per pixel
+    CUDABuffer ssim_dm_dmu1_;        // Partial derivatives
+    CUDABuffer ssim_dm_dsigma1_sq_;
+    CUDABuffer ssim_dm_dsigma12_;
+    CUDABuffer ssim_grad_image_;     // Final SSIM gradient
+    CUDABuffer ssim_dL_dmap_;        // Gradient w.r.t SSIM map
 
     // Background buffers
     CUDABuffer background_;
@@ -139,22 +145,25 @@ private:
 
     // Loss computation buffers
     CUDABuffer loss_value_;  // Single float for loss reduction
+    CUDABuffer ssim_loss_value_; // Single float for SSIM loss
 
     // Dimensions
     int width_ = 0;
     int height_ = 0;
     int channels_ = 3;
+    int batch_ = 1;
 
 public:
     TrainingMemory() = default;
 
-    void initialize(int width, int height, int channels = 3) {
+    void initialize(int width, int height, int channels = 3, int batch = 1) {
         width_ = width;
         height_ = height;
         channels_ = channels;
+        batch_ = batch;
 
-        const size_t image_size = channels * height * width;
-        const size_t alpha_size = height * width;
+        const size_t image_size = batch * channels * height * width;
+        const size_t alpha_size = batch * height * width;
 
         // Allocate all buffers
         grad_image_.allocate(image_size);
@@ -162,16 +171,23 @@ public:
         diff_buffer_.allocate(image_size);
         abs_diff_buffer_.allocate(image_size);
         l1_grad_buffer_.allocate(image_size);
-        ssim_grad_buffer_.allocate(image_size);
         ones_buffer_.allocate(image_size);
-        dL_dmap_buffer_.allocate(image_size);
+
+        // SSIM buffers
+        ssim_map_.allocate(image_size);
+        ssim_dm_dmu1_.allocate(image_size);
+        ssim_dm_dsigma1_sq_.allocate(image_size);
+        ssim_dm_dsigma12_.allocate(image_size);
+        ssim_grad_image_.allocate(image_size);
+        ssim_dL_dmap_.allocate(image_size);
 
         // Background is just 3 floats
         background_.allocate(3);
         bg_mix_buffer_.allocate(3);
 
-        // Loss value is single float
+        // Loss values are single floats
         loss_value_.allocate(1);
+        ssim_loss_value_.allocate(1);
 
         // Initialize background to black
         background_.zero();
@@ -183,10 +199,11 @@ public:
     bool allocated() const {
         return background_.allocated() && grad_image_.allocated();
     }
+
     // Check if we need to reallocate for new dimensions
-    void ensure_size(int width, int height, int channels = 3) {
-        if (width != width_ || height != height_ || channels != channels_) {
-            initialize(width, height, channels);
+    void ensure_size(int width, int height, int channels = 3, int batch = 1) {
+        if (width != width_ || height != height_ || channels != channels_ || batch != batch_) {
+            initialize(width, height, channels, batch);
         }
     }
 
@@ -196,12 +213,20 @@ public:
     float* diff_buffer() { return diff_buffer_.data(); }
     float* abs_diff_buffer() { return abs_diff_buffer_.data(); }
     float* l1_grad() { return l1_grad_buffer_.data(); }
-    float* ssim_grad() { return ssim_grad_buffer_.data(); }
     float* ones() { return ones_buffer_.data(); }
-    float* dL_dmap() { return dL_dmap_buffer_.data(); }
+
+    // SSIM accessors
+    float* ssim_map() { return ssim_map_.data(); }
+    float* ssim_dm_dmu1() { return ssim_dm_dmu1_.data(); }
+    float* ssim_dm_dsigma1_sq() { return ssim_dm_dsigma1_sq_.data(); }
+    float* ssim_dm_dsigma12() { return ssim_dm_dsigma12_.data(); }
+    float* ssim_grad() { return ssim_grad_image_.data(); }
+    float* ssim_dL_dmap() { return ssim_dL_dmap_.data(); }
+
     float* background() { return background_.data(); }
     float* bg_mix() { return bg_mix_buffer_.data(); }
     float* loss_value() { return loss_value_.data(); }
+    float* ssim_loss_value() { return ssim_loss_value_.data(); }
 
     // Utility functions
     void zero_gradients() {
@@ -221,11 +246,19 @@ public:
         return val;
     }
 
+    float get_ssim_loss_value() {
+        float val;
+        ssim_loss_value_.copy_to_host(&val, 1);
+        return val;
+    }
+
     // Get sizes
-    size_t image_size() const { return channels_ * height_ * width_; }
-    size_t alpha_size() const { return height_ * width_; }
+    size_t image_size() const { return batch_ * channels_ * height_ * width_; }
+    size_t alpha_size() const { return batch_ * height_ * width_; }
     int width() const { return width_; }
     int height() const { return height_; }
+    int channels() const { return channels_; }
+    int batch() const { return batch_; }
 };
 
 } // namespace gs::training

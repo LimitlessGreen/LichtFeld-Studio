@@ -27,34 +27,25 @@ namespace gs::training {
         const int height = static_cast<int>(viewpoint_camera.image_height());
         auto [fx, fy, cx, cy] = viewpoint_camera.get_intrinsics();
 
-        // Get Gaussian parameters - no requires_grad needed
-        auto means = gaussian_model.means();
-        auto raw_opacities = gaussian_model.opacity_raw();
-        auto raw_scales = gaussian_model.scaling_raw();
-        auto raw_rotations = gaussian_model.rotation_raw();
-        auto sh0 = gaussian_model.sh0();
-        auto shN = gaussian_model.shN();
+        // Get raw Gaussian pointers - NO TORCH OPERATIONS!
+        float* means_ptr = gaussian_model.means_cuda_ptr();
+        float* raw_opacities_ptr = gaussian_model.opacity_raw_cuda_ptr();
+        float* raw_scales_ptr = gaussian_model.scaling_raw_cuda_ptr();
+        float* raw_rotations_ptr = gaussian_model.rotation_raw_cuda_ptr();
+        float* sh0_ptr = gaussian_model.sh0_cuda_ptr();
+        float* shN_ptr = gaussian_model.shN_cuda_ptr();
 
         const int sh_degree = gaussian_model.get_active_sh_degree();
         const int active_sh_bases = (sh_degree + 1) * (sh_degree + 1);
-        const int n_primitives = means.size(0);
-        const int total_bases_sh_rest = shN.size(1);
+        const int n_primitives = gaussian_model.size();
+        const int total_bases_sh_rest = gaussian_model.shN().size(1);
 
         constexpr float near_plane = 0.01f;
         constexpr float far_plane = 1e10f;
 
-        // Get camera position and world view transform
-        torch::Tensor cam_position_tensor = viewpoint_camera.cam_position();
-        auto w2c = viewpoint_camera.world_view_transform();
-
-        // Ensure all tensors are contiguous
-        means = means.contiguous();
-        raw_scales = raw_scales.contiguous();
-        raw_rotations = raw_rotations.contiguous();
-        raw_opacities = raw_opacities.contiguous();
-        sh0 = sh0.contiguous();
-        shN = shN.contiguous();
-        w2c = w2c.contiguous();
+        // Get raw camera pointers - NO TORCH OPERATIONS!
+        const float* w2c_ptr = viewpoint_camera.world_view_transform_cuda_ptr();
+        const float* cam_position_ptr = viewpoint_camera.cam_position_cuda_ptr();
 
         // Allocate output tensors
         const torch::TensorOptions float_options = torch::TensorOptions()
@@ -65,16 +56,16 @@ namespace gs::training {
         torch::Tensor image = torch::empty({3, height, width}, float_options);
         torch::Tensor alpha = torch::empty({1, height, width}, float_options);
 
-        // Call raw CUDA implementation directly
+        // Call raw CUDA implementation directly with raw pointers
         fast_gs::rasterization::ForwardContext forward_ctx = fast_gs::rasterization::forward_raw(
-            means.data_ptr<float>(),
-            raw_scales.data_ptr<float>(),
-            raw_rotations.data_ptr<float>(),
-            raw_opacities.data_ptr<float>(),
-            sh0.data_ptr<float>(),
-            shN.data_ptr<float>(),
-            w2c.data_ptr<float>(),
-            cam_position_tensor.data_ptr<float>(),
+            means_ptr,              // Raw pointer from SplatData
+            raw_scales_ptr,         // Raw pointer from SplatData
+            raw_rotations_ptr,      // Raw pointer from SplatData
+            raw_opacities_ptr,      // Raw pointer from SplatData
+            sh0_ptr,                // Raw pointer from SplatData
+            shN_ptr,                // Raw pointer from SplatData
+            w2c_ptr,                // Raw pointer from Camera
+            cam_position_ptr,       // Raw pointer from Camera
             image.data_ptr<float>(),
             alpha.data_ptr<float>(),
             n_primitives,
@@ -121,40 +112,34 @@ namespace gs::training {
 
         // Get camera parameters
         auto [fx, fy, cx, cy] = viewpoint_camera.get_intrinsics();
-        torch::Tensor cam_position_tensor = viewpoint_camera.cam_position();
-        auto w2c = viewpoint_camera.world_view_transform();
 
-        const int n_primitives = gaussian_model.means().size(0);
+        // Get raw camera pointers - NO TORCH OPERATIONS!
+        const float* w2c_ptr = viewpoint_camera.world_view_transform_cuda_ptr();
+        const float* cam_position_ptr = viewpoint_camera.cam_position_cuda_ptr();
+
+        const int n_primitives = gaussian_model.size();
         const int sh_degree = gaussian_model.get_active_sh_degree();
         const int active_sh_bases = (sh_degree + 1) * (sh_degree + 1);
         const int total_bases_sh_rest = gaussian_model.shN().size(1);
 
-        // Ensure model has gradients allocated
-        gaussian_model.ensure_grad_allocated();
+        // Get raw gradient pointers - these point to the same memory that tensor.grad() uses!
+        float* grad_means_ptr = gaussian_model.means_grad_cuda_ptr();
+        float* grad_scales_raw_ptr = gaussian_model.scaling_grad_cuda_ptr();
+        float* grad_rotations_raw_ptr = gaussian_model.rotation_grad_cuda_ptr();
+        float* grad_opacities_raw_ptr = gaussian_model.opacity_grad_cuda_ptr();
+        float* grad_sh0_ptr = gaussian_model.sh0_grad_cuda_ptr();
+        float* grad_shN_ptr = gaussian_model.shN_grad_cuda_ptr();
 
-        // Get mutable gradient pointers
-        auto grad_means = gaussian_model.means().mutable_grad();
-        auto grad_scales_raw = gaussian_model.scaling_raw().mutable_grad();
-        auto grad_rotations_raw = gaussian_model.rotation_raw().mutable_grad();
-        auto grad_opacities_raw = gaussian_model.opacity_raw().mutable_grad();
-        auto grad_sh0 = gaussian_model.sh0().mutable_grad();
-        auto grad_shN = gaussian_model.shN().mutable_grad();
+        // We don't support camera gradients since camera is torch-free
+        float* grad_w2c_ptr = nullptr;
 
-        // Camera gradients if needed
-        torch::Tensor grad_w2c;
-        if (w2c.requires_grad()) {
-            grad_w2c = torch::zeros_like(w2c);
-        }
+        // Get raw data pointers for forward data
+        float* means_ptr = gaussian_model.means_cuda_ptr();
+        float* scales_raw_ptr = gaussian_model.scaling_raw_cuda_ptr();
+        float* rotations_raw_ptr = gaussian_model.rotation_raw_cuda_ptr();
+        float* shN_ptr = gaussian_model.shN_cuda_ptr();
 
-        // Ensure gradients are contiguous
-        grad_means = grad_means.contiguous();
-        grad_scales_raw = grad_scales_raw.contiguous();
-        grad_rotations_raw = grad_rotations_raw.contiguous();
-        grad_opacities_raw = grad_opacities_raw.contiguous();
-        grad_sh0 = grad_sh0.contiguous();
-        grad_shN = grad_shN.contiguous();
-
-        // Call raw CUDA backward
+        // Call raw CUDA backward with raw pointers
         fast_gs::rasterization::BackwardOutputs outputs = fast_gs::rasterization::backward_raw(
             gaussian_model._densification_info.defined() ?
                 gaussian_model._densification_info.data_ptr<float>() : nullptr,
@@ -162,20 +147,20 @@ namespace gs::training {
             grad_alpha.contiguous().data_ptr<float>(),
             render_output.image.data_ptr<float>(),
             render_output.alpha.data_ptr<float>(),
-            gaussian_model.means().contiguous().data_ptr<float>(),
-            gaussian_model.scaling_raw().contiguous().data_ptr<float>(),
-            gaussian_model.rotation_raw().contiguous().data_ptr<float>(),
-            gaussian_model.shN().contiguous().data_ptr<float>(),
-            w2c.contiguous().data_ptr<float>(),
-            cam_position_tensor.data_ptr<float>(),
-            *forward_ctx,  // Dereference the pointer to get the context
-            grad_means.data_ptr<float>(),
-            grad_scales_raw.data_ptr<float>(),
-            grad_rotations_raw.data_ptr<float>(),
-            grad_opacities_raw.data_ptr<float>(),
-            grad_sh0.data_ptr<float>(),
-            grad_shN.data_ptr<float>(),
-            grad_w2c.defined() ? grad_w2c.data_ptr<float>() : nullptr,
+            means_ptr,              // Raw pointer from SplatData
+            scales_raw_ptr,         // Raw pointer from SplatData
+            rotations_raw_ptr,      // Raw pointer from SplatData
+            shN_ptr,                // Raw pointer from SplatData
+            w2c_ptr,                // Raw pointer from Camera
+            cam_position_ptr,       // Raw pointer from Camera
+            *forward_ctx,           // Dereference the pointer to get the context
+            grad_means_ptr,         // Raw gradient pointer - same memory as tensor.grad()!
+            grad_scales_raw_ptr,    // Raw gradient pointer - same memory as tensor.grad()!
+            grad_rotations_raw_ptr, // Raw gradient pointer - same memory as tensor.grad()!
+            grad_opacities_raw_ptr, // Raw gradient pointer - same memory as tensor.grad()!
+            grad_sh0_ptr,           // Raw gradient pointer - same memory as tensor.grad()!
+            grad_shN_ptr,           // Raw gradient pointer - same memory as tensor.grad()!
+            grad_w2c_ptr,           // nullptr since we don't support camera gradients
             n_primitives,
             active_sh_bases,
             total_bases_sh_rest,
@@ -190,5 +175,8 @@ namespace gs::training {
             throw std::runtime_error(std::string("Backward pass failed: ") +
                                    (outputs.error_message ? outputs.error_message : "Unknown error"));
         }
+
+        // No need to sync gradients! The optimizer's tensors already have .grad() pointing
+        // to the same memory we just wrote to via grad_means_ptr etc.
     }
 } // namespace gs::training

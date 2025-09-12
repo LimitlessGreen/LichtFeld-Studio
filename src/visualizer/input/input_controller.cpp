@@ -700,82 +700,89 @@ namespace gs::visualizer {
     }
 
     void InputController::handleGoToCamView(const events::cmd::GoToCamView& event) {
-        LOG_TIMER_TRACE("HandleGoToCamView");
+    LOG_TIMER_TRACE("HandleGoToCamView");
 
-        if (!training_manager_) {
-            LOG_ERROR("GoToCamView: trainer_manager_ not initialized");
-            return;
-        }
-
-        auto cam_data = training_manager_->getCamById(event.cam_id);
-        if (!cam_data) {
-            LOG_ERROR("Camera ID {} not found", event.cam_id);
-            return;
-        }
-
-        LOG_DEBUG("Moving camera to view ID: {} ({})", event.cam_id, cam_data->image_name());
-
-        // Transform from WorldToCam to CamToWorld
-        glm::mat3 world_to_cam_R;
-        auto R_accessor = cam_data->R().accessor<float, 2>();
-        for (int i = 0; i < 3; ++i) {
-            for (int j = 0; j < 3; ++j) {
-                world_to_cam_R[j][i] = R_accessor[i][j];
-            }
-        }
-
-        auto T_accessor = cam_data->T().accessor<float, 1>();
-        glm::vec3 world_to_cam_T(T_accessor[0], T_accessor[1], T_accessor[2]);
-
-        glm::mat3 cam_to_world_R = glm::transpose(world_to_cam_R);
-        glm::vec3 cam_to_world_T = -cam_to_world_R * world_to_cam_T;
-
-        viewport_.camera.R = cam_to_world_R;
-        viewport_.camera.t = cam_to_world_T;
-
-        // Get camera intrinsics using the proper method
-        auto [focal_x, focal_y, center_x, center_y] = cam_data->get_intrinsics();
-        const float width = static_cast<float>(cam_data->image_width());
-        const float height = static_cast<float>(cam_data->image_height());
-
-        // Calculate vertical FOV using the actual focal length
-        const float fov_y_rad = 2.0f * std::atan(height / (2.0f * focal_y));
-        const float fov_y_deg = glm::degrees(fov_y_rad);
-
-        LOG_DEBUG("Camera params - focal: ({:.1f}, {:.1f}), center: ({:.1f}, {:.1f}), image: {}x{}, FOV: {:.2f}°",
-                  focal_x, focal_y, center_x, center_y, width, height, fov_y_deg);
-
-        // Check for principal point offset (should be near center)
-        const float cx_expected = width / 2.0f;
-        const float cy_expected = height / 2.0f;
-
-        if (std::abs(center_x - cx_expected) > 1.0f || std::abs(center_y - cy_expected) > 1.0f) {
-            LOG_WARN("Camera has non-centered principal point: ({:.1f}, {:.1f}) vs expected ({:.1f}, {:.1f})",
-                     center_x, center_y, cx_expected, cy_expected);
-        }
-
-        // Set the FOV
-        events::ui::RenderSettingsChanged{
-            .fov = fov_y_deg,
-            .scaling_modifier = std::nullopt,
-            .antialiasing = std::nullopt,
-            .background_color = std::nullopt}
-            .emit();
-
-        // Force immediate camera update
-        events::ui::CameraMove{
-            .rotation = viewport_.getRotationMatrix(),
-            .translation = viewport_.getTranslation()}
-            .emit();
-
-        // Set this as the current camera for GT comparison
-        if (rendering_manager_) {
-            rendering_manager_->setCurrentCameraId(event.cam_id);
-        }
-
-        last_camview = event.cam_id;
+    if (!training_manager_) {
+        LOG_ERROR("GoToCamView: trainer_manager_ not initialized");
+        return;
     }
 
+    auto cam_data = training_manager_->getCamById(event.cam_id);
+    if (!cam_data) {
+        LOG_ERROR("Camera ID {} not found", event.cam_id);
+        return;
+    }
+
+    LOG_DEBUG("Moving camera to view ID: {} ({})", event.cam_id, cam_data->image_name());
+
+    // Use raw CPU pointers directly - safer and more efficient
+    const float* R_data = cam_data->R_cpu_ptr();
+    const float* T_data = cam_data->T_cpu_ptr();
+
+    // R_data is world_to_cam rotation stored row-major
+    // We need cam_to_world for the viewport
+    glm::mat3 world_to_cam_R;
+
+    // Load the matrix properly: R_data is row-major, GLM is column-major
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            // R_data[row * 3 + col] is element at [row][col] in row-major
+            // GLM[col][row] is element at [row][col] when thinking row-major
+            world_to_cam_R[col][row] = R_data[row * 3 + col];
+        }
+    }
+
+    glm::vec3 world_to_cam_T(T_data[0], T_data[1], T_data[2]);
+
+    // Convert to camera-to-world transform
+    glm::mat3 cam_to_world_R = glm::transpose(world_to_cam_R);
+    glm::vec3 cam_to_world_T = -cam_to_world_R * world_to_cam_T;
+
+    viewport_.camera.R = cam_to_world_R;
+    viewport_.camera.t = cam_to_world_T;
+
+    // Get camera intrinsics using the proper method
+    auto [focal_x, focal_y, center_x, center_y] = cam_data->get_intrinsics();
+    const float width = static_cast<float>(cam_data->image_width());
+    const float height = static_cast<float>(cam_data->image_height());
+
+    // Calculate vertical FOV using the actual focal length
+    const float fov_y_rad = 2.0f * std::atan(height / (2.0f * focal_y));
+    const float fov_y_deg = glm::degrees(fov_y_rad);
+
+    LOG_DEBUG("Camera params - focal: ({:.1f}, {:.1f}), center: ({:.1f}, {:.1f}), image: {}x{}, FOV: {:.2f}°",
+              focal_x, focal_y, center_x, center_y, width, height, fov_y_deg);
+
+    // Check for principal point offset (should be near center)
+    const float cx_expected = width / 2.0f;
+    const float cy_expected = height / 2.0f;
+
+    if (std::abs(center_x - cx_expected) > 1.0f || std::abs(center_y - cy_expected) > 1.0f) {
+        LOG_WARN("Camera has non-centered principal point: ({:.1f}, {:.1f}) vs expected ({:.1f}, {:.1f})",
+                 center_x, center_y, cx_expected, cy_expected);
+    }
+
+    // Set the FOV
+    events::ui::RenderSettingsChanged{
+        .fov = fov_y_deg,
+        .scaling_modifier = std::nullopt,
+        .antialiasing = std::nullopt,
+        .background_color = std::nullopt}
+        .emit();
+
+    // Force immediate camera update
+    events::ui::CameraMove{
+        .rotation = viewport_.getRotationMatrix(),
+        .translation = viewport_.getTranslation()}
+        .emit();
+
+    // Set this as the current camera for GT comparison
+    if (rendering_manager_) {
+        rendering_manager_->setCurrentCameraId(event.cam_id);
+    }
+
+    last_camview = event.cam_id;
+}
     // Helpers
     bool InputController::isInViewport(double x, double y) const {
         return x >= viewport_bounds_.x &&

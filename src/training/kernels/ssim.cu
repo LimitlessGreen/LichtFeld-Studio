@@ -2,13 +2,14 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <algorithm>
-#include <c10/cuda/CUDAGuard.h>
+#include "kernels/ssim.cuh"
 #include <cooperative_groups.h>
-#include <iostream>
-#include <torch/torch.h>
+#include <cuda_runtime.h>
+#include <algorithm>
 
 namespace cg = cooperative_groups;
+
+namespace gs::training {
 
 // ------------------------------------------
 // Constant Memory for Gaussian Coefficients
@@ -55,11 +56,6 @@ __device__ __forceinline__ float get_pix_value(
 
 // ------------------------------------------
 // Forward Kernel: Fused SSIM
-//  - Two-pass convolution to get mu1, mu2,
-//    sigma1_sq, sigma2_sq, sigma12, etc.
-//  - Writes final SSIM map to ssim_map
-//  - Optionally writes partial derivatives
-//    to dm_dmu1, dm_dsigma1_sq, dm_dsigma12
 // ------------------------------------------
 __global__ void fusedssimCUDA(
     int H,
@@ -83,7 +79,6 @@ __global__ void fusedssimCUDA(
     // Shared memory for the tile (img1, img2)
     __shared__ float sTile[SHARED_Y][SHARED_X][2];
     // After horizontal pass, store partial sums here
-    // xconv[y][x] -> (sumX, sumX^2, sumY, sumY^2, sumXY)
     __shared__ float xconv[CONV_Y][CONV_X][5];
 
     // Each block processes B x C sub-batches. We loop over channels:
@@ -119,7 +114,6 @@ __global__ void fusedssimCUDA(
 
         // ------------------------------------------------------------
         // 2) Horizontal convolution (11x1) in shared memory
-        //    We'll accumulate symmetrical pairs around center.
         // ------------------------------------------------------------
         {
             int ly = threadIdx.y;
@@ -131,7 +125,6 @@ __global__ void fusedssimCUDA(
             float sumY2 = 0.f;
             float sumXY = 0.f;
 
-            // #pragma unroll for those 5 pairs
 #pragma unroll
             for (int d = 1; d <= HALO; ++d) {
                 float w = cGauss[HALO - d];
@@ -276,10 +269,7 @@ __global__ void fusedssimCUDA(
 }
 
 // ------------------------------------------
-// Backward Kernel: Apply chain rule to get
-//    dL/d(img1) from partial derivatives
-//    (dm_dmu1, dm_dsigma1_sq, dm_dsigma12)
-//    and dL/dmap (the gradient from above).
+// Backward Kernel
 // ------------------------------------------
 __global__ void fusedssim_backwardCUDA(
     int H,
@@ -303,7 +293,6 @@ __global__ void fusedssim_backwardCUDA(
     const int bIdx = block.group_index().z;
 
     // Shared memory for the fused data:
-    // [0]: dm_dmu1*dL, [1]: dm_dsigma1_sq*dL, [2]: dm_dsigma12*dL
     __shared__ float sData[3][SHARED_Y][SHARED_X];
     __shared__ float sScratch[CONV_Y][CONV_X][3];
 
@@ -424,87 +413,219 @@ __global__ void fusedssim_backwardCUDA(
 }
 
 // ------------------------------------------
-// PyTorch Interface (Forward)
-//   Returns (ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12).
-//   If train=false, derivative Tensors are empty.
+// Mean reduction kernel with proper parallelization
 // ------------------------------------------
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-fusedssim(
-    float C1,
-    float C2,
-    torch::Tensor& img1,
-    torch::Tensor& img2,
-    bool train) {
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(img1));
-    int B = img1.size(0);
-    int CH = img1.size(1);
-    int H = img1.size(2);
-    int W = img1.size(3);
+__global__ void ssim_reduce_mean_kernel(
+    const float* ssim_map,
+    float* partial_sums,
+    int total_elements,
+    int start_h,
+    int end_h,
+    int start_w,
+    int end_w,
+    int height,
+    int width,
+    int channels) {
 
-    // Launch config
-    dim3 grid((W + BLOCK_X - 1) / BLOCK_X,
-              (H + BLOCK_Y - 1) / BLOCK_Y,
-              B);
-    dim3 block(BLOCK_X, BLOCK_Y);
+    extern __shared__ float sdata[];
 
-    // Output SSIM map
-    auto ssim_map = torch::zeros_like(img1, img1.options()).contiguous();
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Optionally allocate derivative Tensors
-    auto dm_dmu1 = train ? torch::zeros_like(img1) : torch::empty({0}, img1.options());
-    auto dm_dsigma1_sq = train ? torch::zeros_like(img1) : torch::empty({0}, img1.options());
-    auto dm_dsigma12 = train ? torch::zeros_like(img1) : torch::empty({0}, img1.options());
+    float sum = 0.0f;
 
-    fusedssimCUDA<<<grid, block>>>(
-        H, W, CH, C1, C2,
-        img1.contiguous().data_ptr<float>(),
-        img2.contiguous().data_ptr<float>(),
-        ssim_map.data_ptr<float>(),
-        train ? dm_dmu1.data_ptr<float>() : nullptr,
-        train ? dm_dsigma1_sq.data_ptr<float>() : nullptr,
-        train ? dm_dsigma12.data_ptr<float>() : nullptr);
+    // Grid-stride loop
+    for (int i = idx; i < total_elements; i += blockDim.x * gridDim.x) {
+        // Decode position for cropping check
+        int c = (i / (height * width)) % channels;
+        int h = (i / width) % height;
+        int w = i % width;
 
-    return std::make_tuple(ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12);
+        if (h >= start_h && h < end_h && w >= start_w && w < end_w) {
+            sum += ssim_map[i];
+        }
+    }
+
+    sdata[tid] = sum;
+    __syncthreads();
+
+    // Reduction in shared memory
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        partial_sums[blockIdx.x] = sdata[0];
+    }
+}
+
+// Second stage reduction
+__global__ void reduce_partial_sums(float* partial_sums, float* result, int n_blocks, int valid_elements) {
+    float sum = 0.0f;
+    for (int i = 0; i < n_blocks; i++) {
+        sum += partial_sums[i];
+    }
+    *result = sum / float(valid_elements);
+}
+
+// Fill gradient kernel
+__global__ void ssim_fill_gradient_kernel(
+    float* dL_dmap,
+    float gradient_value,
+    int total_elements,
+    int start_h,
+    int end_h,
+    int start_w,
+    int end_w,
+    int height,
+    int width,
+    int channels) {
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total_elements) {
+        int c = (idx / (height * width)) % channels;
+        int h = (idx / width) % height;
+        int w = idx % width;
+
+        if (h >= start_h && h < end_h && w >= start_w && w < end_w) {
+            dL_dmap[idx] = gradient_value;
+        } else {
+            dL_dmap[idx] = 0.0f;
+        }
+    }
 }
 
 // ------------------------------------------
-// PyTorch Interface (Backward)
-//   Takes the gradient wrt the SSIM map and
-//   the partial derivatives from forward;
-//   returns dL/d(img1).
+// Launch functions
 // ------------------------------------------
-torch::Tensor
-fusedssim_backward(
+void launch_ssim_forward(
+    const float* img1,
+    const float* img2,
+    float* ssim_map,
+    float* dm_dmu1,
+    float* dm_dsigma1_sq,
+    float* dm_dsigma12,
+    int batch,
+    int channels,
+    int height,
+    int width,
     float C1,
     float C2,
-    torch::Tensor& img1,
-    torch::Tensor& img2,
-    torch::Tensor& dL_dmap,
-    torch::Tensor& dm_dmu1,
-    torch::Tensor& dm_dsigma1_sq,
-    torch::Tensor& dm_dsigma12) {
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(img1));
-    int B = img1.size(0);
-    int CH = img1.size(1);
-    int H = img1.size(2);
-    int W = img1.size(3);
+    cudaStream_t stream) {
 
-    auto dL_dimg1 = torch::zeros_like(img1);
-
-    dim3 grid((W + BLOCK_X - 1) / BLOCK_X,
-              (H + BLOCK_Y - 1) / BLOCK_Y,
-              B);
+    dim3 grid((width + BLOCK_X - 1) / BLOCK_X,
+              (height + BLOCK_Y - 1) / BLOCK_Y,
+              batch);
     dim3 block(BLOCK_X, BLOCK_Y);
 
-    fusedssim_backwardCUDA<<<grid, block>>>(
-        H, W, CH, C1, C2,
-        img1.contiguous().data_ptr<float>(),
-        img2.contiguous().data_ptr<float>(),
-        dL_dmap.contiguous().data_ptr<float>(),
-        dL_dimg1.data_ptr<float>(),
-        dm_dmu1.contiguous().data_ptr<float>(),
-        dm_dsigma1_sq.contiguous().data_ptr<float>(),
-        dm_dsigma12.contiguous().data_ptr<float>());
-
-    return dL_dimg1;
+    fusedssimCUDA<<<grid, block, 0, stream>>>(
+        height, width, channels, C1, C2,
+        img1, img2, ssim_map,
+        dm_dmu1, dm_dsigma1_sq, dm_dsigma12);
 }
+
+void launch_ssim_backward(
+    const float* img1,
+    const float* img2,
+    const float* dL_dmap,
+    const float* dm_dmu1,
+    const float* dm_dsigma1_sq,
+    const float* dm_dsigma12,
+    float* dL_dimg1,
+    int batch,
+    int channels,
+    int height,
+    int width,
+    float C1,
+    float C2,
+    cudaStream_t stream) {
+
+    dim3 grid((width + BLOCK_X - 1) / BLOCK_X,
+              (height + BLOCK_Y - 1) / BLOCK_Y,
+              batch);
+    dim3 block(BLOCK_X, BLOCK_Y);
+
+    fusedssim_backwardCUDA<<<grid, block, 0, stream>>>(
+        height, width, channels, C1, C2,
+        img1, img2, dL_dmap, dL_dimg1,
+        dm_dmu1, dm_dsigma1_sq, dm_dsigma12);
+}
+
+void launch_ssim_reduce_mean(
+    const float* ssim_map,
+    float* mean_value,
+    int batch,
+    int channels,
+    int height,
+    int width,
+    int crop_border,
+    cudaStream_t stream) {
+
+    int start_h = crop_border;
+    int end_h = height - crop_border;
+    int start_w = crop_border;
+    int end_w = width - crop_border;
+
+    if (end_h <= start_h || end_w <= start_w) {
+        start_h = 0;
+        end_h = height;
+        start_w = 0;
+        end_w = width;
+    }
+
+    int valid_elements = batch * channels * (end_h - start_h) * (end_w - start_w);
+    int total_elements = batch * channels * height * width;
+
+    // Two-stage reduction
+    int block_size = 256;
+    int grid_size = std::min(1024, (total_elements + block_size - 1) / block_size);
+
+    // Allocate temp buffer for partial sums
+    float* partial_sums;
+    cudaMalloc(&partial_sums, grid_size * sizeof(float));
+
+    ssim_reduce_mean_kernel<<<grid_size, block_size, block_size * sizeof(float), stream>>>(
+        ssim_map, partial_sums, total_elements,
+        start_h, end_h, start_w, end_w, height, width, channels);
+
+    // Final reduction
+    reduce_partial_sums<<<1, 1, 0, stream>>>(partial_sums, mean_value, grid_size, valid_elements);
+
+    cudaFree(partial_sums);
+}
+
+void launch_ssim_fill_gradient(
+    float* dL_dmap,
+    float gradient_value,
+    int batch,
+    int channels,
+    int height,
+    int width,
+    int crop_border,
+    cudaStream_t stream) {
+
+    int start_h = crop_border;
+    int end_h = height - crop_border;
+    int start_w = crop_border;
+    int end_w = width - crop_border;
+
+    if (end_h <= start_h || end_w <= start_w) {
+        start_h = 0;
+        end_h = height;
+        start_w = 0;
+        end_w = width;
+    }
+
+    int total_elements = batch * channels * height * width;
+    int block_size = 256;
+    int grid_size = (total_elements + block_size - 1) / block_size;
+
+    ssim_fill_gradient_kernel<<<grid_size, block_size, 0, stream>>>(
+        dL_dmap, gradient_value, total_elements,
+        start_h, end_h, start_w, end_w, height, width, channels);
+}
+
+} // namespace gs::training
