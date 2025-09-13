@@ -672,22 +672,20 @@ namespace gs::training {
             // Ensure CUDA memory is sized for batch dimension
             cuda_memory_->ensure_size(w, h, channels, batch);
 
-            // Prepare ground truth - ensure it's [B, C, H, W]
+            // Prepare ground truth - ensure it's [B, C, H, W] and extract raw pointer
             if (gt_image.dim() == 3) {
                 gt_image = gt_image.unsqueeze(0);  // [C, H, W] -> [B, C, H, W]
             }
             gt_image = gt_image.contiguous();
+            const float* gt_ptr = gt_image.data_ptr<float>();  // Direct raw pointer extraction
 
-            // Create a temporary buffer for rendered image in [B, C, H, W] format
-            torch::Tensor rendered_tensor = torch::from_blob(
-                r_output.image,
-                {channels, h, w},
-                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
-            ).unsqueeze(0).contiguous();  // [C, H, W] -> [B, C, H, W]
+            // Get raw pointer for rendered image (already in correct format)
+            // Need to reshape from [C, H, W] to [B, C, H, W] layout
+            // We'll do this in-place by treating the memory correctly
+            const float* rendered_ptr = r_output.image;  // This is [C, H, W]
 
-            // Get raw pointers
-            const float* rendered_ptr = rendered_tensor.data_ptr<float>();
-            const float* gt_ptr = gt_image.data_ptr<float>();
+            // For batch=1, we can treat [C, H, W] as [1, C, H, W] without copying
+            // Just need to ensure the kernels understand this
 
             // Compute L1 loss using CUDA kernels
             launch_compute_l1_loss_forward(
@@ -883,17 +881,18 @@ namespace gs::training {
 
             strategy_->get_model().ensure_grad_allocated();
 
-            // Convert gradient from [B, C, H, W] to [C, H, W] for backward pass
-            torch::Tensor grad_chw = torch::from_blob(
-                final_grad_image_ptr,
-                {batch, channels, h, w},
-                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
-            ).squeeze(0).contiguous();  // [B, C, H, W] -> [C, H, W]
+            // The gradient is already in the right format [B, C, H, W] in memory
+            // We just need to pass it as [C, H, W] to the backward function
+            // Extract raw pointer and reshape conceptually
+            float* grad_chw_ptr = final_grad_image_ptr;
+
+            // For batch=1, skip the first dimension conceptually
+            // The memory layout is the same, just the interpretation changes
 
             // Call backward with raw pointers - NO TORCH!
             if (!params_.optimization.gut) {
                 fast_rasterize_backward(
-                    grad_chw.data_ptr<float>(),
+                    grad_chw_ptr,  // Already points to correct memory
                     cuda_memory_->grad_alpha(),
                     r_output,
                     strategy_->get_model(),
@@ -914,17 +913,19 @@ namespace gs::training {
                 }
             }
 
-            // Use CUDA kernels for regularization
+            // Use CUDA kernels for regularization - COMPLETELY RAW
             if (params_.optimization.scale_reg > 0.0f) {
                 try {
-                    auto scale_grad = strategy_->get_model().scaling_raw().mutable_grad();
-                    auto scaling_raw = strategy_->get_model().scaling_raw();
+                    // Get raw pointers directly from SplatData
+                    float* scale_grad_ptr = strategy_->get_model().scaling_grad_cuda_ptr();
+                    float* scaling_raw_ptr = strategy_->get_model().scaling_raw_cuda_ptr();
+                    size_t n_elements = strategy_->get_model().size() * 3;  // 3 scale values per gaussian
 
                     launch_add_scale_regularization(
-                        scale_grad.data_ptr<float>(),
-                        scaling_raw.data_ptr<float>(),
+                        scale_grad_ptr,
+                        scaling_raw_ptr,
                         params_.optimization.scale_reg,
-                        scaling_raw.numel(),
+                        n_elements,
                         0
                     );
                 } catch (const std::exception& e) {
@@ -934,14 +935,16 @@ namespace gs::training {
 
             if (params_.optimization.opacity_reg > 0.0f) {
                 try {
-                    auto opacity_grad = strategy_->get_model().opacity_raw().mutable_grad();
-                    auto opacity_raw = strategy_->get_model().opacity_raw();
+                    // Get raw pointers directly from SplatData
+                    float* opacity_grad_ptr = strategy_->get_model().opacity_grad_cuda_ptr();
+                    float* opacity_raw_ptr = strategy_->get_model().opacity_raw_cuda_ptr();
+                    size_t n_elements = strategy_->get_model().size();  // 1 opacity value per gaussian
 
                     launch_add_opacity_regularization(
-                        opacity_grad.data_ptr<float>(),
-                        opacity_raw.data_ptr<float>(),
+                        opacity_grad_ptr,
+                        opacity_raw_ptr,
                         params_.optimization.opacity_reg,
-                        opacity_raw.size(0),
+                        n_elements,
                         0
                     );
                 } catch (const std::exception& e) {

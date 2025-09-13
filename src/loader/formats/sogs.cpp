@@ -8,6 +8,8 @@
 
 #include "sogs.hpp"
 #include "core/logger.hpp"
+#include "loader/cuda_data.hpp"
+#include "loader/torch_converter.hpp"
 #include <archive.h>
 #include <archive_entry.h>
 #include <cmath>
@@ -15,8 +17,8 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <sstream>
-#include <torch/torch.h>
 #include <unordered_map>
+#include <vector>
 #include <webp/decode.h>
 
 namespace gs::loader {
@@ -226,7 +228,7 @@ namespace gs::loader {
             }
         }
 
-        std::expected<SplatData, std::string> reconstruct_splat_data(
+        std::expected<internal::CudaSplatData, std::string> reconstruct_splat_data(
             const SogMetadata& meta,
             const std::unordered_map<std::string, std::vector<uint8_t>>& images) {
 
@@ -242,19 +244,27 @@ namespace gs::loader {
 
             LOG_DEBUG("Reconstructing {} splats from {}x{} textures", num_splats, width, height);
 
-            // Create output tensors
-            torch::Tensor means = torch::zeros({num_splats, 3}, torch::kFloat32);
-            torch::Tensor scales = torch::zeros({num_splats, 3}, torch::kFloat32);
-            torch::Tensor rotations = torch::zeros({num_splats, 4}, torch::kFloat32);
-            torch::Tensor sh0 = torch::zeros({num_splats, 1, 3}, torch::kFloat32);
-            torch::Tensor opacity = torch::zeros({num_splats, 1}, torch::kFloat32);
+            // Create host buffers
+            std::vector<float> host_means(num_splats * 3);
+            std::vector<float> host_scales(num_splats * 3);
+            std::vector<float> host_rotations(num_splats * 4);
+            std::vector<float> host_opacity(num_splats);
 
-            // Accessors for fast CPU access
-            auto means_acc = means.accessor<float, 2>();
-            auto scales_acc = scales.accessor<float, 2>();
-            auto rot_acc = rotations.accessor<float, 2>();
-            auto sh0_acc = sh0.accessor<float, 3>();
-            auto opacity_acc = opacity.accessor<float, 2>();
+            // Determine SH dimensions
+            int sh0_dim1 = 1, sh0_dim2 = 3;
+            int shN_dim1 = 0, shN_dim2 = 3;
+
+            if (meta.shN.has_value()) {
+                const auto& sh_meta = meta.shN.value();
+                int sh_degree = sh_meta.bands > 0 ? sh_meta.bands :
+                               (sh_meta.coeffs == 3 ? 1 :
+                                sh_meta.coeffs == 8 ? 2 :
+                                sh_meta.coeffs == 15 ? 3 : 0);
+                shN_dim1 = SH_COEFFS[sh_degree];
+            }
+
+            std::vector<float> host_sh0(num_splats * sh0_dim1 * sh0_dim2);
+            std::vector<float> host_shN(num_splats * shN_dim1 * shN_dim2);
 
             // 1. Decode positions from means_l and means_u
             {
@@ -285,9 +295,9 @@ namespace gs::loader {
                     float y_log = y_norm * (meta.means_maxs[1] - meta.means_mins[1]) + meta.means_mins[1];
                     float z_log = z_norm * (meta.means_maxs[2] - meta.means_mins[2]) + meta.means_mins[2];
 
-                    means_acc[i][0] = inverse_log_transform(x_log);
-                    means_acc[i][1] = inverse_log_transform(y_log);
-                    means_acc[i][2] = inverse_log_transform(z_log);
+                    host_means[i * 3 + 0] = inverse_log_transform(x_log);
+                    host_means[i * 3 + 1] = inverse_log_transform(y_log);
+                    host_means[i * 3 + 2] = inverse_log_transform(z_log);
                 }
             }
 
@@ -311,10 +321,10 @@ namespace gs::loader {
 
                     // unpack_quaternion returns [x, y, z, w]
                     // Store as [w, x, y, z] for SplatData format
-                    rot_acc[i][0] = quat[3]; // w
-                    rot_acc[i][1] = quat[0]; // x
-                    rot_acc[i][2] = quat[1]; // y
-                    rot_acc[i][3] = quat[2]; // z
+                    host_rotations[i * 4 + 0] = quat[3]; // w
+                    host_rotations[i * 4 + 1] = quat[0]; // x
+                    host_rotations[i * 4 + 2] = quat[1]; // y
+                    host_rotations[i * 4 + 3] = quat[2]; // z
                 }
             }
 
@@ -345,9 +355,9 @@ namespace gs::loader {
                     }
 
                     // Look up from codebook (already in log space)
-                    scales_acc[i][0] = meta.scales_codebook[idx0];
-                    scales_acc[i][1] = meta.scales_codebook[idx1];
-                    scales_acc[i][2] = meta.scales_codebook[idx2];
+                    host_scales[i * 3 + 0] = meta.scales_codebook[idx0];
+                    host_scales[i * 3 + 1] = meta.scales_codebook[idx1];
+                    host_scales[i * 3 + 2] = meta.scales_codebook[idx2];
                 }
             }
 
@@ -378,21 +388,20 @@ namespace gs::loader {
                     }
 
                     // Look up colors from codebook
-                    sh0_acc[i][0][0] = meta.sh0_codebook[idx0];
-                    sh0_acc[i][0][1] = meta.sh0_codebook[idx1];
-                    sh0_acc[i][0][2] = meta.sh0_codebook[idx2];
+                    host_sh0[i * sh0_dim1 * sh0_dim2 + 0] = meta.sh0_codebook[idx0];
+                    host_sh0[i * sh0_dim1 * sh0_dim2 + 1] = meta.sh0_codebook[idx1];
+                    host_sh0[i * sh0_dim1 * sh0_dim2 + 2] = meta.sh0_codebook[idx2];
 
                     // Decode opacity (inverse sigmoid)
                     float opacity_norm = sh0_img[ti + 3] / 255.0f;
                     // Clamp with a safer epsilon to prevent infinity
                     opacity_norm = std::clamp(opacity_norm, 1e-5f, 1.0f - 1e-5f);
-                    opacity_acc[i][0] = std::log(opacity_norm / (1.0f - opacity_norm));
+                    host_opacity[i] = std::log(opacity_norm / (1.0f - opacity_norm));
                 }
             }
 
             // 5. Decode spherical harmonics if present
-            torch::Tensor shN;
-            if (meta.shN.has_value()) {
+            if (meta.shN.has_value() && shN_dim1 > 0) {
                 const auto& sh_meta = meta.shN.value();
 
                 auto it_centroids = images.find("shN_centroids.webp");
@@ -403,19 +412,17 @@ namespace gs::loader {
                     const auto& labels_img = it_labels->second;
 
                     // Determine SH configuration
-                    int sh_degree = sh_meta.bands > 0 ? sh_meta.bands : (sh_meta.coeffs == 3 ? 1 : sh_meta.coeffs == 8 ? 2
-                                                                                               : sh_meta.coeffs == 15  ? 3
-                                                                                                                       : 0);
+                    int sh_degree = sh_meta.bands > 0 ? sh_meta.bands :
+                                   (sh_meta.coeffs == 3 ? 1 :
+                                    sh_meta.coeffs == 8 ? 2 :
+                                    sh_meta.coeffs == 15 ? 3 : 0);
 
                     int num_coeffs = SH_COEFFS[sh_degree];
-                    int palette_size = sh_meta.palette_size > 0 ? sh_meta.palette_size : centroids_img.size() / (64 * num_coeffs * 4);
+                    int palette_size = sh_meta.palette_size > 0 ? sh_meta.palette_size :
+                                      centroids_img.size() / (64 * num_coeffs * 4);
 
                     LOG_DEBUG("Decoding SH: degree={}, coeffs={}, palette_size={}",
                               sh_degree, num_coeffs, palette_size);
-
-                    // Create SH tensor
-                    shN = torch::zeros({num_splats, num_coeffs, 3}, torch::kFloat32);
-                    auto shN_acc = shN.accessor<float, 3>();
 
                     // Decode centroids from texture
                     std::vector<std::vector<float>> centroids(palette_size);
@@ -456,7 +463,8 @@ namespace gs::loader {
                             // Unpack in band-major order
                             for (int c = 0; c < 3; ++c) {
                                 for (int j = 0; j < num_coeffs; ++j) {
-                                    shN_acc[i][j][c] = centroid[j + c * num_coeffs];
+                                    host_shN[i * shN_dim1 * shN_dim2 + j * shN_dim2 + c] =
+                                        centroid[j + c * num_coeffs];
                                 }
                             }
                         }
@@ -464,34 +472,43 @@ namespace gs::loader {
                 }
             }
 
-            // Move tensors to CUDA
-            means = means.to(torch::kCUDA);
-            scales = scales.to(torch::kCUDA);
-            rotations = rotations.to(torch::kCUDA);
-            sh0 = sh0.to(torch::kCUDA);
-            opacity = opacity.to(torch::kCUDA);
-            if (shN.defined()) {
-                shN = shN.to(torch::kCUDA);
-            } else {
-                shN = torch::zeros({num_splats, 0, 3}, torch::kFloat32).to(torch::kCUDA);
+            // Create CUDA splat data and upload
+            internal::CudaSplatData result;
+            result.num_points = num_splats;
+            result.sh_degree = meta.shN.has_value() ? meta.shN->bands : 0;
+            result.scene_scale = 1.0f;
+            result.sh0_dim1 = sh0_dim1;
+            result.sh0_dim2 = sh0_dim2;
+            result.shN_dim1 = shN_dim1;
+            result.shN_dim2 = shN_dim2;
+
+            // Allocate and upload CUDA memory
+            result.means = internal::CudaBuffer<float>(num_splats * 3);
+            result.means.upload(host_means.data(), num_splats * 3);
+
+            result.scales = internal::CudaBuffer<float>(num_splats * 3);
+            result.scales.upload(host_scales.data(), num_splats * 3);
+
+            result.rotations = internal::CudaBuffer<float>(num_splats * 4);
+            result.rotations.upload(host_rotations.data(), num_splats * 4);
+
+            result.opacity = internal::CudaBuffer<float>(num_splats);
+            result.opacity.upload(host_opacity.data(), num_splats);
+
+            result.sh0 = internal::CudaBuffer<float>(num_splats * sh0_dim1 * sh0_dim2);
+            result.sh0.upload(host_sh0.data(), num_splats * sh0_dim1 * sh0_dim2);
+
+            if (shN_dim1 > 0) {
+                result.shN = internal::CudaBuffer<float>(num_splats * shN_dim1 * shN_dim2);
+                result.shN.upload(host_shN.data(), num_splats * shN_dim1 * shN_dim2);
             }
 
-            // Create SplatData
             LOG_INFO("Successfully reconstructed {} splats", num_splats);
 
-            return SplatData(
-                meta.shN.has_value() ? meta.shN->bands : 0,
-                means,
-                sh0,
-                shN,
-                scales,
-                rotations,
-                opacity,
-                1.0f // scene_scale
-            );
+            return result;
         }
 
-        std::expected<SplatData, std::string> read_sog_bundle(
+        std::expected<internal::CudaSplatData, std::string> read_sog_bundle(
             const std::filesystem::path& path) {
 
             LOG_INFO("Reading SOG bundle: {}", path.string());
@@ -555,7 +572,7 @@ namespace gs::loader {
             return reconstruct_splat_data(meta_result.value(), images);
         }
 
-        std::expected<SplatData, std::string> read_sog_directory(
+        std::expected<internal::CudaSplatData, std::string> read_sog_directory(
             const std::filesystem::path& path) {
 
             LOG_INFO("Reading SOG from directory: {}", path.string());
@@ -666,22 +683,29 @@ namespace gs::loader {
             throw std::runtime_error(error_msg);
         }
 
+        std::expected<internal::CudaSplatData, std::string> cuda_result;
+
         // Check if it's a .sog bundle
         if (path.extension() == ".sog") {
-            return read_sog_bundle(path);
+            cuda_result = read_sog_bundle(path);
         }
-
         // Check if it's a meta.json file
-        if (path.filename() == "meta.json") {
-            return read_sog_directory(path.parent_path());
+        else if (path.filename() == "meta.json") {
+            cuda_result = read_sog_directory(path.parent_path());
         }
-
         // Check if it's a directory
-        if (std::filesystem::is_directory(path)) {
-            return read_sog_directory(path);
+        else if (std::filesystem::is_directory(path)) {
+            cuda_result = read_sog_directory(path);
+        } else {
+            return std::unexpected(std::format("Unknown SOG format: {}", path.string()));
         }
 
-        return std::unexpected(std::format("Unknown SOG format: {}", path.string()));
+        if (!cuda_result) {
+            return std::unexpected(cuda_result.error());
+        }
+
+        // Convert to SplatData using the torch converter
+        return internal::cuda_to_splat_data(std::move(cuda_result.value()));
     }
 
 } // namespace gs::loader

@@ -15,6 +15,7 @@
 #include <span>
 #include <string_view>
 #include <vector>
+#include <cmath>
 
 // TBB includes
 #include <tbb/parallel_for.h>
@@ -317,11 +318,10 @@ namespace gs::loader {
         throw std::runtime_error("No end_header found in PLY file");
     }
 
-    // SIMD position extraction
-    void extract_positions(const char* vertex_data, const FastPropertyLayout& layout, const torch::Tensor& means) {
+    // SIMD position extraction to host memory
+    void extract_positions_to_host(const char* vertex_data, const FastPropertyLayout& layout, float* output) {
         const size_t count = layout.vertex_count;
         const size_t stride = layout.vertex_stride;
-        float* output = means.data_ptr<float>();
 
         if (!layout.has_positions())
             return;
@@ -441,18 +441,16 @@ namespace gs::loader {
         }
     }
 
-    // SH coefficient extraction
-    void extract_sh_coefficients(const char* vertex_data, const FastPropertyLayout& layout,
-                                 size_t start_offset, int coeff_count, int channels,
-                                 const torch::Tensor& output) {
+    // SH coefficient extraction to host memory
+    void extract_sh_coefficients_to_host(const char* vertex_data, const FastPropertyLayout& layout,
+                                         size_t start_offset, int coeff_count, int channels,
+                                         float* output) {
         if (coeff_count == 0 || start_offset == SIZE_MAX)
             return;
 
         const size_t count = layout.vertex_count;
         const size_t stride = layout.vertex_stride;
         const int B = coeff_count / channels;
-
-        auto data_ptr = output.data_ptr<float>();
 
         LOG_TRACE("Extracting {} SH coefficients for {} vertices", coeff_count, count);
 
@@ -469,15 +467,15 @@ namespace gs::loader {
                                       int b = j % B;       // Which basis function
 
                                       // Store in [N, B, 3] layout
-                                      data_ptr[i * B * channels + b * channels + channel] = value;
+                                      output[i * B * channels + b * channels + channel] = value;
                                   }
                               }
                           });
     }
 
-    // Single property extraction
-    void extract_property(const char* vertex_data, const FastPropertyLayout& layout,
-                          size_t property_offset, float* output) {
+    // Single property extraction to host memory
+    void extract_property_to_host(const char* vertex_data, const FastPropertyLayout& layout,
+                                  size_t property_offset, float* output) {
         if (property_offset == SIZE_MAX)
             return;
 
@@ -493,10 +491,11 @@ namespace gs::loader {
                           });
     }
 
-    // Main function
-    [[nodiscard]] std::expected<SplatData, std::string> load_ply(const std::filesystem::path& filepath) {
+    // Main function - torch-free version
+    [[nodiscard]] std::expected<internal::CudaSplatData, std::string> 
+    load_ply_cuda(const std::filesystem::path& filepath) {
         try {
-            LOG_TIMER("PLY File Loading");
+            LOG_TIMER("PLY File Loading (CUDA)");
             auto start_time = std::chrono::high_resolution_clock::now();
 
             if (!std::filesystem::exists(filepath)) {
@@ -527,97 +526,124 @@ namespace gs::loader {
 
             LOG_INFO("Extracting {} Gaussians from PLY", layout.vertex_count);
 
-            auto options = torch::TensorOptions().dtype(torch::kFloat32);
+            // Prepare result
+            internal::CudaSplatData result;
+            result.num_points = layout.vertex_count;
 
-            // Position extraction
-            auto means = torch::zeros({static_cast<int64_t>(layout.vertex_count), 3}, options);
-            extract_positions(vertex_data, layout, means);
+            // Position extraction to host memory
+            std::vector<float> host_means(layout.vertex_count * 3);
+            extract_positions_to_host(vertex_data, layout, host_means.data());
 
-            // SH coefficient extraction
-            torch::Tensor sh0, shN;
+            // SH coefficient extraction to host memory
+            std::vector<float> host_sh0;
+            std::vector<float> host_shN;
 
             if (layout.dc_count > 0 && layout.dc_count % ply_constants::COLOR_CHANNELS == 0) {
                 int B0 = layout.dc_count / ply_constants::COLOR_CHANNELS;
-                sh0 = torch::zeros({static_cast<int64_t>(layout.vertex_count), B0, ply_constants::COLOR_CHANNELS}, options);
-                extract_sh_coefficients(vertex_data, layout, layout.dc_start_offset,
-                                        layout.dc_count, ply_constants::COLOR_CHANNELS, sh0);
+                result.sh0_dim1 = B0;
+                result.sh0_dim2 = ply_constants::COLOR_CHANNELS;
+                host_sh0.resize(layout.vertex_count * B0 * ply_constants::COLOR_CHANNELS);
+                extract_sh_coefficients_to_host(vertex_data, layout, layout.dc_start_offset,
+                                               layout.dc_count, ply_constants::COLOR_CHANNELS, host_sh0.data());
             } else {
-                sh0 = torch::zeros({static_cast<int64_t>(layout.vertex_count), 1, ply_constants::COLOR_CHANNELS}, options);
+                result.sh0_dim1 = 1;
+                result.sh0_dim2 = ply_constants::COLOR_CHANNELS;
+                host_sh0.resize(layout.vertex_count * ply_constants::COLOR_CHANNELS, 0.0f);
             }
 
             if (layout.rest_count > 0 && layout.rest_count % ply_constants::COLOR_CHANNELS == 0) {
                 int Bn = layout.rest_count / ply_constants::COLOR_CHANNELS;
-                shN = torch::zeros({static_cast<int64_t>(layout.vertex_count), Bn, ply_constants::COLOR_CHANNELS}, options);
-                extract_sh_coefficients(vertex_data, layout, layout.rest_start_offset,
-                                        layout.rest_count, ply_constants::COLOR_CHANNELS, shN);
+                result.shN_dim1 = Bn;
+                result.shN_dim2 = ply_constants::COLOR_CHANNELS;
+                host_shN.resize(layout.vertex_count * Bn * ply_constants::COLOR_CHANNELS);
+                extract_sh_coefficients_to_host(vertex_data, layout, layout.rest_start_offset,
+                                               layout.rest_count, ply_constants::COLOR_CHANNELS, host_shN.data());
             } else {
-                shN = torch::zeros({static_cast<int64_t>(layout.vertex_count), ply_constants::SH_DEGREE_3_REST_COEFFS, ply_constants::COLOR_CHANNELS}, options);
+                result.shN_dim1 = ply_constants::SH_DEGREE_3_REST_COEFFS;
+                result.shN_dim2 = ply_constants::COLOR_CHANNELS;
+                host_shN.resize(layout.vertex_count * ply_constants::SH_DEGREE_3_REST_COEFFS * ply_constants::COLOR_CHANNELS, 0.0f);
             }
 
-            // property extraction
-            auto opacity_tensor = torch::zeros({static_cast<int64_t>(layout.vertex_count), 1}, options);
+            // Other property extraction to host memory
+            std::vector<float> host_opacity(layout.vertex_count, 0.0f);
             if (layout.has_opacity()) {
-                extract_property(vertex_data, layout, layout.opacity_offset, opacity_tensor.data_ptr<float>());
+                extract_property_to_host(vertex_data, layout, layout.opacity_offset, host_opacity.data());
             }
 
-            auto scaling = torch::zeros({static_cast<int64_t>(layout.vertex_count), 3}, options);
+            std::vector<float> host_scaling(layout.vertex_count * 3);
             if (layout.has_scaling()) {
-                // Extract scale components individually then stack
+                // Extract scale components individually then combine
                 std::vector<float> s0(layout.vertex_count), s1(layout.vertex_count), s2(layout.vertex_count);
 
-                extract_property(vertex_data, layout, layout.scale_offsets[0], s0.data());
-                extract_property(vertex_data, layout, layout.scale_offsets[1], s1.data());
-                extract_property(vertex_data, layout, layout.scale_offsets[2], s2.data());
+                extract_property_to_host(vertex_data, layout, layout.scale_offsets[0], s0.data());
+                extract_property_to_host(vertex_data, layout, layout.scale_offsets[1], s1.data());
+                extract_property_to_host(vertex_data, layout, layout.scale_offsets[2], s2.data());
 
-                // Stack into final tensor
-                auto scaling_ptr = scaling.data_ptr<float>();
+                // Combine into final array
                 tbb::parallel_for(tbb::blocked_range<size_t>(0, layout.vertex_count, ply_constants::BLOCK_SIZE_SMALL),
                                   [&](const tbb::blocked_range<size_t>& range) {
                                       for (size_t i = range.begin(); i < range.end(); ++i) {
-                                          scaling_ptr[i * 3 + 0] = s0[i];
-                                          scaling_ptr[i * 3 + 1] = s1[i];
-                                          scaling_ptr[i * 3 + 2] = s2[i];
+                                          host_scaling[i * 3 + 0] = s0[i];
+                                          host_scaling[i * 3 + 1] = s1[i];
+                                          host_scaling[i * 3 + 2] = s2[i];
                                       }
                                   });
             } else {
-                scaling.fill_(ply_constants::DEFAULT_LOG_SCALE);
+                std::fill(host_scaling.begin(), host_scaling.end(), ply_constants::DEFAULT_LOG_SCALE);
             }
 
-            auto rotation = torch::zeros({static_cast<int64_t>(layout.vertex_count), 4}, options);
+            std::vector<float> host_rotation(layout.vertex_count * 4, 0.0f);
             if (layout.has_rotation()) {
-                // Extract rotation components individually then stack
+                // Extract rotation components individually then combine
                 std::vector<float> r0(layout.vertex_count), r1(layout.vertex_count), r2(layout.vertex_count), r3(layout.vertex_count);
 
-                extract_property(vertex_data, layout, layout.rot_offsets[0], r0.data());
-                extract_property(vertex_data, layout, layout.rot_offsets[1], r1.data());
-                extract_property(vertex_data, layout, layout.rot_offsets[2], r2.data());
-                extract_property(vertex_data, layout, layout.rot_offsets[3], r3.data());
+                extract_property_to_host(vertex_data, layout, layout.rot_offsets[0], r0.data());
+                extract_property_to_host(vertex_data, layout, layout.rot_offsets[1], r1.data());
+                extract_property_to_host(vertex_data, layout, layout.rot_offsets[2], r2.data());
+                extract_property_to_host(vertex_data, layout, layout.rot_offsets[3], r3.data());
 
-                // Stack into final tensor
-                auto rotation_ptr = rotation.data_ptr<float>();
+                // Combine into final array
                 tbb::parallel_for(tbb::blocked_range<size_t>(0, layout.vertex_count, ply_constants::BLOCK_SIZE_SMALL),
                                   [&](const tbb::blocked_range<size_t>& range) {
                                       for (size_t i = range.begin(); i < range.end(); ++i) {
-                                          rotation_ptr[i * 4 + 0] = r0[i];
-                                          rotation_ptr[i * 4 + 1] = r1[i];
-                                          rotation_ptr[i * 4 + 2] = r2[i];
-                                          rotation_ptr[i * 4 + 3] = r3[i];
+                                          host_rotation[i * 4 + 0] = r0[i];
+                                          host_rotation[i * 4 + 1] = r1[i];
+                                          host_rotation[i * 4 + 2] = r2[i];
+                                          host_rotation[i * 4 + 3] = r3[i];
                                       }
                                   });
             } else {
-                rotation.select(1, 0).fill_(ply_constants::IDENTITY_QUATERNION_W);
+                // Set identity quaternion
+                for (size_t i = 0; i < layout.vertex_count; ++i) {
+                    host_rotation[i * 4 + 0] = ply_constants::IDENTITY_QUATERNION_W;
+                }
             }
 
-            LOG_DEBUG("Transferring tensors to CUDA");
-            // Batch CUDA transfer for maximum speed
-            means = means.to(torch::kCUDA);
-            sh0 = sh0.to(torch::kCUDA);
-            shN = shN.to(torch::kCUDA);
-            scaling = scaling.to(torch::kCUDA);
-            rotation = rotation.to(torch::kCUDA);
-            opacity_tensor = opacity_tensor.to(torch::kCUDA);
+            LOG_DEBUG("Transferring data to CUDA");
+            
+            // Upload all data to CUDA
+            result.means = internal::CudaBuffer<float>(layout.vertex_count * 3);
+            result.means.upload(host_means.data(), layout.vertex_count * 3);
+            
+            result.sh0 = internal::CudaBuffer<float>(host_sh0.size());
+            result.sh0.upload(host_sh0.data(), host_sh0.size());
+            
+            result.shN = internal::CudaBuffer<float>(host_shN.size());
+            result.shN.upload(host_shN.data(), host_shN.size());
+            
+            result.scales = internal::CudaBuffer<float>(layout.vertex_count * 3);
+            result.scales.upload(host_scaling.data(), layout.vertex_count * 3);
+            
+            result.rotations = internal::CudaBuffer<float>(layout.vertex_count * 4);
+            result.rotations.upload(host_rotation.data(), layout.vertex_count * 4);
+            
+            result.opacity = internal::CudaBuffer<float>(layout.vertex_count);
+            result.opacity.upload(host_opacity.data(), layout.vertex_count);
 
-            int sh_degree = static_cast<int>(std::sqrt(shN.size(1) + ply_constants::SH_DEGREE_OFFSET)) - ply_constants::SH_DEGREE_OFFSET;
+            // Calculate SH degree
+            int sh_degree = static_cast<int>(std::sqrt(result.shN_dim1 + ply_constants::SH_DEGREE_OFFSET)) - ply_constants::SH_DEGREE_OFFSET;
+            result.sh_degree = sh_degree;
+            result.scene_scale = ply_constants::SCENE_SCALE_FACTOR;
 
             auto end_time = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
@@ -625,15 +651,7 @@ namespace gs::loader {
             LOG_INFO("PLY loaded: {} MB, {} Gaussians with SH degree {} in {}ms",
                      file_size / (1024 * 1024), layout.vertex_count, sh_degree, duration.count());
 
-            return SplatData(
-                sh_degree,
-                means,
-                sh0,
-                shN,
-                scaling,
-                rotation,
-                opacity_tensor,
-                ply_constants::SCENE_SCALE_FACTOR);
+            return result;
 
         } catch (const std::exception& e) {
             std::string error_msg = std::format("Failed to load PLY file: {}", e.what());

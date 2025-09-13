@@ -2,15 +2,18 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+// formats/ply.hpp
 #pragma once
 
-#include "core/splat_data.hpp"
+#include "loader/cuda_data.hpp"
 #include <expected>
 #include <filesystem>
 #include <string>
 
 namespace gs::loader {
 
-    std::expected<SplatData, std::string> load_ply(const std::filesystem::path& filepath);
+    // Internal torch-free version
+    std::expected<internal::CudaSplatData, std::string> 
+    load_ply_cuda(const std::filesystem::path& filepath);
 
 } // namespace gs::loader

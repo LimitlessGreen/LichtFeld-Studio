@@ -5,23 +5,19 @@
 #include "transforms.hpp"
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
-#include "formats/colmap.hpp"
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <numbers>
-#include <torch/torch.h>
+#include <cmath>
+#include <random>
 
 namespace gs::loader {
-
-    namespace F = torch::nn::functional;
 
     // Constants for random point cloud generation
     constexpr int DEFAULT_NUM_INIT_GAUSSIAN = 10000;
     constexpr uint64_t DEFAULT_RANDOM_SEED = 8128;
-
-    // Use std::numbers::pi instead of a custom PI constant.
 
     float fov_deg_to_focal_length(int resolution, float fov_deg) {
         return 0.5f * (float)resolution / tanf(0.5f * fov_deg * std::numbers::pi / 180.0f);
@@ -31,43 +27,34 @@ namespace gs::loader {
         return 0.5f * (float)resolution / tanf(0.5f * fov_rad);
     }
 
-    // Function to create a 3x3 rotation matrix around Y-axis embeded in 4x4 matrix
-    torch::Tensor createYRotationMatrix(float angle_radians) {
-        torch::Tensor rotMat = torch::eye(4);
+    // Function to create a 3x3 rotation matrix around Y-axis embedded in 4x4 matrix
+    void createYRotationMatrix(float angle_radians, float rotMat[16]) {
         float cos_angle = std::cos(angle_radians);
         float sin_angle = std::sin(angle_radians);
 
+        // Initialize as identity matrix
+        for (int i = 0; i < 16; ++i) {
+            rotMat[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+        }
+
         // Rotation matrix around Y-axis by angle θ:
-        // [cos(θ)   0   sin(θ) 0]
-        // [  0      1     0    0]
-        // [-sin(θ)  0   cos(θ) 0]
-        // [0        0   0      1]
-
-        rotMat[0][0] = cos_angle;  // cos(θ)
-        rotMat[0][1] = 0.0f;       // 0
-        rotMat[0][2] = sin_angle;  // sin(θ)
-        rotMat[1][0] = 0.0f;       // 0
-        rotMat[1][1] = 1.0f;       // 1
-        rotMat[1][2] = 0.0f;       // 0
-        rotMat[2][0] = -sin_angle; // -sin(θ)
-        rotMat[2][1] = 0.0f;       // 0
-        rotMat[2][2] = cos_angle;  // cos(θ)
-
-        return rotMat;
+        rotMat[0] = cos_angle;   // cos(θ)
+        rotMat[2] = sin_angle;   // sin(θ)
+        rotMat[8] = -sin_angle;  // -sin(θ)
+        rotMat[10] = cos_angle;  // cos(θ)
     }
 
     std::filesystem::path GetTransformImagePath(const std::filesystem::path& dir_path, const nlohmann::json& frame) {
         auto image_path = dir_path / frame["file_path"];
         auto image_path_png = std::filesystem::path(image_path.string() + ".png");
         if (std::filesystem::exists(image_path_png)) {
-            // blender data set has not extension, must assumes png
             image_path = image_path_png;
             LOG_TRACE("Using PNG extension for image: {}", image_path.string());
         }
         return image_path;
     }
 
-    std::tuple<std::vector<CameraData>, torch::Tensor> read_transforms_cameras_and_images(
+    TransformsCameraResult read_transforms_cameras_and_images_cuda(
         const std::filesystem::path& transPath) {
 
         LOG_TIMER_TRACE("Read transforms file");
@@ -98,7 +85,6 @@ namespace gs::loader {
         nlohmann::json transforms = nlohmann::json::parse(trans_file, nullptr, true, true);
         int w = -1, h = -1;
         if (!transforms.contains("w") or !transforms.contains("h")) {
-
             try {
                 LOG_DEBUG("Width/height not in transforms.json, reading from first image");
                 auto first_frame_img_path = GetTransformImagePath(dir_path, transforms["frames"][0]);
@@ -131,7 +117,7 @@ namespace gs::loader {
             fl_y = float(transforms["fl_y"]);
         } else if (transforms.contains("camera_angle_y")) {
             fl_y = fov_rad_to_focal_length(h, float(transforms["camera_angle_y"]));
-        } else { // we should be  here in this scope only for blender - if w!=h then we must throw exception
+        } else {
             if (w != h) {
                 LOG_ERROR("No camera_angle_y but w!=h: {}!={}", w, h);
                 throw std::runtime_error("no camera_angle_y expected w!=h");
@@ -152,10 +138,7 @@ namespace gs::loader {
             cy = 0.5 * h;
         }
 
-        float k1 = 0;
-        float k2 = 0;
-        float p1 = 0;
-        float p2 = 0;
+        float k1 = 0, k2 = 0, p1 = 0, p2 = 0;
         if (transforms.contains("k1")) {
             k1 = float(transforms["k1"]);
         }
@@ -173,13 +156,13 @@ namespace gs::loader {
             throw std::runtime_error(std::format("GS don't support distortion for now: k1={}, k2={}, p1={}, p2={}", k1, k2, p1, p2));
         }
 
-        std::vector<CameraData> camerasdata;
+        std::vector<internal::CudaCameraData> camerasdata;
         if (transforms.contains("frames") && transforms["frames"].is_array()) {
             uint64_t counter = 0;
             LOG_DEBUG("Processing {} frames", transforms["frames"].size());
 
             for (size_t frameInd = 0; frameInd < transforms["frames"].size(); ++frameInd) {
-                CameraData camdata;
+                internal::CudaCameraData camdata;
                 auto& frame = transforms["frames"][frameInd];
                 if (!frame.contains("transform_matrix")) {
                     LOG_ERROR("Frame {} missing transform_matrix", frameInd);
@@ -191,80 +174,143 @@ namespace gs::loader {
                 }
 
                 // Create camera-to-world transform matrix
-                torch::Tensor c2w = torch::empty({4, 4}, torch::kFloat32);
-
-                // Fill the c2w matrix from the JSON data
+                float c2w[16];
                 for (int i = 0; i < 4; ++i) {
                     for (int j = 0; j < 4; ++j) {
-                        c2w[i][j] = float(frame["transform_matrix"][i][j]);
+                        c2w[i * 4 + j] = float(frame["transform_matrix"][i][j]);
                     }
                 }
 
                 // Change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
                 // c2w[:3, 1:3] *= -1
-                c2w.slice(0, 0, 3).slice(1, 1, 3) *= -1;
+                for (int i = 0; i < 3; ++i) {
+                    c2w[i * 4 + 1] *= -1;
+                    c2w[i * 4 + 2] *= -1;
+                }
 
                 // Get the world-to-camera transform by computing inverse of c2w
-                torch::Tensor w2c = torch::inverse(c2w);
+                float w2c[16];
+                // Simple 4x4 matrix inverse (assuming affine transform)
+                {
+                    // Extract rotation and translation
+                    float R[9], t[3];
+                    for (int i = 0; i < 3; ++i) {
+                        for (int j = 0; j < 3; ++j) {
+                            R[i * 3 + j] = c2w[i * 4 + j];
+                        }
+                        t[i] = c2w[i * 4 + 3];
+                    }
 
-                // fix so that the z direction will be the same (currently it is faceing downward)
-                torch::Tensor fixMat = createYRotationMatrix(M_PI);
-                w2c = torch::mm(w2c, fixMat);
+                    // Compute R^T
+                    float RT[9];
+                    for (int i = 0; i < 3; ++i) {
+                        for (int j = 0; j < 3; ++j) {
+                            RT[i * 3 + j] = R[j * 3 + i];
+                        }
+                    }
 
-                // Extract rotation matrix R (transposed due to 'glm' in CUDA code)
-                // R = np.transpose(w2c[:3,:3])
-                torch::Tensor R = w2c.slice(0, 0, 3).slice(1, 0, 3);
+                    // Compute -R^T * t
+                    float RTt[3];
+                    for (int i = 0; i < 3; ++i) {
+                        RTt[i] = 0;
+                        for (int j = 0; j < 3; ++j) {
+                            RTt[i] -= RT[i * 3 + j] * t[j];
+                        }
+                    }
 
-                // Extract translation vector T
-                // T = w2c[:3, 3]
-                torch::Tensor T = w2c.slice(0, 0, 3).slice(1, 3, 4).squeeze(1);
+                    // Build w2c matrix
+                    for (int i = 0; i < 3; ++i) {
+                        for (int j = 0; j < 3; ++j) {
+                            w2c[i * 4 + j] = RT[i * 3 + j];
+                        }
+                        w2c[i * 4 + 3] = RTt[i];
+                    }
+                    w2c[12] = 0; w2c[13] = 0; w2c[14] = 0; w2c[15] = 1;
+                }
 
-                camdata._image_path = GetTransformImagePath(dir_path, frame);
+                // Fix so that the z direction will be the same (currently it is facing downward)
+                float fixMat[16];
+                createYRotationMatrix(M_PI, fixMat);
 
-                camdata._image_name = std::filesystem::path(camdata._image_path).filename().string();
+                // Matrix multiply w2c = w2c * fixMat
+                float w2c_fixed[16];
+                for (int i = 0; i < 4; ++i) {
+                    for (int j = 0; j < 4; ++j) {
+                        w2c_fixed[i * 4 + j] = 0;
+                        for (int k = 0; k < 4; ++k) {
+                            w2c_fixed[i * 4 + j] += w2c[i * 4 + k] * fixMat[k * 4 + j];
+                        }
+                    }
+                }
 
-                camdata._width = w;
-                camdata._height = h;
+                // Extract rotation matrix R and translation vector T
+                for (int i = 0; i < 3; ++i) {
+                    for (int j = 0; j < 3; ++j) {
+                        camdata.R[i * 3 + j] = w2c_fixed[i * 4 + j];
+                    }
+                    camdata.T[i] = w2c_fixed[i * 4 + 3];
+                }
 
-                camdata._T = T;
-                camdata._R = R;
+                camdata.image_path = GetTransformImagePath(dir_path, frame);
+                camdata.image_name = std::filesystem::path(camdata.image_path).filename().string();
 
-                camdata._focal_x = fl_x;
-                camdata._focal_y = fl_y;
+                camdata.width = w;
+                camdata.height = h;
 
-                camdata._center_x = cx;
-                camdata._center_y = cy;
+                camdata.focal_x = fl_x;
+                camdata.focal_y = fl_y;
+                camdata.center_x = cx;
+                camdata.center_y = cy;
 
-                camdata._camera_model_type = gsplat::CameraModelType::PINHOLE;
-                camdata._camera_ID = counter++;
+                camdata.camera_model_type = 0; // PINHOLE
+                camdata.camera_id = counter++;
 
                 camerasdata.push_back(camdata);
-                LOG_TRACE("Processed frame {}: {}", frameInd, camdata._image_name);
+                LOG_TRACE("Processed frame {}: {}", frameInd, camdata.image_name);
             }
         }
 
-        auto center = torch::zeros({3}, torch::kFloat32);
+        TransformsCameraResult result;
+        result.cameras = std::move(camerasdata);
+        result.scene_center[0] = 0.0f;
+        result.scene_center[1] = 0.0f;
+        result.scene_center[2] = 0.0f;
 
-        LOG_INFO("Loaded {} cameras from transforms file", camerasdata.size());
-
-        return {camerasdata, center};
+        LOG_INFO("Loaded {} cameras from transforms file", result.cameras.size());
+        return result;
     }
 
-    PointCloud generate_random_point_cloud() {
+    internal::CudaPointCloud generate_random_point_cloud_cuda() {
         LOG_DEBUG("Generating random point cloud with {} points", DEFAULT_NUM_INIT_GAUSSIAN);
 
         int numInitGaussian = DEFAULT_NUM_INIT_GAUSSIAN;
-
         uint64_t seed = DEFAULT_RANDOM_SEED;
-        // Set random seed for reproducibility
-        torch::manual_seed(seed);
 
-        torch::Tensor positions = torch::rand({numInitGaussian, 3}); // in [0, 1]
-        positions = positions * 2.0 - 1.0;                           // now in [-1, 1]
-        // Random RGB colors
-        torch::Tensor colors = torch::randint(0, 256, {numInitGaussian, 3}, torch::kUInt8);
+        // Use standard C++ random number generation
+        std::mt19937 gen(seed);
+        std::uniform_real_distribution<float> pos_dist(-1.0f, 1.0f);
+        std::uniform_int_distribution<uint8_t> color_dist(0, 255);
 
-        return PointCloud(positions, colors);
+        // Generate host data
+        std::vector<float> host_positions(numInitGaussian * 3);
+        std::vector<uint8_t> host_colors(numInitGaussian * 3);
+
+        for (int i = 0; i < numInitGaussian; ++i) {
+            host_positions[i * 3 + 0] = pos_dist(gen);
+            host_positions[i * 3 + 1] = pos_dist(gen);
+            host_positions[i * 3 + 2] = pos_dist(gen);
+
+            host_colors[i * 3 + 0] = color_dist(gen);
+            host_colors[i * 3 + 1] = color_dist(gen);
+            host_colors[i * 3 + 2] = color_dist(gen);
+        }
+
+        // Upload to CUDA
+        internal::CudaPointCloud result(numInitGaussian);
+        result.positions.upload(host_positions.data(), numInitGaussian * 3);
+        result.colors.upload(host_colors.data(), numInitGaussian * 3);
+
+        return result;
     }
 
 } // namespace gs::loader

@@ -13,7 +13,11 @@ add_library(gs_loader STATIC
         loader_service.hpp
         loader_service.cpp
 
-        # Format implementations
+        # Internal CUDA data structures
+        cuda_data.hpp
+        torch_converter.hpp
+
+        # Format implementations (now torch-free)
         formats/ply.hpp
         formats/ply.cpp
         formats/colmap.hpp
@@ -32,6 +36,9 @@ add_library(gs_loader STATIC
         loaders/blender_loader.cpp
         loaders/sogs_loader.hpp
         loaders/sogs_loader.cpp
+
+        # Utility files
+        filesystem_utils.hpp
 )
 
 # Set include directories
@@ -43,6 +50,9 @@ target_include_directories(gs_loader
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/src
 )
+
+# Find required libraries
+find_package(CUDAToolkit REQUIRED)
 
 # Find the actual WebP library target
 if(TARGET WebP::webpdecoder)
@@ -72,7 +82,9 @@ endif()
 target_link_libraries(gs_loader
         PUBLIC
         gs_core            # Link to modular core library for SplatData, Camera, etc.
+        torch              # Still needed for the public interface (SplatData uses torch)
         PRIVATE
+        CUDA::cudart       # CUDA runtime for internal CUDA operations
         TBB::tbb
         spdlog::spdlog
         nlohmann_json::nlohmann_json
@@ -106,6 +118,7 @@ endif ()
 install(FILES ${CMAKE_SOURCE_DIR}/include/loader/loader.hpp
         DESTINATION include/loader)
 
-message(STATUS "Loader module configured with SOG support")
+message(STATUS "Loader module configured (torch-free internals)")
 message(STATUS "  WebP decoder library: ${WEBP_DECODE_LIB}")
 message(STATUS "  Archive library: ${ARCHIVE_LIB}")
+message(STATUS "  CUDA runtime: CUDA::cudart")

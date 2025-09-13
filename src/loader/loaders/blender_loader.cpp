@@ -7,12 +7,14 @@
 #include "core/logger.hpp"
 #include "core/point_cloud.hpp"
 #include "formats/transforms.hpp"
+#include "loader/torch_converter.hpp"
 #include "training/dataset.hpp"
 #include <chrono>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <torch/torch.h>
 
 namespace gs::loader {
 
@@ -110,39 +112,23 @@ namespace gs::loader {
         try {
             LOG_INFO("Loading Blender/NeRF dataset from: {}", transforms_file.string());
 
-            // Read transforms and create cameras
-            auto [camera_infos, scene_center] = read_transforms_cameras_and_images(transforms_file);
+            // Read transforms and create cameras using CUDA version
+            auto result = read_transforms_cameras_and_images_cuda(transforms_file);
+            auto& cuda_camera_infos = result.cameras;
+            float* scene_center = result.scene_center;
 
             if (options.progress) {
-                options.progress(40.0f, std::format("Creating {} cameras...", camera_infos.size()));
+                options.progress(40.0f, std::format("Creating {} cameras...", cuda_camera_infos.size()));
             }
 
-            LOG_DEBUG("Creating {} camera objects", camera_infos.size());
+            LOG_DEBUG("Creating {} camera objects", cuda_camera_infos.size());
 
-            // Create Camera objects
+            // Convert CUDA cameras to torch-based Camera objects
             std::vector<std::shared_ptr<Camera>> cameras;
-            cameras.reserve(camera_infos.size());
+            cameras.reserve(cuda_camera_infos.size());
 
-            for (size_t i = 0; i < camera_infos.size(); ++i) {
-                const auto& info = camera_infos[i];
-
-                auto cam = std::make_shared<Camera>(
-                    info._R,
-                    info._T,
-                    info._focal_x,
-                    info._focal_y,
-                    info._center_x,
-                    info._center_y,
-                    info._radial_distortion,
-                    info._tangential_distortion,
-                    info._camera_model_type,
-                    info._image_name,
-                    info._image_path,
-                    info._width,
-                    info._height,
-                    static_cast<int>(i));
-
-                cameras.push_back(std::move(cam));
+            for (size_t i = 0; i < cuda_camera_infos.size(); ++i) {
+                cameras.push_back(internal::cuda_to_camera(cuda_camera_infos[i], static_cast<int>(i)));
             }
 
             // Create dataset configuration
@@ -161,7 +147,8 @@ namespace gs::loader {
 
             // Generate random point cloud for Blender datasets
             LOG_DEBUG("Generating random point cloud for initialization");
-            auto random_pc = generate_random_point_cloud();
+            auto cuda_pc = generate_random_point_cloud_cuda();
+            auto random_pc = internal::cuda_to_point_cloud(cuda_pc);
             auto point_cloud = std::make_shared<PointCloud>(std::move(random_pc));
             LOG_INFO("Generated random point cloud with {} points", point_cloud->size());
 
@@ -174,23 +161,21 @@ namespace gs::loader {
                 end_time - start_time);
 
             // Create result with shared_ptr
-            LoadResult result{
+            LoadResult result_final{
                 .data = LoadedScene{
                     .cameras = std::move(dataset),
                     .point_cloud = std::move(point_cloud)},
-                .scene_center = scene_center,
+                .scene_center = internal::array_to_tensor(scene_center),
                 .loader_used = name(),
                 .load_time = load_time,
                 .warnings = {"Using random point cloud initialization"}};
 
             LOG_INFO("Blender/NeRF dataset loaded successfully in {}ms", load_time.count());
-            LOG_INFO("  - {} cameras", camera_infos.size());
+            LOG_INFO("  - {} cameras", cuda_camera_infos.size());
             LOG_DEBUG("  - Scene center: [{:.3f}, {:.3f}, {:.3f}]",
-                      scene_center[0].item<float>(),
-                      scene_center[1].item<float>(),
-                      scene_center[2].item<float>());
+                      scene_center[0], scene_center[1], scene_center[2]);
 
-            return result;
+            return result_final;
 
         } catch (const std::exception& e) {
             std::string error_msg = std::format("Failed to load Blender/NeRF dataset: {}", e.what());

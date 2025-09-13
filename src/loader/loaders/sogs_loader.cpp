@@ -91,7 +91,7 @@ namespace gs::loader {
         }
 
         LOG_INFO("Loading SOG file: {}", path.string());
-        auto splat_result = load_sog(path);
+        auto splat_result = load_sog(path);  // Changed from load_sog_cuda to load_sog
         if (!splat_result) {
             std::string error_msg = splat_result.error();
             LOG_ERROR("Failed to load SOG: {}", error_msg);

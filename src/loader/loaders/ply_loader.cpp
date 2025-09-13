@@ -6,10 +6,12 @@
 #include "core/logger.hpp"
 #include "core/splat_data.hpp"
 #include "formats/ply.hpp"
+#include "loader/torch_converter.hpp"
 #include <chrono>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <torch/torch.h>
 
 namespace gs::loader {
 
@@ -72,18 +74,25 @@ namespace gs::loader {
             return result;
         }
 
-        // Load the PLY file using existing implementation
+        // Load the PLY file using torch-free implementation
         if (options.progress) {
             options.progress(50.0f, "Parsing PLY data...");
         }
 
         LOG_INFO("Loading PLY file: {}", path.string());
-        auto splat_result = load_ply(path);
-        if (!splat_result) {
-            std::string error_msg = splat_result.error();
+        auto cuda_result = load_ply_cuda(path);
+        if (!cuda_result) {
+            std::string error_msg = cuda_result.error();
             LOG_ERROR("Failed to load PLY: {}", error_msg);
             throw std::runtime_error(error_msg);
         }
+
+        if (options.progress) {
+            options.progress(90.0f, "Converting to SplatData...");
+        }
+
+        // Convert CUDA data to SplatData with torch tensors
+        auto splat_data = internal::cuda_to_splat_data(std::move(*cuda_result));
 
         if (options.progress) {
             options.progress(100.0f, "PLY loading complete");
@@ -94,11 +103,12 @@ namespace gs::loader {
             end_time - start_time);
 
         LoadResult result{
-            .data = std::make_shared<SplatData>(std::move(*splat_result)),
+            .data = std::make_shared<SplatData>(std::move(splat_data)),
             .scene_center = torch::zeros({3}),
             .loader_used = name(),
             .load_time = load_time,
-            .warnings = {}};
+            .warnings = {}
+        };
 
         LOG_INFO("PLY loaded successfully in {}ms", load_time.count());
 
