@@ -268,15 +268,15 @@ namespace gs::training {
                     base_dataset_->get_cameras(), params.dataset, CameraDataset::Split::VAL);
 
                 LOG_INFO("Created train/val split: {} train, {} val images",
-                         train_dataset_->size().value(),
-                         val_dataset_->size().value());
+                         train_dataset_->size(),
+                         val_dataset_->size());
             } else {
                 // Use all images for training
                 train_dataset_ = base_dataset_;
                 val_dataset_ = nullptr;
 
                 LOG_INFO("Using all {} images for training (no evaluation)",
-                         train_dataset_->size().value());
+                         train_dataset_->size());
             }
 
             // chage resize factor (change may comes from gui)
@@ -287,7 +287,7 @@ namespace gs::training {
                 val_dataset_->set_resize_factor(params.dataset.resize_factor);
             }
 
-            train_dataset_size_ = train_dataset_->size().value();
+            train_dataset_size_ = train_dataset_->size();
 
             m_cam_id_to_cam.clear();
             // Setup camera cache
@@ -1140,9 +1140,9 @@ namespace gs::training {
                               strategy_->is_refining(iter));
         }
 
-        // Use infinite dataloader to avoid epoch restarts
+        // Use our torch-free infinite dataloader
         auto train_dataloader = create_infinite_dataloader_from_dataset(train_dataset_, num_workers);
-        auto loader = train_dataloader->begin();
+        auto loader_iter = train_dataloader->begin();
 
         LOG_DEBUG("Starting training iterations");
         // Single loop without epochs
@@ -1156,17 +1156,18 @@ namespace gs::training {
                 callback_stream_.synchronize();
             }
 
-            // Get batch
-            auto& batch = *loader;
-            auto camera_with_image = batch[0].data;
-
-            // Camera is now torch-free internally
+            // Get batch using our torch-free dataloader
+            auto batch = *loader_iter;
+            auto& camera_with_image = batch[0];
             Camera* cam = camera_with_image.camera;
-            torch::Tensor gt_image = std::move(camera_with_image.image).to(torch::kCUDA, /*non_blocking=*/true);
+            // Image is already on CUDA from the dataloader
+            torch::Tensor gt_image = std::move(camera_with_image.image);
+
             if (iter <= 10 || iter % 100 == 0) {
                 size_t before = c10::cuda::CUDACachingAllocator::getDeviceStats(0).reserved_bytes[0].current;
 
-                torch::Tensor gt_image = std::move(camera_with_image.image).to(torch::kCUDA, true);
+                // Image already moved above, just sync if needed
+                torch::cuda::synchronize();
 
                 size_t after = c10::cuda::CUDACachingAllocator::getDeviceStats(0).reserved_bytes[0].current;
 
@@ -1206,7 +1207,7 @@ namespace gs::training {
             }
 
             ++iter;
-            ++loader;
+            ++loader_iter;  // Advance our torch-free iterator
         }
 
         // Ensure callback is finished before final save

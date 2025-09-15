@@ -383,147 +383,150 @@ namespace gs::training {
         return colormap;
     }
 
-    auto MetricsEvaluator::make_dataloader(std::shared_ptr<CameraDataset> dataset, const int workers) const {
+    std::unique_ptr<DataLoader> MetricsEvaluator::make_dataloader(std::shared_ptr<CameraDataset> dataset, int workers) const {
         return create_dataloader_from_dataset(dataset, workers);
     }
 
-     EvalMetrics MetricsEvaluator::evaluate(const int iteration,
-                                           const SplatData& splatData,
-                                           std::shared_ptr<CameraDataset> val_dataset,
-                                           torch::Tensor& background) {
-        if (!_params.optimization.enable_eval) {
-            throw std::runtime_error("Evaluation is not enabled");
-        }
-
-        EvalMetrics result;
-        result.num_gaussians = static_cast<int>(splatData.size());
-        result.iteration = iteration;
-
-        const auto val_dataloader = make_dataloader(val_dataset);
-
-        std::vector<float> psnr_values, ssim_values, lpips_values;
-        const auto start_time = std::chrono::steady_clock::now();
-
-        // Create directory for evaluation images
-        const std::filesystem::path eval_dir = _params.dataset.output_path /
-                                               ("eval_step_" + std::to_string(iteration));
-        if (_params.optimization.enable_save_eval_images) {
-            std::filesystem::create_directories(eval_dir);
-        }
-
-        // Create subdirectory for depth maps only if we're saving depth
-        std::filesystem::path depth_dir;
-        if (has_depth() && _params.optimization.enable_save_eval_images) {
-            depth_dir = eval_dir / "depth";
-            std::filesystem::create_directories(depth_dir);
-        }
-
-        // Create a temporary TrainingMemory for evaluation
-        TrainingMemory eval_memory;
-
-        int image_idx = 0;
-        const size_t val_dataset_size = val_dataset->size().value();
-
-        for (auto& batch : *val_dataloader) {
-            auto camera_with_image = batch[0].data;
-            Camera* cam = camera_with_image.camera;
-            torch::Tensor gt_image = std::move(camera_with_image.image).to(torch::kCUDA);
-
-            // Initialize eval memory for this camera
-            const int width = cam->image_width();
-            const int height = cam->image_height();
-            eval_memory.ensure_size(width, height, 3, 1);
-
-            // const_cast is not ideal but necessary for now
-            auto& splatData_mutable = const_cast<SplatData&>(splatData);
-
-            // Get raw background pointer
-            float* bg_ptr = background.data_ptr<float>();
-
-            // Render using fast_rasterize with raw memory
-            RenderOutput r_output = fast_rasterize(*cam, splatData_mutable, bg_ptr, eval_memory);
-
-            // Only compute metrics if we have RGB output
-            if (has_rgb()) {
-                // Create tensor wrappers for metrics computation
-                torch::Tensor rendered_image = torch::from_blob(
-                    r_output.image,
-                    {r_output.channels, r_output.height, r_output.width},
-                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
-                );
-
-                // Ensure correct dimensions
-                if (rendered_image.dim() == 3)
-                    rendered_image = rendered_image.unsqueeze(0);
-                if (gt_image.dim() == 3)
-                    gt_image = gt_image.unsqueeze(0);
-
-                // Clamp rendered image to [0, 1]
-                rendered_image = torch::clamp(rendered_image, 0.0, 1.0);
-
-                // Compute metrics
-                const float psnr = _psnr_metric->compute(rendered_image, gt_image);
-                const float ssim = _ssim_metric->compute(rendered_image, gt_image);
-                const float lpips = _lpips_metric->compute(rendered_image, gt_image);
-
-                psnr_values.push_back(psnr);
-                ssim_values.push_back(ssim);
-                lpips_values.push_back(lpips);
-
-                // Save side-by-side RGB images asynchronously
-                if (_params.optimization.enable_save_eval_images) {
-                    const std::vector<torch::Tensor> rgb_images = {gt_image.squeeze(0), rendered_image.squeeze(0)};
-                    image_io::save_images_async(
-                        eval_dir / (std::to_string(image_idx) + ".png"),
-                        rgb_images,
-                        true, // horizontal
-                        4);   // separator width
-                }
-            }
-
-            // Only save depth if enabled and render mode includes depth
-            if (has_depth() && _params.optimization.enable_save_eval_images) {
-                // Note: depth handling would need to be added to RenderOutput
-                // For now, skip depth visualization since we removed it from RenderOutput
-            }
-
-            image_idx++;
-        }
-
-        // Wait for all images to be saved before computing final timing
-        if (_params.optimization.enable_save_eval_images) {
-            const auto pending = image_io::BatchImageSaver::instance().pending_count();
-            if (pending > 0) {
-                image_io::wait_for_pending_saves();
-            }
-        }
-
-        const auto end_time = std::chrono::steady_clock::now();
-        const auto elapsed = std::chrono::duration<float>(end_time - start_time).count();
-
-        // Compute averages only if we have RGB metrics
-        if (has_rgb() && !psnr_values.empty()) {
-            result.psnr = std::accumulate(psnr_values.begin(), psnr_values.end(), 0.0f) / psnr_values.size();
-            result.ssim = std::accumulate(ssim_values.begin(), ssim_values.end(), 0.0f) / ssim_values.size();
-            result.lpips = std::accumulate(lpips_values.begin(), lpips_values.end(), 0.0f) / lpips_values.size();
-        } else {
-            // Set default values for depth-only modes
-            result.psnr = 0.0f;
-            result.ssim = 0.0f;
-            result.lpips = 0.0f;
-        }
-        result.elapsed_time = elapsed / val_dataset_size;
-
-        // Add metrics to reporter
-        _reporter->add_metrics(result);
-
-        if (_params.optimization.enable_save_eval_images) {
-            std::cout << "Saved " << image_idx << " evaluation images to: " << eval_dir << std::endl;
-            if (has_depth()) {
-                std::cout << "Saved depth maps to: " << depth_dir << std::endl;
-            }
-        }
-
-        return result;
+    EvalMetrics MetricsEvaluator::evaluate(const int iteration,
+                                       const SplatData& splatData,
+                                       std::shared_ptr<CameraDataset> val_dataset,
+                                       torch::Tensor& background) {
+    if (!_params.optimization.enable_eval) {
+        throw std::runtime_error("Evaluation is not enabled");
     }
+
+    EvalMetrics result;
+    result.num_gaussians = static_cast<int>(splatData.size());
+    result.iteration = iteration;
+
+    const auto val_dataloader = make_dataloader(val_dataset);
+
+    std::vector<float> psnr_values, ssim_values, lpips_values;
+    const auto start_time = std::chrono::steady_clock::now();
+
+    // Create directory for evaluation images
+    const std::filesystem::path eval_dir = _params.dataset.output_path /
+                                           ("eval_step_" + std::to_string(iteration));
+    if (_params.optimization.enable_save_eval_images) {
+        std::filesystem::create_directories(eval_dir);
+    }
+
+    // Create subdirectory for depth maps only if we're saving depth
+    std::filesystem::path depth_dir;
+    if (has_depth() && _params.optimization.enable_save_eval_images) {
+        depth_dir = eval_dir / "depth";
+        std::filesystem::create_directories(depth_dir);
+    }
+
+    // Create a temporary TrainingMemory for evaluation
+    TrainingMemory eval_memory;
+
+    int image_idx = 0;
+    const size_t val_dataset_size = val_dataset->size();
+
+    // Use auto (not auto&) since the iterator returns by value
+    for (auto batch : *val_dataloader) {
+        // Access the camera and image directly from the batch
+        auto& camera_with_image = batch[0];  // batch[0] returns CameraWithImage&
+        Camera* cam = camera_with_image.camera;
+        torch::Tensor gt_image = std::move(camera_with_image.image).to(torch::kCUDA);
+
+        // Initialize eval memory for this camera
+        const int width = cam->image_width();
+        const int height = cam->image_height();
+        eval_memory.ensure_size(width, height, 3, 1);
+
+        // const_cast is not ideal but necessary for now
+        auto& splatData_mutable = const_cast<SplatData&>(splatData);
+
+        // Get raw background pointer
+        float* bg_ptr = background.data_ptr<float>();
+
+        // Render using fast_rasterize with raw memory
+        RenderOutput r_output = fast_rasterize(*cam, splatData_mutable, bg_ptr, eval_memory);
+
+        // Only compute metrics if we have RGB output
+        if (has_rgb()) {
+            // Create tensor wrappers for metrics computation
+            torch::Tensor rendered_image = torch::from_blob(
+                r_output.image,
+                {r_output.channels, r_output.height, r_output.width},
+                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
+            );
+
+            // Ensure correct dimensions
+            if (rendered_image.dim() == 3)
+                rendered_image = rendered_image.unsqueeze(0);
+            if (gt_image.dim() == 3)
+                gt_image = gt_image.unsqueeze(0);
+
+            // Clamp rendered image to [0, 1]
+            rendered_image = torch::clamp(rendered_image, 0.0, 1.0);
+
+            // Compute metrics
+            const float psnr = _psnr_metric->compute(rendered_image, gt_image);
+            const float ssim = _ssim_metric->compute(rendered_image, gt_image);
+            const float lpips = _lpips_metric->compute(rendered_image, gt_image);
+
+            psnr_values.push_back(psnr);
+            ssim_values.push_back(ssim);
+            lpips_values.push_back(lpips);
+
+            // Save side-by-side RGB images asynchronously
+            if (_params.optimization.enable_save_eval_images) {
+                const std::vector<torch::Tensor> rgb_images = {gt_image.squeeze(0), rendered_image.squeeze(0)};
+                image_io::save_images_async(
+                    eval_dir / (std::to_string(image_idx) + ".png"),
+                    rgb_images,
+                    true, // horizontal
+                    4);   // separator width
+            }
+        }
+
+        // Only save depth if enabled and render mode includes depth
+        if (has_depth() && _params.optimization.enable_save_eval_images) {
+            // Note: depth handling would need to be added to RenderOutput
+            // For now, skip depth visualization since we removed it from RenderOutput
+        }
+
+        image_idx++;
+    }
+
+    // Wait for all images to be saved before computing final timing
+    if (_params.optimization.enable_save_eval_images) {
+        const auto pending = image_io::BatchImageSaver::instance().pending_count();
+        if (pending > 0) {
+            image_io::wait_for_pending_saves();
+        }
+    }
+
+    const auto end_time = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration<float>(end_time - start_time).count();
+
+    // Compute averages only if we have RGB metrics
+    if (has_rgb() && !psnr_values.empty()) {
+        result.psnr = std::accumulate(psnr_values.begin(), psnr_values.end(), 0.0f) / psnr_values.size();
+        result.ssim = std::accumulate(ssim_values.begin(), ssim_values.end(), 0.0f) / ssim_values.size();
+        result.lpips = std::accumulate(lpips_values.begin(), lpips_values.end(), 0.0f) / lpips_values.size();
+    } else {
+        // Set default values for depth-only modes
+        result.psnr = 0.0f;
+        result.ssim = 0.0f;
+        result.lpips = 0.0f;
+    }
+    result.elapsed_time = elapsed / val_dataset_size;
+
+    // Add metrics to reporter
+    _reporter->add_metrics(result);
+
+    if (_params.optimization.enable_save_eval_images) {
+        std::cout << "Saved " << image_idx << " evaluation images to: " << eval_dir << std::endl;
+        if (has_depth()) {
+            std::cout << "Saved depth maps to: " << depth_dir << std::endl;
+        }
+    }
+
+    return result;
+}
+
 } // namespace gs::training

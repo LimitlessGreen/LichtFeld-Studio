@@ -5,15 +5,22 @@
 #pragma once
 
 #include "core/camera.hpp"
+#include "core/logger.hpp"
 #include "core/parameters.hpp"
 #include "loader/loader.hpp"
 #include <expected>
 #include <format>
 #include <memory>
+#include <random>
 #include <torch/torch.h>
 #include <vector>
+#include <queue>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <future>
 
-// Camera with loaded image
 namespace gs::training {
     struct CameraWithImage {
         Camera* camera;
@@ -29,9 +36,11 @@ namespace gs::training {
         }
     };
 
-    using CameraExample = torch::data::Example<CameraWithImage, torch::Tensor>;
+    // Forward declarations
+    class InfiniteRandomSampler;
+    class RandomSampler;
 
-    class CameraDataset : public torch::data::Dataset<CameraDataset, CameraExample> {
+    class CameraDataset {
     public:
         enum class Split {
             TRAIN,
@@ -63,14 +72,11 @@ namespace gs::training {
 
         // Default copy constructor works with shared_ptr
         CameraDataset(const CameraDataset&) = default;
-
         CameraDataset(CameraDataset&&) noexcept = default;
-
         CameraDataset& operator=(CameraDataset&&) noexcept = default;
-
         CameraDataset& operator=(const CameraDataset&) = default;
 
-        CameraExample get(size_t index) override {
+        CameraWithImage get(size_t index) {
             if (index >= _indices.size()) {
                 throw std::out_of_range("Dataset index out of range");
             }
@@ -78,15 +84,14 @@ namespace gs::training {
             size_t camera_idx = _indices[index];
             auto& cam = _cameras[camera_idx];
 
-            // Load image - this still returns a torch tensor but Camera internally doesn't use torch
+            // Load image - returns a torch tensor but Camera internally doesn't use torch
             torch::Tensor image = cam->load_and_get_image(_datasetConfig.resize_factor);
 
             // Return camera pointer and image
-            // The camera itself is torch-free internally
-            return {{cam.get(), std::move(image)}, torch::empty({})};
+            return {cam.get(), std::move(image)};
         }
 
-        torch::optional<size_t> size() const override {
+        size_t size() const {
             return _indices.size();
         }
 
@@ -119,7 +124,10 @@ namespace gs::training {
             }
             return std::nullopt;
         }
-        void set_resize_factor(int resize_factor) { _datasetConfig.resize_factor = resize_factor; }
+
+        void set_resize_factor(int resize_factor) {
+            _datasetConfig.resize_factor = resize_factor;
+        }
 
     private:
         std::vector<std::shared_ptr<Camera>> _cameras;
@@ -128,28 +136,413 @@ namespace gs::training {
         std::vector<size_t> _indices;
     };
 
-    // Infinite random sampler for continuous data flow
-    class InfiniteRandomSampler : public torch::data::samplers::RandomSampler {
+    // Regular random sampler (non-infinite)
+    class RandomSampler {
     public:
-        using super = torch::data::samplers::RandomSampler;
+        explicit RandomSampler(size_t dataset_size)
+            : size_(dataset_size),
+              current_position_(0),
+              gen_(std::random_device{}()) {
 
-        explicit InfiniteRandomSampler(size_t dataset_size)
-            : super(dataset_size) {
+            if (size_ == 0) {
+                throw std::invalid_argument("Dataset size must be positive");
+            }
+
+            // Generate initial permutation
+            generate_permutation();
         }
 
-        std::optional<std::vector<size_t>> next(size_t batch_size) override {
-            auto indices = super::next(batch_size);
-            if (!indices) {
-                super::reset();
-                indices = super::next(batch_size);
+        // Get next batch of indices (returns nullopt when epoch is done)
+        std::optional<std::vector<size_t>> next(size_t batch_size) {
+            if (current_position_ >= indices_.size()) {
+                return std::nullopt;  // End of epoch
             }
-            return indices;
+
+            std::vector<size_t> batch;
+            batch.reserve(batch_size);
+
+            for (size_t i = 0; i < batch_size && current_position_ < indices_.size(); ++i) {
+                batch.push_back(indices_[current_position_]);
+                current_position_++;
+            }
+
+            return batch;
+        }
+
+        void reset() {
+            generate_permutation();
+            current_position_ = 0;
+        }
+
+        size_t size() const { return size_; }
+
+    private:
+        void generate_permutation() {
+            indices_.resize(size_);
+            for (size_t i = 0; i < size_; ++i) {
+                indices_[i] = i;
+            }
+            std::shuffle(indices_.begin(), indices_.end(), gen_);
+        }
+
+        size_t size_;
+        size_t current_position_;
+        std::vector<size_t> indices_;
+        std::mt19937 gen_;
+    };
+
+    // Torch-free infinite random sampler
+    class InfiniteRandomSampler {
+    public:
+        explicit InfiniteRandomSampler(size_t dataset_size)
+            : size_(dataset_size),
+              current_position_(0),
+              epoch_(0),
+              gen_(std::random_device{}()) {
+
+            if (size_ == 0) {
+                throw std::invalid_argument("Dataset size must be positive");
+            }
+
+            // Generate initial permutation
+            generate_permutation();
+        }
+
+        // Get next batch of indices
+        std::vector<size_t> next(size_t batch_size) {
+            std::vector<size_t> batch;
+            batch.reserve(batch_size);
+
+            for (size_t i = 0; i < batch_size; ++i) {
+                // Check if we need to generate new permutation
+                if (current_position_ >= indices_.size()) {
+                    generate_permutation();
+                    current_position_ = 0;
+                    epoch_++;
+                }
+
+                batch.push_back(indices_[current_position_]);
+                current_position_++;
+            }
+
+            return batch;
+        }
+
+        // Get single index
+        size_t next_single() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (current_position_ >= indices_.size()) {
+                generate_permutation();
+                current_position_ = 0;
+                epoch_++;
+            }
+
+            return indices_[current_position_++];
+        }
+
+        void reset() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            generate_permutation();
+            current_position_ = 0;
+            epoch_++;
+        }
+
+        size_t size() const { return size_; }
+        size_t epoch() const {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return epoch_;
+        }
+        size_t position() const {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return current_position_;
         }
 
     private:
-        size_t dataset_size_;
+        void generate_permutation() {
+            indices_.resize(size_);
+            for (size_t i = 0; i < size_; ++i) {
+                indices_[i] = i;
+            }
+            std::shuffle(indices_.begin(), indices_.end(), gen_);
+        }
+
+        size_t size_;
+        size_t current_position_;
+        size_t epoch_;
+        std::vector<size_t> indices_;
+        std::mt19937 gen_;
+        mutable std::mutex mutex_;
     };
 
+    // Simple batch structure
+    struct CameraBatch {
+        std::vector<CameraWithImage> data;
+
+        // For compatibility with existing code that expects [0].data
+        CameraWithImage& operator[](size_t idx) {
+            if (idx >= data.size()) {
+                throw std::out_of_range("Batch index out of range");
+            }
+            return data[idx];
+        }
+
+        const CameraWithImage& operator[](size_t idx) const {
+            if (idx >= data.size()) {
+                throw std::out_of_range("Batch index out of range");
+            }
+            return data[idx];
+        }
+    };
+
+    // Regular DataLoader (non-infinite) - for evaluation, single-threaded
+    class DataLoader {
+    public:
+        DataLoader(std::shared_ptr<CameraDataset> dataset,
+                   size_t batch_size = 1,
+                   [[maybe_unused]] int num_workers = 0)  // num_workers ignored for evaluation
+            : dataset_(dataset),
+              batch_size_(batch_size),
+              sampler_(dataset->size()) {
+        }
+
+        // Iterator for range-based for loops
+        class Iterator {
+        public:
+            Iterator(DataLoader* loader, bool is_end = false)
+                : loader_(loader), is_end_(is_end) {
+                if (!is_end_) {
+                    advance();
+                }
+            }
+
+            CameraBatch operator*() {
+                return current_batch_;
+            }
+
+            Iterator& operator++() {
+                advance();
+                return *this;
+            }
+
+            bool operator!=(const Iterator& other) const {
+                return is_end_ != other.is_end_;
+            }
+
+        private:
+            void advance() {
+                auto indices = loader_->sampler_.next(loader_->batch_size_);
+                if (!indices) {
+                    is_end_ = true;
+                    return;
+                }
+
+                current_batch_.data.clear();
+                for (size_t idx : *indices) {
+                    current_batch_.data.push_back(loader_->dataset_->get(idx));
+                }
+            }
+
+            DataLoader* loader_;
+            CameraBatch current_batch_;
+            bool is_end_;
+        };
+
+        Iterator begin() {
+            sampler_.reset();  // Reset sampler for new epoch
+            return Iterator(this, false);
+        }
+
+        Iterator end() {
+            return Iterator(this, true);
+        }
+
+    private:
+        std::shared_ptr<CameraDataset> dataset_;
+        size_t batch_size_;
+        RandomSampler sampler_;
+    };
+
+    // Torch-free Infinite DataLoader with worker threads for training
+    class InfiniteDataLoader {
+    public:
+        InfiniteDataLoader(std::shared_ptr<CameraDataset> dataset,
+                          size_t batch_size = 1,
+                          int num_workers = 4)
+            : dataset_(dataset),
+              batch_size_(batch_size),
+              num_workers_(std::max(0, num_workers)),
+              sampler_(dataset->size()),
+              stop_workers_(false),
+              prefetch_factor_(2) {
+
+            if (num_workers_ > 0) {
+                // Start worker threads
+                for (int i = 0; i < num_workers_; ++i) {
+                    workers_.emplace_back(&InfiniteDataLoader::worker_thread, this, i);
+                }
+                LOG_DEBUG("Started {} worker threads for training dataloader", num_workers_);
+            } else {
+                LOG_WARN("Running training dataloader without workers - expect memory issues!");
+            }
+        }
+
+        ~InfiniteDataLoader() {
+            stop_workers_ = true;
+            cv_workers_.notify_all();
+
+            for (auto& worker : workers_) {
+                if (worker.joinable()) {
+                    worker.join();
+                }
+            }
+        }
+
+        // Iterator for range-based for loops
+        class Iterator {
+        public:
+            Iterator(InfiniteDataLoader* loader, bool is_end = false)
+                : loader_(loader), is_end_(is_end) {
+                if (!is_end_) {
+                    advance();
+                }
+            }
+
+            CameraBatch operator*() {
+                return current_batch_;
+            }
+
+            Iterator& operator++() {
+                advance();
+                return *this;
+            }
+
+            bool operator!=(const Iterator& other) const {
+                // Infinite iterator never equals end
+                return !is_end_ || !other.is_end_;
+            }
+
+        private:
+            void advance() {
+                if (loader_->num_workers_ > 0) {
+                    // Get from queue (workers are loading in background)
+                    current_batch_ = loader_->get_next_batch();
+                } else {
+                    // Single-threaded fallback
+                    size_t idx = loader_->sampler_.next_single();
+                    current_batch_.data.clear();
+                    current_batch_.data.push_back(loader_->dataset_->get(idx));
+                }
+            }
+
+            InfiniteDataLoader* loader_;
+            CameraBatch current_batch_;
+            bool is_end_;
+        };
+
+        Iterator begin() {
+            return Iterator(this, false);
+        }
+
+        Iterator end() {
+            return Iterator(this, true);
+        }
+
+    private:
+        void worker_thread(int worker_id) {
+            // Set CPU affinity if possible
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            CPU_SET(worker_id % std::thread::hardware_concurrency(), &cpuset);
+            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+
+            while (!stop_workers_) {
+                // Check queue size
+                {
+                    std::unique_lock<std::mutex> lock(queue_mutex_);
+                    cv_workers_.wait(lock, [this] {
+                        return stop_workers_ ||
+                               loaded_batches_.size() < prefetch_factor_ * num_workers_;
+                    });
+                }
+
+                if (stop_workers_) break;
+
+                // Get next index
+                size_t idx = sampler_.next_single();
+
+                // Load data (this happens outside the lock)
+                CameraBatch batch;
+                batch.data.push_back(dataset_->get(idx));
+
+                // Move image to GPU immediately to avoid keeping CPU copy
+                batch.data[0].image = batch.data[0].image.to(torch::kCUDA, /*non_blocking=*/true);
+
+                // Add to queue
+                {
+                    std::lock_guard<std::mutex> lock(queue_mutex_);
+                    loaded_batches_.push(std::move(batch));
+                }
+                cv_main_.notify_one();
+            }
+        }
+
+        CameraBatch get_next_batch() {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+
+            // Notify workers if queue is getting low
+            if (loaded_batches_.size() < prefetch_factor_) {
+                cv_workers_.notify_all();
+            }
+
+            // Wait for batch
+            cv_main_.wait(lock, [this] {
+                return !loaded_batches_.empty() || stop_workers_;
+            });
+
+            if (stop_workers_ && loaded_batches_.empty()) {
+                return CameraBatch();
+            }
+
+            CameraBatch batch = std::move(loaded_batches_.front());
+            loaded_batches_.pop();
+
+            // Notify workers to produce more
+            cv_workers_.notify_one();
+
+            return batch;
+        }
+
+        std::shared_ptr<CameraDataset> dataset_;
+        size_t batch_size_;
+        int num_workers_;
+        InfiniteRandomSampler sampler_;
+
+        // Worker management
+        std::vector<std::thread> workers_;
+        std::queue<CameraBatch> loaded_batches_;
+        std::mutex queue_mutex_;
+        std::condition_variable cv_workers_;
+        std::condition_variable cv_main_;
+        std::atomic<bool> stop_workers_;
+        size_t prefetch_factor_;
+    };
+
+    // Factory functions to match existing interface
+    inline std::unique_ptr<DataLoader> create_dataloader_from_dataset(
+        std::shared_ptr<CameraDataset> dataset,
+        int num_workers = 4) {
+
+        return std::make_unique<DataLoader>(dataset, 1, num_workers);
+    }
+
+    inline std::unique_ptr<InfiniteDataLoader> create_infinite_dataloader_from_dataset(
+        std::shared_ptr<CameraDataset> dataset,
+        int num_workers = 4) {
+
+        return std::make_unique<InfiniteDataLoader>(dataset, 1, num_workers);
+    }
+
+    // Keep the existing create_dataset functions unchanged as they return CameraDataset
     inline std::expected<std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor>, std::string>
     create_dataset_from_colmap(const gs::param::DatasetConfig& datasetConfig) {
         try {
@@ -256,33 +649,5 @@ namespace gs::training {
         } catch (const std::exception& e) {
             return std::unexpected(std::format("Failed to create dataset from transforms: {}", e.what()));
         }
-    }
-
-    inline auto create_dataloader_from_dataset(
-        std::shared_ptr<CameraDataset> dataset,
-        int num_workers = 4) {
-        const size_t dataset_size = dataset->size().value();
-
-        return torch::data::make_data_loader(
-            *dataset,
-            torch::data::samplers::RandomSampler(dataset_size),
-            torch::data::DataLoaderOptions()
-                .batch_size(1)
-                .workers(num_workers)
-                .enforce_ordering(false));
-    }
-
-    inline auto create_infinite_dataloader_from_dataset(
-        std::shared_ptr<CameraDataset> dataset,
-        int num_workers = 4) {
-        const size_t dataset_size = dataset->size().value();
-
-        return torch::data::make_data_loader(
-            *dataset,
-            InfiniteRandomSampler(dataset_size),
-            torch::data::DataLoaderOptions()
-                .batch_size(1)
-                .workers(num_workers)
-                .enforce_ordering(false));
     }
 } // namespace gs::training

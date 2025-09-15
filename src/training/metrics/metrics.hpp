@@ -168,6 +168,6 @@ namespace gs::training {
         bool has_depth() const;
 
         // Create dataloader from dataset
-        auto make_dataloader(std::shared_ptr<CameraDataset> dataset, const int workers = 1) const;
+        std::unique_ptr<DataLoader> make_dataloader(std::shared_ptr<CameraDataset> dataset, int workers = 4) const;
     };
 } // namespace gs::training
