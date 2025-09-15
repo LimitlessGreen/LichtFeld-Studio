@@ -365,10 +365,13 @@ namespace gs::training {
     }
 
     void MCMC::initialize(const gs::param::OptimizationParameters& optimParams) {
+        // DISABLE AUTOGRAD
+        torch::NoGradGuard no_grad;
+
         _params = std::make_unique<const gs::param::OptimizationParameters>(optimParams);
 
         const auto dev = torch::kCUDA;
-        // Move to CUDA but DON'T set requires_grad
+        // Move to CUDA WITHOUT setting requires_grad
         _splat_data.means() = _splat_data.means().to(dev);
         _splat_data.scaling_raw() = _splat_data.scaling_raw().to(dev);
         _splat_data.rotation_raw() = _splat_data.rotation_raw().to(dev);
@@ -378,7 +381,7 @@ namespace gs::training {
         _splat_data._densification_info = torch::empty({0});
         noise_buffer_ = torch::empty_like(_splat_data.means());
 
-        // Pre-allocate gradients
+        // Pre-allocate gradients (without autograd)
         _splat_data.ensure_grad_allocated();
 
         // Initialize binomial coefficients
@@ -387,7 +390,6 @@ namespace gs::training {
         auto binoms_accessor = _binoms.accessor<float, 2>();
         for (int n = 0; n < n_max; ++n) {
             for (int k = 0; k <= n; ++k) {
-                // Compute binomial coefficient C(n,k)
                 float binom = 1.0f;
                 for (int i = 0; i < k; ++i) {
                     binom *= static_cast<float>(n - i) / static_cast<float>(i + 1);

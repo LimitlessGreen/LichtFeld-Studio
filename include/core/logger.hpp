@@ -244,6 +244,15 @@ namespace gs::core {
 #define LOG_CRITICAL(...) \
     ::gs::core::Logger::get().log_internal(::gs::core::LogLevel::Critical, std::source_location::current(), __VA_ARGS__)
 
+#define LOG_WARN_ONCE(...) \
+do { \
+static bool _warned = false; \
+if (!_warned) { \
+_warned = true; \
+LOG_WARN(__VA_ARGS__); \
+} \
+} while(0)
+
 // Timer macros
 #define LOG_TIMER(name)       ::gs::core::ScopedTimer _timer##__LINE__(name)
 #define LOG_TIMER_TRACE(name) ::gs::core::ScopedTimer _timer##__LINE__(name, ::gs::core::LogLevel::Trace)
