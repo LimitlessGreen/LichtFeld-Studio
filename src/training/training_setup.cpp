@@ -72,22 +72,31 @@ namespace gs::training {
                     // Get point cloud or generate random one
                     PointCloud point_cloud_to_use;
                     if (data.point_cloud && data.point_cloud->size() > 0) {
-                        point_cloud_to_use = *data.point_cloud;
+                        // Use move semantics to transfer ownership
+                        point_cloud_to_use = std::move(*data.point_cloud);
                         LOG_INFO("Using point cloud with {} points", point_cloud_to_use.size());
                     } else {
                         // Generate random point cloud if needed
                         LOG_INFO("No point cloud provided, using random initialization");
-                        // Need to generate random point cloud - this should be provided by the loader or a utility
                         int numInitGaussian = 10000;
                         uint64_t seed = 8128;
                         torch::manual_seed(seed);
 
+                        // Generate random positions and colors on host
                         torch::Tensor positions = torch::rand({numInitGaussian, 3}); // in [0, 1]
                         positions = positions * 2.0 - 1.0;                           // now in [-1, 1]
-                        torch::Tensor colors =
-                            torch::randint(0, 256, {numInitGaussian, 3}, torch::kUInt8);
+                        torch::Tensor colors = torch::rand({numInitGaussian, 3});    // in [0, 1]
 
-                        point_cloud_to_use = PointCloud(positions, colors);
+                        // Convert to host memory
+                        auto pos_cpu = positions.to(torch::kCPU).contiguous();
+                        auto col_cpu = colors.to(torch::kCPU).contiguous();
+
+                        // Create PointCloud with host data
+                        point_cloud_to_use = PointCloud(
+                            pos_cpu.data_ptr<float>(),
+                            col_cpu.data_ptr<float>(),
+                            numInitGaussian
+                        );
                     }
                     splat_result = SplatData::init_model_from_pointcloud(
                         params,

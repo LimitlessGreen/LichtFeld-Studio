@@ -4,6 +4,7 @@
 
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
+#include <algorithm>
 
 namespace gs::training {
 
@@ -59,7 +60,7 @@ namespace gs::training {
         }
     }
 
-    // NEW: L1 loss kernels
+    // L1 loss kernels
     __global__ void compute_l1_loss_forward_kernel(
         const float* pred,
         const float* gt,
@@ -196,6 +197,135 @@ namespace gs::training {
         }
     }
 
+    // Transform kernels for SplatData
+    __global__ void transform_positions_kernel(
+        float* positions,
+        const float* transform_matrix,  // 4x4 matrix in row-major
+        int n) {
+
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            // Load position
+            float x = positions[idx * 3 + 0];
+            float y = positions[idx * 3 + 1];
+            float z = positions[idx * 3 + 2];
+
+            // Apply transform (assuming row-major matrix)
+            float new_x = transform_matrix[0] * x + transform_matrix[1] * y + transform_matrix[2] * z + transform_matrix[3];
+            float new_y = transform_matrix[4] * x + transform_matrix[5] * y + transform_matrix[6] * z + transform_matrix[7];
+            float new_z = transform_matrix[8] * x + transform_matrix[9] * y + transform_matrix[10] * z + transform_matrix[11];
+
+            // Store transformed position
+            positions[idx * 3 + 0] = new_x;
+            positions[idx * 3 + 1] = new_y;
+            positions[idx * 3 + 2] = new_z;
+        }
+    }
+
+    __global__ void transform_quaternions_kernel(
+        float* quaternions,  // [N, 4] in [w, x, y, z] format
+        const float* rot_quat,  // Single quaternion to multiply with
+        int n) {
+
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            // Load quaternion
+            float w2 = quaternions[idx * 4 + 0];
+            float x2 = quaternions[idx * 4 + 1];
+            float y2 = quaternions[idx * 4 + 2];
+            float z2 = quaternions[idx * 4 + 3];
+
+            // Load rotation quaternion
+            float w1 = rot_quat[0];
+            float x1 = rot_quat[1];
+            float y1 = rot_quat[2];
+            float z1 = rot_quat[3];
+
+            // Quaternion multiplication: q_new = q_rot * q_original
+            float new_w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2;
+            float new_x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2;
+            float new_y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2;
+            float new_z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2;
+
+            // Store result
+            quaternions[idx * 4 + 0] = new_w;
+            quaternions[idx * 4 + 1] = new_x;
+            quaternions[idx * 4 + 2] = new_y;
+            quaternions[idx * 4 + 3] = new_z;
+        }
+    }
+
+    __global__ void add_scalar_to_tensor_kernel(
+        float* data,
+        float scalar,
+        int n) {
+
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            data[idx] += scalar;
+        }
+    }
+
+    __global__ void compute_mean_3d_kernel(
+        const float* positions,
+        float* mean,
+        int n) {
+
+        // Simple version - for production use CUB reduction
+        extern __shared__ float sdata[];
+
+        int tid = threadIdx.x;
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        // Each thread accumulates its portion
+        float sum_x = 0.0f, sum_y = 0.0f, sum_z = 0.0f;
+
+        for (int i = idx; i < n; i += blockDim.x * gridDim.x) {
+            sum_x += positions[i * 3 + 0];
+            sum_y += positions[i * 3 + 1];
+            sum_z += positions[i * 3 + 2];
+        }
+
+        // Store in shared memory
+        sdata[tid * 3 + 0] = sum_x;
+        sdata[tid * 3 + 1] = sum_y;
+        sdata[tid * 3 + 2] = sum_z;
+        __syncthreads();
+
+        // Reduction in shared memory
+        for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                sdata[tid * 3 + 0] += sdata[(tid + s) * 3 + 0];
+                sdata[tid * 3 + 1] += sdata[(tid + s) * 3 + 1];
+                sdata[tid * 3 + 2] += sdata[(tid + s) * 3 + 2];
+            }
+            __syncthreads();
+        }
+
+        // Write result
+        if (tid == 0) {
+            atomicAdd(&mean[0], sdata[0] / float(n));
+            atomicAdd(&mean[1], sdata[1] / float(n));
+            atomicAdd(&mean[2], sdata[2] / float(n));
+        }
+    }
+
+    __global__ void compute_distances_from_center_kernel(
+        const float* positions,
+        const float* center,
+        float* distances,
+        int n) {
+
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            float dx = positions[idx * 3 + 0] - center[0];
+            float dy = positions[idx * 3 + 1] - center[1];
+            float dz = positions[idx * 3 + 2] - center[2];
+
+            distances[idx] = sqrtf(dx * dx + dy * dy + dz * dz);
+        }
+    }
+
     // Wrapper functions to call from C++
     void launch_compute_sine_background(
         float* output,
@@ -304,7 +434,6 @@ namespace gs::training {
         copy_kernel<<<grid_size, block_size, 0, stream>>>(dst, src, n);
     }
 
-    // NEW: Launch function for blending image with background
     void launch_blend_image_with_background(
         float* image,
         const float* alpha,
@@ -317,6 +446,70 @@ namespace gs::training {
         dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y);
         blend_image_with_background_kernel<<<grid, block, 0, stream>>>(
             image, alpha, bg_color, width, height);
+    }
+
+    void launch_transform_positions(
+        float* positions,
+        const float* transform_matrix,
+        int n,
+        cudaStream_t stream) {
+
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        transform_positions_kernel<<<grid_size, block_size, 0, stream>>>(
+            positions, transform_matrix, n);
+    }
+
+    void launch_transform_quaternions(
+        float* quaternions,
+        const float* rot_quat,
+        int n,
+        cudaStream_t stream) {
+
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        transform_quaternions_kernel<<<grid_size, block_size, 0, stream>>>(
+            quaternions, rot_quat, n);
+    }
+
+    void launch_add_scalar_to_tensor(
+        float* data,
+        float scalar,
+        int n,
+        cudaStream_t stream) {
+
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        add_scalar_to_tensor_kernel<<<grid_size, block_size, 0, stream>>>(
+            data, scalar, n);
+    }
+
+    void launch_compute_mean_3d(
+        const float* positions,
+        float* mean,
+        int n,
+        cudaStream_t stream) {
+
+        // Zero the mean first
+        cudaMemsetAsync(mean, 0, 3 * sizeof(float), stream);
+
+        int block_size = 256;
+        int grid_size = std::min(1024, (n + block_size - 1) / block_size);
+        compute_mean_3d_kernel<<<grid_size, block_size, block_size * 3 * sizeof(float), stream>>>(
+            positions, mean, n);
+    }
+
+    void launch_compute_distances_from_center(
+        const float* positions,
+        const float* center,
+        float* distances,
+        int n,
+        cudaStream_t stream) {
+
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        compute_distances_from_center_kernel<<<grid_size, block_size, 0, stream>>>(
+            positions, center, distances, n);
     }
 
 } // namespace gs::training

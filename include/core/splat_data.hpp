@@ -56,7 +56,7 @@ namespace gs {
         torch::Tensor get_scaling() const;
         torch::Tensor get_shs() const;
 
-        // Transform (still needs implementation)
+        // Transform
         SplatData& transform(const glm::mat4& transform_matrix);
 
         // Simple inline getters

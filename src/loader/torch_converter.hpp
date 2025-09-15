@@ -76,33 +76,42 @@ inline SplatData cuda_to_splat_data(CudaSplatData&& cuda_data) {
     );
 }
 
-// Convert CudaPointCloud to PointCloud
+// Convert CudaPointCloud to PointCloud (raw CUDA memory version)
 inline PointCloud cuda_to_point_cloud(const CudaPointCloud& cuda_pc) {
     if (cuda_pc.num_points == 0) {
         return PointCloud();
     }
 
-    // Download from CUDA to host
-    std::vector<float> host_positions(cuda_pc.num_points * 3);
-    std::vector<uint8_t> host_colors(cuda_pc.num_points * 3);
+    // Create PointCloud with raw CUDA memory
+    PointCloud pc;
+    pc.num_points = cuda_pc.num_points;
 
-    cuda_pc.positions.download(host_positions.data(), cuda_pc.num_points * 3);
-    cuda_pc.colors.download(host_colors.data(), cuda_pc.num_points * 3);
+    // Allocate CUDA memory for positions and colors
+    size_t pos_bytes = cuda_pc.num_points * 3 * sizeof(float);
+    size_t col_bytes = cuda_pc.num_points * 3 * sizeof(float);
 
-    // Create torch tensors
-    torch::Tensor positions = torch::from_blob(
-        host_positions.data(),
-        {static_cast<int64_t>(cuda_pc.num_points), 3},
-        torch::kFloat32
-    ).clone();
+    cudaMalloc(&pc.means_cuda, pos_bytes);
+    cudaMalloc(&pc.colors_cuda, col_bytes);
 
-    torch::Tensor colors = torch::from_blob(
-        host_colors.data(),
-        {static_cast<int64_t>(cuda_pc.num_points), 3},
-        torch::kUInt8
-    ).clone();
+    // Copy positions from CUDA buffer
+    cudaMemcpy(pc.means_cuda, cuda_pc.positions.data, pos_bytes, cudaMemcpyDeviceToDevice);
 
-    return PointCloud(positions, colors);
+    // Convert uint8 colors to float and copy
+    // First download colors to host, convert, then upload
+    std::vector<uint8_t> host_colors_u8(cuda_pc.num_points * 3);
+    std::vector<float> host_colors_f32(cuda_pc.num_points * 3);
+
+    cuda_pc.colors.download(host_colors_u8.data(), cuda_pc.num_points * 3);
+
+    // Convert from uint8 [0,255] to float [0,1]
+    for (size_t i = 0; i < host_colors_u8.size(); ++i) {
+        host_colors_f32[i] = host_colors_u8[i] / 255.0f;
+    }
+
+    // Upload converted colors to CUDA
+    cudaMemcpy(pc.colors_cuda, host_colors_f32.data(), col_bytes, cudaMemcpyHostToDevice);
+
+    return pc;
 }
 
 // Convert CudaCameraData to Camera
