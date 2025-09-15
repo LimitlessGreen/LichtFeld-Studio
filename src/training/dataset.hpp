@@ -5,28 +5,204 @@
 #pragma once
 
 #include "core/camera.hpp"
+#include "core/image_io.hpp"
 #include "core/logger.hpp"
 #include "core/parameters.hpp"
 #include "loader/loader.hpp"
+#include <cuda_runtime.h>
 #include <expected>
 #include <format>
 #include <memory>
 #include <random>
-#include <torch/torch.h>
 #include <vector>
 #include <queue>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <optional>
 #include <future>
 
 namespace gs::training {
+
+    // Simple CUDA image buffer - no torch dependency
+    class CUDAImageBuffer {
+    private:
+        float* data_ = nullptr;
+        size_t width_ = 0;
+        size_t height_ = 0;
+        size_t channels_ = 3;
+        bool allocated_ = false;
+
+    public:
+        CUDAImageBuffer() = default;
+
+        ~CUDAImageBuffer() {
+            if (data_) {
+                cudaFree(data_);
+            }
+        }
+
+        // Move only
+        CUDAImageBuffer(const CUDAImageBuffer&) = delete;
+        CUDAImageBuffer& operator=(const CUDAImageBuffer&) = delete;
+
+        CUDAImageBuffer(CUDAImageBuffer&& other) noexcept
+            : data_(other.data_), width_(other.width_),
+              height_(other.height_), channels_(other.channels_),
+              allocated_(other.allocated_) {
+            other.data_ = nullptr;
+            other.allocated_ = false;
+        }
+
+        CUDAImageBuffer& operator=(CUDAImageBuffer&& other) noexcept {
+            if (this != &other) {
+                if (data_) cudaFree(data_);
+                data_ = other.data_;
+                width_ = other.width_;
+                height_ = other.height_;
+                channels_ = other.channels_;
+                allocated_ = other.allocated_;
+                other.data_ = nullptr;
+                other.allocated_ = false;
+            }
+            return *this;
+        }
+
+        // Allocate or reallocate if size changes
+        void ensure_size(size_t w, size_t h, size_t c = 3) {
+            size_t required_size = w * h * c;
+            size_t current_size = width_ * height_ * channels_;
+
+            if (!allocated_ || required_size != current_size) {
+                if (data_) {
+                    cudaFree(data_);
+                }
+
+                cudaMalloc(&data_, required_size * sizeof(float));
+                width_ = w;
+                height_ = h;
+                channels_ = c;
+                allocated_ = true;
+            }
+        }
+
+        // Load image from file directly to this buffer
+        void load_from_file(const std::filesystem::path& path, int resize_factor) {
+            // Load image using existing image_io
+            unsigned char* cpu_data;
+            int w, h, c;
+            std::tie(cpu_data, w, h, c) = load_image(path, resize_factor);
+
+            // Ensure buffer is right size
+            ensure_size(w, h, c);
+
+            // Convert to float and upload to GPU in one step
+            // Create temporary float buffer on CPU
+            std::vector<float> float_buffer(w * h * c);
+
+            // Convert uint8 to float in CHW format (channels first)
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    for (int ch = 0; ch < c; ++ch) {
+                        size_t src_idx = (y * w + x) * c + ch;
+                        size_t dst_idx = ch * h * w + y * w + x;
+                        float_buffer[dst_idx] = cpu_data[src_idx] / 255.0f;
+                    }
+                }
+            }
+
+            // Copy to GPU
+            cudaMemcpy(data_, float_buffer.data(),
+                      float_buffer.size() * sizeof(float),
+                      cudaMemcpyHostToDevice);
+
+            // Free CPU image
+            free_image(cpu_data);
+        }
+
+        float* data() { return data_; }
+        const float* data() const { return data_; }
+        size_t width() const { return width_; }
+        size_t height() const { return height_; }
+        size_t channels() const { return channels_; }
+    };
+
+    // Image buffer pool for reusing memory
+    class ImageBufferPool {
+    private:
+        std::vector<std::unique_ptr<CUDAImageBuffer>> buffers_;
+        std::queue<CUDAImageBuffer*> available_;
+        mutable std::mutex mutex_;
+        size_t total_buffers_ = 0;
+
+    public:
+        explicit ImageBufferPool(size_t initial_size = 8) {
+            for (size_t i = 0; i < initial_size; ++i) {
+                auto buffer = std::make_unique<CUDAImageBuffer>();
+                available_.push(buffer.get());
+                buffers_.push_back(std::move(buffer));
+            }
+            total_buffers_ = initial_size;
+        }
+
+        CUDAImageBuffer* acquire() {
+            std::lock_guard<std::mutex> lock(mutex_);
+
+            if (available_.empty()) {
+                // Create new buffer if pool is exhausted
+                auto buffer = std::make_unique<CUDAImageBuffer>();
+                CUDAImageBuffer* ptr = buffer.get();
+                buffers_.push_back(std::move(buffer));
+                total_buffers_++;
+                LOG_DEBUG("ImageBufferPool expanded to {} buffers", total_buffers_);
+                return ptr;
+            }
+
+            CUDAImageBuffer* buffer = available_.front();
+            available_.pop();
+            return buffer;
+        }
+
+        void release(CUDAImageBuffer* buffer) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            available_.push(buffer);
+        }
+
+        size_t size() const {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return total_buffers_;
+        }
+
+        size_t available_count() const {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return available_.size();
+        }
+    };
+
+    // Wrapper for camera with raw image data
     struct CameraWithImage {
         Camera* camera;
-        torch::Tensor image;
+        CUDAImageBuffer* image_buffer;  // Borrowed from pool
 
-        // Add raw pointer accessors for fast access
+        // For compatibility - return raw pointer
+        const float* image_data() const {
+            return image_buffer ? image_buffer->data() : nullptr;
+        }
+
+        size_t image_width() const {
+            return image_buffer ? image_buffer->width() : 0;
+        }
+
+        size_t image_height() const {
+            return image_buffer ? image_buffer->height() : 0;
+        }
+
+        size_t image_channels() const {
+            return image_buffer ? image_buffer->channels() : 3;
+        }
+
+        // Raw pointer accessors for fast access
         const float* world_view_transform_ptr() const {
             return camera->world_view_transform_cuda_ptr();
         }
@@ -53,7 +229,9 @@ namespace gs::training {
                       Split split = Split::ALL)
             : _cameras(std::move(cameras)),
               _datasetConfig(params),
-              _split(split) {
+              _split(split),
+              _buffer_pool(std::make_shared<ImageBufferPool>(16)) {
+
             // Create indices based on split
             _indices.clear();
             for (size_t i = 0; i < _cameras.size(); ++i) {
@@ -76,6 +254,11 @@ namespace gs::training {
         CameraDataset& operator=(CameraDataset&&) noexcept = default;
         CameraDataset& operator=(const CameraDataset&) = default;
 
+        // Share buffer pool between datasets
+        void share_buffer_pool(std::shared_ptr<ImageBufferPool> pool) {
+            _buffer_pool = pool;
+        }
+
         CameraWithImage get(size_t index) {
             if (index >= _indices.size()) {
                 throw std::out_of_range("Dataset index out of range");
@@ -84,11 +267,26 @@ namespace gs::training {
             size_t camera_idx = _indices[index];
             auto& cam = _cameras[camera_idx];
 
-            // Load image - returns a torch tensor but Camera internally doesn't use torch
-            torch::Tensor image = cam->load_and_get_image(_datasetConfig.resize_factor);
+            // Get buffer from pool
+            CUDAImageBuffer* buffer = _buffer_pool->acquire();
 
-            // Return camera pointer and image
-            return {cam.get(), std::move(image)};
+            // Load image directly into buffer
+            buffer->load_from_file(cam->image_path(), _datasetConfig.resize_factor);
+
+            // Update camera's image dimensions if needed
+            if (cam->image_width() != static_cast<int>(buffer->width()) ||
+                cam->image_height() != static_cast<int>(buffer->height())) {
+                cam->load_image_size(_datasetConfig.resize_factor);
+            }
+
+            return {cam.get(), buffer};
+        }
+
+        // Return buffer to pool after use
+        void release_buffer(CUDAImageBuffer* buffer) {
+            if (buffer && _buffer_pool) {
+                _buffer_pool->release(buffer);
+            }
         }
 
         size_t size() const {
@@ -129,11 +327,16 @@ namespace gs::training {
             _datasetConfig.resize_factor = resize_factor;
         }
 
+        std::shared_ptr<ImageBufferPool> get_buffer_pool() const {
+            return _buffer_pool;
+        }
+
     private:
         std::vector<std::shared_ptr<Camera>> _cameras;
         gs::param::DatasetConfig _datasetConfig;
         Split _split;
         std::vector<size_t> _indices;
+        std::shared_ptr<ImageBufferPool> _buffer_pool;
     };
 
     // Regular random sampler (non-infinite)
@@ -277,8 +480,47 @@ namespace gs::training {
     // Simple batch structure
     struct CameraBatch {
         std::vector<CameraWithImage> data;
+        std::shared_ptr<ImageBufferPool> pool;  // Keep reference to pool
 
-        // For compatibility with existing code that expects [0].data
+        CameraBatch() = default;
+
+        ~CameraBatch() {
+            // Return all buffers to pool when batch is destroyed
+            if (pool) {
+                for (auto& item : data) {
+                    if (item.image_buffer) {
+                        pool->release(item.image_buffer);
+                    }
+                }
+            }
+        }
+
+        // Move only
+        CameraBatch(const CameraBatch&) = delete;
+        CameraBatch& operator=(const CameraBatch&) = delete;
+
+        CameraBatch(CameraBatch&& other) noexcept
+            : data(std::move(other.data)), pool(std::move(other.pool)) {
+            other.data.clear();
+        }
+
+        CameraBatch& operator=(CameraBatch&& other) noexcept {
+            if (this != &other) {
+                // Return current buffers first
+                if (pool) {
+                    for (auto& item : data) {
+                        if (item.image_buffer) {
+                            pool->release(item.image_buffer);
+                        }
+                    }
+                }
+                data = std::move(other.data);
+                pool = std::move(other.pool);
+                other.data.clear();
+            }
+            return *this;
+        }
+
         CameraWithImage& operator[](size_t idx) {
             if (idx >= data.size()) {
                 throw std::out_of_range("Batch index out of range");
@@ -316,7 +558,7 @@ namespace gs::training {
             }
 
             CameraBatch operator*() {
-                return current_batch_;
+                return std::move(current_batch_);
             }
 
             Iterator& operator++() {
@@ -336,6 +578,8 @@ namespace gs::training {
                     return;
                 }
 
+                current_batch_ = CameraBatch();
+                current_batch_.pool = loader_->dataset_->get_buffer_pool();
                 current_batch_.data.clear();
                 for (size_t idx : *indices) {
                     current_batch_.data.push_back(loader_->dataset_->get(idx));
@@ -408,7 +652,7 @@ namespace gs::training {
             }
 
             CameraBatch operator*() {
-                return current_batch_;
+                return std::move(current_batch_);
             }
 
             Iterator& operator++() {
@@ -429,6 +673,8 @@ namespace gs::training {
                 } else {
                     // Single-threaded fallback
                     size_t idx = loader_->sampler_.next_single();
+                    current_batch_ = CameraBatch();
+                    current_batch_.pool = loader_->dataset_->get_buffer_pool();
                     current_batch_.data.clear();
                     current_batch_.data.push_back(loader_->dataset_->get(idx));
                 }
@@ -472,10 +718,8 @@ namespace gs::training {
 
                 // Load data (this happens outside the lock)
                 CameraBatch batch;
+                batch.pool = dataset_->get_buffer_pool();
                 batch.data.push_back(dataset_->get(idx));
-
-                // Move image to GPU immediately to avoid keeping CPU copy
-                batch.data[0].image = batch.data[0].image.to(torch::kCUDA, /*non_blocking=*/true);
 
                 // Add to queue
                 {

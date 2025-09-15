@@ -387,7 +387,8 @@ namespace gs::training {
         return create_dataloader_from_dataset(dataset, workers);
     }
 
-    EvalMetrics MetricsEvaluator::evaluate(const int iteration,
+    // Fixed evaluate function in metrics.cpp
+EvalMetrics MetricsEvaluator::evaluate(const int iteration,
                                        const SplatData& splatData,
                                        std::shared_ptr<CameraDataset> val_dataset,
                                        torch::Tensor& background) {
@@ -429,12 +430,17 @@ namespace gs::training {
         // Access the camera and image directly from the batch
         auto& camera_with_image = batch[0];  // batch[0] returns CameraWithImage&
         Camera* cam = camera_with_image.camera;
-        torch::Tensor gt_image = std::move(camera_with_image.image).to(torch::kCUDA);
+
+        // Get raw image data and dimensions
+        const float* gt_image_ptr = camera_with_image.image_data();
+        const size_t img_width = camera_with_image.image_width();
+        const size_t img_height = camera_with_image.image_height();
+        const size_t img_channels = camera_with_image.image_channels();
 
         // Initialize eval memory for this camera
-        const int width = cam->image_width();
-        const int height = cam->image_height();
-        eval_memory.ensure_size(width, height, 3, 1);
+        const int width = img_width;
+        const int height = img_height;
+        eval_memory.ensure_size(width, height, img_channels, 1);
 
         // const_cast is not ideal but necessary for now
         auto& splatData_mutable = const_cast<SplatData&>(splatData);
@@ -447,10 +453,21 @@ namespace gs::training {
 
         // Only compute metrics if we have RGB output
         if (has_rgb()) {
-            // Create tensor wrappers for metrics computation
+            // Create tensor wrappers for metrics computation (only for metrics, not in hot path)
             torch::Tensor rendered_image = torch::from_blob(
                 r_output.image,
-                {r_output.channels, r_output.height, r_output.width},
+                {static_cast<long>(r_output.channels),
+                 static_cast<long>(r_output.height),
+                 static_cast<long>(r_output.width)},
+                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
+            );
+
+            // Create tensor wrapper for ground truth (only for metrics)
+            torch::Tensor gt_image = torch::from_blob(
+                const_cast<float*>(gt_image_ptr),  // const_cast needed for from_blob
+                {static_cast<long>(img_channels),
+                 static_cast<long>(img_height),
+                 static_cast<long>(img_width)},
                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
             );
 
@@ -490,6 +507,8 @@ namespace gs::training {
         }
 
         image_idx++;
+
+        // batch destructor automatically returns buffer to pool here
     }
 
     // Wait for all images to be saved before computing final timing

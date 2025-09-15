@@ -114,11 +114,14 @@ namespace gs::training {
         // Returns raw pointer to background color (3 floats)
         float* background_for_step_raw(int iter);
 
-        // Protected method for processing a single training step
+        // Updated method signature for processing a single training step
         std::expected<StepResult, std::string> train_step(
             int iter,
             Camera* cam,
-            torch::Tensor gt_image,
+            const float* gt_image_ptr,  // Raw pointer instead of tensor
+            size_t img_width,
+            size_t img_height,
+            size_t img_channels,
             RenderMode render_mode,
             std::stop_token stop_token = {});
 
