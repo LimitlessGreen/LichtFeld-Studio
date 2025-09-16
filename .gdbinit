@@ -54,6 +54,38 @@ Print tensor with first 100 values (verbose)
 Usage: ptv tensor_variable
 end
 
+define tv
+    tensor-view $arg0 10 10
+end
+document tv
+Visualize 2D tensor (10x10 window)
+Usage: tv tensor_variable
+end
+
+define tvl
+    tensor-view $arg0 20 20
+end
+document tvl
+Visualize 2D tensor (20x20 window)
+Usage: tvl tensor_variable
+end
+
+define td
+    tensor-diff $arg0 $arg1
+end
+document td
+Compare two tensors
+Usage: td tensor1 tensor2
+end
+
+define tb
+    tensor-broadcast $arg0 $arg1
+end
+document tb
+Check broadcast compatibility
+Usage: tb tensor1 tensor2
+end
+
 # Breakpoint helpers
 define tensor_break_on_nan
     break $arg0
@@ -71,7 +103,7 @@ def check_tensor_for_nan():
             # Check if tensor contains NaN
             # This is simplified - would need full implementation
             print(f"Checking tensor {var.name} for NaN...")
-            
+
 check_tensor_for_nan()
         end
         continue
@@ -86,10 +118,19 @@ end
 echo \n
 echo ===== LichtFeld Studio GDB Configuration Loaded =====\n
 echo Available tensor commands:\n
-echo   pt <tensor>       - Print tensor (20 values)\n
-echo   ptv <tensor>      - Print tensor verbose (100 values)\n
-echo   pts <tensor>      - Print tensor statistics\n
-echo   print-tensor      - Full tensor print command\n
-echo   tensor-stats      - Full statistics command\n
+echo   pt <tensor>             - Print tensor (20 values)\n
+echo   ptv <tensor>            - Print tensor verbose (100 values)\n
+echo   pts <tensor>            - Print tensor statistics\n
+echo   tv <tensor>             - Visualize 2D tensor (10x10)\n
+echo   tvl <tensor>            - Visualize 2D tensor (20x20)\n
+echo   td <t1> <t2>            - Compare two tensors\n
+echo   tb <t1> <t2>            - Check broadcast compatibility\n
+echo \n
+echo Full commands:\n
+echo   print-tensor            - Full tensor print command\n
+echo   tensor-stats            - Full statistics command\n
+echo   tensor-view             - Full visualization command\n
+echo   tensor-diff             - Full comparison command\n
+echo   tensor-broadcast        - Full broadcast check command\n
 echo =====================================================\n
 echo \n
