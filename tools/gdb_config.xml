@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="GdbConfiguration">
+    <option name="startupCommands">
+      <list>
+        <option value="source ${PROJECT_DIR}/.gdbinit" />
+      </list>
+    </option>
+    <option name="prettyPrintersEnabled" value="true" />
+  </component>
+</project>

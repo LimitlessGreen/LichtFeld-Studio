@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # Core module - fundamental data structures and utilities
+
+# C++ sources (can use C++23)
 set(CORE_SOURCES
         application.cpp
         argument_parser.cpp
@@ -11,9 +13,53 @@ set(CORE_SOURCES
         parameters.cpp
         splat_data.cpp
         sogs.cpp
+        tensor.cpp          # Main tensor implementation
+        tensor_ops.cpp      # Math operations
+        tensor_utils.cpp    # Utility functions
         tinyply.cpp
 )
 
+# CUDA sources (limited to C++20)
+set(CORE_CUDA_SOURCES
+        tensor_ops.cu       # CUDA kernels for tensor operations
+)
+
+# Create CUDA library for tensor operations (C++20)
+if(CORE_CUDA_SOURCES)
+    add_library(gs_tensor_kernels STATIC ${CORE_CUDA_SOURCES})
+    
+    set_target_properties(gs_tensor_kernels PROPERTIES
+        CUDA_ARCHITECTURES "${LichtFeld-Studio_CUDA_ARCH}"
+        CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        CUDA_STANDARD 20  # CUDA only supports up to C++20
+        CUDA_STANDARD_REQUIRED ON
+    )
+    
+    target_include_directories(gs_tensor_kernels
+        PUBLIC
+            ${CMAKE_SOURCE_DIR}/include
+            ${CMAKE_BINARY_DIR}/include
+            ${CMAKE_SOURCE_DIR}/src       # For inter-module includes
+        PRIVATE
+            ${CUDAToolkit_INCLUDE_DIRS}
+    )
+    
+    target_link_libraries(gs_tensor_kernels
+        PUBLIC
+            CUDA::cudart
+            CUDA::cublas  # For potential matrix operations
+            spdlog::spdlog
+    )
+    
+    target_compile_options(gs_tensor_kernels PRIVATE
+        $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-O0 -g -G -lineinfo>
+        $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-O3 -use_fast_math --ptxas-options=-v>
+    )
+endif()
+
+# Main core library (C++23)
 add_library(gs_core STATIC ${CORE_SOURCES})
 
 target_include_directories(gs_core
@@ -55,17 +101,20 @@ endif()
 
 target_link_libraries(gs_core
     PUBLIC
+        gs_tensor_kernels       # Link our tensor CUDA kernels
+        gs_training_kernels     # Link existing training kernels (for fill, add_scalar, etc.)
         ${TORCH_LIBRARIES}
         TBB::tbb
         nlohmann_json::nlohmann_json
         glm::glm
         Threads::Threads
-        CUDA::cudart    # For Camera CUDA operations
+        CUDA::cudart            # For Camera CUDA operations
         spdlog::spdlog
-        ${WEBP_LIB}     # WebP for SOG compression
-        ${ARCHIVE_LIB}  # LibArchive for SOG bundle support
+        ${WEBP_LIB}            # WebP for SOG compression
+        ${ARCHIVE_LIB}         # LibArchive for SOG bundle support
+        OpenImageIO::OpenImageIO  # For image I/O
     PRIVATE
-        taywee::args    # Only used in argument_parser.cpp
+        taywee::args           # Only used in argument_parser.cpp
 )
 
 # Platform-specific settings
@@ -78,11 +127,13 @@ if(MSVC)
     target_compile_options(gs_core PRIVATE
         $<$<CONFIG:Debug>:/Od /Z7>
         $<$<CONFIG:Release>:/O2 /DNDEBUG>
+        /std:c++23  # Enable C++23 for MSVC
     )
 else()
     target_compile_options(gs_core PRIVATE
         $<$<CONFIG:Debug>:-O0 -g -fno-omit-frame-pointer -DDEBUG>
         $<$<CONFIG:Release>:-O3 -DNDEBUG -march=native>
+        $<$<COMPILE_LANGUAGE:CXX>:-std=c++23>  # Enable C++23 for GCC/Clang
     )
 endif()
 
@@ -107,7 +158,7 @@ set_target_properties(gs_core PROPERTIES DEBUG_POSTFIX d)
 
 # Set properties
 set_target_properties(gs_core PROPERTIES
-    CXX_STANDARD 23
+    CXX_STANDARD 23            # C++23 for the main library
     CXX_STANDARD_REQUIRED ON
     POSITION_INDEPENDENT_CODE ON
     EXPORT_COMPILE_COMMANDS ON
@@ -133,7 +184,11 @@ function(configure_build_type target)
 endfunction()
 
 configure_build_type(gs_core)
+configure_build_type(gs_tensor_kernels)
 
 message(STATUS "Core module configured with ${CMAKE_BUILD_TYPE} build type")
+message(STATUS "  C++ standard: C++23")
+message(STATUS "  CUDA standard: C++20")
 message(STATUS "  WebP library: ${WEBP_LIB}")
 message(STATUS "  Archive library: ${ARCHIVE_LIB}")
+message(STATUS "  Tensor CUDA kernels: Enabled")
