@@ -2,9 +2,9 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <cuda_runtime.h>
-#include <cub/cub.cuh>
 #include <algorithm>
+#include <cub/cub.cuh>
+#include <cuda_runtime.h>
 
 namespace gs::training {
 
@@ -179,10 +179,11 @@ namespace gs::training {
         int x = blockIdx.x * blockDim.x + threadIdx.x;
         int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-        if (x >= width || y >= height) return;
+        if (x >= width || y >= height)
+            return;
 
         int pixel_idx = y * width + x;
-        float a = alpha[pixel_idx];  // Alpha is in HW format
+        float a = alpha[pixel_idx]; // Alpha is in HW format
         float one_minus_a = 1.0f - a;
 
         // Image is in CHW format, so each channel is contiguous
@@ -200,7 +201,7 @@ namespace gs::training {
     // Transform kernels for SplatData
     __global__ void transform_positions_kernel(
         float* positions,
-        const float* transform_matrix,  // 4x4 matrix in row-major
+        const float* transform_matrix, // 4x4 matrix in row-major
         int n) {
 
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -223,8 +224,8 @@ namespace gs::training {
     }
 
     __global__ void transform_quaternions_kernel(
-        float* quaternions,  // [N, 4] in [w, x, y, z] format
-        const float* rot_quat,  // Single quaternion to multiply with
+        float* quaternions,    // [N, 4] in [w, x, y, z] format
+        const float* rot_quat, // Single quaternion to multiply with
         int n) {
 
         int idx = blockIdx.x * blockDim.x + threadIdx.x;

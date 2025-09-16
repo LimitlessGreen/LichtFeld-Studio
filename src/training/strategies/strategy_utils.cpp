@@ -4,8 +4,8 @@
 
 #include "strategy_utils.hpp"
 #include "optimizers/fused_adam.hpp"
-#include <cuda_runtime.h>
 #include <cstring>
+#include <cuda_runtime.h>
 
 namespace gs::training {
     void initialize_gaussians(gs::SplatData& splat_data) {
@@ -17,7 +17,7 @@ namespace gs::training {
         if (!splat_data._densification_info.defined() || splat_data._densification_info.numel() == 0) {
             const auto dev = torch::kCUDA;
             splat_data._densification_info = torch::zeros({2, splat_data.size()},
-                                                         torch::TensorOptions().dtype(torch::kFloat32).device(dev));
+                                                          torch::TensorOptions().dtype(torch::kFloat32).device(dev));
         }
     }
 
@@ -36,13 +36,12 @@ namespace gs::training {
                 .data_ptr = data_ptr,
                 .grad_ptr = grad_ptr,
                 .num_elements = num_elements,
-                .param_id = temp_adam.get_next_param_id()
-            };
+                .param_id = temp_adam.get_next_param_id()};
         };
 
         // Create groups with raw pointers from SplatData
         auto add_param_group = [&groups, &create_raw_param](
-            float* data_ptr, float* grad_ptr, size_t num_elements, double lr) {
+                                   float* data_ptr, float* grad_ptr, size_t num_elements, double lr) {
             FusedAdam::Options options;
             options.lr = lr;
             options.eps = 1e-15;
@@ -58,43 +57,37 @@ namespace gs::training {
             splat_data.means_cuda_ptr(),
             splat_data.means_grad_cuda_ptr(),
             splat_data.means().numel(),
-            params.means_lr * splat_data.get_scene_scale()
-        );
+            params.means_lr * splat_data.get_scene_scale());
 
         add_param_group(
             splat_data.sh0_cuda_ptr(),
             splat_data.sh0_grad_cuda_ptr(),
             splat_data.sh0().numel(),
-            params.shs_lr
-        );
+            params.shs_lr);
 
         add_param_group(
             splat_data.shN_cuda_ptr(),
             splat_data.shN_grad_cuda_ptr(),
             splat_data.shN().numel(),
-            params.shs_lr / 20.f
-        );
+            params.shs_lr / 20.f);
 
         add_param_group(
             splat_data.scaling_raw_cuda_ptr(),
             splat_data.scaling_grad_cuda_ptr(),
             splat_data.scaling_raw().numel(),
-            params.scaling_lr
-        );
+            params.scaling_lr);
 
         add_param_group(
             splat_data.rotation_raw_cuda_ptr(),
             splat_data.rotation_grad_cuda_ptr(),
             splat_data.rotation_raw().numel(),
-            params.rotation_lr
-        );
+            params.rotation_lr);
 
         add_param_group(
             splat_data.opacity_raw_cuda_ptr(),
             splat_data.opacity_grad_cuda_ptr(),
             splat_data.opacity_raw().numel(),
-            params.opacity_lr
-        );
+            params.opacity_lr);
 
         FusedAdam::Options global_options;
         global_options.lr = 0.f;
@@ -151,39 +144,39 @@ namespace gs::training {
                 if (i == 0) {
                     // Update means pointers
                     cudaMemcpy(splat_data.means_cuda_ptr(),
-                              params[i]->data_ptr<float>(),
-                              params[i]->numel() * sizeof(float),
-                              cudaMemcpyDeviceToDevice);
+                               params[i]->data_ptr<float>(),
+                               params[i]->numel() * sizeof(float),
+                               cudaMemcpyDeviceToDevice);
                 } else if (i == 1) {
                     // Update sh0 pointers
                     cudaMemcpy(splat_data.sh0_cuda_ptr(),
-                              params[i]->data_ptr<float>(),
-                              params[i]->numel() * sizeof(float),
-                              cudaMemcpyDeviceToDevice);
+                               params[i]->data_ptr<float>(),
+                               params[i]->numel() * sizeof(float),
+                               cudaMemcpyDeviceToDevice);
                 } else if (i == 2) {
                     // Update shN pointers
                     cudaMemcpy(splat_data.shN_cuda_ptr(),
-                              params[i]->data_ptr<float>(),
-                              params[i]->numel() * sizeof(float),
-                              cudaMemcpyDeviceToDevice);
+                               params[i]->data_ptr<float>(),
+                               params[i]->numel() * sizeof(float),
+                               cudaMemcpyDeviceToDevice);
                 } else if (i == 3) {
                     // Update scaling pointers
                     cudaMemcpy(splat_data.scaling_raw_cuda_ptr(),
-                              params[i]->data_ptr<float>(),
-                              params[i]->numel() * sizeof(float),
-                              cudaMemcpyDeviceToDevice);
+                               params[i]->data_ptr<float>(),
+                               params[i]->numel() * sizeof(float),
+                               cudaMemcpyDeviceToDevice);
                 } else if (i == 4) {
                     // Update rotation pointers
                     cudaMemcpy(splat_data.rotation_raw_cuda_ptr(),
-                              params[i]->data_ptr<float>(),
-                              params[i]->numel() * sizeof(float),
-                              cudaMemcpyDeviceToDevice);
+                               params[i]->data_ptr<float>(),
+                               params[i]->numel() * sizeof(float),
+                               cudaMemcpyDeviceToDevice);
                 } else if (i == 5) {
                     // Update opacity pointers
                     cudaMemcpy(splat_data.opacity_raw_cuda_ptr(),
-                              params[i]->data_ptr<float>(),
-                              params[i]->numel() * sizeof(float),
-                              cudaMemcpyDeviceToDevice);
+                               params[i]->data_ptr<float>(),
+                               params[i]->numel() * sizeof(float),
+                               cudaMemcpyDeviceToDevice);
                 }
             }
         }
@@ -204,13 +197,12 @@ namespace gs::training {
                 .data_ptr = data_ptr,
                 .grad_ptr = grad_ptr,
                 .num_elements = num_elements,
-                .param_id = param_id++
-            };
+                .param_id = param_id++};
         };
 
         // Recreate groups with new raw pointers - these should now be valid
         auto add_param_group = [&groups, &create_raw_param](
-            float* data_ptr, float* grad_ptr, size_t num_elements, double lr) {
+                                   float* data_ptr, float* grad_ptr, size_t num_elements, double lr) {
             FusedAdam::Options options;
             options.lr = lr;
             options.eps = 1e-15;
@@ -226,43 +218,37 @@ namespace gs::training {
             splat_data.means_cuda_ptr(),
             splat_data.means_grad_cuda_ptr(),
             splat_data.means().numel(),
-            old_lrs[0]
-        );
+            old_lrs[0]);
 
         add_param_group(
             splat_data.sh0_cuda_ptr(),
             splat_data.sh0_grad_cuda_ptr(),
             splat_data.sh0().numel(),
-            old_lrs[1]
-        );
+            old_lrs[1]);
 
         add_param_group(
             splat_data.shN_cuda_ptr(),
             splat_data.shN_grad_cuda_ptr(),
             splat_data.shN().numel(),
-            old_lrs[2]
-        );
+            old_lrs[2]);
 
         add_param_group(
             splat_data.scaling_raw_cuda_ptr(),
             splat_data.scaling_grad_cuda_ptr(),
             splat_data.scaling_raw().numel(),
-            old_lrs[3]
-        );
+            old_lrs[3]);
 
         add_param_group(
             splat_data.rotation_raw_cuda_ptr(),
             splat_data.rotation_grad_cuda_ptr(),
             splat_data.rotation_raw().numel(),
-            old_lrs[4]
-        );
+            old_lrs[4]);
 
         add_param_group(
             splat_data.opacity_raw_cuda_ptr(),
             splat_data.opacity_grad_cuda_ptr(),
             splat_data.opacity_raw().numel(),
-            old_lrs[5]
-        );
+            old_lrs[5]);
 
         FusedAdam::Options global_options;
         global_options.lr = 0.f;

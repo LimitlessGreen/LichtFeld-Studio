@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <format>
 #include <fstream>
@@ -15,7 +16,6 @@
 #include <span>
 #include <string_view>
 #include <vector>
-#include <cmath>
 
 // TBB includes
 #include <tbb/parallel_for.h>
@@ -339,10 +339,10 @@ namespace gs::loader {
             __cpuid(cpuInfo, 7);
             has_avx2 = (cpuInfo[1] & (1 << 5)) != 0;
 #elif defined(__GNUC__) || defined(__clang__)
-            __builtin_cpu_init();
-            has_avx2 = __builtin_cpu_supports("avx2");
+                __builtin_cpu_init();
+                has_avx2 = __builtin_cpu_supports("avx2");
 #else
-            has_avx2 = false; // Fallback for other compilers
+                has_avx2 = false; // Fallback for other compilers
 #endif
         });
 
@@ -492,7 +492,7 @@ namespace gs::loader {
     }
 
     // Main function - torch-free version
-    [[nodiscard]] std::expected<internal::CudaSplatData, std::string> 
+    [[nodiscard]] std::expected<internal::CudaSplatData, std::string>
     load_ply_cuda(const std::filesystem::path& filepath) {
         try {
             LOG_TIMER("PLY File Loading (CUDA)");
@@ -544,7 +544,7 @@ namespace gs::loader {
                 result.sh0_dim2 = ply_constants::COLOR_CHANNELS;
                 host_sh0.resize(layout.vertex_count * B0 * ply_constants::COLOR_CHANNELS);
                 extract_sh_coefficients_to_host(vertex_data, layout, layout.dc_start_offset,
-                                               layout.dc_count, ply_constants::COLOR_CHANNELS, host_sh0.data());
+                                                layout.dc_count, ply_constants::COLOR_CHANNELS, host_sh0.data());
             } else {
                 result.sh0_dim1 = 1;
                 result.sh0_dim2 = ply_constants::COLOR_CHANNELS;
@@ -557,7 +557,7 @@ namespace gs::loader {
                 result.shN_dim2 = ply_constants::COLOR_CHANNELS;
                 host_shN.resize(layout.vertex_count * Bn * ply_constants::COLOR_CHANNELS);
                 extract_sh_coefficients_to_host(vertex_data, layout, layout.rest_start_offset,
-                                               layout.rest_count, ply_constants::COLOR_CHANNELS, host_shN.data());
+                                                layout.rest_count, ply_constants::COLOR_CHANNELS, host_shN.data());
             } else {
                 result.shN_dim1 = ply_constants::SH_DEGREE_3_REST_COEFFS;
                 result.shN_dim2 = ply_constants::COLOR_CHANNELS;
@@ -620,23 +620,23 @@ namespace gs::loader {
             }
 
             LOG_DEBUG("Transferring data to CUDA");
-            
+
             // Upload all data to CUDA
             result.means = internal::CudaBuffer<float>(layout.vertex_count * 3);
             result.means.upload(host_means.data(), layout.vertex_count * 3);
-            
+
             result.sh0 = internal::CudaBuffer<float>(host_sh0.size());
             result.sh0.upload(host_sh0.data(), host_sh0.size());
-            
+
             result.shN = internal::CudaBuffer<float>(host_shN.size());
             result.shN.upload(host_shN.data(), host_shN.size());
-            
+
             result.scales = internal::CudaBuffer<float>(layout.vertex_count * 3);
             result.scales.upload(host_scaling.data(), layout.vertex_count * 3);
-            
+
             result.rotations = internal::CudaBuffer<float>(layout.vertex_count * 4);
             result.rotations.upload(host_rotation.data(), layout.vertex_count * 4);
-            
+
             result.opacity = internal::CudaBuffer<float>(layout.vertex_count);
             result.opacity.upload(host_opacity.data(), layout.vertex_count);
 

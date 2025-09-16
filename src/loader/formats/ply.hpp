@@ -13,7 +13,7 @@
 namespace gs::loader {
 
     // Internal torch-free version
-    std::expected<internal::CudaSplatData, std::string> 
+    std::expected<internal::CudaSplatData, std::string>
     load_ply_cuda(const std::filesystem::path& filepath);
 
 } // namespace gs::loader

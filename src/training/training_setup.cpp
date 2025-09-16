@@ -95,8 +95,7 @@ namespace gs::training {
                         point_cloud_to_use = PointCloud(
                             pos_cpu.data_ptr<float>(),
                             col_cpu.data_ptr<float>(),
-                            numInitGaussian
-                        );
+                            numInitGaussian);
                     }
                     splat_result = SplatData::init_model_from_pointcloud(
                         params,

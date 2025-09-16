@@ -5,9 +5,9 @@
 #include "core/camera.hpp"
 #include "core/image_io.hpp"
 #include <c10/cuda/CUDAGuard.h>
-#include <glm/gtc/matrix_inverse.hpp>
 #include <cstring>
 #include <cuda_runtime.h>
+#include <glm/gtc/matrix_inverse.hpp>
 
 namespace gs {
 
@@ -73,9 +73,9 @@ namespace gs {
 
             // Copy data to GPU
             cudaMemcpy(_world_view_transform_cuda, _world_view_transform_cpu.data(),
-                      16 * sizeof(float), cudaMemcpyHostToDevice);
+                       16 * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(_cam_position_cuda, _cam_position_cpu.data(),
-                      3 * sizeof(float), cudaMemcpyHostToDevice);
+                       3 * sizeof(float), cudaMemcpyHostToDevice);
 
             _cuda_allocated = true;
         }
@@ -134,14 +134,14 @@ namespace gs {
             auto rad_cpu = radial_distortion.to(torch::kCPU).contiguous();
             _radial_distortion_cpu.resize(rad_cpu.numel());
             std::memcpy(_radial_distortion_cpu.data(), rad_cpu.data_ptr<float>(),
-                       rad_cpu.numel() * sizeof(float));
+                        rad_cpu.numel() * sizeof(float));
         }
 
         if (tangential_distortion.numel() > 0) {
             auto tan_cpu = tangential_distortion.to(torch::kCPU).contiguous();
             _tangential_distortion_cpu.resize(tan_cpu.numel());
             std::memcpy(_tangential_distortion_cpu.data(), tan_cpu.data_ptr<float>(),
-                       tan_cpu.numel() * sizeof(float));
+                        tan_cpu.numel() * sizeof(float));
         }
 
         // Compute world view transform
@@ -266,8 +266,7 @@ namespace gs {
         return torch::from_blob(
             const_cast<float*>(_world_view_transform_cuda),
             {1, 4, 4},
-            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
-        );
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     }
 
     torch::Tensor Camera::cam_position() const {
@@ -275,24 +274,25 @@ namespace gs {
         return torch::from_blob(
             const_cast<float*>(_cam_position_cuda),
             {3},
-            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
-        );
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     }
 
     torch::Tensor Camera::R() const {
         return torch::from_blob(
-            const_cast<float*>(_R_cpu.data()),
-            {3, 3},
-            torch::TensorOptions().dtype(torch::kFloat32)
-        ).clone().to(torch::kCUDA);
+                   const_cast<float*>(_R_cpu.data()),
+                   {3, 3},
+                   torch::TensorOptions().dtype(torch::kFloat32))
+            .clone()
+            .to(torch::kCUDA);
     }
 
     torch::Tensor Camera::T() const {
         return torch::from_blob(
-            const_cast<float*>(_T_cpu.data()),
-            {3},
-            torch::TensorOptions().dtype(torch::kFloat32)
-        ).clone().to(torch::kCUDA);
+                   const_cast<float*>(_T_cpu.data()),
+                   {3},
+                   torch::TensorOptions().dtype(torch::kFloat32))
+            .clone()
+            .to(torch::kCUDA);
     }
 
     torch::Tensor Camera::K() const {
@@ -300,18 +300,19 @@ namespace gs {
         float K_data[9] = {0};
         auto [fx, fy, cx, cy] = get_intrinsics();
 
-        K_data[0] = fx;  // K[0][0]
-        K_data[4] = fy;  // K[1][1]
-        K_data[2] = cx;  // K[0][2]
-        K_data[5] = cy;  // K[1][2]
+        K_data[0] = fx;   // K[0][0]
+        K_data[4] = fy;   // K[1][1]
+        K_data[2] = cx;   // K[0][2]
+        K_data[5] = cy;   // K[1][2]
         K_data[8] = 1.0f; // K[2][2]
 
         // Create tensor and move to CUDA
         return torch::from_blob(
-            K_data,
-            {1, 3, 3},
-            torch::TensorOptions().dtype(torch::kFloat32)
-        ).clone().to(torch::kCUDA);
+                   K_data,
+                   {1, 3, 3},
+                   torch::TensorOptions().dtype(torch::kFloat32))
+            .clone()
+            .to(torch::kCUDA);
     }
 
     torch::Tensor Camera::radial_distortion() const noexcept {
@@ -319,10 +320,10 @@ namespace gs {
             return torch::empty({0}, torch::kFloat32);
         }
         return torch::from_blob(
-            const_cast<float*>(_radial_distortion_cpu.data()),
-            {static_cast<long>(_radial_distortion_cpu.size())},
-            torch::TensorOptions().dtype(torch::kFloat32)
-        ).clone();
+                   const_cast<float*>(_radial_distortion_cpu.data()),
+                   {static_cast<long>(_radial_distortion_cpu.size())},
+                   torch::TensorOptions().dtype(torch::kFloat32))
+            .clone();
     }
 
     torch::Tensor Camera::tangential_distortion() const noexcept {
@@ -330,10 +331,10 @@ namespace gs {
             return torch::empty({0}, torch::kFloat32);
         }
         return torch::from_blob(
-            const_cast<float*>(_tangential_distortion_cpu.data()),
-            {static_cast<long>(_tangential_distortion_cpu.size())},
-            torch::TensorOptions().dtype(torch::kFloat32)
-        ).clone();
+                   const_cast<float*>(_tangential_distortion_cpu.data()),
+                   {static_cast<long>(_tangential_distortion_cpu.size())},
+                   torch::TensorOptions().dtype(torch::kFloat32))
+            .clone();
     }
 
     std::tuple<float, float, float, float> Camera::get_intrinsics() const {
@@ -375,7 +376,8 @@ namespace gs {
 
         image = image.to(torch::kCUDA, /*non_blocking=*/true)
                     .permute({2, 0, 1})
-                    .to(torch::kFloat32) / 255.0f;
+                    .to(torch::kFloat32) /
+                255.0f;
 
         // Free the original data
         free_image(data);

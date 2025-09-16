@@ -9,19 +9,19 @@
 #include "core/logger.hpp"
 #include "core/parameters.hpp"
 #include "loader/loader.hpp"
+#include <atomic>
+#include <condition_variable>
 #include <cuda_runtime.h>
 #include <expected>
 #include <format>
-#include <memory>
-#include <random>
-#include <vector>
-#include <queue>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <atomic>
-#include <optional>
 #include <future>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <queue>
+#include <random>
+#include <thread>
+#include <vector>
 
 namespace gs::training {
 
@@ -48,8 +48,10 @@ namespace gs::training {
         CUDAImageBuffer& operator=(const CUDAImageBuffer&) = delete;
 
         CUDAImageBuffer(CUDAImageBuffer&& other) noexcept
-            : data_(other.data_), width_(other.width_),
-              height_(other.height_), channels_(other.channels_),
+            : data_(other.data_),
+              width_(other.width_),
+              height_(other.height_),
+              channels_(other.channels_),
               allocated_(other.allocated_) {
             other.data_ = nullptr;
             other.allocated_ = false;
@@ -57,7 +59,8 @@ namespace gs::training {
 
         CUDAImageBuffer& operator=(CUDAImageBuffer&& other) noexcept {
             if (this != &other) {
-                if (data_) cudaFree(data_);
+                if (data_)
+                    cudaFree(data_);
                 data_ = other.data_;
                 width_ = other.width_;
                 height_ = other.height_;
@@ -114,8 +117,8 @@ namespace gs::training {
 
             // Copy to GPU
             cudaMemcpy(data_, float_buffer.data(),
-                      float_buffer.size() * sizeof(float),
-                      cudaMemcpyHostToDevice);
+                       float_buffer.size() * sizeof(float),
+                       cudaMemcpyHostToDevice);
 
             // Free CPU image
             free_image(cpu_data);
@@ -183,7 +186,7 @@ namespace gs::training {
     // Wrapper for camera with raw image data
     struct CameraWithImage {
         Camera* camera;
-        CUDAImageBuffer* image_buffer;  // Borrowed from pool
+        CUDAImageBuffer* image_buffer; // Borrowed from pool
 
         // For compatibility - return raw pointer
         const float* image_data() const {
@@ -358,7 +361,7 @@ namespace gs::training {
         // Get next batch of indices (returns nullopt when epoch is done)
         std::optional<std::vector<size_t>> next(size_t batch_size) {
             if (current_position_ >= indices_.size()) {
-                return std::nullopt;  // End of epoch
+                return std::nullopt; // End of epoch
             }
 
             std::vector<size_t> batch;
@@ -480,7 +483,7 @@ namespace gs::training {
     // Simple batch structure
     struct CameraBatch {
         std::vector<CameraWithImage> data;
-        std::shared_ptr<ImageBufferPool> pool;  // Keep reference to pool
+        std::shared_ptr<ImageBufferPool> pool; // Keep reference to pool
 
         CameraBatch() = default;
 
@@ -500,7 +503,8 @@ namespace gs::training {
         CameraBatch& operator=(const CameraBatch&) = delete;
 
         CameraBatch(CameraBatch&& other) noexcept
-            : data(std::move(other.data)), pool(std::move(other.pool)) {
+            : data(std::move(other.data)),
+              pool(std::move(other.pool)) {
             other.data.clear();
         }
 
@@ -541,7 +545,7 @@ namespace gs::training {
     public:
         DataLoader(std::shared_ptr<CameraDataset> dataset,
                    size_t batch_size = 1,
-                   [[maybe_unused]] int num_workers = 0)  // num_workers ignored for evaluation
+                   [[maybe_unused]] int num_workers = 0) // num_workers ignored for evaluation
             : dataset_(dataset),
               batch_size_(batch_size),
               sampler_(dataset->size()) {
@@ -551,7 +555,8 @@ namespace gs::training {
         class Iterator {
         public:
             Iterator(DataLoader* loader, bool is_end = false)
-                : loader_(loader), is_end_(is_end) {
+                : loader_(loader),
+                  is_end_(is_end) {
                 if (!is_end_) {
                     advance();
                 }
@@ -592,7 +597,7 @@ namespace gs::training {
         };
 
         Iterator begin() {
-            sampler_.reset();  // Reset sampler for new epoch
+            sampler_.reset(); // Reset sampler for new epoch
             return Iterator(this, false);
         }
 
@@ -610,8 +615,8 @@ namespace gs::training {
     class InfiniteDataLoader {
     public:
         InfiniteDataLoader(std::shared_ptr<CameraDataset> dataset,
-                          size_t batch_size = 1,
-                          int num_workers = 4)
+                           size_t batch_size = 1,
+                           int num_workers = 4)
             : dataset_(dataset),
               batch_size_(batch_size),
               num_workers_(std::max(0, num_workers)),
@@ -645,7 +650,8 @@ namespace gs::training {
         class Iterator {
         public:
             Iterator(InfiniteDataLoader* loader, bool is_end = false)
-                : loader_(loader), is_end_(is_end) {
+                : loader_(loader),
+                  is_end_(is_end) {
                 if (!is_end_) {
                     advance();
                 }
@@ -711,7 +717,8 @@ namespace gs::training {
                     });
                 }
 
-                if (stop_workers_) break;
+                if (stop_workers_)
+                    break;
 
                 // Get next index
                 size_t idx = sampler_.next_single();
@@ -827,8 +834,7 @@ namespace gs::training {
                         auto dataset = std::make_shared<CameraDataset>(
                             data.cameras->get_cameras(),
                             datasetConfig,
-                            CameraDataset::Split::ALL
-                        );
+                            CameraDataset::Split::ALL);
 
                         return std::make_tuple(dataset, result->scene_center);
                     } else {
@@ -881,8 +887,7 @@ namespace gs::training {
                         auto dataset = std::make_shared<CameraDataset>(
                             data.cameras->get_cameras(),
                             datasetConfig,
-                            CameraDataset::Split::ALL
-                        );
+                            CameraDataset::Split::ALL);
 
                         return std::make_tuple(dataset, result->scene_center);
                     } else {

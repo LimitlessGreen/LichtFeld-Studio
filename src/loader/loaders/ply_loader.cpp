@@ -107,8 +107,7 @@ namespace gs::loader {
             .scene_center = torch::zeros({3}),
             .loader_used = name(),
             .load_time = load_time,
-            .warnings = {}
-        };
+            .warnings = {}};
 
         LOG_INFO("PLY loaded successfully in {}ms", load_time.count());
 

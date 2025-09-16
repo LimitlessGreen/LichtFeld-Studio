@@ -7,15 +7,15 @@
 #include "core/camera.hpp"
 #include "core/splat_data.hpp"
 #include "geometry/bounding_box.hpp"
-#include <memory>
 #include <cstring>
+#include <memory>
 
 namespace gs::training {
     // Raw render output without torch dependency
     struct RenderOutput {
         // Raw pointers to CUDA memory
-        float* image = nullptr;      // [C, H, W] in CUDA memory
-        float* alpha = nullptr;      // [1, H, W] in CUDA memory
+        float* image = nullptr; // [C, H, W] in CUDA memory
+        float* alpha = nullptr; // [1, H, W] in CUDA memory
 
         // Dimensions
         int width = 0;
@@ -28,19 +28,19 @@ namespace gs::training {
         bool has_context = false;
 
         // Helper to get context as the actual type
-        template<typename T>
+        template <typename T>
         T* get_context() {
             static_assert(sizeof(T) <= FORWARD_CONTEXT_SIZE, "Context size mismatch");
             return reinterpret_cast<T*>(forward_context_storage);
         }
 
-        template<typename T>
+        template <typename T>
         const T* get_context() const {
             static_assert(sizeof(T) <= FORWARD_CONTEXT_SIZE, "Context size mismatch");
             return reinterpret_cast<const T*>(forward_context_storage);
         }
 
-        template<typename T>
+        template <typename T>
         void set_context(const T& ctx) {
             static_assert(sizeof(T) <= FORWARD_CONTEXT_SIZE, "Context size mismatch");
             std::memcpy(forward_context_storage, &ctx, sizeof(T));

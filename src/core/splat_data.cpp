@@ -13,6 +13,8 @@
 #include "external/tinyply.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <cuda_runtime.h>
 #include <expected>
 #include <filesystem>
 #include <format>
@@ -25,8 +27,6 @@
 #include <thread>
 #include <torch/torch.h>
 #include <vector>
-#include <cuda_runtime.h>
-#include <cstring>
 
 namespace {
     std::string tensor_sizes_to_string(const c10::ArrayRef<int64_t>& sizes) {
@@ -146,12 +146,18 @@ namespace {
         // Create vector of pointers for tinyply
         std::vector<float*> data_ptrs;
         data_ptrs.push_back(host_means.data());
-        if (pc.normals_cuda) data_ptrs.push_back(host_normals.data());
-        if (pc.sh0_cuda) data_ptrs.push_back(host_sh0.data());
-        if (pc.shN_cuda) data_ptrs.push_back(host_shN.data());
-        if (pc.opacity_cuda) data_ptrs.push_back(host_opacity.data());
-        if (pc.scaling_cuda) data_ptrs.push_back(host_scaling.data());
-        if (pc.rotation_cuda) data_ptrs.push_back(host_rotation.data());
+        if (pc.normals_cuda)
+            data_ptrs.push_back(host_normals.data());
+        if (pc.sh0_cuda)
+            data_ptrs.push_back(host_sh0.data());
+        if (pc.shN_cuda)
+            data_ptrs.push_back(host_shN.data());
+        if (pc.opacity_cuda)
+            data_ptrs.push_back(host_opacity.data());
+        if (pc.scaling_cuda)
+            data_ptrs.push_back(host_scaling.data());
+        if (pc.rotation_cuda)
+            data_ptrs.push_back(host_rotation.data());
 
         auto write_output_ply =
             [](const fs::path& file_path,
@@ -202,7 +208,7 @@ namespace {
             };
 
         write_output_ply(root / ("splat_" + std::to_string(iteration) + ".ply"),
-                        data_ptrs, pc.attribute_names, pc.num_points);
+                         data_ptrs, pc.attribute_names, pc.num_points);
     }
 
     void write_sog_impl(const gs::SplatData& splat_data,
@@ -233,60 +239,60 @@ namespace {
 namespace gs {
 
     void SplatData::allocate_cuda_memory_and_tensors(int64_t num_points,
-                                                 int64_t sh0_dim1, int64_t sh0_dim2,
-                                                 int64_t shN_dim1, int64_t shN_dim2) {
-    _num_points = num_points;
-    _sh0_dims[0] = num_points;
-    _sh0_dims[1] = sh0_dim1;
-    _sh0_dims[2] = sh0_dim2;
-    _shN_dims[0] = num_points;
-    _shN_dims[1] = shN_dim1;
-    _shN_dims[2] = shN_dim2;
+                                                     int64_t sh0_dim1, int64_t sh0_dim2,
+                                                     int64_t shN_dim1, int64_t shN_dim2) {
+        _num_points = num_points;
+        _sh0_dims[0] = num_points;
+        _sh0_dims[1] = sh0_dim1;
+        _sh0_dims[2] = sh0_dim2;
+        _shN_dims[0] = num_points;
+        _shN_dims[1] = shN_dim1;
+        _shN_dims[2] = shN_dim2;
 
-    // Allocate raw CUDA memory
-    size_t means_size = num_points * 3 * sizeof(float);
-    size_t opacity_size = num_points * 1 * sizeof(float);
-    size_t rotation_size = num_points * 4 * sizeof(float);
-    size_t scaling_size = num_points * 3 * sizeof(float);
-    size_t sh0_size = _sh0_dims[0] * _sh0_dims[1] * _sh0_dims[2] * sizeof(float);
-    size_t shN_size = _shN_dims[0] * _shN_dims[1] * _shN_dims[2] * sizeof(float);
+        // Allocate raw CUDA memory
+        size_t means_size = num_points * 3 * sizeof(float);
+        size_t opacity_size = num_points * 1 * sizeof(float);
+        size_t rotation_size = num_points * 4 * sizeof(float);
+        size_t scaling_size = num_points * 3 * sizeof(float);
+        size_t sh0_size = _sh0_dims[0] * _sh0_dims[1] * _sh0_dims[2] * sizeof(float);
+        size_t shN_size = _shN_dims[0] * _shN_dims[1] * _shN_dims[2] * sizeof(float);
 
-    cudaMalloc(&_means_cuda, means_size);
-    cudaMalloc(&_opacity_cuda, opacity_size);
-    cudaMalloc(&_rotation_cuda, rotation_size);
-    cudaMalloc(&_scaling_cuda, scaling_size);
-    cudaMalloc(&_sh0_cuda, sh0_size);
-    cudaMalloc(&_shN_cuda, shN_size);
+        cudaMalloc(&_means_cuda, means_size);
+        cudaMalloc(&_opacity_cuda, opacity_size);
+        cudaMalloc(&_rotation_cuda, rotation_size);
+        cudaMalloc(&_scaling_cuda, scaling_size);
+        cudaMalloc(&_sh0_cuda, sh0_size);
+        cudaMalloc(&_shN_cuda, shN_size);
 
-    // Allocate gradient memory
-    cudaMalloc(&_means_grad_cuda, means_size);
-    cudaMalloc(&_opacity_grad_cuda, opacity_size);
-    cudaMalloc(&_rotation_grad_cuda, rotation_size);
-    cudaMalloc(&_scaling_grad_cuda, scaling_size);
-    cudaMalloc(&_sh0_grad_cuda, sh0_size);
-    cudaMalloc(&_shN_grad_cuda, shN_size);
+        // Allocate gradient memory
+        cudaMalloc(&_means_grad_cuda, means_size);
+        cudaMalloc(&_opacity_grad_cuda, opacity_size);
+        cudaMalloc(&_rotation_grad_cuda, rotation_size);
+        cudaMalloc(&_scaling_grad_cuda, scaling_size);
+        cudaMalloc(&_sh0_grad_cuda, sh0_size);
+        cudaMalloc(&_shN_grad_cuda, shN_size);
 
-    // Initialize gradients to zero
-    cudaMemset(_means_grad_cuda, 0, means_size);
-    cudaMemset(_opacity_grad_cuda, 0, opacity_size);
-    cudaMemset(_rotation_grad_cuda, 0, rotation_size);
-    cudaMemset(_scaling_grad_cuda, 0, scaling_size);
-    cudaMemset(_sh0_grad_cuda, 0, sh0_size);
-    cudaMemset(_shN_grad_cuda, 0, shN_size);
+        // Initialize gradients to zero
+        cudaMemset(_means_grad_cuda, 0, means_size);
+        cudaMemset(_opacity_grad_cuda, 0, opacity_size);
+        cudaMemset(_rotation_grad_cuda, 0, rotation_size);
+        cudaMemset(_scaling_grad_cuda, 0, scaling_size);
+        cudaMemset(_sh0_grad_cuda, 0, sh0_size);
+        cudaMemset(_shN_grad_cuda, 0, shN_size);
 
-    // Create persistent tensor wrappers WITHOUT requires_grad
-    const auto tensor_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+        // Create persistent tensor wrappers WITHOUT requires_grad
+        const auto tensor_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
 
-    // Create data tensors - NO requires_grad!
-    _means_tensor = torch::from_blob(_means_cuda, {num_points, 3}, tensor_opts);
-    _opacity_tensor = torch::from_blob(_opacity_cuda, {num_points, 1}, tensor_opts);
-    _rotation_tensor = torch::from_blob(_rotation_cuda, {num_points, 4}, tensor_opts);
-    _scaling_tensor = torch::from_blob(_scaling_cuda, {num_points, 3}, tensor_opts);
-    _sh0_tensor = torch::from_blob(_sh0_cuda, {_sh0_dims[0], _sh0_dims[1], _sh0_dims[2]}, tensor_opts);
-    _shN_tensor = torch::from_blob(_shN_cuda, {_shN_dims[0], _shN_dims[1], _shN_dims[2]}, tensor_opts);
+        // Create data tensors - NO requires_grad!
+        _means_tensor = torch::from_blob(_means_cuda, {num_points, 3}, tensor_opts);
+        _opacity_tensor = torch::from_blob(_opacity_cuda, {num_points, 1}, tensor_opts);
+        _rotation_tensor = torch::from_blob(_rotation_cuda, {num_points, 4}, tensor_opts);
+        _scaling_tensor = torch::from_blob(_scaling_cuda, {num_points, 3}, tensor_opts);
+        _sh0_tensor = torch::from_blob(_sh0_cuda, {_sh0_dims[0], _sh0_dims[1], _sh0_dims[2]}, tensor_opts);
+        _shN_tensor = torch::from_blob(_shN_cuda, {_shN_dims[0], _shN_dims[1], _shN_dims[2]}, tensor_opts);
 
-    // DON'T set requires_grad(true) - we compute gradients manually!
-}
+        // DON'T set requires_grad(true) - we compute gradients manually!
+    }
 
     void SplatData::ensure_grad_allocated() {
         // Since we allocate gradients in allocate_cuda_memory_and_tensors,
@@ -299,44 +305,56 @@ namespace gs {
         // These are just views into our raw gradient memory
         if (!_means_tensor.grad().defined() && _means_grad_cuda) {
             _means_tensor.mutable_grad() = torch::from_blob(_means_grad_cuda,
-                {_num_points, 3}, tensor_opts);
+                                                            {_num_points, 3}, tensor_opts);
         }
         if (!_opacity_tensor.grad().defined() && _opacity_grad_cuda) {
             _opacity_tensor.mutable_grad() = torch::from_blob(_opacity_grad_cuda,
-                {_num_points, 1}, tensor_opts);
+                                                              {_num_points, 1}, tensor_opts);
         }
         if (!_rotation_tensor.grad().defined() && _rotation_grad_cuda) {
             _rotation_tensor.mutable_grad() = torch::from_blob(_rotation_grad_cuda,
-                {_num_points, 4}, tensor_opts);
+                                                               {_num_points, 4}, tensor_opts);
         }
         if (!_scaling_tensor.grad().defined() && _scaling_grad_cuda) {
             _scaling_tensor.mutable_grad() = torch::from_blob(_scaling_grad_cuda,
-                {_num_points, 3}, tensor_opts);
+                                                              {_num_points, 3}, tensor_opts);
         }
         if (!_sh0_tensor.grad().defined() && _sh0_grad_cuda) {
             _sh0_tensor.mutable_grad() = torch::from_blob(_sh0_grad_cuda,
-                {_sh0_dims[0], _sh0_dims[1], _sh0_dims[2]}, tensor_opts);
+                                                          {_sh0_dims[0], _sh0_dims[1], _sh0_dims[2]}, tensor_opts);
         }
         if (!_shN_tensor.grad().defined() && _shN_grad_cuda) {
             _shN_tensor.mutable_grad() = torch::from_blob(_shN_grad_cuda,
-                {_shN_dims[0], _shN_dims[1], _shN_dims[2]}, tensor_opts);
+                                                          {_shN_dims[0], _shN_dims[1], _shN_dims[2]}, tensor_opts);
         }
     }
 
     void SplatData::free_cuda_memory() {
-        if (_means_cuda) cudaFree(_means_cuda);
-        if (_opacity_cuda) cudaFree(_opacity_cuda);
-        if (_rotation_cuda) cudaFree(_rotation_cuda);
-        if (_scaling_cuda) cudaFree(_scaling_cuda);
-        if (_sh0_cuda) cudaFree(_sh0_cuda);
-        if (_shN_cuda) cudaFree(_shN_cuda);
+        if (_means_cuda)
+            cudaFree(_means_cuda);
+        if (_opacity_cuda)
+            cudaFree(_opacity_cuda);
+        if (_rotation_cuda)
+            cudaFree(_rotation_cuda);
+        if (_scaling_cuda)
+            cudaFree(_scaling_cuda);
+        if (_sh0_cuda)
+            cudaFree(_sh0_cuda);
+        if (_shN_cuda)
+            cudaFree(_shN_cuda);
 
-        if (_means_grad_cuda) cudaFree(_means_grad_cuda);
-        if (_opacity_grad_cuda) cudaFree(_opacity_grad_cuda);
-        if (_rotation_grad_cuda) cudaFree(_rotation_grad_cuda);
-        if (_scaling_grad_cuda) cudaFree(_scaling_grad_cuda);
-        if (_sh0_grad_cuda) cudaFree(_sh0_grad_cuda);
-        if (_shN_grad_cuda) cudaFree(_shN_grad_cuda);
+        if (_means_grad_cuda)
+            cudaFree(_means_grad_cuda);
+        if (_opacity_grad_cuda)
+            cudaFree(_opacity_grad_cuda);
+        if (_rotation_grad_cuda)
+            cudaFree(_rotation_grad_cuda);
+        if (_scaling_grad_cuda)
+            cudaFree(_scaling_grad_cuda);
+        if (_sh0_grad_cuda)
+            cudaFree(_sh0_grad_cuda);
+        if (_shN_grad_cuda)
+            cudaFree(_shN_grad_cuda);
 
         _means_cuda = nullptr;
         _opacity_cuda = nullptr;
@@ -370,22 +388,21 @@ namespace gs {
         allocate_cuda_memory_and_tensors(
             means.size(0),
             sh0.size(1), sh0.size(2),
-            shN.size(1), shN.size(2)
-        );
+            shN.size(1), shN.size(2));
 
         // Copy data from input tensors to raw CUDA memory
         cudaMemcpy(_means_cuda, means.contiguous().data_ptr<float>(),
-                  means.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+                   means.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
         cudaMemcpy(_opacity_cuda, opacity.contiguous().data_ptr<float>(),
-                  opacity.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+                   opacity.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
         cudaMemcpy(_rotation_cuda, rotation.contiguous().data_ptr<float>(),
-                  rotation.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+                   rotation.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
         cudaMemcpy(_scaling_cuda, scaling.contiguous().data_ptr<float>(),
-                  scaling.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+                   scaling.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
         cudaMemcpy(_sh0_cuda, sh0.contiguous().data_ptr<float>(),
-                  sh0.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+                   sh0.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
         cudaMemcpy(_shN_cuda, shN.contiguous().data_ptr<float>(),
-                  shN.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+                   shN.numel() * sizeof(float), cudaMemcpyDeviceToDevice);
     }
 
     // Move constructor
@@ -528,9 +545,9 @@ namespace gs {
         // Launch CUDA kernel to transform positions
         gs::training::launch_transform_positions(
             _means_cuda,
-            &transform_matrix[0][0],  // Pass as float[16]
+            &transform_matrix[0][0], // Pass as float[16]
             _num_points,
-            0  // stream
+            0 // stream
         );
 
         // Extract rotation from transform matrix
@@ -556,7 +573,7 @@ namespace gs {
                 _rotation_cuda,
                 rot_quat,
                 _num_points,
-                0  // stream
+                0 // stream
             );
         }
 
@@ -573,7 +590,7 @@ namespace gs {
                 _scaling_cuda,
                 std::log(avg_scale),
                 _num_points * 3,
-                0  // stream
+                0 // stream
             );
         }
 
@@ -586,7 +603,7 @@ namespace gs {
             _means_cuda,
             scene_center,
             _num_points,
-            0  // stream
+            0 // stream
         );
 
         // Compute median distance
@@ -598,7 +615,7 @@ namespace gs {
             scene_center,
             distances,
             _num_points,
-            0  // stream
+            0 // stream
         );
 
         // Compute median (simplified - just use mean for now)
@@ -609,7 +626,7 @@ namespace gs {
             distances,
             median_dist,
             _num_points,
-            0  // stream
+            0 // stream
         );
 
         cudaDeviceSynchronize();
@@ -766,16 +783,17 @@ namespace gs {
             if (pcd.means_cuda && pcd.colors_cuda) {
                 // Wrap existing CUDA memory
                 positions = torch::from_blob(
-                    pcd.means_cuda,
-                    {static_cast<long>(pcd.num_points), 3},
-                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
-                ).clone(); // Clone to ensure ownership
+                                pcd.means_cuda,
+                                {static_cast<long>(pcd.num_points), 3},
+                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+                                .clone(); // Clone to ensure ownership
 
                 colors = torch::from_blob(
-                    pcd.colors_cuda,
-                    {static_cast<long>(pcd.num_points), 3},
-                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)
-                ).clone() * 255.0f; // Convert from [0,1] to [0,255]
+                             pcd.colors_cuda,
+                             {static_cast<long>(pcd.num_points), 3},
+                             torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+                             .clone() *
+                         255.0f; // Convert from [0,1] to [0,255]
             } else if (params.optimization.random) {
                 // Random initialization
                 const int num_points = params.optimization.init_num_pts;

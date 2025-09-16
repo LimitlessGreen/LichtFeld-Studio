@@ -1,12 +1,12 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
-*
+ *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #pragma once
 
 #include "istrategy.hpp"
-#include "optimizers/scheduler.hpp"
 #include "optimizers/fused_adam.hpp"
+#include "optimizers/scheduler.hpp"
 #include <memory>
 #include <torch/torch.h>
 

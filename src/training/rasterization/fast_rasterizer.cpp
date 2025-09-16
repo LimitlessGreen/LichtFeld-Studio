@@ -7,8 +7,8 @@
 #include "kernels/training_kernels.cuh"
 #include "rasterization_api.h"
 #include <cuda_runtime.h>
+#include <iostream> // Add for debugging
 #include <stdexcept>
-#include <iostream>  // Add for debugging
 
 namespace gs::training {
 
@@ -93,15 +93,15 @@ namespace gs::training {
         // Debug: Check image values BEFORE blending
         if (debug_counter <= 10) {
             float sample_pixel[3];
-            int center_pixel = (height/2) * width + (width/2);
+            int center_pixel = (height / 2) * width + (width / 2);
             for (int c = 0; c < 3; ++c) {
                 cudaMemcpy(&sample_pixel[c], image_buffer + c * width * height + center_pixel,
-                          sizeof(float), cudaMemcpyDeviceToHost);
+                           sizeof(float), cudaMemcpyDeviceToHost);
             }
             float sample_alpha;
             cudaMemcpy(&sample_alpha, alpha_buffer + center_pixel, sizeof(float), cudaMemcpyDeviceToHost);
             std::cout << "Before blend - Center pixel RGB: [" << sample_pixel[0] << ", "
-                     << sample_pixel[1] << ", " << sample_pixel[2] << "], Alpha: " << sample_alpha << std::endl;
+                      << sample_pixel[1] << ", " << sample_pixel[2] << "], Alpha: " << sample_alpha << std::endl;
         }
 
         // Blend with background using our kernel from training_kernels.cu
@@ -111,20 +111,20 @@ namespace gs::training {
             bg_color,
             width,
             height,
-            0  // default stream
+            0 // default stream
         );
         cudaDeviceSynchronize();
 
         // Debug: Check image values AFTER blending
         if (debug_counter <= 10) {
             float sample_pixel[3];
-            int center_pixel = (height/2) * width + (width/2);
+            int center_pixel = (height / 2) * width + (width / 2);
             for (int c = 0; c < 3; ++c) {
                 cudaMemcpy(&sample_pixel[c], image_buffer + c * width * height + center_pixel,
-                          sizeof(float), cudaMemcpyDeviceToHost);
+                           sizeof(float), cudaMemcpyDeviceToHost);
             }
             std::cout << "After blend - Center pixel RGB: [" << sample_pixel[0] << ", "
-                     << sample_pixel[1] << ", " << sample_pixel[2] << "]" << std::endl;
+                      << sample_pixel[1] << ", " << sample_pixel[2] << "]" << std::endl;
         }
 
         // Create output
@@ -184,8 +184,7 @@ namespace gs::training {
 
         // Call raw CUDA backward with raw pointers
         fast_gs::rasterization::BackwardOutputs outputs = fast_gs::rasterization::backward_raw(
-            gaussian_model._densification_info.defined() ?
-                gaussian_model._densification_info.data_ptr<float>() : nullptr,
+            gaussian_model._densification_info.defined() ? gaussian_model._densification_info.data_ptr<float>() : nullptr,
             grad_image,
             grad_alpha,
             render_output.image,
@@ -216,7 +215,7 @@ namespace gs::training {
 
         if (!outputs.success) {
             throw std::runtime_error(std::string("Backward pass failed: ") +
-                                   (outputs.error_message ? outputs.error_message : "Unknown error"));
+                                     (outputs.error_message ? outputs.error_message : "Unknown error"));
         }
     }
 } // namespace gs::training

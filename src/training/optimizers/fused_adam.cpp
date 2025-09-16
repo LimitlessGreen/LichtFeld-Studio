@@ -5,9 +5,9 @@
 #include "fused_adam.hpp"
 #include "adam_api.h"
 #include <cmath>
+#include <cstring>
 #include <cuda_runtime.h>
 #include <stdexcept>
-#include <cstring>
 
 // TODO: This is just a gimmick for the bounty. I don't think it should be integrated into the main codebase.
 // TODO: Removing the SH step skipping also means that the custom zero_grad() method is no longer needed.

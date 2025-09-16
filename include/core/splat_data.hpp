@@ -5,6 +5,7 @@
 #pragma once
 
 #include "core/point_cloud.hpp"
+#include <cuda_runtime.h>
 #include <expected>
 #include <filesystem>
 #include <future>
@@ -13,7 +14,6 @@
 #include <string>
 #include <torch/torch.h>
 #include <vector>
-#include <cuda_runtime.h>
 
 namespace gs {
     namespace param {
@@ -145,16 +145,16 @@ namespace gs {
         int64_t _num_points = 0;
 
         // Dimensions for tensor reconstruction
-        int64_t _sh0_dims[3] = {0, 0, 0};  // [N, channels, coeffs]
-        int64_t _shN_dims[3] = {0, 0, 0};  // [N, channels, coeffs]
+        int64_t _sh0_dims[3] = {0, 0, 0}; // [N, channels, coeffs]
+        int64_t _shN_dims[3] = {0, 0, 0}; // [N, channels, coeffs]
 
         // Raw CUDA memory for data
-        float* _means_cuda = nullptr;          // [N, 3]
-        float* _sh0_cuda = nullptr;            // [N, 3, 1]
-        float* _shN_cuda = nullptr;            // [N, 3, (max_degree+1)^2-1]
-        float* _scaling_cuda = nullptr;        // [N, 3]
-        float* _rotation_cuda = nullptr;       // [N, 4]
-        float* _opacity_cuda = nullptr;        // [N, 1]
+        float* _means_cuda = nullptr;    // [N, 3]
+        float* _sh0_cuda = nullptr;      // [N, 3, 1]
+        float* _shN_cuda = nullptr;      // [N, 3, (max_degree+1)^2-1]
+        float* _scaling_cuda = nullptr;  // [N, 3]
+        float* _rotation_cuda = nullptr; // [N, 4]
+        float* _opacity_cuda = nullptr;  // [N, 1]
 
         // Raw CUDA memory for gradients
         float* _means_grad_cuda = nullptr;

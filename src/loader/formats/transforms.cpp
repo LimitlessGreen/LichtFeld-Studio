@@ -5,12 +5,12 @@
 #include "transforms.hpp"
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
+#include <cmath>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <numbers>
-#include <cmath>
 #include <random>
 
 namespace gs::loader {
@@ -38,10 +38,10 @@ namespace gs::loader {
         }
 
         // Rotation matrix around Y-axis by angle θ:
-        rotMat[0] = cos_angle;   // cos(θ)
-        rotMat[2] = sin_angle;   // sin(θ)
-        rotMat[8] = -sin_angle;  // -sin(θ)
-        rotMat[10] = cos_angle;  // cos(θ)
+        rotMat[0] = cos_angle;  // cos(θ)
+        rotMat[2] = sin_angle;  // sin(θ)
+        rotMat[8] = -sin_angle; // -sin(θ)
+        rotMat[10] = cos_angle; // cos(θ)
     }
 
     std::filesystem::path GetTransformImagePath(const std::filesystem::path& dir_path, const nlohmann::json& frame) {
@@ -225,7 +225,10 @@ namespace gs::loader {
                         }
                         w2c[i * 4 + 3] = RTt[i];
                     }
-                    w2c[12] = 0; w2c[13] = 0; w2c[14] = 0; w2c[15] = 1;
+                    w2c[12] = 0;
+                    w2c[13] = 0;
+                    w2c[14] = 0;
+                    w2c[15] = 1;
                 }
 
                 // Fix so that the z direction will be the same (currently it is facing downward)

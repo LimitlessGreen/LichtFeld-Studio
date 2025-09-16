@@ -118,7 +118,7 @@ namespace gs::training {
         std::expected<StepResult, std::string> train_step(
             int iter,
             Camera* cam,
-            const float* gt_image_ptr,  // Raw pointer instead of tensor
+            const float* gt_image_ptr, // Raw pointer instead of tensor
             size_t img_width,
             size_t img_height,
             size_t img_channels,

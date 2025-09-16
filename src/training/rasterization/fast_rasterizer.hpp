@@ -1,5 +1,5 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
-*
+ *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #pragma once
@@ -16,7 +16,7 @@ namespace gs::training {
     RenderOutput fast_rasterize(
         Camera& viewpoint_camera,
         SplatData& gaussian_model,
-        float* bg_color,  // Raw pointer to 3 floats
+        float* bg_color, // Raw pointer to 3 floats
         TrainingMemory& cuda_memory);
 
     // Backward pass with direct gradient writing

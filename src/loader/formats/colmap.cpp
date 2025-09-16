@@ -7,6 +7,7 @@
 #include "core/logger.hpp"
 #include "loader/filesystem_utils.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -15,7 +16,6 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
-#include <cmath>
 
 namespace gs::loader {
 
@@ -26,8 +26,8 @@ namespace gs::loader {
     // -----------------------------------------------------------------------------
     inline void qvec2rotmat_cuda(const float qraw[4], float R[9]) {
         // Normalize quaternion
-        float norm = std::sqrt(qraw[0]*qraw[0] + qraw[1]*qraw[1] +
-                              qraw[2]*qraw[2] + qraw[3]*qraw[3]);
+        float norm = std::sqrt(qraw[0] * qraw[0] + qraw[1] * qraw[1] +
+                               qraw[2] * qraw[2] + qraw[3] * qraw[3]);
         float q[4];
         for (int i = 0; i < 4; ++i) {
             q[i] = qraw[i] / norm;
@@ -105,8 +105,7 @@ namespace gs::loader {
         {8, {CAMERA_MODEL::SIMPLE_RADIAL_FISHEYE, 4}},
         {9, {CAMERA_MODEL::RADIAL_FISHEYE, 5}},
         {10, {CAMERA_MODEL::THIN_PRISM_FISHEYE, 12}},
-        {11, {CAMERA_MODEL::UNDEFINED, -1}}
-    };
+        {11, {CAMERA_MODEL::UNDEFINED, -1}}};
 
     static const std::unordered_map<std::string, CAMERA_MODEL> camera_model_names = {
         {"SIMPLE_PINHOLE", CAMERA_MODEL::SIMPLE_PINHOLE},
@@ -119,8 +118,7 @@ namespace gs::loader {
         {"FOV", CAMERA_MODEL::FOV},
         {"SIMPLE_RADIAL_FISHEYE", CAMERA_MODEL::SIMPLE_RADIAL_FISHEYE},
         {"RADIAL_FISHEYE", CAMERA_MODEL::RADIAL_FISHEYE},
-        {"THIN_PRISM_FISHEYE", CAMERA_MODEL::THIN_PRISM_FISHEYE}
-    };
+        {"THIN_PRISM_FISHEYE", CAMERA_MODEL::THIN_PRISM_FISHEYE}};
 
     // -----------------------------------------------------------------------------
     //  Binary-file loader
@@ -369,7 +367,7 @@ namespace gs::loader {
             host_colors[i * 3 + 1] = *cur++;
             host_colors[i * 3 + 2] = *cur++;
 
-            cur += 8; // skip reprojection error
+            cur += 8;                                    // skip reprojection error
             cur += read_u64(cur) * sizeof(uint32_t) * 2; // skip track
         }
 
@@ -563,9 +561,9 @@ namespace gs::loader {
     // -----------------------------------------------------------------------------
     ColmapCameraResult
     read_colmap_cameras_cuda(const std::filesystem::path base_path,
-                            const std::unordered_map<uint32_t, internal::CudaCameraData>& cams,
-                            const std::vector<Image>& images,
-                            const std::string& images_folder = "images") {
+                             const std::unordered_map<uint32_t, internal::CudaCameraData>& cams,
+                             const std::vector<Image>& images,
+                             const std::string& images_folder = "images") {
         LOG_TIMER_TRACE("Assemble COLMAP cameras");
         std::vector<internal::CudaCameraData> out(images.size());
 

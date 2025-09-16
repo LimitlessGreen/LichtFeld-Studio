@@ -5,16 +5,16 @@
 #pragma once
 
 #include "Common.h"
+#include <array>
 #include <c10/cuda/CUDAStream.h>
+#include <cuda_runtime.h>
 #include <filesystem>
 #include <future>
-#include <string>
-#include <torch/torch.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <array>
 #include <memory>
-#include <cuda_runtime.h>
+#include <string>
+#include <torch/torch.h>
 #include <vector>
 
 namespace gs {
@@ -131,7 +131,7 @@ namespace gs {
         int _image_height = 0;
 
         // CPU storage (computed once)
-        std::array<float, 16> _world_view_transform_cpu;  // 4x4 matrix
+        std::array<float, 16> _world_view_transform_cpu; // 4x4 matrix
         std::array<float, 3> _cam_position_cpu;
 
         // GPU storage (allocated on demand)

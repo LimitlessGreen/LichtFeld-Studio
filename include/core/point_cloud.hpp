@@ -4,30 +4,30 @@
 
 #pragma once
 
+#include <cstring>
+#include <cuda_runtime.h>
 #include <string>
 #include <vector>
-#include <cuda_runtime.h>
-#include <cstring>
 
 namespace gs {
     // Torch-free point cloud structure using raw CUDA memory
     struct PointCloud {
         // Basic point cloud data
-        float* means_cuda = nullptr;     // [N, 3] float32
-        float* colors_cuda = nullptr;    // [N, 3] float32 (normalized to [0,1])
+        float* means_cuda = nullptr;  // [N, 3] float32
+        float* colors_cuda = nullptr; // [N, 3] float32 (normalized to [0,1])
 
         // For Gaussian point clouds (optional, can be nullptr for basic point clouds)
-        float* normals_cuda = nullptr;   // [N, 3] float32
-        float* sh0_cuda = nullptr;       // [N, channels*coeffs] float32 (flattened)
-        float* shN_cuda = nullptr;       // [N, channels*coeffs] float32 (flattened)
-        float* opacity_cuda = nullptr;   // [N, 1] float32
-        float* scaling_cuda = nullptr;   // [N, 3] float32
-        float* rotation_cuda = nullptr;  // [N, 4] float32
+        float* normals_cuda = nullptr;  // [N, 3] float32
+        float* sh0_cuda = nullptr;      // [N, channels*coeffs] float32 (flattened)
+        float* shN_cuda = nullptr;      // [N, channels*coeffs] float32 (flattened)
+        float* opacity_cuda = nullptr;  // [N, 1] float32
+        float* scaling_cuda = nullptr;  // [N, 3] float32
+        float* rotation_cuda = nullptr; // [N, 4] float32
 
         // Dimensions
         size_t num_points = 0;
-        size_t sh0_dims[3] = {0, 0, 0};  // [N, channels, coeffs] - for reconstruction
-        size_t shN_dims[3] = {0, 0, 0};  // [N, channels, coeffs] - for reconstruction
+        size_t sh0_dims[3] = {0, 0, 0}; // [N, channels, coeffs] - for reconstruction
+        size_t shN_dims[3] = {0, 0, 0}; // [N, channels, coeffs] - for reconstruction
 
         // Metadata
         std::vector<std::string> attribute_names;
@@ -53,7 +53,9 @@ namespace gs {
 
         // Constructor that takes ownership of already allocated CUDA memory
         PointCloud(float* means, float* colors, size_t n_points)
-            : means_cuda(means), colors_cuda(colors), num_points(n_points) {}
+            : means_cuda(means),
+              colors_cuda(colors),
+              num_points(n_points) {}
 
         // Destructor
         ~PointCloud() {
@@ -157,12 +159,12 @@ namespace gs {
             if (n_points > 0) {
                 // Store dimensions
                 sh0_dims[0] = n_points;
-                sh0_dims[1] = sh0_c;  // channels
-                sh0_dims[2] = sh0_d;  // coefficients
+                sh0_dims[1] = sh0_c; // channels
+                sh0_dims[2] = sh0_d; // coefficients
 
                 shN_dims[0] = n_points;
-                shN_dims[1] = shN_c;  // channels
-                shN_dims[2] = shN_d;  // coefficients
+                shN_dims[1] = shN_c; // channels
+                shN_dims[2] = shN_d; // coefficients
 
                 // Allocate additional Gaussian attributes
                 cudaMalloc(&normals_cuda, n_points * 3 * sizeof(float));
@@ -270,14 +272,38 @@ namespace gs {
 
     private:
         void free_memory() {
-            if (means_cuda) { cudaFree(means_cuda); means_cuda = nullptr; }
-            if (colors_cuda) { cudaFree(colors_cuda); colors_cuda = nullptr; }
-            if (normals_cuda) { cudaFree(normals_cuda); normals_cuda = nullptr; }
-            if (sh0_cuda) { cudaFree(sh0_cuda); sh0_cuda = nullptr; }
-            if (shN_cuda) { cudaFree(shN_cuda); shN_cuda = nullptr; }
-            if (opacity_cuda) { cudaFree(opacity_cuda); opacity_cuda = nullptr; }
-            if (scaling_cuda) { cudaFree(scaling_cuda); scaling_cuda = nullptr; }
-            if (rotation_cuda) { cudaFree(rotation_cuda); rotation_cuda = nullptr; }
+            if (means_cuda) {
+                cudaFree(means_cuda);
+                means_cuda = nullptr;
+            }
+            if (colors_cuda) {
+                cudaFree(colors_cuda);
+                colors_cuda = nullptr;
+            }
+            if (normals_cuda) {
+                cudaFree(normals_cuda);
+                normals_cuda = nullptr;
+            }
+            if (sh0_cuda) {
+                cudaFree(sh0_cuda);
+                sh0_cuda = nullptr;
+            }
+            if (shN_cuda) {
+                cudaFree(shN_cuda);
+                shN_cuda = nullptr;
+            }
+            if (opacity_cuda) {
+                cudaFree(opacity_cuda);
+                opacity_cuda = nullptr;
+            }
+            if (scaling_cuda) {
+                cudaFree(scaling_cuda);
+                scaling_cuda = nullptr;
+            }
+            if (rotation_cuda) {
+                cudaFree(rotation_cuda);
+                rotation_cuda = nullptr;
+            }
             num_points = 0;
         }
     };

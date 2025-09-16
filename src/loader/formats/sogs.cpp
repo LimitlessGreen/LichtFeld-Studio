@@ -256,10 +256,9 @@ namespace gs::loader {
 
             if (meta.shN.has_value()) {
                 const auto& sh_meta = meta.shN.value();
-                int sh_degree = sh_meta.bands > 0 ? sh_meta.bands :
-                               (sh_meta.coeffs == 3 ? 1 :
-                                sh_meta.coeffs == 8 ? 2 :
-                                sh_meta.coeffs == 15 ? 3 : 0);
+                int sh_degree = sh_meta.bands > 0 ? sh_meta.bands : (sh_meta.coeffs == 3 ? 1 : sh_meta.coeffs == 8 ? 2
+                                                                                           : sh_meta.coeffs == 15  ? 3
+                                                                                                                   : 0);
                 shN_dim1 = SH_COEFFS[sh_degree];
             }
 
@@ -412,14 +411,12 @@ namespace gs::loader {
                     const auto& labels_img = it_labels->second;
 
                     // Determine SH configuration
-                    int sh_degree = sh_meta.bands > 0 ? sh_meta.bands :
-                                   (sh_meta.coeffs == 3 ? 1 :
-                                    sh_meta.coeffs == 8 ? 2 :
-                                    sh_meta.coeffs == 15 ? 3 : 0);
+                    int sh_degree = sh_meta.bands > 0 ? sh_meta.bands : (sh_meta.coeffs == 3 ? 1 : sh_meta.coeffs == 8 ? 2
+                                                                                               : sh_meta.coeffs == 15  ? 3
+                                                                                                                       : 0);
 
                     int num_coeffs = SH_COEFFS[sh_degree];
-                    int palette_size = sh_meta.palette_size > 0 ? sh_meta.palette_size :
-                                      centroids_img.size() / (64 * num_coeffs * 4);
+                    int palette_size = sh_meta.palette_size > 0 ? sh_meta.palette_size : centroids_img.size() / (64 * num_coeffs * 4);
 
                     LOG_DEBUG("Decoding SH: degree={}, coeffs={}, palette_size={}",
                               sh_degree, num_coeffs, palette_size);

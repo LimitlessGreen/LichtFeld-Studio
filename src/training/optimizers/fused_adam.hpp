@@ -4,12 +4,12 @@
 
 #pragma once
 
-#include <memory>
-#include <vector>
-#include <unordered_map>
-#include <cuda_runtime.h>
-#include <tuple>
 #include <cstdint>
+#include <cuda_runtime.h>
+#include <memory>
+#include <tuple>
+#include <unordered_map>
+#include <vector>
 
 namespace gs::training {
     /**
@@ -28,18 +28,30 @@ namespace gs::training {
             Options() = default;
             Options(double learning_rate) : lr(learning_rate) {}
 
-            Options& set_lr(double val) { lr = val; return *this; }
-            Options& set_betas(std::tuple<double, double> val) { betas = val; return *this; }
-            Options& set_eps(double val) { eps = val; return *this; }
-            Options& set_weight_decay(double val) { weight_decay = val; return *this; }
+            Options& set_lr(double val) {
+                lr = val;
+                return *this;
+            }
+            Options& set_betas(std::tuple<double, double> val) {
+                betas = val;
+                return *this;
+            }
+            Options& set_eps(double val) {
+                eps = val;
+                return *this;
+            }
+            Options& set_weight_decay(double val) {
+                weight_decay = val;
+                return *this;
+            }
         };
 
         // Raw parameter info - no torch dependency
         struct RawParam {
-            float* data_ptr;           // Parameter data pointer
-            float* grad_ptr;           // Gradient data pointer
-            size_t num_elements;       // Number of elements
-            int param_id;              // Unique ID for this parameter
+            float* data_ptr;     // Parameter data pointer
+            float* grad_ptr;     // Gradient data pointer
+            size_t num_elements; // Number of elements
+            int param_id;        // Unique ID for this parameter
         };
 
         struct ParamGroup {
@@ -47,10 +59,12 @@ namespace gs::training {
             Options options;
 
             ParamGroup(std::vector<RawParam> p, Options opt)
-                : params(std::move(p)), options(opt) {}
+                : params(std::move(p)),
+                  options(opt) {}
 
             ParamGroup(std::vector<RawParam> p)
-                : params(std::move(p)), options() {}
+                : params(std::move(p)),
+                  options() {}
         };
 
         // Raw CUDA memory for Adam state
@@ -80,17 +94,19 @@ namespace gs::training {
 
     private:
         std::vector<ParamGroup> param_groups_;
-        std::unordered_map<int, std::unique_ptr<AdamState>> state_;  // Use param_id as key
+        std::unordered_map<int, std::unique_ptr<AdamState>> state_; // Use param_id as key
         Options global_options_;
         int next_param_id_ = 0;
 
     public:
         // Constructors
         explicit FusedAdam(std::vector<ParamGroup> param_groups, Options global_options)
-            : param_groups_(std::move(param_groups)), global_options_(global_options) {}
+            : param_groups_(std::move(param_groups)),
+              global_options_(global_options) {}
 
         explicit FusedAdam(std::vector<ParamGroup> param_groups)
-            : param_groups_(std::move(param_groups)), global_options_() {}
+            : param_groups_(std::move(param_groups)),
+              global_options_() {}
 
         // Main interface
         void step(int iteration = 0);
