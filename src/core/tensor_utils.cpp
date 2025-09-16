@@ -33,7 +33,7 @@ namespace gs::tensor {
             LOG_ERROR("Invalid range: step cannot be zero");
             return Tensor();
         }
-        
+
         if (n <= 0) {
             LOG_ERROR("Invalid range: start={}, end={}, step={}", start, end, step);
             return Tensor();
@@ -311,7 +311,7 @@ namespace gs::tensor::functional {
     }
 
     // ============= EXPLICIT INSTANTIATIONS FOR ALL TYPES USED IN TESTS =============
-    
+
     // Basic function types
     template Tensor map<std::function<float(float)>>(const Tensor&, std::function<float(float)>);
     template float reduce<std::plus<float>>(const Tensor&, float, std::plus<float>);
@@ -344,7 +344,7 @@ struct ProfileOp {
 namespace gs::tensor::functional {
     template Tensor map<SquareFunc>(const Tensor&, SquareFunc);
     template Tensor filter<PositiveFilter>(const Tensor&, PositiveFilter);
-}
+} // namespace gs::tensor::functional
 
 // ============= Template implementation and instantiation for Tensor::timed =============
 namespace gs {
@@ -357,10 +357,10 @@ namespace gs {
         }
         return func(*this);
     }
-    
+
     // Explicit instantiation for ProfileOp
     template auto Tensor::timed<ProfileOp>(const std::string&, ProfileOp) -> decltype(std::declval<ProfileOp>()(*std::declval<Tensor*>()));
-}
+} // namespace gs
 
 // ============= Old test functors that might still be used =============
 struct GreaterThanTwo {
@@ -382,4 +382,4 @@ struct SubThree {
 namespace gs::tensor::functional {
     // Instantiate for old test functors if they're still used
     template Tensor filter<GreaterThanTwo>(const Tensor&, GreaterThanTwo);
-}
+} // namespace gs::tensor::functional

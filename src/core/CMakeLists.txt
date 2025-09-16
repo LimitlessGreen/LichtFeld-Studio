@@ -13,15 +13,18 @@ set(CORE_SOURCES
         parameters.cpp
         splat_data.cpp
         sogs.cpp
-        tensor.cpp          # Main tensor implementation
-        tensor_ops.cpp      # Math operations
-        tensor_utils.cpp    # Utility functions
+        tensor.cpp              # Main tensor implementation
+        tensor_ops.cpp          # Math operations
+        tensor_utils.cpp        # Utility functions
+        tensor_matrix_ops.cpp   # Matrix operations (matmul, transpose, etc.)
+        tensor_random_ops.cpp   # Random generation operations
         tinyply.cpp
 )
 
 # CUDA sources (limited to C++20)
 set(CORE_CUDA_SOURCES
-        tensor_ops.cu       # CUDA kernels for tensor operations
+        tensor_ops.cu           # CUDA kernels for tensor operations
+        tensor_matrix_ops.cu    # CUDA kernels for matrix operations
 )
 
 # Create CUDA library for tensor operations (C++20)
@@ -49,7 +52,9 @@ if(CORE_CUDA_SOURCES)
     target_link_libraries(gs_tensor_kernels
         PUBLIC
             CUDA::cudart
-            CUDA::cublas  # For potential matrix operations
+            CUDA::cublas      # For matrix operations
+            CUDA::curand      # For random number generation
+            CUDA::cusolver    # Optional: for advanced linear algebra
             spdlog::spdlog
     )
     
@@ -109,6 +114,8 @@ target_link_libraries(gs_core
         glm::glm
         Threads::Threads
         CUDA::cudart            # For Camera CUDA operations
+        CUDA::cublas            # For matrix multiplication
+        CUDA::curand            # For random number generation
         spdlog::spdlog
         ${WEBP_LIB}            # WebP for SOG compression
         ${ARCHIVE_LIB}         # LibArchive for SOG bundle support
@@ -192,3 +199,5 @@ message(STATUS "  CUDA standard: C++20")
 message(STATUS "  WebP library: ${WEBP_LIB}")
 message(STATUS "  Archive library: ${ARCHIVE_LIB}")
 message(STATUS "  Tensor CUDA kernels: Enabled")
+message(STATUS "  Matrix operations: Enabled (cuBLAS)")
+message(STATUS "  Random operations: Enabled (cuRAND)")

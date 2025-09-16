@@ -335,12 +335,139 @@ namespace gs {
     }
 
     Tensor Tensor::transpose(int dim1, int dim2) const {
-        std::vector<int> dims;
-        for (size_t i = 0; i < shape_.rank(); ++i) {
-            dims.push_back(static_cast<int>(i));
+        if (!is_valid()) {
+            return Tensor();
         }
-        std::swap(dims[dim1], dims[dim2]);
-        return permute(dims);
+
+        // Handle negative indices
+        if (dim1 < 0)
+            dim1 = shape_.rank() + dim1;
+        if (dim2 < 0)
+            dim2 = shape_.rank() + dim2;
+
+        // Check bounds
+        if (dim1 < 0 || dim1 >= static_cast<int>(shape_.rank()) ||
+            dim2 < 0 || dim2 >= static_cast<int>(shape_.rank())) {
+            LOG_ERROR("Transpose dimensions out of bounds");
+            return Tensor();
+        }
+
+        // If same dimension, just return clone
+        if (dim1 == dim2) {
+            return clone();
+        }
+
+        // Create new shape with swapped dimensions
+        std::vector<size_t> new_shape = shape_.dims();
+        std::swap(new_shape[dim1], new_shape[dim2]);
+
+        auto result = empty(TensorShape(new_shape), device_, dtype_);
+
+        // For now, implement a general transpose by copying data
+        // This is not optimal but works correctly
+        size_t total_elements = numel();
+
+        if (device_ == Device::CUDA) {
+            // Copy to CPU, transpose, copy back
+            std::vector<float> src_data(total_elements);
+            std::vector<float> dst_data(total_elements);
+
+            cudaMemcpy(src_data.data(), ptr<float>(), total_elements * sizeof(float),
+                       cudaMemcpyDeviceToHost);
+
+            // Calculate strides for source and destination
+            std::vector<size_t> src_strides(shape_.rank());
+            std::vector<size_t> dst_strides(shape_.rank());
+
+            src_strides[shape_.rank() - 1] = 1;
+            dst_strides[shape_.rank() - 1] = 1;
+
+            for (int i = shape_.rank() - 2; i >= 0; --i) {
+                src_strides[i] = src_strides[i + 1] * shape_[i + 1];
+                dst_strides[i] = dst_strides[i + 1] * new_shape[i + 1];
+            }
+
+            // Perform the transpose
+            std::vector<size_t> indices(shape_.rank(), 0);
+
+            for (size_t i = 0; i < total_elements; ++i) {
+                // Calculate source linear index
+                size_t src_idx = 0;
+                for (size_t d = 0; d < shape_.rank(); ++d) {
+                    src_idx += indices[d] * src_strides[d];
+                }
+
+                // Calculate destination indices (with dims swapped)
+                std::vector<size_t> dst_indices = indices;
+                std::swap(dst_indices[dim1], dst_indices[dim2]);
+
+                // Calculate destination linear index
+                size_t dst_idx = 0;
+                for (size_t d = 0; d < shape_.rank(); ++d) {
+                    dst_idx += dst_indices[d] * dst_strides[d];
+                }
+
+                dst_data[dst_idx] = src_data[src_idx];
+
+                // Increment indices
+                for (int d = shape_.rank() - 1; d >= 0; --d) {
+                    indices[d]++;
+                    if (indices[d] < shape_[d]) {
+                        break;
+                    }
+                    indices[d] = 0;
+                }
+            }
+
+            cudaMemcpy(result.ptr<float>(), dst_data.data(), total_elements * sizeof(float),
+                       cudaMemcpyHostToDevice);
+        } else {
+            // CPU implementation (similar logic)
+            const float* src = ptr<float>();
+            float* dst = result.ptr<float>();
+
+            // Calculate strides
+            std::vector<size_t> src_strides(shape_.rank());
+            std::vector<size_t> dst_strides(shape_.rank());
+
+            src_strides[shape_.rank() - 1] = 1;
+            dst_strides[shape_.rank() - 1] = 1;
+
+            for (int i = shape_.rank() - 2; i >= 0; --i) {
+                src_strides[i] = src_strides[i + 1] * shape_[i + 1];
+                dst_strides[i] = dst_strides[i + 1] * new_shape[i + 1];
+            }
+
+            // Perform the transpose
+            std::vector<size_t> indices(shape_.rank(), 0);
+
+            for (size_t i = 0; i < total_elements; ++i) {
+                size_t src_idx = 0;
+                for (size_t d = 0; d < shape_.rank(); ++d) {
+                    src_idx += indices[d] * src_strides[d];
+                }
+
+                std::vector<size_t> dst_indices = indices;
+                std::swap(dst_indices[dim1], dst_indices[dim2]);
+
+                size_t dst_idx = 0;
+                for (size_t d = 0; d < shape_.rank(); ++d) {
+                    dst_idx += dst_indices[d] * dst_strides[d];
+                }
+
+                dst[dst_idx] = src[src_idx];
+
+                for (int d = shape_.rank() - 1; d >= 0; --d) {
+                    indices[d]++;
+                    if (indices[d] < shape_[d]) {
+                        break;
+                    }
+                    indices[d] = 0;
+                }
+            }
+        }
+
+        return result;
     }
 
     Tensor Tensor::flatten(int start_dim, int end_dim) const {

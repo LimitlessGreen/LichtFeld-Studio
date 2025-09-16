@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include <curand_kernel.h>
 
 namespace gs::tensor_ops {
 
@@ -36,5 +37,39 @@ namespace gs::tensor_ops {
     void launch_reduce_mean(const float* data, float* result, size_t n, cudaStream_t stream);
     void launch_reduce_min(const float* data, float* result, size_t n, cudaStream_t stream);
     void launch_reduce_max(const float* data, float* result, size_t n, cudaStream_t stream);
+
+    // Matrix operations
+    void launch_matmul(const float* a, const float* b, float* c,
+                       size_t m, size_t n, size_t k,
+                       cudaStream_t stream);
+
+    void launch_batch_matmul(const float* a, const float* b, float* c,
+                             size_t batch_size, size_t m, size_t n, size_t k,
+                             cudaStream_t stream);
+
+    void launch_transpose(const float* input, float* output,
+                          size_t rows, size_t cols,
+                          cudaStream_t stream);
+
+    void launch_dot_product(const float* a, const float* b, float* result,
+                            size_t n, cudaStream_t stream);
+
+    // Random operations
+    void launch_uniform(float* data, size_t n, float low, float high,
+                        unsigned long long seed, cudaStream_t stream);
+
+    void launch_normal(float* data, size_t n, float mean, float std,
+                       unsigned long long seed, cudaStream_t stream);
+
+    void launch_bernoulli(float* data, size_t n, float p,
+                          unsigned long long seed, cudaStream_t stream);
+
+    void launch_randint(int* data, size_t n, int low, int high,
+                        unsigned long long seed, cudaStream_t stream);
+
+    // Matrix creation operations
+    void launch_eye(float* data, size_t m, size_t n, cudaStream_t stream);
+    void launch_diag(const float* diagonal, float* matrix, size_t n, cudaStream_t stream);
+    void launch_extract_diag(const float* matrix, float* diagonal, size_t n, cudaStream_t stream);
 
 } // namespace gs::tensor_ops

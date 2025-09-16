@@ -1,0 +1,277 @@
+/* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
+ * SPDX-License-Identifier: GPL-3.0-or-later */
+
+#include "core/tensor.hpp"
+#include "core/tensor_ops.hpp"
+#include <curand.h>
+#include <curand_kernel.h>
+#include <random>
+
+#define CHECK_CUDA(call)                              \
+    do {                                              \
+        cudaError_t error = call;                     \
+        if (error != cudaSuccess) {                   \
+            LOG_ERROR("CUDA error at {}:{} - {}: {}", \
+                      __FILE__, __LINE__,             \
+                      cudaGetErrorName(error),        \
+                      cudaGetErrorString(error));     \
+        }                                             \
+    } while (0)
+
+#define CHECK_CURAND(call)                             \
+    do {                                               \
+        curandStatus_t error = call;                   \
+        if (error != CURAND_STATUS_SUCCESS) {          \
+            LOG_ERROR("CURAND error at {}:{} - {}",    \
+                      __FILE__, __LINE__, (int)error); \
+        }                                              \
+    } while (0)
+
+namespace gs {
+
+    // ============= RandomGenerator Implementation =============
+    RandomGenerator& RandomGenerator::instance() {
+        static RandomGenerator instance;
+        return instance;
+    }
+
+    RandomGenerator::RandomGenerator() : seed_(42),
+                                         cpu_generator_(seed_) {
+        // Initialize CUDA random generator
+        curandGenerator_t* gen = new curandGenerator_t;
+        CHECK_CURAND(curandCreateGenerator(gen, CURAND_RNG_PSEUDO_DEFAULT));
+        CHECK_CURAND(curandSetPseudoRandomGeneratorSeed(*gen, seed_));
+        cuda_generator_ = gen;
+    }
+
+    RandomGenerator::~RandomGenerator() {
+        if (cuda_generator_) {
+            curandGenerator_t* gen = static_cast<curandGenerator_t*>(cuda_generator_);
+            curandDestroyGenerator(*gen);
+            delete gen;
+        }
+    }
+
+    void RandomGenerator::manual_seed(uint64_t seed) {
+        seed_ = seed;
+        cpu_generator_.seed(seed);
+
+        if (cuda_generator_) {
+            curandGenerator_t* gen = static_cast<curandGenerator_t*>(cuda_generator_);
+            CHECK_CURAND(curandSetPseudoRandomGeneratorSeed(*gen, seed));
+        }
+    }
+
+    void* RandomGenerator::get_generator(Device device) {
+        if (device == Device::CUDA) {
+            return cuda_generator_;
+        } else {
+            return &cpu_generator_;
+        }
+    }
+
+    // ============= Random Tensor Factory Methods =============
+    Tensor Tensor::rand(TensorShape shape, Device device, DataType dtype) {
+        return uniform(shape, 0.0f, 1.0f, device, dtype);
+    }
+
+    Tensor Tensor::randn(TensorShape shape, Device device, DataType dtype) {
+        return normal(shape, 0.0f, 1.0f, device, dtype);
+    }
+
+    Tensor Tensor::uniform(TensorShape shape, float low, float high, Device device, DataType dtype) {
+        if (dtype != DataType::Float32) {
+            LOG_ERROR("Random operations only implemented for float32");
+            return Tensor();
+        }
+
+        auto result = empty(shape, device, dtype);
+        if (!result.is_valid() || result.numel() == 0) {
+            return result;
+        }
+
+        result.uniform_(low, high);
+        return result;
+    }
+
+    Tensor Tensor::normal(TensorShape shape, float mean, float std, Device device, DataType dtype) {
+        if (dtype != DataType::Float32) {
+            LOG_ERROR("Random operations only implemented for float32");
+            return Tensor();
+        }
+
+        auto result = empty(shape, device, dtype);
+        if (!result.is_valid() || result.numel() == 0) {
+            return result;
+        }
+
+        result.normal_(mean, std);
+        return result;
+    }
+
+    Tensor Tensor::randint(TensorShape shape, int low, int high, Device device, DataType dtype) {
+        if (dtype != DataType::Int32 && dtype != DataType::Float32) {
+            LOG_ERROR("Randint only supports int32 and float32");
+            return Tensor();
+        }
+
+        auto result = empty(shape, device, dtype);
+        if (!result.is_valid() || result.numel() == 0) {
+            return result;
+        }
+
+        size_t n = result.numel();
+
+        if (device == Device::CUDA) {
+            if (dtype == DataType::Int32) {
+                tensor_ops::launch_randint(
+                    result.ptr<int>(), n, low, high,
+                    RandomGenerator::instance().get_seed(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                // For float32, generate integers and convert
+                auto temp = empty(shape, device, DataType::Int32);
+                tensor_ops::launch_randint(
+                    temp.ptr<int>(), n, low, high,
+                    RandomGenerator::instance().get_seed(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+
+                // Convert to float
+                int* int_data = temp.ptr<int>();
+                float* float_data = result.ptr<float>();
+
+                // For simplicity, do it on CPU
+                std::vector<int> int_vals(n);
+                CHECK_CUDA(cudaMemcpy(int_vals.data(), int_data, n * sizeof(int),
+                                      cudaMemcpyDeviceToHost));
+                std::vector<float> float_vals(n);
+                for (size_t i = 0; i < n; ++i) {
+                    float_vals[i] = static_cast<float>(int_vals[i]);
+                }
+                // FIXED: Complete the cudaMemcpy line properly
+                CHECK_CUDA(cudaMemcpy(float_data, float_vals.data(), n * sizeof(float),
+                                      cudaMemcpyHostToDevice));
+            }
+        } else {
+            auto& gen = *static_cast<std::mt19937_64*>(
+                RandomGenerator::instance().get_generator(Device::CPU));
+            std::uniform_int_distribution<int> dist(low, high - 1);
+
+            if (dtype == DataType::Int32) {
+                int* data = result.ptr<int>();
+                for (size_t i = 0; i < n; ++i) {
+                    data[i] = dist(gen);
+                }
+            } else {
+                float* data = result.ptr<float>();
+                for (size_t i = 0; i < n; ++i) {
+                    data[i] = static_cast<float>(dist(gen));
+                }
+            }
+        }
+
+        CHECK_CUDA(cudaDeviceSynchronize());
+        return result;
+    }
+
+    Tensor Tensor::bernoulli(TensorShape shape, float p, Device device, DataType dtype) {
+        if (dtype != DataType::Float32) {
+            LOG_ERROR("Bernoulli only implemented for float32");
+            return Tensor();
+        }
+
+        auto result = empty(shape, device, dtype);
+        if (!result.is_valid() || result.numel() == 0) {
+            return result;
+        }
+
+        size_t n = result.numel();
+
+        if (device == Device::CUDA) {
+            tensor_ops::launch_bernoulli(
+                result.ptr<float>(), n, p,
+                RandomGenerator::instance().get_seed(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            auto& gen = *static_cast<std::mt19937_64*>(
+                RandomGenerator::instance().get_generator(Device::CPU));
+            std::bernoulli_distribution dist(p);
+
+            float* data = result.ptr<float>();
+            for (size_t i = 0; i < n; ++i) {
+                data[i] = dist(gen) ? 1.0f : 0.0f;
+            }
+        }
+
+        return result;
+    }
+
+    // ============= In-place Random Operations =============
+    Tensor& Tensor::uniform_(float low, float high) {
+        if (dtype_ != DataType::Float32) {
+            LOG_ERROR("uniform_ only implemented for float32");
+            return *this;
+        }
+
+        if (!is_valid() || numel() == 0) {
+            return *this;
+        }
+
+        size_t n = numel();
+
+        if (device_ == Device::CUDA) {
+            // Use kernel-based generation for reproducibility
+            tensor_ops::launch_uniform(
+                ptr<float>(), n, low, high,
+                RandomGenerator::instance().get_seed(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            auto& gen = *static_cast<std::mt19937_64*>(
+                RandomGenerator::instance().get_generator(Device::CPU));
+            std::uniform_real_distribution<float> dist(low, high);
+
+            float* data = ptr<float>();
+            for (size_t i = 0; i < n; ++i) {
+                data[i] = dist(gen);
+            }
+        }
+
+        return *this;
+    }
+
+    Tensor& Tensor::normal_(float mean, float std) {
+        if (dtype_ != DataType::Float32) {
+            LOG_ERROR("normal_ only implemented for float32");
+            return *this;
+        }
+
+        if (!is_valid() || numel() == 0) {
+            return *this;
+        }
+
+        size_t n = numel();
+
+        if (device_ == Device::CUDA) {
+            // Use kernel-based generation for reproducibility
+            tensor_ops::launch_normal(
+                ptr<float>(), n, mean, std,
+                RandomGenerator::instance().get_seed(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            auto& gen = *static_cast<std::mt19937_64*>(
+                RandomGenerator::instance().get_generator(Device::CPU));
+            std::normal_distribution<float> dist(mean, std);
+
+            float* data = ptr<float>();
+            for (size_t i = 0; i < n; ++i) {
+                data[i] = dist(gen);
+            }
+        }
+
+        return *this;
+    }
+
+#undef CHECK_CUDA
+#undef CHECK_CURAND
+
+} // namespace gs

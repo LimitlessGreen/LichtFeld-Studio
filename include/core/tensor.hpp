@@ -12,6 +12,7 @@
 #include <initializer_list>
 #include <memory>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -113,6 +114,29 @@ namespace gs {
     // Forward declaration
     class TensorError;
 
+    // Random number generator management
+    class RandomGenerator {
+    public:
+        static RandomGenerator& instance();
+
+        void manual_seed(uint64_t seed);
+        uint64_t get_seed() const { return seed_; }
+
+        // Get generator for a specific device
+        void* get_generator(Device device);
+
+    private:
+        RandomGenerator();
+        ~RandomGenerator();
+
+        uint64_t seed_;
+        void* cuda_generator_ = nullptr;
+        std::mt19937_64 cpu_generator_;
+
+        RandomGenerator(const RandomGenerator&) = delete;
+        RandomGenerator& operator=(const RandomGenerator&) = delete;
+    };
+
     // Lightweight tensor - a view over memory
     class Tensor {
     private:
@@ -157,6 +181,20 @@ namespace gs {
                            DataType dtype = DataType::Float32);
         static Tensor full(TensorShape shape, float value, Device device = Device::CUDA,
                            DataType dtype = DataType::Float32);
+
+        // Random tensors
+        static Tensor rand(TensorShape shape, Device device = Device::CUDA,
+                           DataType dtype = DataType::Float32);
+        static Tensor randn(TensorShape shape, Device device = Device::CUDA,
+                            DataType dtype = DataType::Float32);
+        static Tensor uniform(TensorShape shape, float low = 0.0f, float high = 1.0f,
+                              Device device = Device::CUDA, DataType dtype = DataType::Float32);
+        static Tensor normal(TensorShape shape, float mean = 0.0f, float std = 1.0f,
+                             Device device = Device::CUDA, DataType dtype = DataType::Float32);
+        static Tensor randint(TensorShape shape, int low, int high,
+                              Device device = Device::CUDA, DataType dtype = DataType::Int32);
+        static Tensor bernoulli(TensorShape shape, float p = 0.5f,
+                                Device device = Device::CUDA, DataType dtype = DataType::Float32);
 
         // Create view from raw memory
         static Tensor from_blob(void* data, TensorShape shape, Device device, DataType dtype) {
@@ -225,8 +263,11 @@ namespace gs {
         Tensor squeeze(int dim = -1) const;
         Tensor unsqueeze(int dim) const;
         Tensor permute(std::vector<int> dims) const;
-        Tensor transpose(int dim1, int dim2) const;
+        Tensor transpose(int dim1 = 0, int dim2 = 1) const;
         Tensor flatten(int start_dim = 0, int end_dim = -1) const;
+
+        // New transpose that returns a proper transposed tensor
+        Tensor t() const; // Transpose last two dimensions
 
         // ============= Memory Operations =============
         Tensor to(Device device) const;      // Copy to device
@@ -246,6 +287,12 @@ namespace gs {
         Tensor div(float scalar) const;
         Tensor neg() const;
 
+        // Matrix operations
+        Tensor matmul(const Tensor& other) const;
+        Tensor mm(const Tensor& other) const { return matmul(other); } // Alias
+        Tensor bmm(const Tensor& other) const;                         // Batch matrix multiply
+        Tensor dot(const Tensor& other) const;                         // Dot product for 1D tensors
+
         // Operator overloads
         Tensor operator+(const Tensor& other) const { return add(other); }
         Tensor operator+(float scalar) const { return add(scalar); }
@@ -256,6 +303,7 @@ namespace gs {
         Tensor operator/(const Tensor& other) const { return div(other); }
         Tensor operator/(float scalar) const { return div(scalar); }
         Tensor operator-() const { return neg(); }
+        // Note: operator@ is not valid C++, use matmul() or mm() instead
 
         // In-place operations
         Tensor& add_(const Tensor& other);
@@ -266,6 +314,10 @@ namespace gs {
         Tensor& mul_(float scalar);
         Tensor& div_(const Tensor& other);
         Tensor& div_(float scalar);
+
+        // In-place random operations
+        Tensor& uniform_(float low = 0.0f, float high = 1.0f);
+        Tensor& normal_(float mean = 0.0f, float std = 1.0f);
 
         // ============= Reduction Operations =============
         float sum() const;
@@ -362,6 +414,38 @@ namespace gs {
             return Tensor::from_blob(data, shape, device, dtype);
         }
 
+        // Random functions
+        inline Tensor rand(TensorShape shape, Device device = Device::CUDA) {
+            return Tensor::rand(shape, device);
+        }
+
+        inline Tensor randn(TensorShape shape, Device device = Device::CUDA) {
+            return Tensor::randn(shape, device);
+        }
+
+        inline Tensor uniform(TensorShape shape, float low = 0.0f, float high = 1.0f,
+                              Device device = Device::CUDA) {
+            return Tensor::uniform(shape, low, high, device);
+        }
+
+        inline Tensor normal(TensorShape shape, float mean = 0.0f, float std = 1.0f,
+                             Device device = Device::CUDA) {
+            return Tensor::normal(shape, mean, std, device);
+        }
+
+        inline Tensor randint(TensorShape shape, int low, int high, Device device = Device::CUDA) {
+            return Tensor::randint(shape, low, high, device);
+        }
+
+        inline Tensor bernoulli(TensorShape shape, float p = 0.5f, Device device = Device::CUDA) {
+            return Tensor::bernoulli(shape, p, device);
+        }
+
+        // Set random seed
+        inline void manual_seed(uint64_t seed) {
+            RandomGenerator::instance().manual_seed(seed);
+        }
+
         // Like operations
         inline Tensor zeros_like(const Tensor& other) {
             return zeros(other.shape(), other.device());
@@ -370,6 +454,19 @@ namespace gs {
         inline Tensor ones_like(const Tensor& other) {
             return ones(other.shape(), other.device());
         }
+
+        inline Tensor rand_like(const Tensor& other) {
+            return rand(other.shape(), other.device());
+        }
+
+        inline Tensor randn_like(const Tensor& other) {
+            return randn(other.shape(), other.device());
+        }
+
+        // Matrix creation helpers
+        Tensor eye(size_t n, Device device = Device::CUDA);
+        Tensor eye(size_t m, size_t n, Device device = Device::CUDA);
+        Tensor diag(const Tensor& diagonal);
 
         // Range operations
         Tensor arange(float end);

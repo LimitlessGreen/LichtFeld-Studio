@@ -24,6 +24,8 @@ set(OPTIONAL_TEST_FILES
     test_tensor_torch_compat.cpp
     test_tensor_advanced.cpp
     test_tensor_stress.cpp
+    test_tensor_matrix.cpp
+    test_tensor_random.cpp
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})
@@ -56,7 +58,7 @@ target_include_directories(lichtfeld_tests PRIVATE
     ${OPENGL_INCLUDE_DIRS}
 )
 
-# Link libraries
+# Link libraries - Add cuBLAS and cuRAND
 target_link_libraries(lichtfeld_tests PRIVATE
     gs_core
     gs_geometry
@@ -73,6 +75,8 @@ target_link_libraries(lichtfeld_tests PRIVATE
     ${TORCH_LIBRARIES}
     ${OPENGL_LIBRARIES}
     CUDA::cudart
+    CUDA::cublas
+    CUDA::curand
     spdlog::spdlog
 )
 
