@@ -15,7 +15,25 @@ namespace gs::tensor {
     }
 
     Tensor arange(float start, float end, float step) {
-        int n = static_cast<int>((end - start) / step);
+        // Handle negative step
+        int n;
+        if (step > 0) {
+            if (start >= end) {
+                LOG_ERROR("Invalid range: start={}, end={}, step={} (start >= end with positive step)", start, end, step);
+                return Tensor();
+            }
+            n = static_cast<int>((end - start) / step);
+        } else if (step < 0) {
+            if (start <= end) {
+                LOG_ERROR("Invalid range: start={}, end={}, step={} (start <= end with negative step)", start, end, step);
+                return Tensor();
+            }
+            n = static_cast<int>((end - start) / step);
+        } else {
+            LOG_ERROR("Invalid range: step cannot be zero");
+            return Tensor();
+        }
+        
         if (n <= 0) {
             LOG_ERROR("Invalid range: start={}, end={}, step={}", start, end, step);
             return Tensor();
@@ -54,7 +72,7 @@ namespace gs::tensor {
     }
 
     // ============= Stack/Concatenate Operations =============
-    Tensor stack(const std::vector<Tensor>& tensors, int dim) {
+    Tensor stack(std::vector<Tensor>&& tensors, int dim) {
         if (tensors.empty()) {
             LOG_ERROR("Cannot stack empty tensor list");
             return Tensor();
@@ -104,7 +122,7 @@ namespace gs::tensor {
         return result;
     }
 
-    Tensor cat(const std::vector<Tensor>& tensors, int dim) {
+    Tensor cat(std::vector<Tensor>&& tensors, int dim) {
         if (tensors.empty()) {
             LOG_ERROR("Cannot concatenate empty tensor list");
             return Tensor();
@@ -233,12 +251,13 @@ namespace gs::tensor {
     Tensor apply_batched(const Tensor& input, size_t batch_size, Func func) {
         auto batches = Tensor::split_batch(input, batch_size);
         std::vector<Tensor> results;
+        results.reserve(batches.size());
 
         for (auto& batch : batches) {
             results.push_back(func(batch));
         }
 
-        return cat(results, 0);
+        return cat(std::move(results), 0);
     }
 
     // Explicit instantiations for common function types
@@ -291,9 +310,76 @@ namespace gs::tensor::functional {
         return result;
     }
 
-    // Explicit instantiations
+    // ============= EXPLICIT INSTANTIATIONS FOR ALL TYPES USED IN TESTS =============
+    
+    // Basic function types
     template Tensor map<std::function<float(float)>>(const Tensor&, std::function<float(float)>);
     template float reduce<std::plus<float>>(const Tensor&, float, std::plus<float>);
+    template float reduce<std::multiplies<float>>(const Tensor&, float, std::multiplies<float>);
     template Tensor filter<std::function<bool(float)>>(const Tensor&, std::function<bool(float)>);
 
 } // namespace gs::tensor::functional
+
+// ============= Explicit instantiations for test functors =============
+// These are the function objects used in test_tensor_advanced.cpp
+
+// Functor for squaring
+struct SquareFunc {
+    float operator()(float x) const { return x * x; }
+};
+
+// Functor for filtering positive values
+struct PositiveFilter {
+    bool operator()(float x) const { return x > 0; }
+};
+
+// Functor for profiling test - needs to be in gs namespace to use gs::Tensor
+struct ProfileOp {
+    gs::Tensor operator()(const gs::Tensor& t) const {
+        return t.add(1.0f).mul(2.0f).sub(1.0f);
+    }
+};
+
+// Now instantiate the templates for these functors
+namespace gs::tensor::functional {
+    template Tensor map<SquareFunc>(const Tensor&, SquareFunc);
+    template Tensor filter<PositiveFilter>(const Tensor&, PositiveFilter);
+}
+
+// ============= Template implementation and instantiation for Tensor::timed =============
+namespace gs {
+    // Template implementation for Tensor::timed (must be defined before instantiation)
+    template <typename Func>
+    auto Tensor::timed(const std::string& name, Func func) -> decltype(func(*this)) {
+        if (profiling_enabled_) {
+            TensorTimer timer(name);
+            return func(*this);
+        }
+        return func(*this);
+    }
+    
+    // Explicit instantiation for ProfileOp
+    template auto Tensor::timed<ProfileOp>(const std::string&, ProfileOp) -> decltype(std::declval<ProfileOp>()(*std::declval<Tensor*>()));
+}
+
+// ============= Old test functors that might still be used =============
+struct GreaterThanTwo {
+    bool operator()(float x) const { return x > 2; }
+};
+
+struct AddOne {
+    gs::Tensor operator()(const gs::Tensor& t) const { return t.add(1); }
+};
+
+struct MulTwo {
+    gs::Tensor operator()(const gs::Tensor& t) const { return t.mul(2); }
+};
+
+struct SubThree {
+    gs::Tensor operator()(const gs::Tensor& t) const { return t.sub(3); }
+};
+
+namespace gs::tensor::functional {
+    // Instantiate for old test functors if they're still used
+    template Tensor filter<GreaterThanTwo>(const Tensor&, GreaterThanTwo);
+}

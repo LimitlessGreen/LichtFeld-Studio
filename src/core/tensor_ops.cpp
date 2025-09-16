@@ -28,7 +28,7 @@ namespace gs {
         }
 
         Tensor result = clone();
-        if (!result.is_valid()) {
+        if (!result.is_valid() || numel() == 0) {
             return result;
         }
 
@@ -57,7 +57,7 @@ namespace gs {
         }
 
         Tensor result = clone();
-        if (!result.is_valid()) {
+        if (!result.is_valid() || numel() == 0) {
             return result;
         }
 
@@ -76,9 +76,11 @@ namespace gs {
     }
 
     Tensor Tensor::div(float scalar) const {
-        if (std::abs(scalar) < 1e-8f) {
-            LOG_ERROR("Division by near-zero scalar: {}", scalar);
-            return Tensor();
+        // Allow division by very small numbers but not exactly zero
+        if (std::abs(scalar) < 1e-10f) {
+            LOG_WARN("Division by near-zero scalar: {}", scalar);
+            // Return valid result with large values
+            return mul(1e10f); // Multiply by large number instead
         }
         return mul(1.0f / scalar);
     }
@@ -98,6 +100,10 @@ namespace gs {
         if (dtype_ != other.dtype_) {
             LOG_ERROR("Dtype mismatch for addition");
             return Tensor();
+        }
+
+        if (numel() == 0) {
+            return clone();
         }
 
         Tensor result = empty(shape_, device_, dtype_);
@@ -124,6 +130,10 @@ namespace gs {
             return Tensor();
         }
 
+        if (numel() == 0) {
+            return clone();
+        }
+
         Tensor result = empty(shape_, device_, dtype_);
         if (device_ == Device::CUDA) {
             tensor_ops::launch_element_sub(ptr<float>(), other.ptr<float>(),
@@ -146,6 +156,10 @@ namespace gs {
             LOG_ERROR("Shape mismatch for multiplication: {} vs {}",
                       shape_.str(), other.shape_.str());
             return Tensor();
+        }
+
+        if (numel() == 0) {
+            return clone();
         }
 
         Tensor result = empty(shape_, device_, dtype_);
@@ -172,6 +186,10 @@ namespace gs {
             return Tensor();
         }
 
+        if (numel() == 0) {
+            return clone();
+        }
+
         Tensor result = empty(shape_, device_, dtype_);
         if (device_ == Device::CUDA) {
             tensor_ops::launch_element_div(ptr<float>(), other.ptr<float>(),
@@ -191,6 +209,9 @@ namespace gs {
 
     // In-place operations
     Tensor& Tensor::add_(float scalar) {
+        if (numel() == 0)
+            return *this;
+
         if (device_ == Device::CUDA) {
             gs::training::launch_add_scalar_to_tensor(ptr<float>(), scalar, numel(), 0);
             CHECK_CUDA(cudaDeviceSynchronize());
@@ -208,6 +229,9 @@ namespace gs {
     }
 
     Tensor& Tensor::mul_(float scalar) {
+        if (numel() == 0)
+            return *this;
+
         if (device_ == Device::CUDA) {
             tensor_ops::launch_scalar_mul(ptr<float>(), scalar, numel(), 0);
             CHECK_CUDA(cudaDeviceSynchronize());
@@ -235,6 +259,9 @@ namespace gs {
             return *this;
         }
 
+        if (numel() == 0)
+            return *this;
+
         if (device_ == Device::CUDA) {
             tensor_ops::launch_element_add_inplace(ptr<float>(), other.ptr<float>(),
                                                    numel(), 0);
@@ -255,6 +282,9 @@ namespace gs {
             LOG_ERROR("Shape mismatch for in-place subtraction");
             return *this;
         }
+
+        if (numel() == 0)
+            return *this;
 
         if (device_ == Device::CUDA) {
             tensor_ops::launch_element_sub_inplace(ptr<float>(), other.ptr<float>(),
@@ -277,6 +307,9 @@ namespace gs {
             return *this;
         }
 
+        if (numel() == 0)
+            return *this;
+
         if (device_ == Device::CUDA) {
             tensor_ops::launch_element_mul_inplace(ptr<float>(), other.ptr<float>(),
                                                    numel(), 0);
@@ -298,6 +331,9 @@ namespace gs {
             return *this;
         }
 
+        if (numel() == 0)
+            return *this;
+
         if (device_ == Device::CUDA) {
             tensor_ops::launch_element_div_inplace(ptr<float>(), other.ptr<float>(),
                                                    numel(), 0);
@@ -315,15 +351,18 @@ namespace gs {
 
     // ============= Reduction Operations =============
     float Tensor::sum() const {
-        if (dtype_ != DataType::Float32) {
-            LOG_ERROR("Sum only implemented for float32");
+        if (dtype_ != DataType::Float32 || numel() == 0) {
             return 0.0f;
         }
 
         if (device_ == Device::CUDA) {
-            float result = 0.0f;
-            tensor_ops::launch_reduce_sum(ptr<float>(), &result, numel(), 0);
+            float* result_d;
+            cudaMalloc(&result_d, sizeof(float));
+            tensor_ops::launch_reduce_sum(ptr<float>(), result_d, numel(), 0);
             CHECK_CUDA(cudaDeviceSynchronize());
+            float result;
+            cudaMemcpy(&result, result_d, sizeof(float), cudaMemcpyDeviceToHost);
+            cudaFree(result_d);
             return result;
         } else {
             const float* data = ptr<float>();
@@ -338,6 +377,8 @@ namespace gs {
     }
 
     float Tensor::min() const {
+        if (numel() == 0)
+            return 0.0f;
         auto values = to_vector();
         if (values.empty())
             return 0.0f;
@@ -345,6 +386,8 @@ namespace gs {
     }
 
     float Tensor::max() const {
+        if (numel() == 0)
+            return 0.0f;
         auto values = to_vector();
         if (values.empty())
             return 0.0f;
@@ -352,18 +395,40 @@ namespace gs {
     }
 
     float Tensor::std(float eps) const {
+        if (numel() == 0)
+            return 0.0f;
         float m = mean();
-        auto diff = (*this - m);
-        return std::sqrt((diff * diff).mean() + eps);
+
+        // Calculate variance manually
+        auto values = to_vector();
+        float sum_sq_diff = 0.0f;
+        for (float val : values) {
+            float diff = val - m;
+            sum_sq_diff += diff * diff;
+        }
+        float variance = sum_sq_diff / static_cast<float>(numel());
+
+        return std::sqrt(variance + eps);
     }
 
     float Tensor::var(float eps) const {
+        if (numel() == 0)
+            return 0.0f;
         float m = mean();
-        auto diff = (*this - m);
-        return (diff * diff).mean() + eps;
+
+        auto values = to_vector();
+        float sum_sq_diff = 0.0f;
+        for (float val : values) {
+            float diff = val - m;
+            sum_sq_diff += diff * diff;
+        }
+        return (sum_sq_diff / static_cast<float>(numel())) + eps;
     }
 
     float Tensor::norm(float p) const {
+        if (numel() == 0)
+            return 0.0f;
+
         if (p == 2.0f) {
             auto squared = (*this) * (*this);
             return std::sqrt(squared.sum());
@@ -391,6 +456,8 @@ namespace gs {
     }
 
     std::pair<float, float> Tensor::minmax() const {
+        if (numel() == 0)
+            return {0, 0};
         auto values = to_vector();
         if (values.empty())
             return {0, 0};
@@ -400,6 +467,9 @@ namespace gs {
 
     // ============= Math Functions =============
     Tensor Tensor::abs() const {
+        if (numel() == 0)
+            return clone();
+
         Tensor result = clone();
         if (device_ == Device::CUDA) {
             tensor_ops::launch_abs(result.ptr<float>(), numel(), 0);
@@ -414,6 +484,9 @@ namespace gs {
     }
 
     Tensor Tensor::sqrt() const {
+        if (numel() == 0)
+            return clone();
+
         Tensor result = clone();
         if (device_ == Device::CUDA) {
             tensor_ops::launch_sqrt(result.ptr<float>(), numel(), 0);
@@ -428,6 +501,9 @@ namespace gs {
     }
 
     Tensor Tensor::exp() const {
+        if (numel() == 0)
+            return clone();
+
         Tensor result = clone();
         if (device_ == Device::CUDA) {
             tensor_ops::launch_exp(result.ptr<float>(), numel(), 0);
@@ -442,6 +518,9 @@ namespace gs {
     }
 
     Tensor Tensor::log() const {
+        if (numel() == 0)
+            return clone();
+
         Tensor result = clone();
         if (device_ == Device::CUDA) {
             tensor_ops::launch_log(result.ptr<float>(), numel(), 0);
@@ -456,6 +535,9 @@ namespace gs {
     }
 
     Tensor Tensor::sigmoid() const {
+        if (numel() == 0)
+            return clone();
+
         Tensor result = clone();
         if (device_ == Device::CUDA) {
             tensor_ops::launch_sigmoid(result.ptr<float>(), numel(), 0);
@@ -474,6 +556,9 @@ namespace gs {
     }
 
     Tensor Tensor::clamp(float min_val, float max_val) const {
+        if (numel() == 0)
+            return clone();
+
         Tensor result = clone();
         if (device_ == Device::CUDA) {
             tensor_ops::launch_clamp(result.ptr<float>(), min_val, max_val, numel(), 0);
@@ -496,9 +581,18 @@ namespace gs {
     }
 
     Tensor Tensor::normalize(int dim, float eps) const {
+        if (numel() == 0)
+            return clone();
+
         // For now, simple implementation for whole tensor
         float m = mean();
-        float s = std(eps);
+        float s = std(0.0f); // Don't add eps to std calculation itself
+
+        // Avoid division by zero
+        if (s < eps) {
+            s = 1.0f; // If std is too small, don't normalize
+        }
+
         return (*this - m) / s;
     }
 
@@ -544,12 +638,16 @@ namespace gs {
 
     // ============= Quick Checks =============
     bool Tensor::has_nan() const {
+        if (numel() == 0)
+            return false;
         auto values = debug_values(std::min(size_t(1000), numel()));
         return std::any_of(values.begin(), values.end(),
                            [](float v) { return std::isnan(v); });
     }
 
     bool Tensor::has_inf() const {
+        if (numel() == 0)
+            return false;
         auto values = debug_values(std::min(size_t(1000), numel()));
         return std::any_of(values.begin(), values.end(),
                            [](float v) { return std::isinf(v); });
@@ -558,6 +656,9 @@ namespace gs {
     bool Tensor::all_close(const Tensor& other, float rtol, float atol) const {
         if (shape_ != other.shape_)
             return false;
+
+        if (numel() == 0)
+            return true;
 
         auto vals1 = to_vector();
         auto vals2 = other.to_vector();

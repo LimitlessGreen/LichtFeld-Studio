@@ -47,6 +47,7 @@ namespace gs {
           device_(device),
           dtype_(dtype),
           owns_memory_(false),
+          initialized_(true), // Mark as initialized
           id_(next_id_++) {
         LOG_TRACE("Created tensor #{} (view): shape={}, device={}, dtype={}",
                   id_, shape_.str(), device_name(device_), dtype_name(dtype_));
@@ -58,11 +59,13 @@ namespace gs {
           device_(other.device_),
           dtype_(other.dtype_),
           owns_memory_(other.owns_memory_),
+          initialized_(other.initialized_),
           id_(other.id_) {
 
         // Clear the source
         other.data_ = nullptr;
         other.owns_memory_ = false;
+        other.initialized_ = false;
 
         LOG_TRACE("Moved tensor #{} to tensor #{}", other.id_, id_);
     }
@@ -84,11 +87,13 @@ namespace gs {
             device_ = other.device_;
             dtype_ = other.dtype_;
             owns_memory_ = other.owns_memory_;
+            initialized_ = other.initialized_;
             id_ = other.id_;
 
             // Clear source
             other.data_ = nullptr;
             other.owns_memory_ = false;
+            other.initialized_ = false;
 
             LOG_TRACE("Move-assigned tensor #{} to tensor #{}", other.id_, id_);
         }
@@ -109,9 +114,17 @@ namespace gs {
     // ============= Factory Methods =============
     Tensor Tensor::empty(TensorShape shape, Device device, DataType dtype) {
         size_t bytes = shape.elements() * dtype_size(dtype);
-        if (bytes == 0) {
-            LOG_WARN("Creating empty tensor with 0 elements");
-            return Tensor();
+
+        // Handle empty tensors (0 elements)
+        if (shape.elements() == 0) {
+            LOG_TRACE("Creating empty tensor with 0 elements");
+            // Create a dummy non-null pointer for empty tensors
+            // This allows is_valid() to return true while having 0 elements
+            static char dummy_data = 0;
+            Tensor t(&dummy_data, shape, device, dtype);
+            t.owns_memory_ = false; // Don't try to free the dummy pointer
+            t.initialized_ = true;  // Mark as initialized
+            return t;
         }
 
         void* data = nullptr;
@@ -127,6 +140,7 @@ namespace gs {
 
         Tensor t(data, shape, device, dtype);
         t.owns_memory_ = true;
+        t.initialized_ = true; // Mark as initialized
 
         LOG_DEBUG("Allocated tensor #{}: {} bytes, shape={}, device={}",
                   t.id_, bytes, shape.str(), device_name(device));
@@ -136,7 +150,7 @@ namespace gs {
 
     Tensor Tensor::zeros(TensorShape shape, Device device, DataType dtype) {
         Tensor t = empty(shape, device, dtype);
-        if (t.is_valid()) {
+        if (t.is_valid() && t.numel() > 0) {
             t.zero_();
         }
         return t;
@@ -144,7 +158,7 @@ namespace gs {
 
     Tensor Tensor::ones(TensorShape shape, Device device, DataType dtype) {
         Tensor t = empty(shape, device, dtype);
-        if (t.is_valid()) {
+        if (t.is_valid() && t.numel() > 0) {
             t.fill_(1.0f);
         }
         return t;
@@ -152,7 +166,7 @@ namespace gs {
 
     Tensor Tensor::full(TensorShape shape, float value, Device device, DataType dtype) {
         Tensor t = empty(shape, device, dtype);
-        if (t.is_valid()) {
+        if (t.is_valid() && t.numel() > 0) {
             t.fill_(value);
         }
         return t;
@@ -160,6 +174,21 @@ namespace gs {
 
     // ============= View Operations =============
     Tensor Tensor::view(TensorShape new_shape) const {
+        // Special handling for empty tensors
+        if (shape_.elements() == 0) {
+            // If current tensor is empty and new shape is also empty, return a view of the same data
+            if (new_shape.elements() == 0) {
+                // Return a view pointing to the same (dummy) data
+                Tensor t(data_, new_shape, device_, dtype_);
+                t.initialized_ = true;
+                return t;
+            } else {
+                // Cannot reshape empty tensor to non-empty
+                LOG_ERROR("Cannot reshape empty tensor to non-empty shape");
+                return Tensor();
+            }
+        }
+
         size_t new_elements = new_shape.elements();
 
         // Allow -1 in one dimension to infer size
@@ -181,7 +210,7 @@ namespace gs {
         }
 
         if (has_infer) {
-            if (shape_.elements() % known_elements != 0) {
+            if (known_elements == 0 || shape_.elements() % known_elements != 0) {
                 LOG_ERROR("Cannot infer dimension: {} is not divisible by {}",
                           shape_.elements(), known_elements);
                 return Tensor();
@@ -199,7 +228,9 @@ namespace gs {
             return Tensor();
         }
 
-        return Tensor(data_, new_shape, device_, dtype_);
+        Tensor t(data_, new_shape, device_, dtype_);
+        t.initialized_ = true;
+        return t;
     }
 
     Tensor Tensor::slice(size_t dim, size_t start, size_t end) const {
@@ -222,32 +253,66 @@ namespace gs {
         // Calculate offset in elements
         size_t offset = 0;
         size_t stride = 1;
-        for (size_t i = shape_.rank(); i > dim; --i) {
+
+        // Calculate the stride for the dimension we're slicing
+        for (size_t i = shape_.rank(); i > dim + 1; --i) {
             stride *= shape_[i - 1];
         }
+
+        // Calculate the offset to the start of the slice
         offset = start * stride;
 
         // Calculate offset in bytes
         size_t byte_offset = offset * dtype_size(dtype_);
         void* new_data = static_cast<char*>(data_) + byte_offset;
 
-        return Tensor(new_data, new_shape, device_, dtype_);
+        // Return a view into the sliced data
+        Tensor t(new_data, new_shape, device_, dtype_);
+        t.initialized_ = true;
+        return t;
     }
 
     Tensor Tensor::squeeze(int dim) const {
-        if (dim < 0)
-            dim = shape_.rank() + dim;
+        std::vector<size_t> new_dims;
 
-        if (dim >= static_cast<int>(shape_.rank()) || shape_[dim] != 1) {
-            // Return a view of the same tensor (no copy)
-            return Tensor(data_, shape_, device_, dtype_);
+        if (dim == -1) {
+            // Squeeze all dimensions of size 1
+            for (size_t i = 0; i < shape_.rank(); ++i) {
+                if (shape_[i] != 1) {
+                    new_dims.push_back(shape_[i]);
+                }
+            }
+        } else {
+            // Handle negative indexing
+            if (dim < 0) {
+                dim = shape_.rank() + dim;
+            }
+
+            // Check bounds
+            if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
+                Tensor t(data_, shape_, device_, dtype_);
+                t.initialized_ = true;
+                return t;
+            }
+
+            // Only squeeze if dimension is 1
+            if (shape_[dim] != 1) {
+                Tensor t(data_, shape_, device_, dtype_);
+                t.initialized_ = true;
+                return t;
+            }
+
+            // Build new shape without the squeezed dimension
+            for (size_t i = 0; i < shape_.rank(); ++i) {
+                if (static_cast<int>(i) != dim) {
+                    new_dims.push_back(shape_[i]);
+                }
+            }
         }
 
-        std::vector<size_t> new_dims;
-        for (size_t i = 0; i < shape_.rank(); ++i) {
-            if (static_cast<int>(i) != dim) {
-                new_dims.push_back(shape_[i]);
-            }
+        // Handle edge case where all dims are 1
+        if (new_dims.empty()) {
+            new_dims.push_back(1);
         }
 
         return view(TensorShape(new_dims));
@@ -313,8 +378,12 @@ namespace gs {
         }
 
         Tensor result = empty(shape_, device, dtype_);
-        if (!result.is_valid()) {
+        if (!result.is_valid() || !is_valid()) {
             return result;
+        }
+
+        if (numel() == 0) {
+            return result; // Nothing to copy for empty tensors
         }
 
         size_t bytes = this->bytes();
@@ -332,9 +401,17 @@ namespace gs {
     }
 
     Tensor Tensor::clone() const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
         Tensor result = empty(shape_, device_, dtype_);
         if (!result.is_valid()) {
             return result;
+        }
+
+        if (numel() == 0) {
+            return result; // Nothing to copy for empty tensors
         }
 
         size_t bytes = this->bytes();
@@ -363,6 +440,15 @@ namespace gs {
             return;
         }
 
+        if (!is_valid() || !other.is_valid()) {
+            LOG_ERROR("Cannot copy between invalid tensors");
+            return;
+        }
+
+        if (numel() == 0) {
+            return; // Nothing to copy for empty tensors
+        }
+
         size_t bytes = this->bytes();
 
         if (device_ == Device::CUDA && other.device_ == Device::CUDA) {
@@ -377,8 +463,8 @@ namespace gs {
     }
 
     void Tensor::fill_(float value) {
-        if (!is_valid()) {
-            LOG_ERROR("Cannot fill invalid tensor");
+        if (!is_valid() || numel() == 0) {
+            LOG_TRACE("Cannot fill invalid or empty tensor");
             return;
         }
 
@@ -399,8 +485,8 @@ namespace gs {
     }
 
     void Tensor::zero_() {
-        if (!is_valid()) {
-            LOG_ERROR("Cannot zero invalid tensor");
+        if (!is_valid() || numel() == 0) {
+            LOG_TRACE("Cannot zero invalid or empty tensor");
             return;
         }
 
@@ -526,7 +612,7 @@ namespace gs {
     std::vector<float> Tensor::debug_values(size_t max_values) const {
         std::vector<float> values;
 
-        if (!is_valid() || dtype_ != DataType::Float32) {
+        if (!is_valid() || dtype_ != DataType::Float32 || numel() == 0) {
             return values;
         }
 
@@ -547,8 +633,12 @@ namespace gs {
     }
 
     std::vector<float> Tensor::to_vector() const {
-        if (dtype_ != DataType::Float32) {
-            LOG_ERROR("to_vector only supports float32");
+        if (dtype_ != DataType::Float32 || !is_valid()) {
+            LOG_ERROR("to_vector only supports valid float32 tensors");
+            return {};
+        }
+
+        if (numel() == 0) {
             return {};
         }
 

@@ -63,15 +63,18 @@ namespace gs {
     private:
         std::vector<size_t> dims_;
         size_t total_elements_ = 0;
+        bool initialized_ = false; // Track if shape was explicitly set
 
     public:
         TensorShape() = default;
 
-        TensorShape(std::initializer_list<size_t> dims) : dims_(dims) {
+        TensorShape(std::initializer_list<size_t> dims) : dims_(dims),
+                                                          initialized_(true) {
             compute_total();
         }
 
-        explicit TensorShape(const std::vector<size_t>& dims) : dims_(dims) {
+        explicit TensorShape(const std::vector<size_t>& dims) : dims_(dims),
+                                                                initialized_(true) {
             compute_total();
         }
 
@@ -85,6 +88,7 @@ namespace gs {
         }
         size_t elements() const { return total_elements_; }
         const std::vector<size_t>& dims() const { return dims_; }
+        bool is_initialized() const { return initialized_; }
 
         bool operator==(const TensorShape& other) const {
             return dims_ == other.dims_;
@@ -117,6 +121,7 @@ namespace gs {
         Device device_ = Device::CPU;
         DataType dtype_ = DataType::Float32;
         bool owns_memory_ = false;
+        bool initialized_ = false; // Track if tensor was properly initialized
 
         // For debugging
         mutable size_t id_ = 0;
@@ -161,7 +166,7 @@ namespace gs {
         // ============= Data Access =============
         template <typename T>
         T* ptr() {
-            if (!data_) {
+            if (!data_ && shape_.elements() > 0) {
                 LOG_ERROR("Tensor #{}: Attempting to access null data pointer", id_);
                 return nullptr;
             }
@@ -170,7 +175,7 @@ namespace gs {
 
         template <typename T>
         const T* ptr() const {
-            if (!data_) {
+            if (!data_ && shape_.elements() > 0) {
                 LOG_ERROR("Tensor #{}: Attempting to access null data pointer", id_);
                 return nullptr;
             }
@@ -185,8 +190,29 @@ namespace gs {
         Device device() const { return device_; }
         DataType dtype() const { return dtype_; }
         bool owns_memory() const { return owns_memory_; }
-        bool is_empty() const { return data_ == nullptr || shape_.elements() == 0; }
-        bool is_valid() const { return data_ != nullptr && shape_.elements() > 0; }
+
+        // Empty tensor: has 0 elements
+        bool is_empty() const {
+            // Default constructed tensors are considered empty
+            if (!initialized_)
+                return true;
+            return shape_.elements() == 0;
+        }
+
+        // Valid tensor: properly initialized and either has data or is truly empty (0 elements)
+        bool is_valid() const {
+            // Default constructed tensors are invalid
+            if (!initialized_)
+                return false;
+
+            // Empty tensors (0 elements) are valid even without data
+            if (shape_.elements() == 0)
+                return true;
+
+            // Non-empty tensors need valid data pointer
+            return data_ != nullptr;
+        }
+
         bool is_contiguous() const { return true; } // For now, assume all tensors are contiguous
         size_t numel() const { return shape_.elements(); }
         size_t bytes() const { return shape_.elements() * dtype_size(dtype_); }
@@ -350,9 +376,9 @@ namespace gs {
         Tensor arange(float start, float end, float step = 1.0f);
         Tensor linspace(float start, float end, size_t steps);
 
-        // Stack/concatenate operations
-        Tensor stack(const std::vector<Tensor>& tensors, int dim = 0);
-        Tensor cat(const std::vector<Tensor>& tensors, int dim = 0);
+        // Stack/concatenate operations - using rvalue references for move semantics
+        Tensor stack(std::vector<Tensor>&& tensors, int dim = 0);
+        Tensor cat(std::vector<Tensor>&& tensors, int dim = 0);
 
         // Utility functions
         bool check_valid(const Tensor& t, const std::string& name);
@@ -437,7 +463,7 @@ namespace gs {
         private:
             template <size_t... Is>
             Tensor apply_impl(const Tensor& input, std::index_sequence<Is...>) const {
-                Tensor result = input;
+                Tensor result = input.clone(); // Use clone instead of copy
                 ((result = std::get<Is>(ops_)(result)), ...);
                 return result;
             }
