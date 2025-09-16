@@ -9,10 +9,12 @@
 namespace gs::tensor_ops {
 
     // Scalar operations
+    void launch_scalar_add(float* data, float scalar, size_t n, cudaStream_t stream);
+    void launch_scalar_sub(float* data, float scalar, size_t n, cudaStream_t stream);
     void launch_scalar_mul(float* data, float scalar, size_t n, cudaStream_t stream);
     void launch_scalar_div(float* data, float scalar, size_t n, cudaStream_t stream);
 
-    // Element-wise operations
+    // Element-wise operations (non-broadcast)
     void launch_element_add(const float* a, const float* b, float* c, size_t n, cudaStream_t stream);
     void launch_element_sub(const float* a, const float* b, float* c, size_t n, cudaStream_t stream);
     void launch_element_mul(const float* a, const float* b, float* c, size_t n, cudaStream_t stream);
@@ -24,12 +26,39 @@ namespace gs::tensor_ops {
     void launch_element_mul_inplace(float* a, const float* b, size_t n, cudaStream_t stream);
     void launch_element_div_inplace(float* a, const float* b, size_t n, cudaStream_t stream);
 
+    // Broadcasting operations
+    void launch_broadcast(const float* src, float* dst,
+                          const size_t* src_shape, const size_t* dst_shape,
+                          size_t src_rank, size_t dst_rank,
+                          size_t dst_elements, cudaStream_t stream);
+
+    void launch_broadcast_add(const float* a, const float* b, float* c,
+                              const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                              size_t a_rank, size_t b_rank, size_t c_rank,
+                              size_t c_elements, cudaStream_t stream);
+
+    void launch_broadcast_sub(const float* a, const float* b, float* c,
+                              const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                              size_t a_rank, size_t b_rank, size_t c_rank,
+                              size_t c_elements, cudaStream_t stream);
+
+    void launch_broadcast_mul(const float* a, const float* b, float* c,
+                              const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                              size_t a_rank, size_t b_rank, size_t c_rank,
+                              size_t c_elements, cudaStream_t stream);
+
+    void launch_broadcast_div(const float* a, const float* b, float* c,
+                              const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                              size_t a_rank, size_t b_rank, size_t c_rank,
+                              size_t c_elements, cudaStream_t stream);
+
     // Math functions
     void launch_abs(float* data, size_t n, cudaStream_t stream);
     void launch_sqrt(float* data, size_t n, cudaStream_t stream);
     void launch_exp(float* data, size_t n, cudaStream_t stream);
     void launch_log(float* data, size_t n, cudaStream_t stream);
     void launch_sigmoid(float* data, size_t n, cudaStream_t stream);
+    void launch_relu(float* data, size_t n, cudaStream_t stream);
     void launch_clamp(float* data, float min_val, float max_val, size_t n, cudaStream_t stream);
 
     // Reduction operations

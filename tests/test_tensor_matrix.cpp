@@ -13,12 +13,23 @@ protected:
     void SetUp() override {
         torch::manual_seed(42);
         tensor::manual_seed(42);
+
+        // Ensure CUDA is properly initialized
+        cudaSetDevice(0);
     }
 
     bool compare_tensors(const Tensor& our_tensor, const torch::Tensor& torch_tensor,
                          float tolerance = 1e-4f) {
         auto our_values = our_tensor.to_vector();
-        auto torch_cpu = torch_tensor.to(torch::kCPU).contiguous();
+
+        // Always work with CPU tensors for comparison
+        torch::Tensor torch_cpu;
+        if (torch_tensor.is_cuda()) {
+            torch_cpu = torch_tensor.to(torch::kCPU).contiguous();
+        } else {
+            torch_cpu = torch_tensor.contiguous();
+        }
+
         auto torch_data = torch_cpu.data_ptr<float>();
 
         if (our_values.size() != static_cast<size_t>(torch_cpu.numel())) {
@@ -44,14 +55,23 @@ protected:
         auto tensor = Tensor::empty(TensorShape(shape), Device::CUDA);
         cudaMemcpy(tensor.ptr<float>(), data.data(),
                    data.size() * sizeof(float), cudaMemcpyHostToDevice);
+        cudaDeviceSynchronize();
         return tensor;
     }
 
     torch::Tensor create_torch_from_vector(const std::vector<float>& data,
                                            const std::vector<int64_t>& shape) {
-        auto cpu_tensor = torch::from_blob(const_cast<float*>(data.data()), shape,
-                                           torch::TensorOptions().dtype(torch::kFloat32));
-        return cpu_tensor.to(torch::kCUDA).clone();
+        // Always create on CPU to avoid CUDA issues
+        auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+        auto tensor = torch::from_blob(const_cast<float*>(data.data()), shape, options).clone();
+        return tensor;
+    }
+
+    // Helper to perform torch operations on CPU
+    torch::Tensor torch_matmul_cpu(const torch::Tensor& a, const torch::Tensor& b) {
+        auto a_cpu = a.is_cuda() ? a.to(torch::kCPU) : a;
+        auto b_cpu = b.is_cuda() ? b.to(torch::kCPU) : b;
+        return torch::matmul(a_cpu, b_cpu);
     }
 };
 
@@ -72,7 +92,7 @@ TEST_F(TensorMatrixTest, MatMul2D) {
     auto torch_b = create_torch_from_vector(data_b, {3, 2});
 
     auto our_result = our_a.matmul(our_b);
-    auto torch_result = torch::matmul(torch_a, torch_b);
+    auto torch_result = torch_matmul_cpu(torch_a, torch_b);
 
     EXPECT_TRUE(compare_tensors(our_result, torch_result));
 
@@ -95,7 +115,7 @@ TEST_F(TensorMatrixTest, MatMulVectorMatrix) {
     auto torch_mat = create_torch_from_vector(mat_data, {3, 2});
 
     auto our_result = our_vec.matmul(our_mat);
-    auto torch_result = torch::matmul(torch_vec, torch_mat);
+    auto torch_result = torch_matmul_cpu(torch_vec, torch_mat);
 
     EXPECT_TRUE(compare_tensors(our_result, torch_result));
 }
@@ -113,7 +133,7 @@ TEST_F(TensorMatrixTest, MatMulMatrixVector) {
     auto torch_vec = create_torch_from_vector(vec_data, {3});
 
     auto our_result = our_mat.matmul(our_vec);
-    auto torch_result = torch::matmul(torch_mat, torch_vec);
+    auto torch_result = torch_matmul_cpu(torch_mat, torch_vec);
 
     EXPECT_TRUE(compare_tensors(our_result, torch_result));
 }
@@ -214,13 +234,15 @@ TEST_F(TensorMatrixTest, TransposeSpecificDims) {
 TEST_F(TensorMatrixTest, Eye) {
     // Test square identity matrix
     auto our_eye = tensor::eye(4, Device::CUDA);
-    auto torch_eye = torch::eye(4, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    // Create torch eye on CPU to avoid CUDA issues
+    auto torch_eye = torch::eye(4, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
 
     EXPECT_TRUE(compare_tensors(our_eye, torch_eye));
 
     // Test rectangular identity matrix
     auto our_eye_rect = tensor::eye(3, 5, Device::CUDA);
-    auto torch_eye_rect = torch::eye(3, 5, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto torch_eye_rect = torch::eye(3, 5, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
 
     EXPECT_TRUE(compare_tensors(our_eye_rect, torch_eye_rect));
 }
@@ -254,7 +276,7 @@ TEST_F(TensorMatrixTest, MatMulChain) {
     auto torch_c = create_torch_from_vector(c_data, {2, 2});
 
     auto our_result = our_a.matmul(our_b).matmul(our_c);
-    auto torch_result = torch::matmul(torch::matmul(torch_a, torch_b), torch_c);
+    auto torch_result = torch_matmul_cpu(torch_matmul_cpu(torch_a, torch_b), torch_c);
 
     EXPECT_TRUE(compare_tensors(our_result, torch_result));
 }
@@ -273,7 +295,7 @@ TEST_F(TensorMatrixTest, TransposeMatMul) {
     auto torch_b = create_torch_from_vector(b_data, {2, 2});
 
     auto our_result = our_a.t().matmul(our_b);
-    auto torch_result = torch::matmul(torch_a.t(), torch_b);
+    auto torch_result = torch_matmul_cpu(torch_a.t(), torch_b);
 
     EXPECT_TRUE(compare_tensors(our_result, torch_result));
 }
@@ -296,21 +318,22 @@ TEST_F(TensorMatrixTest, LargeMatMul) {
     auto our_a = Tensor::randn({n, n}, Device::CUDA);
     auto our_b = Tensor::randn({n, n}, Device::CUDA);
 
-    // Convert to torch tensors
+    // Get data for torch tensors
     auto a_vec = our_a.to_vector();
     auto b_vec = our_b.to_vector();
 
-    auto torch_a = torch::from_blob(a_vec.data(), {static_cast<int64_t>(n), static_cast<int64_t>(n)},
-                                    torch::TensorOptions().dtype(torch::kFloat32))
-                       .to(torch::kCUDA)
+    std::vector<int64_t> shape = {static_cast<int64_t>(n), static_cast<int64_t>(n)};
+
+    // Create torch tensors on CPU only
+    auto torch_a = torch::from_blob(a_vec.data(), shape,
+                                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU))
                        .clone();
-    auto torch_b = torch::from_blob(b_vec.data(), {static_cast<int64_t>(n), static_cast<int64_t>(n)},
-                                    torch::TensorOptions().dtype(torch::kFloat32))
-                       .to(torch::kCUDA)
+    auto torch_b = torch::from_blob(b_vec.data(), shape,
+                                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU))
                        .clone();
 
     auto our_result = our_a.matmul(our_b);
-    auto torch_result = torch::matmul(torch_a, torch_b);
+    auto torch_result = torch_matmul_cpu(torch_a, torch_b);
 
     // Use slightly higher tolerance for larger matrices
     EXPECT_TRUE(compare_tensors(our_result, torch_result, 1e-3f));

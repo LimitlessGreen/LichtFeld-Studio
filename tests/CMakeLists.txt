@@ -7,6 +7,11 @@
 # Find GTest
 find_package(GTest CONFIG REQUIRED)
 
+# Find external libraries needed by core module
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(WebP REQUIRED libwebp)
+pkg_check_modules(LibArchive REQUIRED libarchive)
+
 # Test sources - START WITH ONLY EXISTING FILES
 set(TEST_SOURCES
     test_geometry.cpp
@@ -26,6 +31,7 @@ set(OPTIONAL_TEST_FILES
     test_tensor_stress.cpp
     test_tensor_matrix.cpp
     test_tensor_random.cpp
+    test_tensor_broadcast.cpp
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})
@@ -56,28 +62,51 @@ target_include_directories(lichtfeld_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/tests
     ${CUDAToolkit_INCLUDE_DIRS}
     ${OPENGL_INCLUDE_DIRS}
+    ${WebP_INCLUDE_DIRS}
+    ${LibArchive_INCLUDE_DIRS}
 )
 
-# Link libraries - Add cuBLAS and cuRAND
+# Link libraries - Fix linking order and add missing dependencies
 target_link_libraries(lichtfeld_tests PRIVATE
-    gs_core
-    gs_geometry
-    gs_project
-    gs_kernels
-    gs_loader
-    gs_training
-    gs_rendering
+    # Core libraries (in dependency order)
     gs_visualizer
+    gs_rendering
+    gs_training
+    gs_training_kernels
+    gs_loader
+    gs_project
+    gs_geometry
+    gs_core
+    gs_tensor_kernels
+    gs_kernels
+    
+    # Backend libraries
     gsplat_backend
     fastgs_backend
+    
+    # External libraries
     GTest::gtest
     GTest::gtest_main
     ${TORCH_LIBRARIES}
     ${OPENGL_LIBRARIES}
+    
+    # CUDA libraries
     CUDA::cudart
     CUDA::cublas
     CUDA::curand
+    
+    # System libraries
     spdlog::spdlog
+    
+    # Libraries needed by sogs.cpp
+    ${WebP_LIBRARIES}
+    ${LibArchive_LIBRARIES}
+)
+
+# Add link directories for external libraries
+target_link_directories(lichtfeld_tests PRIVATE
+    ${WebP_LIBRARY_DIRS}
+    ${LibArchive_LIBRARY_DIRS}
 )
 
 # Compiler options for CUDA debugging
@@ -85,6 +114,8 @@ target_compile_options(lichtfeld_tests PRIVATE
     $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G -lineinfo -Xcudafe --device-debug>
     $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:-O0 -g -fno-omit-frame-pointer>
     $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3 -DNDEBUG>
+    ${WebP_CFLAGS_OTHER}
+    ${LibArchive_CFLAGS_OTHER}
 )
 
 # Enable testing

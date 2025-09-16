@@ -2,215 +2,307 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
-#include "core/tensor_ops.hpp"
-#include "kernels/training_kernels.cuh"
-#include <algorithm>
+#include "core/tensor_broadcast.hpp"
 #include <cstring>
 #include <cuda_runtime.h>
 #include <fstream>
 #include <iomanip>
 #include <numeric>
 #include <print>
-#include <sstream>
+
+#define CHECK_CUDA(call)                              \
+    do {                                              \
+        cudaError_t error = call;                     \
+        if (error != cudaSuccess) {                   \
+            LOG_ERROR("CUDA error at {}:{} - {}: {}", \
+                      __FILE__, __LINE__,             \
+                      cudaGetErrorName(error),        \
+                      cudaGetErrorString(error));     \
+        }                                             \
+    } while (0)
 
 namespace gs {
 
-// Helper to check CUDA errors
-#define CHECK_CUDA(x)                                                                          \
-    do {                                                                                       \
-        cudaError_t err = x;                                                                   \
-        if (err != cudaSuccess) {                                                              \
-            LOG_ERROR("CUDA error: {} at {}:{}", cudaGetErrorString(err), __FILE__, __LINE__); \
-        }                                                                                      \
-    } while (0)
-
-    // ============= Static Members =============
     std::atomic<size_t> Tensor::next_id_{1};
 
-    // ============= TensorShape Implementation =============
-    std::string TensorShape::str() const {
-        std::ostringstream oss;
-        oss << "[";
-        for (size_t i = 0; i < dims_.size(); ++i) {
-            if (i > 0)
-                oss << ", ";
-            oss << dims_[i];
-        }
-        oss << "]";
-        return oss.str();
-    }
-
-    // ============= Tensor Constructors =============
+    // ============= Constructors & Destructor =============
     Tensor::Tensor(void* data, TensorShape shape, Device device, DataType dtype)
         : data_(data),
           shape_(shape),
           device_(device),
           dtype_(dtype),
           owns_memory_(false),
-          initialized_(true), // Mark as initialized
+          initialized_(true),
           id_(next_id_++) {
-        LOG_TRACE("Created tensor #{} (view): shape={}, device={}, dtype={}",
-                  id_, shape_.str(), device_name(device_), dtype_name(dtype_));
+
+        if (profiling_enabled_) {
+            LOG_DEBUG("Created tensor #{} (view): shape={}, device={}, dtype={}",
+                      id_, shape_.str(), device_name(device_), dtype_name(dtype_));
+        }
     }
 
     Tensor::Tensor(Tensor&& other) noexcept
         : data_(other.data_),
-          shape_(std::move(other.shape_)),
+          shape_(other.shape_),
           device_(other.device_),
           dtype_(other.dtype_),
           owns_memory_(other.owns_memory_),
           initialized_(other.initialized_),
           id_(other.id_) {
 
-        // Clear the source
         other.data_ = nullptr;
         other.owns_memory_ = false;
         other.initialized_ = false;
-
-        LOG_TRACE("Moved tensor #{} to tensor #{}", other.id_, id_);
     }
 
     Tensor& Tensor::operator=(Tensor&& other) noexcept {
         if (this != &other) {
-            // Free existing memory if we own it
+            // Clean up existing resources
             if (owns_memory_ && data_) {
                 if (device_ == Device::CUDA) {
                     cudaFree(data_);
                 } else {
-                    std::free(data_);
+                    delete[] static_cast<char*>(data_);
                 }
             }
 
-            // Move data
+            // Move from other
             data_ = other.data_;
-            shape_ = std::move(other.shape_);
+            shape_ = other.shape_;
             device_ = other.device_;
             dtype_ = other.dtype_;
             owns_memory_ = other.owns_memory_;
             initialized_ = other.initialized_;
             id_ = other.id_;
 
-            // Clear source
+            // Reset other
             other.data_ = nullptr;
             other.owns_memory_ = false;
             other.initialized_ = false;
-
-            LOG_TRACE("Move-assigned tensor #{} to tensor #{}", other.id_, id_);
         }
         return *this;
     }
 
     Tensor::~Tensor() {
         if (owns_memory_ && data_) {
-            LOG_TRACE("Destroying tensor #{} (freeing memory)", id_);
+            if (profiling_enabled_) {
+                LOG_DEBUG("Destroying tensor #{}: shape={}, device={}",
+                          id_, shape_.str(), device_name(device_));
+            }
+
             if (device_ == Device::CUDA) {
                 cudaFree(data_);
             } else {
-                std::free(data_);
+                delete[] static_cast<char*>(data_);
             }
         }
     }
 
     // ============= Factory Methods =============
     Tensor Tensor::empty(TensorShape shape, Device device, DataType dtype) {
-        size_t bytes = shape.elements() * dtype_size(dtype);
+        if (!shape.is_initialized()) {
+            LOG_ERROR("Cannot create tensor with uninitialized shape");
+            return Tensor();
+        }
 
-        // Handle empty tensors (0 elements)
-        if (shape.elements() == 0) {
-            LOG_TRACE("Creating empty tensor with 0 elements");
-            // Create a dummy non-null pointer for empty tensors
-            // This allows is_valid() to return true while having 0 elements
-            static char dummy_data = 0;
-            Tensor t(&dummy_data, shape, device, dtype);
-            t.owns_memory_ = false; // Don't try to free the dummy pointer
-            t.initialized_ = true;  // Mark as initialized
+        size_t n_bytes = shape.elements() * dtype_size(dtype);
+        if (n_bytes == 0) {
+            // Valid empty tensor with no memory allocation
+            Tensor t;
+            t.shape_ = shape;
+            t.device_ = device;
+            t.dtype_ = dtype;
+            t.owns_memory_ = false;
+            t.initialized_ = true;
+            t.id_ = next_id_++;
             return t;
         }
 
         void* data = nullptr;
         if (device == Device::CUDA) {
-            CHECK_CUDA(cudaMalloc(&data, bytes));
+            cudaError_t err = cudaMalloc(&data, n_bytes);
+            if (err != cudaSuccess) {
+                LOG_ERROR("Failed to allocate {} bytes on CUDA: {}",
+                          n_bytes, cudaGetErrorString(err));
+                return Tensor();
+            }
         } else {
-            data = std::malloc(bytes);
+            data = new char[n_bytes];
             if (!data) {
-                LOG_ERROR("Failed to allocate {} bytes on CPU", bytes);
+                LOG_ERROR("Failed to allocate {} bytes on CPU", n_bytes);
                 return Tensor();
             }
         }
 
-        Tensor t(data, shape, device, dtype);
+        Tensor t;
+        t.data_ = data;
+        t.shape_ = shape;
+        t.device_ = device;
+        t.dtype_ = dtype;
         t.owns_memory_ = true;
-        t.initialized_ = true; // Mark as initialized
+        t.initialized_ = true;
+        t.id_ = next_id_++;
 
-        LOG_DEBUG("Allocated tensor #{}: {} bytes, shape={}, device={}",
-                  t.id_, bytes, shape.str(), device_name(device));
+        if (profiling_enabled_) {
+            LOG_DEBUG("Created tensor #{} (owned): shape={}, device={}, dtype={}, bytes={}",
+                      t.id_, shape.str(), device_name(device), dtype_name(dtype), n_bytes);
+        }
 
         return t;
     }
 
     Tensor Tensor::zeros(TensorShape shape, Device device, DataType dtype) {
-        Tensor t = empty(shape, device, dtype);
-        if (t.is_valid() && t.numel() > 0) {
-            t.zero_();
+        if (dtype != DataType::Float32) {
+            LOG_ERROR("Currently only float32 is supported for zeros");
+            return Tensor();
         }
+
+        auto t = empty(shape, device, dtype);
+        if (t.is_valid() && t.numel() > 0) {
+            if (device == Device::CUDA) {
+                CHECK_CUDA(cudaMemset(t.data_, 0, t.bytes()));
+            } else {
+                std::memset(t.data_, 0, t.bytes());
+            }
+        }
+
         return t;
     }
 
     Tensor Tensor::ones(TensorShape shape, Device device, DataType dtype) {
-        Tensor t = empty(shape, device, dtype);
-        if (t.is_valid() && t.numel() > 0) {
-            t.fill_(1.0f);
-        }
-        return t;
+        return full(shape, 1.0f, device, dtype);
     }
 
     Tensor Tensor::full(TensorShape shape, float value, Device device, DataType dtype) {
-        Tensor t = empty(shape, device, dtype);
-        if (t.is_valid() && t.numel() > 0) {
-            t.fill_(value);
+        if (dtype != DataType::Float32) {
+            LOG_ERROR("Currently only float32 is supported for full");
+            return Tensor();
         }
+
+        auto t = empty(shape, device, dtype);
+        if (!t.is_valid() || t.numel() == 0) {
+            return t;
+        }
+
+        if (device == Device::CUDA) {
+            // Fill on GPU
+            std::vector<float> temp(t.numel(), value);
+            CHECK_CUDA(cudaMemcpy(t.data_, temp.data(), t.bytes(), cudaMemcpyHostToDevice));
+        } else {
+            float* data = t.ptr<float>();
+            std::fill(data, data + t.numel(), value);
+        }
+
         return t;
     }
 
-    // ============= View Operations =============
+    // ============= Memory Operations =============
+    Tensor Tensor::clone() const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
+        auto t = empty(shape_, device_, dtype_);
+        if (numel() == 0) {
+            return t;
+        }
+
+        if (device_ == Device::CUDA) {
+            CHECK_CUDA(cudaMemcpy(t.data_, data_, bytes(), cudaMemcpyDeviceToDevice));
+        } else {
+            std::memcpy(t.data_, data_, bytes());
+        }
+
+        return t;
+    }
+
+    Tensor Tensor::contiguous() const {
+        // For now, tensors are always contiguous
+        return clone();
+    }
+
+    Tensor Tensor::to(Device device) const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
+        if (device_ == device) {
+            return clone();
+        }
+
+        auto t = empty(shape_, device, dtype_);
+        if (numel() == 0) {
+            return t;
+        }
+
+        if (device_ == Device::CPU && device == Device::CUDA) {
+            CHECK_CUDA(cudaMemcpy(t.data_, data_, bytes(), cudaMemcpyHostToDevice));
+        } else if (device_ == Device::CUDA && device == Device::CPU) {
+            CHECK_CUDA(cudaMemcpy(t.data_, data_, bytes(), cudaMemcpyDeviceToHost));
+        }
+
+        return t;
+    }
+
+    Tensor Tensor::to(DataType dtype) const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
+        if (dtype_ == dtype) {
+            return clone();
+        }
+
+        // For now, only support float32
+        LOG_ERROR("Type conversion not implemented");
+        return Tensor();
+    }
+
+    // ============= In-place fill with zeros =============
+    Tensor& Tensor::zero_() {
+        if (!is_valid() || numel() == 0) {
+            return *this;
+        }
+
+        if (device_ == Device::CUDA) {
+            CHECK_CUDA(cudaMemset(data_, 0, bytes()));
+        } else {
+            std::memset(data_, 0, bytes());
+        }
+
+        return *this;
+    }
+
+    // ============= Shape Operations =============
+    Tensor Tensor::reshape(TensorShape new_shape) const {
+        return view(new_shape);
+    }
+
     Tensor Tensor::view(TensorShape new_shape) const {
-        // Special handling for empty tensors
-        if (shape_.elements() == 0) {
-            // If current tensor is empty and new shape is also empty, return a view of the same data
-            if (new_shape.elements() == 0) {
-                // Return a view pointing to the same (dummy) data
-                Tensor t(data_, new_shape, device_, dtype_);
-                t.initialized_ = true;
-                return t;
-            } else {
-                // Cannot reshape empty tensor to non-empty
-                LOG_ERROR("Cannot reshape empty tensor to non-empty shape");
-                return Tensor();
-            }
+        if (!is_valid()) {
+            return Tensor();
         }
 
         size_t new_elements = new_shape.elements();
 
-        // Allow -1 in one dimension to infer size
-        bool has_infer = false;
-        size_t infer_dim = 0;
+        // Check for -1 dimension (infer)
+        int infer_dim = -1;
         size_t known_elements = 1;
-
         for (size_t i = 0; i < new_shape.rank(); ++i) {
             if (new_shape[i] == static_cast<size_t>(-1)) {
-                if (has_infer) {
-                    LOG_ERROR("Can only have one inferred dimension in view");
+                if (infer_dim != -1) {
+                    LOG_ERROR("Can only infer one dimension");
                     return Tensor();
                 }
-                has_infer = true;
                 infer_dim = i;
             } else {
                 known_elements *= new_shape[i];
             }
         }
 
-        if (has_infer) {
-            if (known_elements == 0 || shape_.elements() % known_elements != 0) {
+        // Infer dimension if needed
+        if (infer_dim != -1) {
+            if (shape_.elements() % known_elements != 0) {
                 LOG_ERROR("Cannot infer dimension: {} is not divisible by {}",
                           shape_.elements(), known_elements);
                 return Tensor();
@@ -498,158 +590,69 @@ namespace gs {
         return view(TensorShape(new_dims));
     }
 
-    // ============= Memory Operations =============
-    Tensor Tensor::to(Device device) const {
-        if (device_ == device) {
-            return clone(); // Same device, just clone
-        }
-
-        Tensor result = empty(shape_, device, dtype_);
-        if (!result.is_valid() || !is_valid()) {
-            return result;
-        }
-
-        if (numel() == 0) {
-            return result; // Nothing to copy for empty tensors
-        }
-
-        size_t bytes = this->bytes();
-
-        if (device_ == Device::CPU && device == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.data_, data_, bytes, cudaMemcpyHostToDevice));
-        } else if (device_ == Device::CUDA && device == Device::CPU) {
-            CHECK_CUDA(cudaMemcpy(result.data_, data_, bytes, cudaMemcpyDeviceToHost));
-        }
-
-        LOG_TRACE("Copied tensor #{} from {} to {} (new tensor #{})",
-                  id_, device_name(device_), device_name(device), result.id_);
-
-        return result;
-    }
-
-    Tensor Tensor::clone() const {
+    // ============= Broadcasting Methods Implementation =============
+    Tensor Tensor::expand(const TensorShape& target_shape) const {
         if (!is_valid()) {
             return Tensor();
         }
 
-        Tensor result = empty(shape_, device_, dtype_);
-        if (!result.is_valid()) {
-            return result;
-        }
-
-        if (numel() == 0) {
-            return result; // Nothing to copy for empty tensors
-        }
-
-        size_t bytes = this->bytes();
-
-        if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.data_, data_, bytes, cudaMemcpyDeviceToDevice));
-        } else {
-            std::memcpy(result.data_, data_, bytes);
-        }
-
-        LOG_TRACE("Cloned tensor #{} to tensor #{}", id_, result.id_);
-
-        return result;
+        return BroadcastHelper::expand(*this, target_shape);
     }
 
-    void Tensor::copy_from(const Tensor& other) {
-        if (shape_ != other.shape_) {
-            LOG_ERROR("Cannot copy from tensor with different shape: {} vs {}",
-                      shape_.str(), other.shape_.str());
-            return;
-        }
-
-        if (dtype_ != other.dtype_) {
-            LOG_ERROR("Cannot copy from tensor with different dtype: {} vs {}",
-                      dtype_name(dtype_), dtype_name(other.dtype_));
-            return;
-        }
-
-        if (!is_valid() || !other.is_valid()) {
-            LOG_ERROR("Cannot copy between invalid tensors");
-            return;
-        }
-
-        if (numel() == 0) {
-            return; // Nothing to copy for empty tensors
-        }
-
-        size_t bytes = this->bytes();
-
-        if (device_ == Device::CUDA && other.device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes, cudaMemcpyDeviceToDevice));
-        } else if (device_ == Device::CUDA && other.device_ == Device::CPU) {
-            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes, cudaMemcpyHostToDevice));
-        } else if (device_ == Device::CPU && other.device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes, cudaMemcpyDeviceToHost));
-        } else {
-            std::memcpy(data_, other.data_, bytes);
-        }
+    Tensor Tensor::broadcast_to(const TensorShape& target_shape) const {
+        return expand(target_shape);
     }
 
-    void Tensor::fill_(float value) {
-        if (!is_valid() || numel() == 0) {
-            LOG_TRACE("Cannot fill invalid or empty tensor");
-            return;
-        }
-
-        if (dtype_ != DataType::Float32) {
-            LOG_ERROR("Fill only implemented for float32 tensors");
-            return;
-        }
-
-        if (device_ == Device::CUDA) {
-            gs::training::launch_fill_tensor(ptr<float>(), value, numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* data = ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                data[i] = value;
-            }
-        }
+    bool Tensor::can_broadcast_to(const TensorShape& target) const {
+        return BroadcastHelper::can_broadcast(shape_, target);
     }
 
-    void Tensor::zero_() {
-        if (!is_valid() || numel() == 0) {
-            LOG_TRACE("Cannot zero invalid or empty tensor");
-            return;
-        }
-
-        if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemset(data_, 0, bytes()));
-        } else {
-            std::memset(data_, 0, bytes());
-        }
+    TensorShape Tensor::broadcast_shape(const TensorShape& other) const {
+        return BroadcastHelper::broadcast_shape(shape_, other);
     }
 
-    // ============= Debug Utilities =============
+    // ============= TensorShape Implementation =============
+    std::string TensorShape::str() const {
+        if (!initialized_) {
+            return "[uninitialized]";
+        }
+        if (dims_.empty()) {
+            return "[]";
+        }
+        std::ostringstream oss;
+        oss << "[";
+        for (size_t i = 0; i < dims_.size(); ++i) {
+            if (i > 0)
+                oss << ", ";
+            oss << dims_[i];
+        }
+        oss << "]";
+        return oss.str();
+    }
+
+    // ============= Tensor String Representation =============
     std::string Tensor::str() const {
         std::ostringstream oss;
-        oss << "Tensor(#" << id_ << ", ";
-
-        if (!is_valid()) {
-            oss << "invalid)";
-            return oss.str();
-        }
-
-        oss << "shape=" << shape_.str()
-            << ", dtype=" << dtype_name(dtype_)
-            << ", device=" << device_name(device_);
-
-        if (owns_memory_) {
-            oss << ", owned";
+        oss << "Tensor(";
+        if (!initialized_) {
+            oss << "uninitialized";
         } else {
-            oss << ", view";
+            oss << "shape=" << shape_.str();
+            oss << ", device=" << device_name(device_);
+            oss << ", dtype=" << dtype_name(dtype_);
+            if (owns_memory_) {
+                oss << ", owned";
+            } else {
+                oss << ", view";
+            }
         }
-
         oss << ")";
         return oss.str();
     }
 
-    void Tensor::print(const std::string& name) const {
-        std::string prefix = name.empty() ? "Tensor" : name;
+    // ============= Debug Functions =============
+    void Tensor::log_info(const std::string& name) const {
+        const std::string& prefix = name.empty() ? "Tensor" : name;
 
         if (!is_valid()) {
             LOG_INFO("{}: {}", prefix, str());
@@ -736,6 +739,86 @@ namespace gs {
         }
     }
 
+    Tensor& Tensor::fill_(float value) {
+        if (!is_valid() || numel() == 0) {
+            return *this;
+        }
+
+        if (device_ == Device::CUDA) {
+            std::vector<float> temp(numel(), value);
+            CHECK_CUDA(cudaMemcpy(data_, temp.data(), bytes(), cudaMemcpyHostToDevice));
+        } else {
+            float* data = ptr<float>();
+            std::fill(data, data + numel(), value);
+        }
+
+        return *this;
+    }
+
+    Tensor& Tensor::copy_from(const Tensor& other) {
+        if (!is_valid() || !other.is_valid()) {
+            LOG_ERROR("Invalid tensors for copy_from");
+            return *this;
+        }
+
+        if (shape_ != other.shape_) {
+            LOG_ERROR("Shape mismatch in copy_from: {} vs {}", shape_.str(), other.shape_.str());
+            return *this;
+        }
+
+        if (dtype_ != other.dtype_) {
+            LOG_ERROR("Dtype mismatch in copy_from");
+            return *this;
+        }
+
+        if (numel() == 0) {
+            return *this;
+        }
+
+        if (device_ == Device::CUDA && other.device_ == Device::CUDA) {
+            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes(), cudaMemcpyDeviceToDevice));
+        } else if (device_ == Device::CUDA && other.device_ == Device::CPU) {
+            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes(), cudaMemcpyHostToDevice));
+        } else if (device_ == Device::CPU && other.device_ == Device::CUDA) {
+            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes(), cudaMemcpyDeviceToHost));
+        } else {
+            std::memcpy(data_, other.data_, bytes());
+        }
+
+        return *this;
+    }
+
+    std::expected<Tensor, std::string> Tensor::try_reshape(TensorShape shape) const {
+        if (!is_valid()) {
+            return std::unexpected("Tensor is not valid");
+        }
+
+        if (shape.elements() != numel()) {
+            return std::unexpected("Shape mismatch: new shape has different number of elements");
+        }
+
+        return reshape(shape);
+    }
+
+    std::vector<Tensor> Tensor::split_batch(const Tensor& tensor, size_t batch_size) {
+        std::vector<Tensor> batches;
+
+        if (!tensor.is_valid() || tensor.shape().rank() == 0) {
+            return batches;
+        }
+
+        size_t total_size = tensor.shape()[0];
+        size_t num_batches = (total_size + batch_size - 1) / batch_size;
+
+        for (size_t i = 0; i < num_batches; ++i) {
+            size_t start = i * batch_size;
+            size_t end = std::min(start + batch_size, total_size);
+            batches.push_back(tensor.slice(0, start, end));
+        }
+
+        return batches;
+    }
+
     std::vector<float> Tensor::debug_values(size_t max_values) const {
         std::vector<float> values;
 
@@ -804,28 +887,47 @@ namespace gs {
     // ============= Error Classes =============
     TensorError::TensorError(const std::string& msg, const Tensor* t)
         : std::runtime_error(msg),
-          tensor_info_(t ? t->str() : "N/A") {}
+          tensor_info_(t ? t->str() : "") {}
 
-    // ============= Performance Monitoring =============
-    TensorTimer::TensorTimer(std::string name)
-        : start_(Clock::now()),
-          name_(std::move(name)) {}
-
-    TensorTimer::~TensorTimer() {
-        auto duration = Clock::now() - start_;
-        auto ms = std::chrono::duration<double, std::milli>(duration).count();
-        LOG_TRACE("{} took {:.3f}ms", name_, ms);
+    // ============= TensorBuilder Implementation =============
+    TensorBuilder& TensorBuilder::with_shape(TensorShape shape) {
+        shape_ = shape;
+        return *this;
     }
 
-    // ============= Stream Output =============
-    std::ostream& operator<<(std::ostream& os, const Tensor& t) {
-        os << t.str();
-        return os;
+    TensorBuilder& TensorBuilder::on_device(Device device) {
+        device_ = device;
+        return *this;
     }
 
-    std::ostream& operator<<(std::ostream& os, const TensorShape& shape) {
-        os << shape.str();
-        return os;
+    TensorBuilder& TensorBuilder::with_dtype(DataType dtype) {
+        dtype_ = dtype;
+        return *this;
+    }
+
+    TensorBuilder& TensorBuilder::filled_with(float value) {
+        fill_value_ = value;
+        return *this;
+    }
+
+    TensorBuilder& TensorBuilder::ensure_finite() {
+        check_finite_ = true;
+        return *this;
+    }
+
+    Tensor TensorBuilder::build() {
+        Tensor t;
+        if (fill_value_.has_value()) {
+            t = Tensor::full(shape_, *fill_value_, device_, dtype_);
+        } else {
+            t = Tensor::empty(shape_, device_, dtype_);
+        }
+
+        if (check_finite_) {
+            t.assert_finite();
+        }
+
+        return t;
     }
 
 } // namespace gs

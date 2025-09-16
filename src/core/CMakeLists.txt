@@ -14,10 +14,13 @@ set(CORE_SOURCES
         splat_data.cpp
         sogs.cpp
         tensor.cpp              # Main tensor implementation
-        tensor_ops.cpp          # Math operations
+        tensor_ops.cpp          # Math operations with broadcasting support
         tensor_utils.cpp        # Utility functions
         tensor_matrix_ops.cpp   # Matrix operations (matmul, transpose, etc.)
         tensor_random_ops.cpp   # Random generation operations
+        tensor_broadcast.cpp    # Broadcasting implementation
+        tensor_math_ops.cpp     # Math functions
+        tensor_reduction_ops.cpp # Reduction operations
         tinyply.cpp
 )
 
@@ -25,6 +28,7 @@ set(CORE_SOURCES
 set(CORE_CUDA_SOURCES
         tensor_ops.cu           # CUDA kernels for tensor operations
         tensor_matrix_ops.cu    # CUDA kernels for matrix operations
+        tensor_broadcast_ops.cu # CUDA kernels for broadcasting (NEW)
 )
 
 # Create CUDA library for tensor operations (C++20)
@@ -76,128 +80,33 @@ target_include_directories(gs_core
         ${CUDAToolkit_INCLUDE_DIRS}   # For CUDA interop in Camera
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src       # For inter-module includes (training/, visualizer/, etc.)
-        ${CMAKE_SOURCE_DIR}/external  # For tinyply and STB headers
-        ${OPENGL_INCLUDE_DIRS}
 )
-
-# Find the actual WebP library target
-if(TARGET WebP::webp)
-    set(WEBP_LIB WebP::webp)
-elseif(TARGET WebP::libwebp)
-    set(WEBP_LIB WebP::libwebp)
-elseif(TARGET webp)
-    set(WEBP_LIB webp)
-else()
-    find_library(WEBP_LIBRARY NAMES webp libwebp REQUIRED)
-    set(WEBP_LIB ${WEBP_LIBRARY})
-endif()
-
-# Find the actual LibArchive library target
-if(TARGET LibArchive::LibArchive)
-    set(ARCHIVE_LIB LibArchive::LibArchive)
-elseif(TARGET archive)
-    set(ARCHIVE_LIB archive)
-elseif(TARGET archive_static)
-    set(ARCHIVE_LIB archive_static)
-else()
-    find_library(ARCHIVE_LIBRARY NAMES archive libarchive REQUIRED)
-    set(ARCHIVE_LIB ${ARCHIVE_LIBRARY})
-endif()
 
 target_link_libraries(gs_core
     PUBLIC
-        gs_tensor_kernels       # Link our tensor CUDA kernels
-        gs_training_kernels     # Link existing training kernels (for fill, add_scalar, etc.)
+        gs_tensor_kernels     # Link CUDA tensor kernels
         ${TORCH_LIBRARIES}
-        TBB::tbb
-        nlohmann_json::nlohmann_json
-        glm::glm
-        Threads::Threads
-        CUDA::cudart            # For Camera CUDA operations
-        CUDA::cublas            # For matrix multiplication
-        CUDA::curand            # For random number generation
         spdlog::spdlog
-        ${WEBP_LIB}            # WebP for SOG compression
-        ${ARCHIVE_LIB}         # LibArchive for SOG bundle support
-        OpenImageIO::OpenImageIO  # For image I/O
+        glm::glm
+        OpenImageIO::OpenImageIO
+        CUDA::cudart
+        CUDA::cublas          # Added for matrix operations
+        CUDA::curand          # Added for random operations
     PRIVATE
-        taywee::args           # Only used in argument_parser.cpp
+        # Add any private dependencies here
 )
 
-# Platform-specific settings
-if(UNIX)
-    target_link_libraries(gs_core PUBLIC dl)
-endif()
+target_compile_options(gs_core PRIVATE
+    $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0 -g>
+    $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-O3>
+)
 
-# Compiler options
 if(MSVC)
-    target_compile_options(gs_core PRIVATE
-        $<$<CONFIG:Debug>:/Od /Z7>
-        $<$<CONFIG:Release>:/O2 /DNDEBUG>
-        /std:c++23  # Enable C++23 for MSVC
-    )
-else()
-    target_compile_options(gs_core PRIVATE
-        $<$<CONFIG:Debug>:-O0 -g -fno-omit-frame-pointer -DDEBUG>
-        $<$<CONFIG:Release>:-O3 -DNDEBUG -march=native>
-        $<$<COMPILE_LANGUAGE:CXX>:-std=c++23>  # Enable C++23 for GCC/Clang
-    )
+    target_compile_definitions(gs_core PRIVATE _USE_MATH_DEFINES NOMINMAX)
 endif()
 
-# AVX2 support
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    include(CheckCXXCompilerFlag)
-    check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
-
-    if(COMPILER_SUPPORTS_AVX2)
-        target_compile_options(gs_core PRIVATE
-            $<$<COMPILE_LANGUAGE:CXX>:-mavx2 -mfma>
-        )
-        target_compile_definitions(gs_core PRIVATE HAS_AVX2_SUPPORT)
-        message(STATUS "✓ AVX2 support enabled for gs_core")
-    else()
-        message(WARNING "✗ Compiler does not support AVX2")
-    endif()
-endif()
-
-# Debug symbols in debug builds
-set_target_properties(gs_core PROPERTIES DEBUG_POSTFIX d)
-
-# Set properties
 set_target_properties(gs_core PROPERTIES
-    CXX_STANDARD 23            # C++23 for the main library
+    CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
     POSITION_INDEPENDENT_CODE ON
-    EXPORT_COMPILE_COMMANDS ON
 )
-
-# Configure build type
-function(configure_build_type target)
-    get_target_property(target_type ${target} TYPE)
-    
-    if(target_type STREQUAL "INTERFACE_LIBRARY")
-        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-            target_compile_definitions(${target} INTERFACE DEBUG_BUILD)
-        elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
-            target_compile_definitions(${target} INTERFACE RELEASE_BUILD)
-        endif()
-    else()
-        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-            target_compile_definitions(${target} PRIVATE DEBUG_BUILD)
-        elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
-            target_compile_definitions(${target} PRIVATE RELEASE_BUILD)
-        endif()
-    endif()
-endfunction()
-
-configure_build_type(gs_core)
-configure_build_type(gs_tensor_kernels)
-
-message(STATUS "Core module configured with ${CMAKE_BUILD_TYPE} build type")
-message(STATUS "  C++ standard: C++23")
-message(STATUS "  CUDA standard: C++20")
-message(STATUS "  WebP library: ${WEBP_LIB}")
-message(STATUS "  Archive library: ${ARCHIVE_LIB}")
-message(STATUS "  Tensor CUDA kernels: Enabled")
-message(STATUS "  Matrix operations: Enabled (cuBLAS)")
-message(STATUS "  Random operations: Enabled (cuRAND)")

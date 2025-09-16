@@ -23,9 +23,11 @@ protected:
     }
 
     torch::Tensor create_torch_from_vector(const std::vector<float>& data, const std::vector<int64_t>& shape) {
+        // CRITICAL FIX: Always create on CPU first, then move to CUDA if needed
         auto cpu_tensor = torch::from_blob(const_cast<float*>(data.data()), shape,
-                                           torch::TensorOptions().dtype(torch::kFloat32));
-        return cpu_tensor.to(torch::kCUDA).clone();
+                                           torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+        // Clone to ensure we own the data, then move to CUDA
+        return cpu_tensor.clone().to(torch::kCUDA);
     }
 
     bool compare_tensors(const Tensor& our_tensor, const torch::Tensor& torch_tensor, float tolerance = 1e-5f) {

@@ -237,61 +237,59 @@ namespace gs {
             return shape_.elements() == 0;
         }
 
-        // Valid tensor: properly initialized and either has data or is truly empty (0 elements)
-        bool is_valid() const {
-            // Default constructed tensors are invalid
-            if (!initialized_)
-                return false;
+        // Valid tensor: is initialized (may be empty)
+        bool is_valid() const { return initialized_; }
 
-            // Empty tensors (0 elements) are valid even without data
-            if (shape_.elements() == 0)
-                return true;
-
-            // Non-empty tensors need valid data pointer
-            return data_ != nullptr;
-        }
-
-        bool is_contiguous() const { return true; } // For now, assume all tensors are contiguous
         size_t numel() const { return shape_.elements(); }
-        size_t bytes() const { return shape_.elements() * dtype_size(dtype_); }
-        size_t id() const { return id_; }
+        size_t bytes() const { return numel() * dtype_size(dtype_); }
 
-        // ============= View Operations (No Copy) =============
+        // Shape queries
+        size_t ndim() const { return shape_.rank(); }
+        size_t size(size_t dim) const { return shape_[dim]; }
+
+        // ============= Memory Operations =============
+        Tensor clone() const;
+        Tensor contiguous() const;
+        Tensor to(Device device) const;
+        Tensor to(DataType dtype) const;
+        bool is_contiguous() const { return true; } // Always true for now
+
+        // ============= Shape Operations =============
+        Tensor reshape(TensorShape new_shape) const;
         Tensor view(TensorShape new_shape) const;
-        Tensor reshape(TensorShape new_shape) const { return view(new_shape); }
         Tensor slice(size_t dim, size_t start, size_t end) const;
         Tensor squeeze(int dim = -1) const;
         Tensor unsqueeze(int dim) const;
         Tensor permute(std::vector<int> dims) const;
-        Tensor transpose(int dim1 = 0, int dim2 = 1) const;
+        Tensor transpose(int dim1 = -2, int dim2 = -1) const;
+        Tensor t() const; // Transpose last two dimensions
         Tensor flatten(int start_dim = 0, int end_dim = -1) const;
 
-        // New transpose that returns a proper transposed tensor
-        Tensor t() const; // Transpose last two dimensions
+        // ============= Broadcasting Operations =============
+        Tensor expand(const TensorShape& target_shape) const;
+        Tensor broadcast_to(const TensorShape& target_shape) const;
+        bool can_broadcast_to(const TensorShape& target) const;
+        TensorShape broadcast_shape(const TensorShape& other) const;
 
-        // ============= Memory Operations =============
-        Tensor to(Device device) const;      // Copy to device
-        Tensor clone() const;                // Deep copy
-        void copy_from(const Tensor& other); // Copy data from another tensor
-        void fill_(float value);             // Fill with value (in-place)
-        void zero_();                        // Fill with zeros (in-place)
-
-        // ============= Basic Math Operations =============
-        Tensor add(const Tensor& other) const;
+        // ============= Arithmetic Operations =============
+        // All element-wise operations support broadcasting
         Tensor add(float scalar) const;
-        Tensor sub(const Tensor& other) const;
         Tensor sub(float scalar) const;
-        Tensor mul(const Tensor& other) const;
         Tensor mul(float scalar) const;
-        Tensor div(const Tensor& other) const;
         Tensor div(float scalar) const;
         Tensor neg() const;
 
+        // Element-wise operations with broadcasting
+        Tensor add(const Tensor& other) const;
+        Tensor sub(const Tensor& other) const;
+        Tensor mul(const Tensor& other) const;
+        Tensor div(const Tensor& other) const;
+
         // Matrix operations
-        Tensor matmul(const Tensor& other) const;
-        Tensor mm(const Tensor& other) const { return matmul(other); } // Alias
-        Tensor bmm(const Tensor& other) const;                         // Batch matrix multiply
-        Tensor dot(const Tensor& other) const;                         // Dot product for 1D tensors
+        Tensor mm(const Tensor& other) const;     // Matrix multiply
+        Tensor bmm(const Tensor& other) const;    // Batch matrix multiply
+        Tensor matmul(const Tensor& other) const; // General matrix multiply
+        Tensor dot(const Tensor& other) const;    // Dot product for 1D tensors
 
         // Operator overloads
         Tensor operator+(const Tensor& other) const { return add(other); }
@@ -305,7 +303,7 @@ namespace gs {
         Tensor operator-() const { return neg(); }
         // Note: operator@ is not valid C++, use matmul() or mm() instead
 
-        // In-place operations
+        // In-place operations (no broadcasting for in-place)
         Tensor& add_(const Tensor& other);
         Tensor& add_(float scalar);
         Tensor& sub_(const Tensor& other);
@@ -314,10 +312,44 @@ namespace gs {
         Tensor& mul_(float scalar);
         Tensor& div_(const Tensor& other);
         Tensor& div_(float scalar);
+        Tensor& zero_();                        // Fill with zeros in-place
+        Tensor& fill_(float value);             // Fill tensor with a value in-place
+        Tensor& copy_from(const Tensor& other); // Copy data from another tensor
 
         // In-place random operations
         Tensor& uniform_(float low = 0.0f, float high = 1.0f);
         Tensor& normal_(float mean = 0.0f, float std = 1.0f);
+
+        // Additional utility methods that tests expect:
+        std::expected<Tensor, std::string> try_reshape(TensorShape shape) const; // Safe reshape with error handling
+
+        // Static utility methods:
+        static std::vector<Tensor> split_batch(const Tensor& tensor, size_t batch_size);
+        static void enable_profiling(bool enable) { profiling_enabled_ = enable; }
+
+        // Functional-style methods:
+        template <typename Func>
+        Tensor& inplace(Func&& func) {
+            func(*this);
+            return *this;
+        }
+
+        template <typename Func>
+        Tensor apply(Func&& func) const {
+            return func(*this);
+        }
+
+        template <typename Func>
+        Tensor timed(const std::string& name, Func&& func) const {
+            auto start = std::chrono::high_resolution_clock::now();
+            auto result = func(*this);
+            auto end = std::chrono::high_resolution_clock::now();
+            if (profiling_enabled_) {
+                auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+                LOG_INFO("{}: {} μs", name, duration.count());
+            }
+            return result;
+        }
 
         // ============= Reduction Operations =============
         float sum() const;
@@ -348,50 +380,46 @@ namespace gs {
         Tensor& assert_dtype(DataType expected);
         Tensor& assert_finite();
 
-        // ============= Quick Checks =============
+        // ============= Comparison Operations =============
         bool has_nan() const;
         bool has_inf() const;
         bool all_close(const Tensor& other, float rtol = 1e-5f, float atol = 1e-8f) const;
 
-        // ============= Debug Utilities =============
+        // ============= Utility Functions =============
         std::string str() const;
-        void print(const std::string& name = "") const;
-        void print_formatted(const std::string& name = "", size_t max_per_dim = 6) const;
-        std::vector<float> debug_values(size_t max_values = 10) const;
         std::vector<float> to_vector() const;
+        std::vector<float> debug_values(size_t max_values = 100) const;
+
         void dump_diagnostic(const std::string& filename) const;
-
-        // ============= Performance Monitoring =============
-        static void enable_profiling(bool enable = true) { profiling_enabled_ = enable; }
-
-        template <typename Func>
-        auto timed(const std::string& name, Func func) -> decltype(func(*this));
-
-        // ============= Batch Operations =============
-        static std::vector<Tensor> split_batch(const Tensor& t, size_t batch_size);
-
-        // ============= Error Handling =============
-        std::expected<Tensor, std::string> try_reshape(TensorShape new_shape) const;
-
-        // ============= Chainable Operations =============
-        Tensor& inplace(std::function<void(Tensor&)> op) {
-            op(*this);
-            return *this;
-        }
-
-        template <typename Op>
-        Tensor apply(Op op) const {
-            return op(*this);
-        }
+        void log_info(const std::string& name = "") const;
+        void print_formatted(const std::string& name = "", size_t max_per_dim = 10) const;
 
     private:
-        void print_1d(size_t max_elem) const;
-        void print_2d(size_t max_per_dim) const;
+        void print_1d(size_t max_elem = 10) const;
+        void print_2d(size_t max_per_dim = 10) const;
     };
 
-    // ============= Convenience Namespace =============
+    // ============= TensorBuilder Class =============
+    class TensorBuilder {
+    private:
+        TensorShape shape_;
+        Device device_ = Device::CUDA;
+        DataType dtype_ = DataType::Float32;
+        std::optional<float> fill_value_;
+        bool check_finite_ = false;
+
+    public:
+        TensorBuilder& with_shape(TensorShape shape);
+        TensorBuilder& on_device(Device device);
+        TensorBuilder& with_dtype(DataType dtype);
+        TensorBuilder& filled_with(float value);
+        TensorBuilder& ensure_finite();
+        Tensor build();
+    };
+
+    // ============= Tensor Utilities Namespace =============
     namespace tensor {
-        // Factory functions
+        // Creation functions
         inline Tensor empty(TensorShape shape, Device device = Device::CUDA) {
             return Tensor::empty(shape, device);
         }
@@ -406,12 +434,6 @@ namespace gs {
 
         inline Tensor full(TensorShape shape, float value, Device device = Device::CUDA) {
             return Tensor::full(shape, value, device);
-        }
-
-        inline Tensor from_blob(void* data, TensorShape shape,
-                                Device device = Device::CUDA,
-                                DataType dtype = DataType::Float32) {
-            return Tensor::from_blob(data, shape, device, dtype);
         }
 
         // Random functions
@@ -446,22 +468,11 @@ namespace gs {
             RandomGenerator::instance().manual_seed(seed);
         }
 
-        // Like operations
-        inline Tensor zeros_like(const Tensor& other) {
-            return zeros(other.shape(), other.device());
-        }
-
-        inline Tensor ones_like(const Tensor& other) {
-            return ones(other.shape(), other.device());
-        }
-
-        inline Tensor rand_like(const Tensor& other) {
-            return rand(other.shape(), other.device());
-        }
-
-        inline Tensor randn_like(const Tensor& other) {
-            return randn(other.shape(), other.device());
-        }
+        // Like operations - declarations only, implemented in tensor_utils.cpp
+        Tensor zeros_like(const Tensor& other);
+        Tensor ones_like(const Tensor& other);
+        Tensor rand_like(const Tensor& other);
+        Tensor randn_like(const Tensor& other);
 
         // Matrix creation helpers
         Tensor eye(size_t n, Device device = Device::CUDA);
@@ -479,100 +490,11 @@ namespace gs {
 
         // Utility functions
         bool check_valid(const Tensor& t, const std::string& name);
-        void assert_shape(const Tensor& t, TensorShape expected, const std::string& name);
-
-        // Builder pattern
-        struct TensorBuilder {
-            TensorShape shape;
-            Device device = Device::CUDA;
-            DataType dtype = DataType::Float32;
-            std::optional<float> fill_value;
-            bool check_finite = false;
-
-            TensorBuilder& with_shape(TensorShape s) {
-                shape = s;
-                return *this;
-            }
-            TensorBuilder& on_device(Device d) {
-                device = d;
-                return *this;
-            }
-            TensorBuilder& with_dtype(DataType d) {
-                dtype = d;
-                return *this;
-            }
-            TensorBuilder& filled_with(float v) {
-                fill_value = v;
-                return *this;
-            }
-            TensorBuilder& ensure_finite() {
-                check_finite = true;
-                return *this;
-            }
-
-            Tensor build();
-        };
-
-        // Safe operations
-        struct SafeOps {
-            static Tensor divide(const Tensor& a, const Tensor& b, float eps = 1e-8f);
-            static Tensor log(const Tensor& t, float eps = 1e-8f);
-            static Tensor sqrt(const Tensor& t, float eps = 1e-8f);
-        };
-
-        // Memory info
-        struct MemoryInfo {
-            size_t allocated_bytes;
-            size_t reserved_bytes;
-            size_t free_bytes;
-
-            static MemoryInfo cuda();
-            void log() const;
-        };
-
-        // Batch processing
-        template <typename Func>
-        Tensor apply_batched(const Tensor& input, size_t batch_size, Func func);
+        void assert_same_shape(const Tensor& a, const Tensor& b);
+        void assert_same_device(const Tensor& a, const Tensor& b);
     } // namespace tensor
 
-    // ============= Functional Programming Support =============
-    namespace tensor::functional {
-        template <typename Func>
-        Tensor map(const Tensor& input, Func func);
-
-        template <typename Func>
-        float reduce(const Tensor& input, float init, Func func);
-
-        template <typename Pred>
-        Tensor filter(const Tensor& input, Pred predicate);
-
-        template <typename... Ops>
-        class Pipeline {
-            std::tuple<Ops...> ops_;
-
-        public:
-            explicit Pipeline(Ops... ops) : ops_(ops...) {}
-
-            Tensor operator()(const Tensor& input) const {
-                return apply_impl(input, std::index_sequence_for<Ops...>{});
-            }
-
-        private:
-            template <size_t... Is>
-            Tensor apply_impl(const Tensor& input, std::index_sequence<Is...>) const {
-                Tensor result = input.clone(); // Use clone instead of copy
-                ((result = std::get<Is>(ops_)(result)), ...);
-                return result;
-            }
-        };
-
-        template <typename... Ops>
-        Pipeline<Ops...> pipe(Ops... ops) {
-            return Pipeline<Ops...>(ops...);
-        }
-    } // namespace tensor::functional
-
-    // ============= Error Classes =============
+    // ============= Tensor Error Handling =============
     class TensorError : public std::runtime_error {
     public:
         TensorError(const std::string& msg, const Tensor* t = nullptr);
@@ -582,46 +504,54 @@ namespace gs {
         std::string tensor_info_;
     };
 
-    // ============= Performance Monitoring =============
-    class TensorTimer {
-        using Clock = std::chrono::high_resolution_clock;
-        Clock::time_point start_;
-        std::string name_;
+    // ============= Safe Operations Namespace =============
+    namespace SafeOps {
+        using Tensor = gs::Tensor;
 
+        // Safe division with epsilon to avoid division by zero
+        Tensor divide(const Tensor& a, const Tensor& b, float epsilon = 1e-6f);
+
+        // Safe log with clamping to avoid NaN
+        Tensor log(const Tensor& input, float epsilon = 1e-6f);
+
+        // Safe sqrt with clamping to avoid NaN
+        Tensor sqrt(const Tensor& input, float epsilon = 0.0f);
+    } // namespace SafeOps
+
+    // ============= Memory Info Class =============
+    class MemoryInfo {
     public:
-        explicit TensorTimer(std::string name);
-        ~TensorTimer();
+        size_t free_bytes = 0;
+        size_t total_bytes = 0;
+        size_t allocated_bytes = 0;
+        int device_id = -1;
+
+        static MemoryInfo cuda();
+        static MemoryInfo cpu();
+
+        void log() const;
     };
 
-    // ============= Stream Output =============
-    std::ostream& operator<<(std::ostream& os, const Tensor& t);
-    std::ostream& operator<<(std::ostream& os, const TensorShape& shape);
+    // ============= Functional Operations Namespace =============
+    namespace functional {
+        // Map a function over tensor elements
+        Tensor map(const Tensor& input, std::function<float(float)> func);
 
-// ============= Debug Macros =============
-#ifdef DEBUG
-#define TENSOR_DEBUG(tensor)                                          \
-    do {                                                              \
-        LOG_DEBUG("Tensor {} at {}:{}", #tensor, __FILE__, __LINE__); \
-        (tensor).print(#tensor);                                      \
-    } while (0)
+        // Reduce tensor with binary operation
+        float reduce(const Tensor& input, float init, std::function<float(float, float)> func);
 
-#define TENSOR_ASSERT_SHAPE(tensor, ...)                        \
-    do {                                                        \
-        TensorShape expected{__VA_ARGS__};                      \
-        if ((tensor).shape() != expected) {                     \
-            LOG_ERROR("Shape assertion failed for {} at {}:{}", \
-                      #tensor, __FILE__, __LINE__);             \
-            LOG_ERROR("  Expected: {}, Got: {}",                \
-                      expected.str(), (tensor).shape().str());  \
-            assert(false);                                      \
-        }                                                       \
-    } while (0)
+        // Filter tensor elements based on predicate (returns mask)
+        Tensor filter(const Tensor& input, std::function<bool(float)> predicate);
 
-#define TENSOR_TIME(name) TensorTimer _timer##__LINE__(name)
-#else
-#define TENSOR_DEBUG(tensor)             ((void)0)
-#define TENSOR_ASSERT_SHAPE(tensor, ...) ((void)0)
-#define TENSOR_TIME(name)                ((void)0)
-#endif
+        // Pipe multiple operations
+        template <typename... Funcs>
+        auto pipe(Funcs... funcs) {
+            return [=](const Tensor& input) -> Tensor {
+                Tensor result = input;
+                ((result = funcs(result)), ...);
+                return result;
+            };
+        }
+    } // namespace functional
 
 } // namespace gs
