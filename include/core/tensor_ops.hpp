@@ -60,6 +60,11 @@ namespace gs::tensor_ops {
     void launch_sigmoid(float* data, size_t n, cudaStream_t stream);
     void launch_relu(float* data, size_t n, cudaStream_t stream);
     void launch_clamp(float* data, float min_val, float max_val, size_t n, cudaStream_t stream);
+    void launch_pow_scalar(float* data, float exponent, size_t n, cudaStream_t stream);
+    void launch_pow_tensor(const float* a, const float* b, float* c,
+                           const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                           size_t a_rank, size_t b_rank, size_t c_rank,
+                           size_t c_elements, cudaStream_t stream);
 
     // Reduction operations
     void launch_reduce_sum(const float* data, float* result, size_t n, cudaStream_t stream);
@@ -100,5 +105,98 @@ namespace gs::tensor_ops {
     void launch_eye(float* data, size_t m, size_t n, cudaStream_t stream);
     void launch_diag(const float* diagonal, float* matrix, size_t n, cudaStream_t stream);
     void launch_extract_diag(const float* matrix, float* diagonal, size_t n, cudaStream_t stream);
+
+    // ============= NEW: Comparison Operations =============
+    void launch_compare_eq(const float* a, const float* b, unsigned char* result,
+                           const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                           size_t a_rank, size_t b_rank, size_t c_rank,
+                           size_t c_elements, cudaStream_t stream);
+
+    void launch_compare_lt(const float* a, const float* b, unsigned char* result,
+                           const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                           size_t a_rank, size_t b_rank, size_t c_rank,
+                           size_t c_elements, cudaStream_t stream);
+
+    void launch_compare_gt(const float* a, const float* b, unsigned char* result,
+                           const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                           size_t a_rank, size_t b_rank, size_t c_rank,
+                           size_t c_elements, cudaStream_t stream);
+
+    void launch_compare_scalar_eq(const float* a, float value, unsigned char* result,
+                                  size_t n, cudaStream_t stream);
+
+    void launch_compare_scalar_lt(const float* a, float value, unsigned char* result,
+                                  size_t n, cudaStream_t stream);
+
+    void launch_compare_scalar_gt(const float* a, float value, unsigned char* result,
+                                  size_t n, cudaStream_t stream);
+
+    // ============= NEW: Logical Operations =============
+    void launch_logical_and(const unsigned char* a, const unsigned char* b, unsigned char* result,
+                            const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                            size_t a_rank, size_t b_rank, size_t c_rank,
+                            size_t c_elements, cudaStream_t stream);
+
+    void launch_logical_or(const unsigned char* a, const unsigned char* b, unsigned char* result,
+                           const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                           size_t a_rank, size_t b_rank, size_t c_rank,
+                           size_t c_elements, cudaStream_t stream);
+
+    void launch_logical_xor(const unsigned char* a, const unsigned char* b, unsigned char* result,
+                            const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                            size_t a_rank, size_t b_rank, size_t c_rank,
+                            size_t c_elements, cudaStream_t stream);
+
+    void launch_logical_not(const unsigned char* a, unsigned char* result,
+                            size_t n, cudaStream_t stream);
+
+    // ============= NEW: Masking Operations =============
+    void launch_masked_select(const float* input, const unsigned char* mask,
+                              float* output, size_t n, size_t output_size, cudaStream_t stream);
+
+    void launch_masked_fill(float* data, const unsigned char* mask,
+                            float value, size_t n, cudaStream_t stream);
+
+    void launch_masked_scatter(float* data, const unsigned char* mask,
+                               const float* src, size_t n, size_t src_size, cudaStream_t stream);
+
+    void launch_where(const unsigned char* condition,
+                      const float* x, const float* y, float* result,
+                      const size_t* cond_shape, const size_t* x_shape,
+                      const size_t* y_shape, const size_t* result_shape,
+                      size_t cond_rank, size_t x_rank, size_t y_rank, size_t result_rank,
+                      size_t result_elements, cudaStream_t stream);
+
+    void launch_count_nonzero_bool(const unsigned char* data, size_t* count,
+                                   size_t n, cudaStream_t stream);
+
+    void launch_count_nonzero_float(const float* data, size_t* count,
+                                    size_t n, cudaStream_t stream);
+
+    // ============= NEW: Indexing Operations =============
+    void launch_index_select(const float* input, const int* indices, float* output,
+                             const size_t* shape, size_t rank, int dim,
+                             size_t index_size, int boundary_mode, cudaStream_t stream);
+
+    void launch_gather(const float* input, const int* indices, float* output,
+                       const size_t* input_shape, const size_t* index_shape,
+                       size_t rank, int dim, size_t total_elements,
+                       int boundary_mode, cudaStream_t stream);
+
+    void launch_take(const float* input, const int* indices, float* output,
+                     size_t input_size, size_t index_size, cudaStream_t stream);
+
+    void launch_scatter(float* output, const int* indices, const float* src,
+                        const size_t* output_shape, const size_t* index_shape,
+                        size_t rank, int dim, size_t total_elements,
+                        int scatter_mode, cudaStream_t stream);
+
+    void launch_index_fill(float* data, const int* indices, float value,
+                           const size_t* shape, size_t rank, int dim,
+                           size_t index_size, cudaStream_t stream);
+
+    void launch_index_copy(float* data, const int* indices, const float* src,
+                           const size_t* shape, size_t rank, int dim,
+                           size_t index_size, cudaStream_t stream);
 
 } // namespace gs::tensor_ops

@@ -32,6 +32,7 @@ set(OPTIONAL_TEST_FILES
     test_tensor_matrix.cpp
     test_tensor_random.cpp
     test_tensor_broadcast.cpp
+    test_tensor_masking.cpp
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})

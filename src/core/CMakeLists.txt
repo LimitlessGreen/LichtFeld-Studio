@@ -21,6 +21,7 @@ set(CORE_SOURCES
         tensor_broadcast.cpp    # Broadcasting implementation
         tensor_math_ops.cpp     # Math functions
         tensor_reduction_ops.cpp # Reduction operations
+	tensor_masking_ops.cpp # Masking and indexing operations
         tinyply.cpp
 )
 
@@ -28,7 +29,8 @@ set(CORE_SOURCES
 set(CORE_CUDA_SOURCES
         tensor_ops.cu           # CUDA kernels for tensor operations
         tensor_matrix_ops.cu    # CUDA kernels for matrix operations
-        tensor_broadcast_ops.cu # CUDA kernels for broadcasting (NEW)
+        tensor_broadcast_ops.cu # CUDA kernels for broadcasting
+        tensor_masking_ops.cu 	# CUDA kernels for masking/indexing
 )
 
 # Create CUDA library for tensor operations (C++20)

@@ -29,7 +29,8 @@ namespace gs {
         Float16 = 1,
         Int32 = 2,
         Int64 = 3,
-        UInt8 = 4
+        UInt8 = 4,
+        Bool = 5 // Added for masking
     };
 
     // Get size in bytes for each data type
@@ -40,6 +41,7 @@ namespace gs {
         case DataType::Int32: return 4;
         case DataType::Int64: return 8;
         case DataType::UInt8: return 1;
+        case DataType::Bool: return 1;
         default: return 0;
         }
     }
@@ -52,6 +54,7 @@ namespace gs {
         case DataType::Int32: return "int32";
         case DataType::Int64: return "int64";
         case DataType::UInt8: return "uint8";
+        case DataType::Bool: return "bool";
         default: return "unknown";
         }
     }
@@ -59,6 +62,22 @@ namespace gs {
     inline const char* device_name(Device device) {
         return device == Device::CPU ? "cpu" : "cuda";
     }
+
+    // Boundary checking mode for indexing operations
+    enum class BoundaryMode : uint8_t {
+        Assert = 0, // Throw on out-of-bounds
+        Clamp = 1,  // Clamp to valid range
+        Wrap = 2    // Wrap around (modulo)
+    };
+
+    // Reduction mode for scatter operations
+    enum class ScatterMode : uint8_t {
+        None = 0,     // Direct assignment (last write wins)
+        Add = 1,      // Add to existing value
+        Multiply = 2, // Multiply with existing value
+        Max = 3,      // Take maximum
+        Min = 4       // Take minimum
+    };
 
     class TensorShape {
     private:
@@ -111,8 +130,10 @@ namespace gs {
         }
     };
 
-    // Forward declaration
+    // Forward declarations
     class TensorError;
+    class TensorIndexer;
+    class MaskedTensorProxy;
 
     // Random number generator management
     class RandomGenerator {
@@ -182,6 +203,11 @@ namespace gs {
         static Tensor full(TensorShape shape, float value, Device device = Device::CUDA,
                            DataType dtype = DataType::Float32);
 
+        // Boolean tensor creation
+        static Tensor full_bool(TensorShape shape, bool value, Device device = Device::CUDA);
+        static Tensor zeros_bool(TensorShape shape, Device device = Device::CUDA);
+        static Tensor ones_bool(TensorShape shape, Device device = Device::CUDA);
+
         // Random tensors
         static Tensor rand(TensorShape shape, Device device = Device::CUDA,
                            DataType dtype = DataType::Float32);
@@ -200,6 +226,14 @@ namespace gs {
         static Tensor from_blob(void* data, TensorShape shape, Device device, DataType dtype) {
             return Tensor(data, shape, device, dtype);
         }
+
+        // Create from vector
+        static Tensor from_vector(const std::vector<float>& data, TensorShape shape,
+                                  Device device = Device::CUDA);
+        static Tensor from_vector(const std::vector<int>& data, TensorShape shape,
+                                  Device device = Device::CUDA);
+        static Tensor from_vector(const std::vector<bool>& data, TensorShape shape,
+                                  Device device = Device::CUDA);
 
         // ============= Data Access =============
         template <typename T>
@@ -278,18 +312,74 @@ namespace gs {
         Tensor mul(float scalar) const;
         Tensor div(float scalar) const;
         Tensor neg() const;
+        Tensor pow(float exponent) const;
 
         // Element-wise operations with broadcasting
         Tensor add(const Tensor& other) const;
         Tensor sub(const Tensor& other) const;
         Tensor mul(const Tensor& other) const;
         Tensor div(const Tensor& other) const;
+        Tensor pow(const Tensor& other) const;
 
         // Matrix operations
         Tensor mm(const Tensor& other) const;     // Matrix multiply
         Tensor bmm(const Tensor& other) const;    // Batch matrix multiply
         Tensor matmul(const Tensor& other) const; // General matrix multiply
         Tensor dot(const Tensor& other) const;    // Dot product for 1D tensors
+
+        // ============= Comparison Operations (NEW) =============
+        Tensor eq(const Tensor& other) const; // Equal
+        Tensor ne(const Tensor& other) const; // Not equal
+        Tensor lt(const Tensor& other) const; // Less than
+        Tensor le(const Tensor& other) const; // Less or equal
+        Tensor gt(const Tensor& other) const; // Greater than
+        Tensor ge(const Tensor& other) const; // Greater or equal
+
+        Tensor eq(float value) const;
+        Tensor ne(float value) const;
+        Tensor lt(float value) const;
+        Tensor le(float value) const;
+        Tensor gt(float value) const;
+        Tensor ge(float value) const;
+
+        // Logical operations for boolean tensors
+        Tensor logical_and(const Tensor& other) const;
+        Tensor logical_or(const Tensor& other) const;
+        Tensor logical_not() const;
+        Tensor logical_xor(const Tensor& other) const;
+
+        // ============= Masking Operations (NEW) =============
+        Tensor masked_select(const Tensor& mask) const;
+        Tensor& masked_fill_(const Tensor& mask, float value);
+        Tensor masked_fill(const Tensor& mask, float value) const;
+        Tensor where(const Tensor& condition, const Tensor& other) const;
+        static Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y);
+
+        // ============= Indexing Operations (NEW) =============
+        Tensor index_select(int dim, const Tensor& indices) const;
+        Tensor gather(int dim, const Tensor& indices) const;
+        Tensor take(const Tensor& indices) const; // 1D indexing
+
+        Tensor& scatter_(int dim, const Tensor& indices, const Tensor& src,
+                         ScatterMode mode = ScatterMode::None);
+        Tensor& scatter_(int dim, const Tensor& indices, float value,
+                         ScatterMode mode = ScatterMode::None);
+        Tensor& index_fill_(int dim, const Tensor& indices, float value);
+        Tensor& index_copy_(int dim, const Tensor& indices, const Tensor& src);
+
+        // Advanced indexing with boundary modes
+        Tensor index_select(int dim, const Tensor& indices, BoundaryMode mode) const;
+        Tensor gather(int dim, const Tensor& indices, BoundaryMode mode) const;
+
+        // ============= Python-like Indexing (NEW) =============
+        // Indexing proxy for Python-like syntax
+        TensorIndexer operator[](const Tensor& indices);
+        TensorIndexer operator[](const std::vector<Tensor>& indices);
+        MaskedTensorProxy operator[](const Tensor& mask) const;
+
+        // For scalar indexing
+        float& at(std::initializer_list<size_t> indices);
+        float at(std::initializer_list<size_t> indices) const;
 
         // Operator overloads
         Tensor operator+(const Tensor& other) const { return add(other); }
@@ -301,7 +391,25 @@ namespace gs {
         Tensor operator/(const Tensor& other) const { return div(other); }
         Tensor operator/(float scalar) const { return div(scalar); }
         Tensor operator-() const { return neg(); }
-        // Note: operator@ is not valid C++, use matmul() or mm() instead
+
+        // Comparison operator overloads
+        Tensor operator==(const Tensor& other) const { return eq(other); }
+        Tensor operator==(float value) const { return eq(value); }
+        Tensor operator!=(const Tensor& other) const { return ne(other); }
+        Tensor operator!=(float value) const { return ne(value); }
+        Tensor operator<(const Tensor& other) const { return lt(other); }
+        Tensor operator<(float value) const { return lt(value); }
+        Tensor operator<=(const Tensor& other) const { return le(other); }
+        Tensor operator<=(float value) const { return le(value); }
+        Tensor operator>(const Tensor& other) const { return gt(other); }
+        Tensor operator>(float value) const { return gt(value); }
+        Tensor operator>=(const Tensor& other) const { return ge(other); }
+        Tensor operator>=(float value) const { return ge(value); }
+
+        // Logical operator overloads (for boolean tensors)
+        Tensor operator&&(const Tensor& other) const { return logical_and(other); }
+        Tensor operator||(const Tensor& other) const { return logical_or(other); }
+        Tensor operator!() const { return logical_not(); }
 
         // In-place operations (no broadcasting for in-place)
         Tensor& add_(const Tensor& other);
@@ -362,6 +470,9 @@ namespace gs {
         float item() const; // Get single value (for scalar tensors)
         std::pair<float, float> minmax() const;
 
+        // Count non-zero elements (useful for masks)
+        size_t count_nonzero() const;
+
         // ============= Common Deep Learning Operations =============
         Tensor normalize(int dim = -1, float eps = 1e-12f) const;
         Tensor abs() const;
@@ -384,10 +495,14 @@ namespace gs {
         bool has_nan() const;
         bool has_inf() const;
         bool all_close(const Tensor& other, float rtol = 1e-5f, float atol = 1e-8f) const;
+        bool any() const; // For boolean tensors
+        bool all() const; // For boolean tensors
 
         // ============= Utility Functions =============
         std::string str() const;
         std::vector<float> to_vector() const;
+        std::vector<int> to_vector_int() const;
+        std::vector<bool> to_vector_bool() const;
         std::vector<float> debug_values(size_t max_values = 100) const;
 
         void dump_diagnostic(const std::string& filename) const;
@@ -397,6 +512,49 @@ namespace gs {
     private:
         void print_1d(size_t max_elem = 10) const;
         void print_2d(size_t max_per_dim = 10) const;
+
+        friend class TensorIndexer;
+        friend class MaskedTensorProxy;
+    };
+
+    // ============= Indexing Helper Classes (NEW) =============
+
+    // Proxy class for masked tensor assignment
+    class MaskedTensorProxy {
+    private:
+        const Tensor* tensor_;
+        Tensor mask_;
+
+    public:
+        MaskedTensorProxy(const Tensor* tensor, Tensor mask)
+            : tensor_(tensor),
+              mask_(std::move(mask)) {}
+
+        // Assignment operators for Python-like syntax
+        void operator=(float value);
+        void operator=(const Tensor& other);
+
+        // Conversion to tensor for selection
+        operator Tensor() const;
+    };
+
+    // Indexer for advanced indexing
+    class TensorIndexer {
+    private:
+        Tensor* tensor_;
+        std::vector<Tensor> indices_;
+
+    public:
+        TensorIndexer(Tensor* tensor, std::vector<Tensor> indices)
+            : tensor_(tensor),
+              indices_(std::move(indices)) {}
+
+        // Assignment for indexed positions
+        void operator=(float value);
+        void operator=(const Tensor& other);
+
+        // Get indexed values
+        operator Tensor() const;
     };
 
     // ============= TensorBuilder Class =============
