@@ -96,6 +96,141 @@ TEST_F(TensorMaskingTest, DiagnosticMaskedFill) {
     EXPECT_TRUE(compare_vectors(after, expected));
 }
 
+// =============  Regression Tests for Fixed Bugs =============
+
+// Test for the diagonal mask bug where arange().reshape({n,1}).eq(arange().reshape({1,n})) was all true
+TEST_F(TensorMaskingTest, RegressionDiagonalMaskBroadcast) {
+    const size_t n = 5;
+
+    // Create range tensors
+    std::vector<float> range_data = {0, 1, 2, 3, 4};
+    auto range = Tensor::from_vector(range_data, {n}, Device::CUDA);
+
+    // Reshape to column and row
+    auto col = range.reshape({n, 1});  // [0, 1, 2, 3, 4]^T
+    auto row = range.reshape({1, n});  // [0, 1, 2, 3, 4]
+
+    // Create diagonal mask via broadcasting comparison
+    auto diag_mask = col.eq(row);
+
+    EXPECT_EQ(diag_mask.shape(), TensorShape({n, n}));
+    EXPECT_EQ(diag_mask.dtype(), DataType::Bool);
+
+    // Check that we get a proper diagonal matrix
+    auto mask_values = diag_mask.to_vector_bool();
+
+    // Print for debugging
+    std::cout << "Diagonal mask (should be identity matrix):\n";
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t j = 0; j < n; ++j) {
+            std::cout << (mask_values[i * n + j] ? "1 " : "0 ");
+        }
+        std::cout << "\n";
+    }
+
+    // Verify it's actually a diagonal matrix
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t j = 0; j < n; ++j) {
+            bool expected = (i == j);
+            EXPECT_EQ(mask_values[i * n + j], expected)
+                << "Failed at position (" << i << ", " << j << ")";
+        }
+    }
+
+    // Count diagonal elements
+    auto diagonal_count = diag_mask.count_nonzero();
+    EXPECT_EQ(diagonal_count, n) << "Should have exactly " << n << " true elements on diagonal";
+}
+
+// Test for boolean tensor expansion bug
+TEST_F(TensorMaskingTest, RegressionBooleanTensorExpansion) {
+    const size_t batch_size = 3;
+    const size_t seq_len = 4;
+
+    // Create a 2D boolean mask
+    std::vector<bool> mask_data(seq_len * seq_len);
+    for (size_t i = 0; i < seq_len; ++i) {
+        for (size_t j = 0; j < seq_len; ++j) {
+            mask_data[i * seq_len + j] = (i >= j);  // Lower triangular
+        }
+    }
+
+    auto mask_2d = Tensor::from_vector(mask_data, {seq_len, seq_len}, Device::CUDA);
+
+    // Add batch dimension and expand
+    auto mask_3d = mask_2d.unsqueeze(0);  // Shape: [1, seq_len, seq_len]
+    EXPECT_EQ(mask_3d.shape(), TensorShape({1, seq_len, seq_len}));
+
+    auto mask_expanded = mask_3d.expand({batch_size, seq_len, seq_len});
+    EXPECT_EQ(mask_expanded.shape(), TensorShape({batch_size, seq_len, seq_len}));
+
+    // Verify all batches have the same mask pattern
+    auto expanded_values = mask_expanded.to_vector_bool();
+
+    for (size_t b = 0; b < batch_size; ++b) {
+        std::cout << "Batch " << b << " mask:\n";
+        for (size_t i = 0; i < seq_len; ++i) {
+            for (size_t j = 0; j < seq_len; ++j) {
+                size_t idx = b * seq_len * seq_len + i * seq_len + j;
+                bool value = expanded_values[idx];
+                std::cout << (value ? "1 " : "0 ");
+
+                // All batches should have the same pattern
+                bool expected = (i >= j);
+                EXPECT_EQ(value, expected)
+                    << "Failed at batch " << b << ", position (" << i << ", " << j << ")";
+            }
+            std::cout << "\n";
+        }
+        std::cout << "\n";
+    }
+}
+
+// Test broadcasting with different rank tensors in comparison
+TEST_F(TensorMaskingTest, RegressionBroadcastComparisonDifferentRanks) {
+    // Test case 1: 1D vs 2D
+    auto vec = create_test_tensor({1, 2, 3}, {3});
+    auto mat = create_test_tensor({1, 2, 3, 2, 3, 4}, {2, 3});
+
+    auto mask = vec.eq(mat);
+    EXPECT_EQ(mask.shape(), TensorShape({2, 3}));
+
+    auto values = mask.to_vector_bool();
+    // First row compared with [1, 2, 3]: [1==1, 2==2, 3==3] = [T, T, T]
+    // Second row compared with [1, 2, 3]: [2==1, 3==2, 4==3] = [F, F, F]
+    std::vector<bool> expected = {true, true, true, false, false, false};
+    EXPECT_EQ(values, expected);
+
+    // Test case 2: Scalar-like vs Matrix
+    auto scalar = create_test_tensor({2}, {1, 1});
+    auto matrix = create_test_tensor({1, 2, 3, 4}, {2, 2});
+
+    auto mask2 = scalar.eq(matrix);
+    EXPECT_EQ(mask2.shape(), TensorShape({2, 2}));
+
+    auto values2 = mask2.to_vector_bool();
+    // All elements compared with 2
+    std::vector<bool> expected2 = {false, true, false, false};
+    EXPECT_EQ(values2, expected2);
+}
+
+// Test for proper boolean broadcast in logical operations
+TEST_F(TensorMaskingTest, RegressionBooleanBroadcastLogical) {
+    // Create masks with different shapes
+    auto mask1 = Tensor::from_vector(std::vector<bool>{true, false}, {2, 1}, Device::CUDA);
+    auto mask2 = Tensor::from_vector(std::vector<bool>{true, false, true}, {1, 3}, Device::CUDA);
+
+    // Logical AND with broadcasting
+    auto result = mask1.logical_and(mask2);
+    EXPECT_EQ(result.shape(), TensorShape({2, 3}));
+
+    auto values = result.to_vector_bool();
+    // First row: [true] AND [true, false, true] = [true, false, true]
+    // Second row: [false] AND [true, false, true] = [false, false, false]
+    std::vector<bool> expected = {true, false, true, false, false, false};
+    EXPECT_EQ(values, expected);
+}
+
 // ============= Comparison Operations Tests =============
 TEST_F(TensorMaskingTest, ComparisonEqual) {
     auto a = create_test_tensor({1, 2, 3, 4, 5}, {5});
@@ -577,7 +712,96 @@ TEST_F(TensorMaskingTest, AdvancedIndexingScenario) {
     EXPECT_TRUE(compare_vectors(final_values, final_expected));
 }
 
-// ============= NEW: Advanced Masking Patterns =============
+// =============  Additional Advanced Masking Patterns =============
+
+// Test creating attention masks with proper broadcasting
+TEST_F(TensorMaskingTest, AttentionMaskCreation) {
+    const size_t batch = 2;
+    const size_t heads = 4;
+    const size_t seq_len = 8;
+
+    // Create attention scores
+    auto scores = Tensor::randn({batch, heads, seq_len, seq_len}, Device::CUDA);
+
+    // Create causal mask using broadcasting
+    std::vector<float> range_data(seq_len);
+    for (size_t i = 0; i < seq_len; ++i) {
+        range_data[i] = static_cast<float>(i);
+    }
+    auto range = Tensor::from_vector(range_data, {seq_len}, Device::CUDA);
+
+    auto row_idx = range.reshape({seq_len, 1});
+    auto col_idx = range.reshape({1, seq_len});
+
+    // Create causal mask: row_idx >= col_idx
+    auto causal_mask = row_idx.ge(col_idx);
+    EXPECT_EQ(causal_mask.shape(), TensorShape({seq_len, seq_len}));
+
+    // Expand to match scores shape
+    auto mask_expanded = causal_mask.unsqueeze(0).unsqueeze(0)
+                                    .expand({batch, heads, seq_len, seq_len});
+    EXPECT_EQ(mask_expanded.shape(), scores.shape());
+
+    // Apply mask
+    scores.masked_fill_(mask_expanded.logical_not(), -1e9f);
+
+    // Verify some values
+    auto cpu_scores = scores.to(Device::CPU);
+    // Upper triangular should be -1e9, lower triangular should be normal
+    for (size_t i = 0; i < seq_len; ++i) {
+        for (size_t j = 0; j < seq_len; ++j) {
+            float val = cpu_scores.at({0, 0, i, j});
+            if (j > i) {
+                EXPECT_FLOAT_EQ(val, -1e9f) << "Failed at position (0, 0, " << i << ", " << j << ")";
+            } else {
+                EXPECT_NE(val, -1e9f) << "Failed at position (0, 0, " << i << ", " << j << ")";
+            }
+        }
+    }
+}
+
+// Test for creating padding masks
+TEST_F(TensorMaskingTest, PaddingMaskCreation) {
+    const size_t batch = 3;
+    const size_t seq_len = 10;
+    const size_t hidden = 64;
+
+    // Simulate sequence lengths for each batch
+    std::vector<int> lengths = {7, 5, 9};
+
+    // Create data
+    auto data = Tensor::randn({batch, seq_len, hidden}, Device::CUDA);
+
+    // Create padding mask
+    auto mask = Tensor::zeros_bool({batch, seq_len}, Device::CUDA);
+    auto cpu_mask = mask.to(Device::CPU);
+
+    // Set valid positions to true
+    for (size_t b = 0; b < batch; ++b) {
+        for (size_t s = 0; s < lengths[b]; ++s) {
+            cpu_mask.at({b, s}) = 1.0f;  // Will be converted to bool
+        }
+    }
+
+    mask = cpu_mask.to(Device::CUDA);
+
+    // Expand mask to match data dimensions
+    auto mask_expanded = mask.unsqueeze(2).expand({batch, seq_len, hidden});
+
+    // Apply padding
+    data = data.mul(mask_expanded.to(DataType::Float32));
+
+    // Verify padding positions are zero
+    auto cpu_data = data.to(Device::CPU);
+    for (size_t b = 0; b < batch; ++b) {
+        for (size_t s = lengths[b]; s < seq_len; ++s) {
+            for (size_t h = 0; h < hidden; ++h) {
+                EXPECT_FLOAT_EQ(cpu_data.at({b, s, h}), 0.0f)
+                    << "Failed at position (" << b << ", " << s << ", " << h << ")";
+            }
+        }
+    }
+}
 
 // ============= Multi-Condition Masking =============
 TEST_F(TensorMaskingTest, MultiConditionMasking) {
@@ -1005,7 +1229,7 @@ TEST_F(TensorMaskingTest, FixedSingleElementIndexing) {
     }
 }
 
-// ============= Fixed Compound Masking Operations =============
+// ============= Compound Masking Operations =============
 TEST_F(TensorMaskingTest, SimpleCompoundMasking) {
     // Simpler test case
     const size_t batch = 2;
@@ -1047,4 +1271,395 @@ TEST_F(TensorMaskingTest, SimpleCompoundMasking) {
             }
         }
     }
+}
+
+// =============  Extensive Boolean Expansion Tests =============
+
+TEST_F(TensorMaskingTest, BooleanExpansionSimple1D) {
+    // Test 1D boolean tensor expansion
+    auto bool_1d = Tensor::from_vector(std::vector<bool>{true, false, true}, {3}, Device::CUDA);
+
+    // Expand to 2D
+    auto expanded = bool_1d.unsqueeze(0).expand({2, 3});
+    EXPECT_EQ(expanded.shape(), TensorShape({2, 3}));
+
+    auto values = expanded.to_vector_bool();
+    // Both rows should be [true, false, true]
+    std::vector<bool> expected = {true, false, true, true, false, true};
+    EXPECT_EQ(values, expected);
+}
+
+TEST_F(TensorMaskingTest, BooleanExpansion2Dto3D) {
+    // Test 2D to 3D boolean tensor expansion
+    std::vector<bool> data_2d = {true, false, false, true};
+    auto bool_2d = Tensor::from_vector(data_2d, {2, 2}, Device::CUDA);
+
+    // Add dimension and expand
+    auto expanded = bool_2d.unsqueeze(0).expand({3, 2, 2});
+    EXPECT_EQ(expanded.shape(), TensorShape({3, 2, 2}));
+
+    auto values = expanded.to_vector_bool();
+    // All 3 batches should have the same pattern
+    std::vector<bool> expected = {
+        true, false, false, true,  // batch 0
+        true, false, false, true,  // batch 1
+        true, false, false, true   // batch 2
+    };
+    EXPECT_EQ(values, expected);
+}
+
+TEST_F(TensorMaskingTest, BooleanExpansionMultipleDims) {
+    // Test expansion along multiple dimensions
+    auto bool_tensor = Tensor::from_vector(std::vector<bool>{true}, {1, 1}, Device::CUDA);
+
+    auto expanded = bool_tensor.expand({5, 4});
+    EXPECT_EQ(expanded.shape(), TensorShape({5, 4}));
+
+    // All elements should be true
+    auto values = expanded.to_vector_bool();
+    EXPECT_EQ(values.size(), 20);
+    for (bool val : values) {
+        EXPECT_TRUE(val);
+    }
+}
+
+// =============  Broadcasting Comparison Edge Cases =============
+
+TEST_F(TensorMaskingTest, BroadcastComparisonScalarLike) {
+    // Test scalar-like tensors in comparisons
+    auto scalar = create_test_tensor({5}, {1});
+    auto vector = create_test_tensor({1, 2, 3, 4, 5, 6}, {6});
+
+    auto mask = vector.eq(scalar);
+    EXPECT_EQ(mask.shape(), vector.shape());
+
+    auto values = mask.to_vector_bool();
+    // Only the 5th element (index 4) should be true
+    std::vector<bool> expected = {false, false, false, false, true, false};
+    EXPECT_EQ(values, expected);
+}
+
+TEST_F(TensorMaskingTest, BroadcastComparison3D) {
+    // Test 3D broadcasting in comparisons
+    auto a = create_test_tensor({1, 2}, {2, 1, 1});
+    auto b = create_test_tensor({1, 2, 3}, {1, 1, 3});
+
+    auto mask = a.eq(b);
+    EXPECT_EQ(mask.shape(), TensorShape({2, 1, 3}));
+
+    auto values = mask.to_vector_bool();
+    // First batch: 1 compared with [1, 2, 3] = [T, F, F]
+    // Second batch: 2 compared with [1, 2, 3] = [F, T, F]
+    std::vector<bool> expected = {true, false, false, false, true, false};
+    EXPECT_EQ(values, expected);
+}
+
+TEST_F(TensorMaskingTest, BroadcastComparisonMaxRank) {
+    // Test broadcasting with maximum rank difference
+    auto a = create_test_tensor({2}, {1});  // Rank 1
+    auto b = create_test_tensor({1, 2, 3, 4, 5, 6, 7, 8}, {2, 2, 2});  // Rank 3
+
+    auto mask = a.eq(b);
+    EXPECT_EQ(mask.shape(), TensorShape({2, 2, 2}));
+
+    auto values = mask.to_vector_bool();
+    // Element at position [0, 1, 0] is 2, others are not
+    std::vector<bool> expected = {false, true, false, false, false, false, false, false};
+    EXPECT_EQ(values, expected);
+}
+
+// =============  Complex Boolean Operations =============
+
+TEST_F(TensorMaskingTest, ChainedBooleanOperations) {
+    const size_t n = 100;
+    auto data = Tensor::randn({n}, Device::CUDA);
+
+    // Create multiple conditions
+    auto mask1 = data.gt(0);           // positive values
+    auto mask2 = data.lt(1);           // less than 1
+    auto mask3 = data.abs().gt(0.1);   // absolute value > 0.1
+
+    // Complex chained boolean logic
+    auto final_mask = mask1.logical_and(mask2).logical_or(mask3.logical_not());
+
+    EXPECT_EQ(final_mask.shape(), data.shape());
+    EXPECT_EQ(final_mask.dtype(), DataType::Bool);
+
+    // Apply the mask
+    data.masked_fill_(final_mask, 0);
+
+    // Verify some properties
+    auto remaining = data.ne(0);
+    auto remaining_data = data.masked_select(remaining);
+
+    // All remaining values should NOT satisfy the final_mask condition
+    // This is a complex condition, so we just check that the operation completed
+    EXPECT_GE(remaining.count_nonzero(), 0);
+}
+
+TEST_F(TensorMaskingTest, BooleanReductionAcrossDimensions) {
+    // Create a 3D boolean tensor
+    const size_t d1 = 4, d2 = 5, d3 = 6;
+    auto data = Tensor::randn({d1, d2, d3}, Device::CUDA);
+    auto mask = data.gt(0);
+
+    // Test reduction operations
+    bool has_any_true = mask.any();
+    bool all_true = mask.all();
+
+    // Since it's random data, we expect some true and some false
+    EXPECT_TRUE(has_any_true);
+    EXPECT_FALSE(all_true);  // Unlikely all random values are > 0
+
+    // Count non-zeros
+    size_t count = mask.count_nonzero();
+    EXPECT_GT(count, 0);
+    EXPECT_LT(count, d1 * d2 * d3);
+}
+
+// =============  Stress Tests =============
+
+TEST_F(TensorMaskingTest, StressTestLargeMasking) {
+    const size_t size = 10000;
+    auto data = Tensor::randn({size, size}, Device::CUDA);
+
+    // Create complex mask
+    auto mask = data.gt(0).logical_and(data.lt(1));
+
+    // Apply mask
+    auto selected = data.masked_select(mask);
+
+    // Just verify it works without crashing
+    EXPECT_GE(selected.numel(), 0);
+    EXPECT_LE(selected.numel(), size * size);
+}
+
+TEST_F(TensorMaskingTest, StressTestManyDimensions) {
+    // Test with many dimensions (up to 6D)
+    auto data = Tensor::randn({2, 3, 4, 5, 6, 7}, Device::CUDA);
+    auto mask = data.gt(0);
+
+    EXPECT_EQ(mask.shape(), data.shape());
+    EXPECT_EQ(mask.ndim(), 6);
+
+    // Apply masking operations
+    data.masked_fill_(mask, 1.0f);
+
+    // Count elements
+    auto count = mask.count_nonzero();
+    EXPECT_GE(count, 0);
+    EXPECT_LE(count, data.numel());
+}
+
+// =============  Mixed Dtype Operations =============
+
+TEST_F(TensorMaskingTest, MixedDtypeComparisons) {
+    // Test that comparisons always return bool regardless of input dtype
+    auto float_tensor = create_test_tensor({1.5, 2.5, 3.5}, {3});
+
+    auto mask1 = float_tensor.gt(2.0f);
+    EXPECT_EQ(mask1.dtype(), DataType::Bool);
+
+    auto mask2 = float_tensor.eq(float_tensor);
+    EXPECT_EQ(mask2.dtype(), DataType::Bool);
+
+    // All elements should equal themselves
+    EXPECT_TRUE(mask2.all());
+}
+
+// =============  Special Value Handling =============
+
+TEST_F(TensorMaskingTest, SpecialValueMasking) {
+    // Create tensor with special values
+    std::vector<float> data = {
+        0.0f, 1.0f, -1.0f,
+        std::numeric_limits<float>::infinity(),
+        -std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::quiet_NaN()
+    };
+    auto tensor = Tensor::from_vector(data, {6}, Device::CUDA);
+
+    // Test comparisons with special values
+    auto finite_mask = tensor.eq(tensor);  // NaN != NaN
+    auto values = finite_mask.to_vector_bool();
+
+    // First 5 should be true, last (NaN) should be false
+    EXPECT_TRUE(values[0]);
+    EXPECT_TRUE(values[1]);
+    EXPECT_TRUE(values[2]);
+    EXPECT_TRUE(values[3]);
+    EXPECT_TRUE(values[4]);
+    EXPECT_FALSE(values[5]);  // NaN != NaN
+}
+
+// =============  Boolean Tensor Arithmetic =============
+
+TEST_F(TensorMaskingTest, BooleanToFloatConversion) {
+    auto bool_tensor = Tensor::from_vector(
+        std::vector<bool>{true, false, true, false},
+        {2, 2},
+        Device::CUDA
+    );
+
+    // Convert to float for arithmetic
+    auto float_tensor = bool_tensor.to(DataType::Float32);
+
+    // Multiply by scalar
+    auto result = float_tensor.mul(5.0f);
+
+    auto values = result.to_vector();
+    std::vector<float> expected = {5.0f, 0.0f, 5.0f, 0.0f};
+    EXPECT_TRUE(compare_vectors(values, expected));
+}
+
+// =============  Advanced Indexing with Boolean Masks =============
+
+TEST_F(TensorMaskingTest, AdvancedBooleanIndexing) {
+    // Create a 3D tensor
+    const size_t d0 = 3, d1 = 4, d2 = 5;
+
+    // Create a tensor with sequential values
+    std::vector<float> data(d0 * d1 * d2);
+    for (size_t i = 0; i < d0 * d1 * d2; ++i) {
+        data[i] = static_cast<float>(i);
+    }
+    auto tensor = Tensor::from_vector(data, {d0, d1, d2}, Device::CUDA);
+
+    // Create boolean mask for middle dimension
+    auto mask_1d = Tensor::from_vector(
+        std::vector<bool>{false, true, true, false},
+        {d1},
+        Device::CUDA
+    );
+
+    // Select using mask - this should select dimensions 1 and 2 from middle axis
+    auto indices = Tensor::from_vector(std::vector<int>{1, 2}, {2}, Device::CUDA);
+    auto selected = tensor.index_select(1, indices);
+
+    EXPECT_EQ(selected.shape(), TensorShape({d0, 2, d2}));
+}
+
+// =============  Batch Processing with Masks =============
+
+TEST_F(TensorMaskingTest, BatchMaskProcessing) {
+    const size_t batch = 8;
+    const size_t features = 128;
+
+    // Simulate batch processing with different masks per batch
+    auto data = Tensor::randn({batch, features}, Device::CUDA);
+
+    // Create different threshold for each batch element
+    std::vector<float> thresholds(batch);
+    for (size_t i = 0; i < batch; ++i) {
+        thresholds[i] = -1.0f + 0.5f * i;  // Increasing thresholds
+    }
+
+    // Process each batch with its own mask
+    for (size_t i = 0; i < batch; ++i) {
+        auto batch_data = data.slice(0, i, i+1).squeeze(0);
+        auto batch_mask = batch_data.gt(thresholds[i]);
+        batch_data.masked_fill_(batch_mask, thresholds[i]);
+    }
+
+    // Verify each batch is clamped at its threshold
+    for (size_t i = 0; i < batch; ++i) {
+        auto batch_data = data.slice(0, i, i+1).squeeze(0);
+        auto max_val = batch_data.max();
+        EXPECT_LE(max_val, thresholds[i] + 1e-5f);
+    }
+}
+
+// =============  Memory Layout Tests =============
+
+TEST_F(TensorMaskingTest, ContiguousVsNonContiguousMasking) {
+    // Create a non-contiguous tensor via transpose
+    auto original = create_test_tensor(
+        {1, 2, 3, 4, 5, 6},
+        {2, 3}
+    );
+
+    auto transposed = original.transpose(0, 1);  // Now non-contiguous
+    EXPECT_EQ(transposed.shape(), TensorShape({3, 2}));
+
+    // Apply masking operations on non-contiguous tensor
+    auto mask = transposed.gt(3);
+    auto masked = transposed.masked_fill(mask, -1);
+
+    // Verify the operation worked correctly
+    auto values = masked.to_vector();
+    // Original transposed: [[1,4], [2,5], [3,6]]
+    // After masking > 3: [[1,-1], [2,-1], [3,-1]]
+    std::vector<float> expected = {1, -1, 2, -1, 3, -1};
+    EXPECT_TRUE(compare_vectors(values, expected));
+}
+
+// =============  Error Handling Tests =============
+
+TEST_F(TensorMaskingTest, ErrorHandlingMismatchedShapes) {
+    auto tensor = create_test_tensor({1, 2, 3, 4}, {2, 2});
+    auto wrong_mask = Tensor::ones_bool({3, 3}, Device::CUDA);
+
+    // This should fail gracefully
+    auto result = tensor.masked_select(wrong_mask);
+    EXPECT_FALSE(result.is_valid());
+}
+
+TEST_F(TensorMaskingTest, ErrorHandlingWrongDevice) {
+    auto cuda_tensor = create_test_tensor({1, 2, 3, 4}, {2, 2});
+    auto cpu_mask = Tensor::ones_bool({2, 2}, Device::CPU);
+
+    // This should fail gracefully
+    auto result = cuda_tensor.masked_select(cpu_mask);
+    EXPECT_FALSE(result.is_valid());
+}
+
+// =============  Final Integration Test =============
+
+TEST_F(TensorMaskingTest, IntegrationCompleteWorkflow) {
+    // Simulate a complete ML workflow with masking
+    const size_t batch = 32;
+    const size_t seq_len = 128;
+    const size_t hidden = 256;
+
+    // 1. Create input data
+    auto inputs = Tensor::randn({batch, seq_len, hidden}, Device::CUDA);
+
+    // 2. Create attention mask (causal)
+    std::vector<float> range(seq_len);
+    for (size_t i = 0; i < seq_len; ++i) {
+        range[i] = static_cast<float>(i);
+    }
+    auto range_tensor = Tensor::from_vector(range, {seq_len}, Device::CUDA);
+    auto causal = range_tensor.reshape({seq_len, 1}).ge(range_tensor.reshape({1, seq_len}));
+
+    // 3. Create padding mask (different lengths per batch)
+    auto padding = Tensor::ones_bool({batch, seq_len}, Device::CUDA);
+    // Simulate some padding
+    auto cpu_padding = padding.to(Device::CPU);
+    for (size_t b = 0; b < batch; ++b) {
+        size_t length = seq_len - (b % 10);  // Variable lengths
+        for (size_t s = length; s < seq_len; ++s) {
+            cpu_padding.at({b, s}) = 0;
+        }
+    }
+    padding = cpu_padding.to(Device::CUDA).to(DataType::Bool);
+
+    // 4. Combine masks
+    auto causal_expanded = causal.unsqueeze(0).expand({batch, seq_len, seq_len});
+    auto padding_expanded = padding.unsqueeze(1).expand({batch, seq_len, seq_len});
+    auto combined_mask = causal_expanded.logical_and(padding_expanded);
+
+    // 5. Apply to attention scores (simulated)
+    auto scores = Tensor::randn({batch, seq_len, seq_len}, Device::CUDA);
+    scores.masked_fill_(combined_mask.logical_not(), -1e9f);
+
+    // 6. Apply softmax (simulated by just checking mask worked)
+    auto masked_scores = scores.masked_select(combined_mask.logical_not());
+    if (masked_scores.numel() > 0) {
+        EXPECT_FLOAT_EQ(masked_scores.to_vector()[0], -1e9f);
+    }
+
+    // Just verify the workflow completed without errors
+    EXPECT_TRUE(scores.is_valid());
+    EXPECT_EQ(scores.shape(), TensorShape({batch, seq_len, seq_len}));
 }

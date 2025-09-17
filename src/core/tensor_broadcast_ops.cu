@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor_ops.hpp"
+#include "core/cuda_memory_guard.hpp"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -129,128 +130,124 @@ namespace gs::tensor_ops {
         __device__ float operator()(float a, float b) const { return a / (b + 1e-8f); }
     };
 
-    // Launch functions for broadcasting
+    // Launch functions for broadcasting - UPDATED with RAII
     void launch_broadcast(const float* src, float* dst,
                           const size_t* src_shape, const size_t* dst_shape,
                           size_t src_rank, size_t dst_rank,
                           size_t dst_elements, cudaStream_t stream) {
-        // Allocate device memory for shapes
-        size_t *d_src_shape, *d_dst_shape;
-        cudaMalloc(&d_src_shape, src_rank * sizeof(size_t));
-        cudaMalloc(&d_dst_shape, dst_rank * sizeof(size_t));
+        // Allocate device memory for shapes using RAII
+        CudaDeviceMemory<size_t> d_src_shape(src_rank);
+        CudaDeviceMemory<size_t> d_dst_shape(dst_rank);
 
-        cudaMemcpy(d_src_shape, src_shape, src_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_dst_shape, dst_shape, dst_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_src_shape.valid() || !d_dst_shape.valid()) {
+            return;
+        }
+
+        d_src_shape.copy_from_host(src_shape, src_rank);
+        d_dst_shape.copy_from_host(dst_shape, dst_rank);
 
         int block_size = 256;
         int grid_size = (dst_elements + block_size - 1) / block_size;
 
         broadcast_kernel<<<grid_size, block_size, 0, stream>>>(
-            src, dst, d_src_shape, d_dst_shape, src_rank, dst_rank, dst_elements);
-
-        cudaFree(d_src_shape);
-        cudaFree(d_dst_shape);
+            src, dst, d_src_shape.get(), d_dst_shape.get(), src_rank, dst_rank, dst_elements);
     }
 
     void launch_broadcast_add(const float* a, const float* b, float* c,
                               const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                               size_t a_rank, size_t b_rank, size_t c_rank,
                               size_t c_elements, cudaStream_t stream) {
-        // Allocate device memory for shapes
-        size_t *d_a_shape, *d_b_shape, *d_c_shape;
-        cudaMalloc(&d_a_shape, a_rank * sizeof(size_t));
-        cudaMalloc(&d_b_shape, b_rank * sizeof(size_t));
-        cudaMalloc(&d_c_shape, c_rank * sizeof(size_t));
+        // Allocate device memory for shapes using RAII
+        CudaDeviceMemory<size_t> d_a_shape(a_rank);
+        CudaDeviceMemory<size_t> d_b_shape(b_rank);
+        CudaDeviceMemory<size_t> d_c_shape(c_rank);
 
-        cudaMemcpy(d_a_shape, a_shape, a_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b_shape, b_shape, b_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_c_shape, c_shape, c_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
+            return;
+        }
+
+        d_a_shape.copy_from_host(a_shape, a_rank);
+        d_b_shape.copy_from_host(b_shape, b_rank);
+        d_c_shape.copy_from_host(c_shape, c_rank);
 
         int block_size = 256;
         int grid_size = (c_elements + block_size - 1) / block_size;
 
         broadcast_binary_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, c, d_a_shape, d_b_shape, d_c_shape,
+            a, b, c, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
             a_rank, b_rank, c_rank, c_elements, AddOp());
-
-        cudaFree(d_a_shape);
-        cudaFree(d_b_shape);
-        cudaFree(d_c_shape);
     }
 
     void launch_broadcast_sub(const float* a, const float* b, float* c,
                               const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                               size_t a_rank, size_t b_rank, size_t c_rank,
                               size_t c_elements, cudaStream_t stream) {
-        size_t *d_a_shape, *d_b_shape, *d_c_shape;
-        cudaMalloc(&d_a_shape, a_rank * sizeof(size_t));
-        cudaMalloc(&d_b_shape, b_rank * sizeof(size_t));
-        cudaMalloc(&d_c_shape, c_rank * sizeof(size_t));
+        CudaDeviceMemory<size_t> d_a_shape(a_rank);
+        CudaDeviceMemory<size_t> d_b_shape(b_rank);
+        CudaDeviceMemory<size_t> d_c_shape(c_rank);
 
-        cudaMemcpy(d_a_shape, a_shape, a_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b_shape, b_shape, b_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_c_shape, c_shape, c_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
+            return;
+        }
+
+        d_a_shape.copy_from_host(a_shape, a_rank);
+        d_b_shape.copy_from_host(b_shape, b_rank);
+        d_c_shape.copy_from_host(c_shape, c_rank);
 
         int block_size = 256;
         int grid_size = (c_elements + block_size - 1) / block_size;
 
         broadcast_binary_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, c, d_a_shape, d_b_shape, d_c_shape,
+            a, b, c, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
             a_rank, b_rank, c_rank, c_elements, SubOp());
-
-        cudaFree(d_a_shape);
-        cudaFree(d_b_shape);
-        cudaFree(d_c_shape);
     }
 
     void launch_broadcast_mul(const float* a, const float* b, float* c,
                               const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                               size_t a_rank, size_t b_rank, size_t c_rank,
                               size_t c_elements, cudaStream_t stream) {
-        size_t *d_a_shape, *d_b_shape, *d_c_shape;
-        cudaMalloc(&d_a_shape, a_rank * sizeof(size_t));
-        cudaMalloc(&d_b_shape, b_rank * sizeof(size_t));
-        cudaMalloc(&d_c_shape, c_rank * sizeof(size_t));
+        CudaDeviceMemory<size_t> d_a_shape(a_rank);
+        CudaDeviceMemory<size_t> d_b_shape(b_rank);
+        CudaDeviceMemory<size_t> d_c_shape(c_rank);
 
-        cudaMemcpy(d_a_shape, a_shape, a_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b_shape, b_shape, b_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_c_shape, c_shape, c_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
+            return;
+        }
+
+        d_a_shape.copy_from_host(a_shape, a_rank);
+        d_b_shape.copy_from_host(b_shape, b_rank);
+        d_c_shape.copy_from_host(c_shape, c_rank);
 
         int block_size = 256;
         int grid_size = (c_elements + block_size - 1) / block_size;
 
         broadcast_binary_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, c, d_a_shape, d_b_shape, d_c_shape,
+            a, b, c, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
             a_rank, b_rank, c_rank, c_elements, MulOp());
-
-        cudaFree(d_a_shape);
-        cudaFree(d_b_shape);
-        cudaFree(d_c_shape);
     }
 
     void launch_broadcast_div(const float* a, const float* b, float* c,
                               const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                               size_t a_rank, size_t b_rank, size_t c_rank,
                               size_t c_elements, cudaStream_t stream) {
-        size_t *d_a_shape, *d_b_shape, *d_c_shape;
-        cudaMalloc(&d_a_shape, a_rank * sizeof(size_t));
-        cudaMalloc(&d_b_shape, b_rank * sizeof(size_t));
-        cudaMalloc(&d_c_shape, c_rank * sizeof(size_t));
+        CudaDeviceMemory<size_t> d_a_shape(a_rank);
+        CudaDeviceMemory<size_t> d_b_shape(b_rank);
+        CudaDeviceMemory<size_t> d_c_shape(c_rank);
 
-        cudaMemcpy(d_a_shape, a_shape, a_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b_shape, b_shape, b_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_c_shape, c_shape, c_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
+            return;
+        }
+
+        d_a_shape.copy_from_host(a_shape, a_rank);
+        d_b_shape.copy_from_host(b_shape, b_rank);
+        d_c_shape.copy_from_host(c_shape, c_rank);
 
         int block_size = 256;
         int grid_size = (c_elements + block_size - 1) / block_size;
 
         broadcast_binary_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, c, d_a_shape, d_b_shape, d_c_shape,
+            a, b, c, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
             a_rank, b_rank, c_rank, c_elements, DivOp());
-
-        cudaFree(d_a_shape);
-        cudaFree(d_b_shape);
-        cudaFree(d_c_shape);
     }
 
 } // namespace gs::tensor_ops

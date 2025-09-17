@@ -26,6 +26,10 @@ namespace gs::tensor_ops {
     void launch_element_mul_inplace(float* a, const float* b, size_t n, cudaStream_t stream);
     void launch_element_div_inplace(float* a, const float* b, size_t n, cudaStream_t stream);
 
+    // Type conversion operations
+    void launch_bool_to_float(const unsigned char* src, float* dst, size_t n, cudaStream_t stream);
+    void launch_float_to_bool(const float* src, unsigned char* dst, size_t n, cudaStream_t stream);
+
     // Broadcasting operations
     void launch_broadcast(const float* src, float* dst,
                           const size_t* src_shape, const size_t* dst_shape,
@@ -198,5 +202,11 @@ namespace gs::tensor_ops {
     void launch_index_copy(float* data, const int* indices, const float* src,
                            const size_t* shape, size_t rank, int dim,
                            size_t index_size, cudaStream_t stream);
+
+    // ============= Boolean Broadcasting Operations =============
+    void launch_broadcast_bool(const unsigned char* src, unsigned char* dst,
+                               const size_t* src_shape, const size_t* dst_shape,
+                               size_t src_rank, size_t dst_rank,
+                               size_t dst_elements, cudaStream_t stream);
 
 } // namespace gs::tensor_ops

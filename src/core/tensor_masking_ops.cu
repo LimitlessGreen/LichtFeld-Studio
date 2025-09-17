@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor_ops.hpp"
+#include "core/cuda_memory_guard.hpp"
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
@@ -19,7 +20,7 @@ namespace gs::tensor_ops {
         if (idx >= c_elements)
             return;
 
-        // Calculate indices similar to broadcasting ops
+        // Calculate indices for result tensor
         size_t indices[10];
         size_t temp = idx;
         for (int i = c_rank - 1; i >= 0; --i) {
@@ -27,26 +28,32 @@ namespace gs::tensor_ops {
             temp /= c_shape[i];
         }
 
-        // Map to a index
+        // Map to a index - FIXED: properly handle rank differences and broadcasting
         size_t a_idx = 0;
-        int a_rank_diff = c_rank - a_rank;
-        size_t a_stride = 1;
-        for (int i = a_rank - 1; i >= 0; --i) {
-            int c_dim_idx = i + a_rank_diff;
-            size_t dim_idx = (a_shape[i] == 1) ? 0 : indices[c_dim_idx];
-            a_idx += dim_idx * a_stride;
-            a_stride *= a_shape[i];
+        if (a_rank > 0) {
+            int rank_diff = c_rank - a_rank;
+            size_t a_stride = 1;
+            for (int i = a_rank - 1; i >= 0; --i) {
+                int c_dim_idx = i + rank_diff;
+                // Only use the index if this dimension exists and is not broadcast (size 1)
+                size_t dim_idx = (a_shape[i] == 1) ? 0 : indices[c_dim_idx];
+                a_idx += dim_idx * a_stride;
+                a_stride *= a_shape[i];
+            }
         }
 
-        // Map to b index
+        // Map to b index - FIXED: properly handle rank differences and broadcasting
         size_t b_idx = 0;
-        int b_rank_diff = c_rank - b_rank;
-        size_t b_stride = 1;
-        for (int i = b_rank - 1; i >= 0; --i) {
-            int c_dim_idx = i + b_rank_diff;
-            size_t dim_idx = (b_shape[i] == 1) ? 0 : indices[c_dim_idx];
-            b_idx += dim_idx * b_stride;
-            b_stride *= b_shape[i];
+        if (b_rank > 0) {
+            int rank_diff = c_rank - b_rank;
+            size_t b_stride = 1;
+            for (int i = b_rank - 1; i >= 0; --i) {
+                int c_dim_idx = i + rank_diff;
+                // Only use the index if this dimension exists and is not broadcast (size 1)
+                size_t dim_idx = (b_shape[i] == 1) ? 0 : indices[c_dim_idx];
+                b_idx += dim_idx * b_stride;
+                b_stride *= b_shape[i];
+            }
         }
 
         c[idx] = op(a[a_idx], b[b_idx]) ? 1 : 0;
@@ -73,80 +80,77 @@ namespace gs::tensor_ops {
         __device__ bool operator()(float a, float b) const { return a > b; }
     };
 
-    // Launch functions for comparisons
+    // Launch functions for comparisons - UPDATED with RAII
     void launch_compare_eq(const float* a, const float* b, unsigned char* result,
                            const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                            size_t a_rank, size_t b_rank, size_t c_rank,
                            size_t c_elements, cudaStream_t stream) {
-        size_t *d_a_shape, *d_b_shape, *d_c_shape;
-        cudaMalloc(&d_a_shape, a_rank * sizeof(size_t));
-        cudaMalloc(&d_b_shape, b_rank * sizeof(size_t));
-        cudaMalloc(&d_c_shape, c_rank * sizeof(size_t));
+        CudaDeviceMemory<size_t> d_a_shape(a_rank);
+        CudaDeviceMemory<size_t> d_b_shape(b_rank);
+        CudaDeviceMemory<size_t> d_c_shape(c_rank);
 
-        cudaMemcpy(d_a_shape, a_shape, a_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b_shape, b_shape, b_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_c_shape, c_shape, c_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
+            return; // Memory allocation failed
+        }
+
+        d_a_shape.copy_from_host(a_shape, a_rank);
+        d_b_shape.copy_from_host(b_shape, b_rank);
+        d_c_shape.copy_from_host(c_shape, c_rank);
 
         int block_size = 256;
         int grid_size = (c_elements + block_size - 1) / block_size;
 
         compare_broadcast_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, result, d_a_shape, d_b_shape, d_c_shape,
+            a, b, result, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
             a_rank, b_rank, c_rank, c_elements, EqOp());
-
-        cudaFree(d_a_shape);
-        cudaFree(d_b_shape);
-        cudaFree(d_c_shape);
     }
 
     void launch_compare_lt(const float* a, const float* b, unsigned char* result,
                            const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                            size_t a_rank, size_t b_rank, size_t c_rank,
                            size_t c_elements, cudaStream_t stream) {
-        size_t *d_a_shape, *d_b_shape, *d_c_shape;
-        cudaMalloc(&d_a_shape, a_rank * sizeof(size_t));
-        cudaMalloc(&d_b_shape, b_rank * sizeof(size_t));
-        cudaMalloc(&d_c_shape, c_rank * sizeof(size_t));
+        CudaDeviceMemory<size_t> d_a_shape(a_rank);
+        CudaDeviceMemory<size_t> d_b_shape(b_rank);
+        CudaDeviceMemory<size_t> d_c_shape(c_rank);
 
-        cudaMemcpy(d_a_shape, a_shape, a_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b_shape, b_shape, b_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_c_shape, c_shape, c_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
+            return;
+        }
+
+        d_a_shape.copy_from_host(a_shape, a_rank);
+        d_b_shape.copy_from_host(b_shape, b_rank);
+        d_c_shape.copy_from_host(c_shape, c_rank);
 
         int block_size = 256;
         int grid_size = (c_elements + block_size - 1) / block_size;
 
         compare_broadcast_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, result, d_a_shape, d_b_shape, d_c_shape,
+            a, b, result, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
             a_rank, b_rank, c_rank, c_elements, LtOp());
-
-        cudaFree(d_a_shape);
-        cudaFree(d_b_shape);
-        cudaFree(d_c_shape);
     }
 
     void launch_compare_gt(const float* a, const float* b, unsigned char* result,
                            const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                            size_t a_rank, size_t b_rank, size_t c_rank,
                            size_t c_elements, cudaStream_t stream) {
-        size_t *d_a_shape, *d_b_shape, *d_c_shape;
-        cudaMalloc(&d_a_shape, a_rank * sizeof(size_t));
-        cudaMalloc(&d_b_shape, b_rank * sizeof(size_t));
-        cudaMalloc(&d_c_shape, c_rank * sizeof(size_t));
+        CudaDeviceMemory<size_t> d_a_shape(a_rank);
+        CudaDeviceMemory<size_t> d_b_shape(b_rank);
+        CudaDeviceMemory<size_t> d_c_shape(c_rank);
 
-        cudaMemcpy(d_a_shape, a_shape, a_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b_shape, b_shape, b_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_c_shape, c_shape, c_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
+            return;
+        }
+
+        d_a_shape.copy_from_host(a_shape, a_rank);
+        d_b_shape.copy_from_host(b_shape, b_rank);
+        d_c_shape.copy_from_host(c_shape, c_rank);
 
         int block_size = 256;
         int grid_size = (c_elements + block_size - 1) / block_size;
 
         compare_broadcast_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, result, d_a_shape, d_b_shape, d_c_shape,
+            a, b, result, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
             a_rank, b_rank, c_rank, c_elements, GtOp());
-
-        cudaFree(d_a_shape);
-        cudaFree(d_b_shape);
-        cudaFree(d_c_shape);
     }
 
     void launch_compare_scalar_eq(const float* a, float value, unsigned char* result,
@@ -245,75 +249,72 @@ namespace gs::tensor_ops {
                             const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                             size_t a_rank, size_t b_rank, size_t c_rank,
                             size_t c_elements, cudaStream_t stream) {
-        size_t *d_a_shape, *d_b_shape, *d_c_shape;
-        cudaMalloc(&d_a_shape, a_rank * sizeof(size_t));
-        cudaMalloc(&d_b_shape, b_rank * sizeof(size_t));
-        cudaMalloc(&d_c_shape, c_rank * sizeof(size_t));
+        CudaDeviceMemory<size_t> d_a_shape(a_rank);
+        CudaDeviceMemory<size_t> d_b_shape(b_rank);
+        CudaDeviceMemory<size_t> d_c_shape(c_rank);
 
-        cudaMemcpy(d_a_shape, a_shape, a_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b_shape, b_shape, b_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_c_shape, c_shape, c_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
+            return;
+        }
+
+        d_a_shape.copy_from_host(a_shape, a_rank);
+        d_b_shape.copy_from_host(b_shape, b_rank);
+        d_c_shape.copy_from_host(c_shape, c_rank);
 
         int block_size = 256;
         int grid_size = (c_elements + block_size - 1) / block_size;
 
         logical_binary_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, result, d_a_shape, d_b_shape, d_c_shape,
+            a, b, result, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
             a_rank, b_rank, c_rank, c_elements, AndOp());
-
-        cudaFree(d_a_shape);
-        cudaFree(d_b_shape);
-        cudaFree(d_c_shape);
     }
 
     void launch_logical_or(const unsigned char* a, const unsigned char* b, unsigned char* result,
                            const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                            size_t a_rank, size_t b_rank, size_t c_rank,
                            size_t c_elements, cudaStream_t stream) {
-        size_t *d_a_shape, *d_b_shape, *d_c_shape;
-        cudaMalloc(&d_a_shape, a_rank * sizeof(size_t));
-        cudaMalloc(&d_b_shape, b_rank * sizeof(size_t));
-        cudaMalloc(&d_c_shape, c_rank * sizeof(size_t));
+        CudaDeviceMemory<size_t> d_a_shape(a_rank);
+        CudaDeviceMemory<size_t> d_b_shape(b_rank);
+        CudaDeviceMemory<size_t> d_c_shape(c_rank);
 
-        cudaMemcpy(d_a_shape, a_shape, a_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b_shape, b_shape, b_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_c_shape, c_shape, c_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
+            return;
+        }
+
+        d_a_shape.copy_from_host(a_shape, a_rank);
+        d_b_shape.copy_from_host(b_shape, b_rank);
+        d_c_shape.copy_from_host(c_shape, c_rank);
 
         int block_size = 256;
         int grid_size = (c_elements + block_size - 1) / block_size;
 
         logical_binary_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, result, d_a_shape, d_b_shape, d_c_shape,
+            a, b, result, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
             a_rank, b_rank, c_rank, c_elements, OrOp());
-
-        cudaFree(d_a_shape);
-        cudaFree(d_b_shape);
-        cudaFree(d_c_shape);
     }
 
     void launch_logical_xor(const unsigned char* a, const unsigned char* b, unsigned char* result,
                             const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                             size_t a_rank, size_t b_rank, size_t c_rank,
                             size_t c_elements, cudaStream_t stream) {
-        size_t *d_a_shape, *d_b_shape, *d_c_shape;
-        cudaMalloc(&d_a_shape, a_rank * sizeof(size_t));
-        cudaMalloc(&d_b_shape, b_rank * sizeof(size_t));
-        cudaMalloc(&d_c_shape, c_rank * sizeof(size_t));
+        CudaDeviceMemory<size_t> d_a_shape(a_rank);
+        CudaDeviceMemory<size_t> d_b_shape(b_rank);
+        CudaDeviceMemory<size_t> d_c_shape(c_rank);
 
-        cudaMemcpy(d_a_shape, a_shape, a_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b_shape, b_shape, b_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_c_shape, c_shape, c_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
+            return;
+        }
+
+        d_a_shape.copy_from_host(a_shape, a_rank);
+        d_b_shape.copy_from_host(b_shape, b_rank);
+        d_c_shape.copy_from_host(c_shape, c_rank);
 
         int block_size = 256;
         int grid_size = (c_elements + block_size - 1) / block_size;
 
         logical_binary_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, result, d_a_shape, d_b_shape, d_c_shape,
+            a, b, result, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
             a_rank, b_rank, c_rank, c_elements, XorOp());
-
-        cudaFree(d_a_shape);
-        cudaFree(d_b_shape);
-        cudaFree(d_c_shape);
     }
 
     void launch_logical_not(const unsigned char* a, unsigned char* result,
@@ -334,29 +335,40 @@ namespace gs::tensor_ops {
 
     void launch_masked_select(const float* input, const unsigned char* mask,
                               float* output, size_t n, size_t output_size, cudaStream_t stream) {
-        // First, do exclusive scan to get output positions
-        int* d_scan_result;
-        cudaMalloc(&d_scan_result, n * sizeof(int));
+        // Early exit for empty case
+        if (n == 0 || output_size == 0) {
+            return;
+        }
+
+        // Use RAII for scan result
+        CudaDeviceMemory<int> d_scan_result(n);
+        if (!d_scan_result.valid()) {
+            return;
+        }
 
         // Use CUB for efficient parallel prefix sum
         size_t temp_storage_bytes = 0;
         cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_bytes,
-                                      mask, d_scan_result, n, stream);
+                                      mask, d_scan_result.get(), n, stream);
 
-        void* d_temp_storage;
-        cudaMalloc(&d_temp_storage, temp_storage_bytes);
+        CudaDeviceMemory<uint8_t> d_temp_storage(temp_storage_bytes);
+        if (!d_temp_storage.valid()) {
+            return;
+        }
 
-        cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes,
-                                      mask, d_scan_result, n, stream);
+        cub::DeviceScan::ExclusiveSum(d_temp_storage.get(), temp_storage_bytes,
+                                      mask, d_scan_result.get(), n, stream);
+
+        // Synchronize to ensure scan is complete before using results
+        if (stream != 0) {
+            cudaStreamSynchronize(stream);
+        }
 
         // Now gather the selected elements
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
         masked_select_kernel<<<grid_size, block_size, 0, stream>>>(
-            input, mask, output, d_scan_result, n);
-
-        cudaFree(d_scan_result);
-        cudaFree(d_temp_storage);
+            input, mask, output, d_scan_result.get(), n);
     }
 
     __global__ void masked_fill_kernel(float* data, const unsigned char* mask,
@@ -384,27 +396,38 @@ namespace gs::tensor_ops {
 
     void launch_masked_scatter(float* data, const unsigned char* mask,
                                const float* src, size_t n, size_t src_size, cudaStream_t stream) {
-        // First, do exclusive scan to get source positions
-        int* d_scan_result;
-        cudaMalloc(&d_scan_result, n * sizeof(int));
+        // Early exit for empty case
+        if (n == 0 || src_size == 0) {
+            return;
+        }
+
+        // Use RAII for scan result
+        CudaDeviceMemory<int> d_scan_result(n);
+        if (!d_scan_result.valid()) {
+            return;
+        }
 
         size_t temp_storage_bytes = 0;
         cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_bytes,
-                                      mask, d_scan_result, n, stream);
+                                      mask, d_scan_result.get(), n, stream);
 
-        void* d_temp_storage;
-        cudaMalloc(&d_temp_storage, temp_storage_bytes);
+        CudaDeviceMemory<uint8_t> d_temp_storage(temp_storage_bytes);
+        if (!d_temp_storage.valid()) {
+            return;
+        }
 
-        cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes,
-                                      mask, d_scan_result, n, stream);
+        cub::DeviceScan::ExclusiveSum(d_temp_storage.get(), temp_storage_bytes,
+                                      mask, d_scan_result.get(), n, stream);
+
+        // Synchronize to ensure scan is complete
+        if (stream != 0) {
+            cudaStreamSynchronize(stream);
+        }
 
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
         masked_scatter_kernel<<<grid_size, block_size, 0, stream>>>(
-            data, mask, src, d_scan_result, n);
-
-        cudaFree(d_scan_result);
-        cudaFree(d_temp_storage);
+            data, mask, src, d_scan_result.get(), n);
     }
 
     // Fixed where kernel with proper broadcasting support
@@ -470,31 +493,30 @@ namespace gs::tensor_ops {
                       size_t cond_rank, size_t x_rank, size_t y_rank, size_t result_rank,
                       size_t result_elements, cudaStream_t stream) {
 
-        // Allocate device memory for shapes
-        size_t *d_cond_shape, *d_x_shape, *d_y_shape, *d_result_shape;
-        cudaMalloc(&d_cond_shape, cond_rank * sizeof(size_t));
-        cudaMalloc(&d_x_shape, x_rank * sizeof(size_t));
-        cudaMalloc(&d_y_shape, y_rank * sizeof(size_t));
-        cudaMalloc(&d_result_shape, result_rank * sizeof(size_t));
+        // Allocate device memory for shapes using RAII
+        CudaDeviceMemory<size_t> d_cond_shape(cond_rank);
+        CudaDeviceMemory<size_t> d_x_shape(x_rank);
+        CudaDeviceMemory<size_t> d_y_shape(y_rank);
+        CudaDeviceMemory<size_t> d_result_shape(result_rank);
 
-        cudaMemcpy(d_cond_shape, cond_shape, cond_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_x_shape, x_shape, x_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_y_shape, y_shape, y_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_result_shape, result_shape, result_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_cond_shape.valid() || !d_x_shape.valid() ||
+            !d_y_shape.valid() || !d_result_shape.valid()) {
+            return;
+        }
+
+        d_cond_shape.copy_from_host(cond_shape, cond_rank);
+        d_x_shape.copy_from_host(x_shape, x_rank);
+        d_y_shape.copy_from_host(y_shape, y_rank);
+        d_result_shape.copy_from_host(result_shape, result_rank);
 
         int block_size = 256;
         int grid_size = (result_elements + block_size - 1) / block_size;
 
         where_broadcast_kernel<<<grid_size, block_size, 0, stream>>>(
             condition, x, y, result,
-            d_cond_shape, d_x_shape, d_y_shape, d_result_shape,
+            d_cond_shape.get(), d_x_shape.get(), d_y_shape.get(), d_result_shape.get(),
             cond_rank, x_rank, y_rank, result_rank,
             result_elements);
-
-        cudaFree(d_cond_shape);
-        cudaFree(d_x_shape);
-        cudaFree(d_y_shape);
-        cudaFree(d_result_shape);
     }
 
     __global__ void count_nonzero_bool_kernel(const unsigned char* data, unsigned long long* count, size_t n) {
@@ -526,28 +548,34 @@ namespace gs::tensor_ops {
 
     void launch_count_nonzero_bool(const unsigned char* data, size_t* count,
                                    size_t n, cudaStream_t stream) {
-        // Use unsigned long long for atomicAdd support
-        unsigned long long* d_count;
-        cudaMalloc(&d_count, sizeof(unsigned long long));
-        cudaMemsetAsync(d_count, 0, sizeof(unsigned long long), stream);
+        if (n == 0) {
+            *count = 0;
+            return;
+        }
+
+        // Use RAII for count
+        CudaDeviceMemory<unsigned long long> d_count(1);
+        if (!d_count.valid()) {
+            *count = 0;
+            return;
+        }
+
+        cudaMemsetAsync(d_count.get(), 0, sizeof(unsigned long long), stream);
 
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
 
         count_nonzero_bool_kernel<<<grid_size, block_size,
                                     block_size * sizeof(unsigned long long), stream>>>(
-            data, d_count, n);
+            data, d_count.get(), n);
 
-        if (stream == 0) {
-            cudaDeviceSynchronize();
-        }
+        // Synchronize before copying result
+        cudaStreamSynchronize(stream);
 
         // Copy result back to size_t
-        unsigned long long h_count;
-        cudaMemcpy(&h_count, d_count, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+        unsigned long long h_count = 0;
+        d_count.copy_to_host(&h_count, 1);
         *count = static_cast<size_t>(h_count);
-
-        cudaFree(d_count);
     }
 
     __global__ void count_nonzero_float_kernel(const float* data, unsigned long long* count, size_t n) {
@@ -579,28 +607,34 @@ namespace gs::tensor_ops {
 
     void launch_count_nonzero_float(const float* data, size_t* count,
                                     size_t n, cudaStream_t stream) {
-        // Use unsigned long long for atomicAdd support
-        unsigned long long* d_count;
-        cudaMalloc(&d_count, sizeof(unsigned long long));
-        cudaMemsetAsync(d_count, 0, sizeof(unsigned long long), stream);
+        if (n == 0) {
+            *count = 0;
+            return;
+        }
+
+        // Use RAII for count
+        CudaDeviceMemory<unsigned long long> d_count(1);
+        if (!d_count.valid()) {
+            *count = 0;
+            return;
+        }
+
+        cudaMemsetAsync(d_count.get(), 0, sizeof(unsigned long long), stream);
 
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
 
         count_nonzero_float_kernel<<<grid_size, block_size,
                                      block_size * sizeof(unsigned long long), stream>>>(
-            data, d_count, n);
+            data, d_count.get(), n);
 
-        if (stream == 0) {
-            cudaDeviceSynchronize();
-        }
+        // Synchronize before copying result
+        cudaStreamSynchronize(stream);
 
         // Copy result back to size_t
-        unsigned long long h_count;
-        cudaMemcpy(&h_count, d_count, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+        unsigned long long h_count = 0;
+        d_count.copy_to_host(&h_count, 1);
         *count = static_cast<size_t>(h_count);
-
-        cudaFree(d_count);
     }
 
     // ============= Indexing Operations Kernels =============
@@ -1002,25 +1036,83 @@ namespace gs::tensor_ops {
                            const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                            size_t a_rank, size_t b_rank, size_t c_rank,
                            size_t c_elements, cudaStream_t stream) {
-        size_t *d_a_shape, *d_b_shape, *d_c_shape;
-        cudaMalloc(&d_a_shape, a_rank * sizeof(size_t));
-        cudaMalloc(&d_b_shape, b_rank * sizeof(size_t));
-        cudaMalloc(&d_c_shape, c_rank * sizeof(size_t));
+        CudaDeviceMemory<size_t> d_a_shape(a_rank);
+        CudaDeviceMemory<size_t> d_b_shape(b_rank);
+        CudaDeviceMemory<size_t> d_c_shape(c_rank);
 
-        cudaMemcpy(d_a_shape, a_shape, a_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b_shape, b_shape, b_rank * sizeof(size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_c_shape, c_shape, c_rank * sizeof(size_t), cudaMemcpyHostToDevice);
+        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
+            return;
+        }
+
+        d_a_shape.copy_from_host(a_shape, a_rank);
+        d_b_shape.copy_from_host(b_shape, b_rank);
+        d_c_shape.copy_from_host(c_shape, c_rank);
 
         int block_size = 256;
         int grid_size = (c_elements + block_size - 1) / block_size;
 
         pow_broadcast_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, c, d_a_shape, d_b_shape, d_c_shape,
+            a, b, c, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
             a_rank, b_rank, c_rank, c_elements, PowOp());
+    }
 
-        cudaFree(d_a_shape);
-        cudaFree(d_b_shape);
-        cudaFree(d_c_shape);
+    // ============= Boolean Broadcasting Operations =============
+    __global__ void broadcast_bool_kernel(const unsigned char* src, unsigned char* dst,
+                                          const size_t* src_shape, const size_t* dst_shape,
+                                          size_t src_rank, size_t dst_rank,
+                                          size_t dst_elements) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (idx >= dst_elements)
+            return;
+
+        // Convert linear index to multi-dimensional indices in dst
+        size_t dst_indices[10]; // Max 10 dimensions
+        size_t temp = idx;
+        for (int i = dst_rank - 1; i >= 0; --i) {
+            dst_indices[i] = temp % dst_shape[i];
+            temp /= dst_shape[i];
+        }
+
+        // Map dst indices to src indices (considering broadcasting)
+        size_t src_idx = 0;
+        int rank_diff = dst_rank - src_rank;
+        size_t src_stride = 1;
+
+        for (int i = src_rank - 1; i >= 0; --i) {
+            int dst_dim_idx = i + rank_diff;
+
+            // If this dimension is 1 in source, always use index 0
+            // Otherwise use the corresponding destination index
+            size_t dim_idx = (src_shape[i] == 1) ? 0 : dst_indices[dst_dim_idx];
+
+            src_idx += dim_idx * src_stride;
+            src_stride *= src_shape[i];
+        }
+
+        dst[idx] = src[src_idx];
+    }
+
+    void launch_broadcast_bool(const unsigned char* src, unsigned char* dst,
+                               const size_t* src_shape, const size_t* dst_shape,
+                               size_t src_rank, size_t dst_rank,
+                               size_t dst_elements, cudaStream_t stream) {
+        // Allocate device memory for shapes using RAII
+        CudaDeviceMemory<size_t> d_src_shape(src_rank);
+        CudaDeviceMemory<size_t> d_dst_shape(dst_rank);
+
+        if (!d_src_shape.valid() || !d_dst_shape.valid()) {
+            return;
+        }
+
+        d_src_shape.copy_from_host(src_shape, src_rank);
+        d_dst_shape.copy_from_host(dst_shape, dst_rank);
+
+        int block_size = 256;
+        int grid_size = (dst_elements + block_size - 1) / block_size;
+
+        broadcast_bool_kernel<<<grid_size, block_size, 0, stream>>>(
+            src, dst, d_src_shape.get(), d_dst_shape.get(), src_rank, dst_rank, dst_elements);
     }
 
 } // namespace gs::tensor_ops

@@ -227,6 +227,9 @@ namespace gs {
             return Tensor(data, shape, device, dtype);
         }
 
+        // Boolean tensor element access
+        void set_bool(std::initializer_list<size_t> indices, bool value);
+        bool get_bool(std::initializer_list<size_t> indices) const;
         // Create from vector
         static Tensor from_vector(const std::vector<float>& data, TensorShape shape,
                                   Device device = Device::CUDA);

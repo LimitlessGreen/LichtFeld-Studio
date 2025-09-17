@@ -3,6 +3,7 @@
 
 #include "core/tensor.hpp"
 #include "core/tensor_broadcast.hpp"
+#include "core/tensor_ops.hpp"
 #include <cstring>
 #include <cuda_runtime.h>
 #include <fstream>
@@ -253,8 +254,56 @@ namespace gs {
             return clone();
         }
 
-        // For now, only support float32
-        LOG_ERROR("Type conversion not implemented");
+        // Support Bool -> Float32 conversion
+        if (dtype_ == DataType::Bool && dtype == DataType::Float32) {
+            auto result = empty(shape_, device_, DataType::Float32);
+
+            if (numel() == 0) {
+                return result;
+            }
+
+            if (device_ == Device::CUDA) {
+                // Launch a simple conversion kernel
+                tensor_ops::launch_bool_to_float(ptr<unsigned char>(), result.ptr<float>(),
+                                                numel(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                const unsigned char* src = ptr<unsigned char>();
+                float* dst = result.ptr<float>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = src[i] ? 1.0f : 0.0f;
+                }
+            }
+
+            return result;
+        }
+
+        // Support Float32 -> Bool conversion
+        if (dtype_ == DataType::Float32 && dtype == DataType::Bool) {
+            auto result = empty(shape_, device_, DataType::Bool);
+
+            if (numel() == 0) {
+                return result;
+            }
+
+            if (device_ == Device::CUDA) {
+                // Launch a simple conversion kernel
+                tensor_ops::launch_float_to_bool(ptr<float>(), result.ptr<unsigned char>(),
+                                                numel(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                const float* src = ptr<float>();
+                unsigned char* dst = result.ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = (src[i] != 0.0f) ? 1 : 0;
+                }
+            }
+
+            return result;
+        }
+
+        LOG_ERROR("Type conversion from {} to {} not implemented",
+                  dtype_name(dtype_), dtype_name(dtype));
         return Tensor();
     }
 

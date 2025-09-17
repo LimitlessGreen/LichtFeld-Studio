@@ -84,28 +84,57 @@ namespace gs {
 
         // Perform the broadcast expansion
         if (tensor.device() == Device::CUDA) {
-            // Launch CUDA kernel for broadcast
-            tensor_ops::launch_broadcast(
-                tensor.ptr<float>(),
-                result.ptr<float>(),
-                tensor.shape().dims().data(),
-                target_shape.dims().data(),
-                tensor.shape().rank(),
-                target_shape.rank(),
-                target_shape.elements(),
-                0 // stream
-            );
+            // Special handling for boolean tensors
+            if (tensor.dtype() == DataType::Bool) {
+                // Use the boolean broadcast kernel
+                tensor_ops::launch_broadcast_bool(
+                    tensor.ptr<unsigned char>(),
+                    result.ptr<unsigned char>(),
+                    tensor.shape().dims().data(),
+                    target_shape.dims().data(),
+                    tensor.shape().rank(),
+                    target_shape.rank(),
+                    target_shape.elements(),
+                    0 // stream
+                );
+            } else {
+                // Launch CUDA kernel for float broadcast
+                tensor_ops::launch_broadcast(
+                    tensor.ptr<float>(),
+                    result.ptr<float>(),
+                    tensor.shape().dims().data(),
+                    target_shape.dims().data(),
+                    tensor.shape().rank(),
+                    target_shape.rank(),
+                    target_shape.elements(),
+                    0 // stream
+                );
+            }
             cudaDeviceSynchronize();
         } else {
             // CPU implementation
-            BroadcastIterator src_iter(tensor.shape(), target_shape);
-            const float* src_data = tensor.ptr<float>();
-            float* dst_data = result.ptr<float>();
+            if (tensor.dtype() == DataType::Bool) {
+                // Boolean CPU broadcast
+                BroadcastIterator src_iter(tensor.shape(), target_shape);
+                const unsigned char* src_data = tensor.ptr<unsigned char>();
+                unsigned char* dst_data = result.ptr<unsigned char>();
 
-            size_t dst_idx = 0;
-            while (!src_iter.done()) {
-                dst_data[dst_idx++] = src_data[src_iter.index()];
-                src_iter.next();
+                size_t dst_idx = 0;
+                while (!src_iter.done()) {
+                    dst_data[dst_idx++] = src_data[src_iter.index()];
+                    src_iter.next();
+                }
+            } else {
+                // Float CPU broadcast
+                BroadcastIterator src_iter(tensor.shape(), target_shape);
+                const float* src_data = tensor.ptr<float>();
+                float* dst_data = result.ptr<float>();
+
+                size_t dst_idx = 0;
+                while (!src_iter.done()) {
+                    dst_data[dst_idx++] = src_data[src_iter.index()];
+                    src_iter.next();
+                }
             }
         }
 

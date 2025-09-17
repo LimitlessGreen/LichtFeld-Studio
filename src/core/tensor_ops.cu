@@ -101,6 +101,22 @@ namespace gs::tensor_ops {
         }
     }
 
+    // ============= Type Conversion Kernels =============
+
+    __global__ void bool_to_float_kernel(const unsigned char* src, float* dst, size_t n) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            dst[idx] = src[idx] ? 1.0f : 0.0f;
+        }
+    }
+
+    __global__ void float_to_bool_kernel(const float* src, unsigned char* dst, size_t n) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            dst[idx] = (src[idx] != 0.0f) ? 1 : 0;
+        }
+    }
+
     // ============= Math Function Kernels =============
 
     __global__ void abs_kernel(float* data, size_t n) {
@@ -306,6 +322,19 @@ namespace gs::tensor_ops {
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
         element_div_inplace_kernel<<<grid_size, block_size, 0, stream>>>(a, b, n);
+    }
+
+    // Type conversion operations
+    void launch_bool_to_float(const unsigned char* src, float* dst, size_t n, cudaStream_t stream) {
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        bool_to_float_kernel<<<grid_size, block_size, 0, stream>>>(src, dst, n);
+    }
+
+    void launch_float_to_bool(const float* src, unsigned char* dst, size_t n, cudaStream_t stream) {
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        float_to_bool_kernel<<<grid_size, block_size, 0, stream>>>(src, dst, n);
     }
 
     // Math functions
