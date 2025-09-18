@@ -20,75 +20,192 @@
 
 namespace gs {
 
-    // ============= Helper for unary operations =============
-    template<typename Op>
-    static void dispatch_unary(Tensor& t, void(*cuda_fn)(float*, size_t, cudaStream_t), Op cpu_op) {
-        if (t.device() == Device::CUDA) {
-            cuda_fn(t.ptr<float>(), t.numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* data = t.ptr<float>();
-            for (size_t i = 0; i < t.numel(); ++i) {
-                cpu_op(data[i]);
-            }
+    // ============= Math Operations Implementation =============
+
+    Tensor Tensor::abs() const {
+        if (!is_valid()) {
+            return Tensor();
         }
-    }
 
-    // ============= Math Operations =============
-
-    #define DEFINE_UNARY_OP(name, cuda_fn, cpu_lambda) \
-    Tensor Tensor::name() const { \
-        if (!is_valid()) return Tensor(); \
-        auto result = empty(shape_, device_, dtype_); \
-        CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(), \
-                             device_ == Device::CUDA ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToHost)); \
-        dispatch_unary(result, tensor_ops::cuda_fn, cpu_lambda); \
-        return result; \
-    }
-
-    DEFINE_UNARY_OP(abs, launch_abs, [](float& x) { x = std::abs(x); })
-    DEFINE_UNARY_OP(sqrt, launch_sqrt, [](float& x) { x = std::sqrt(std::max(0.0f, x)); })
-    DEFINE_UNARY_OP(exp, launch_exp, [](float& x) { x = std::exp(x); })
-    DEFINE_UNARY_OP(log, launch_log, [](float& x) { x = std::log(std::max(1e-10f, x)); })
-    DEFINE_UNARY_OP(sigmoid, launch_sigmoid, [](float& x) { x = 1.0f / (1.0f + std::exp(-x)); })
-    DEFINE_UNARY_OP(relu, launch_relu, [](float& x) { x = std::max(0.0f, x); })
-
-    #undef DEFINE_UNARY_OP
-
-    Tensor Tensor::logit(float eps) const {
-        if (!is_valid()) return Tensor();
-        auto result = empty(shape_, device_, dtype_);
+        auto result = clone();
+        if (result.numel() == 0) {
+            return result;
+        }
 
         if (device_ == Device::CUDA) {
-            tensor_ops::launch_logit(ptr<float>(), result.ptr<float>(), numel(), eps, 0);
+            tensor_ops::launch_abs(result.ptr<float>(), result.numel(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            float* data = result.ptr<float>();
+            for (size_t i = 0; i < result.numel(); ++i) {
+                data[i] = std::abs(data[i]);
+            }
+        }
+
+        return result;
+    }
+
+    Tensor Tensor::sqrt() const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
+        auto result = clone();
+        if (result.numel() == 0) {
+            return result;
+        }
+
+        if (device_ == Device::CUDA) {
+            tensor_ops::launch_sqrt(result.ptr<float>(), result.numel(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            float* data = result.ptr<float>();
+            for (size_t i = 0; i < result.numel(); ++i) {
+                data[i] = std::sqrt(std::max(0.0f, data[i]));
+            }
+        }
+
+        return result;
+    }
+
+    Tensor Tensor::exp() const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
+        auto result = clone();
+        if (result.numel() == 0) {
+            return result;
+        }
+
+        if (device_ == Device::CUDA) {
+            tensor_ops::launch_exp(result.ptr<float>(), result.numel(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            float* data = result.ptr<float>();
+            for (size_t i = 0; i < result.numel(); ++i) {
+                data[i] = std::exp(data[i]);
+            }
+        }
+
+        return result;
+    }
+
+    Tensor Tensor::log() const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
+        auto result = clone();
+        if (result.numel() == 0) {
+            return result;
+        }
+
+        if (device_ == Device::CUDA) {
+            tensor_ops::launch_log(result.ptr<float>(), result.numel(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            float* data = result.ptr<float>();
+            for (size_t i = 0; i < result.numel(); ++i) {
+                data[i] = std::log(std::max(1e-10f, data[i]));
+            }
+        }
+
+        return result;
+    }
+
+    Tensor Tensor::sigmoid() const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
+        auto result = clone();
+        if (result.numel() == 0) {
+            return result;
+        }
+
+        if (device_ == Device::CUDA) {
+            tensor_ops::launch_sigmoid(result.ptr<float>(), result.numel(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            float* data = result.ptr<float>();
+            for (size_t i = 0; i < result.numel(); ++i) {
+                data[i] = 1.0f / (1.0f + std::exp(-data[i]));
+            }
+        }
+
+        return result;
+    }
+
+    Tensor Tensor::logit(float eps) const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
+        auto result = empty(shape_, device_, dtype_);
+        if (result.numel() == 0) {
+            return result;
+        }
+
+        if (device_ == Device::CUDA) {
+            tensor_ops::launch_logit(ptr<float>(), result.ptr<float>(), result.numel(), eps, 0);
             CHECK_CUDA(cudaDeviceSynchronize());
         } else {
             const float* src = ptr<float>();
             float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                float x = std::clamp(src[i], eps, 1.0f - eps);
+            for (size_t i = 0; i < result.numel(); ++i) {
+                float x = src[i];
+                x = std::max(std::min(x, 1.0f - eps), eps);
                 dst[i] = std::log(x / (1.0f - x));
             }
         }
+
+        return result;
+    }
+
+    Tensor Tensor::relu() const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
+        auto result = clone();
+        if (result.numel() == 0) {
+            return result;
+        }
+
+        if (device_ == Device::CUDA) {
+            tensor_ops::launch_relu(result.ptr<float>(), result.numel(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            float* data = result.ptr<float>();
+            for (size_t i = 0; i < result.numel(); ++i) {
+                data[i] = std::max(0.0f, data[i]);
+            }
+        }
+
         return result;
     }
 
     Tensor Tensor::clamp(float min_val, float max_val) const {
-        if (!is_valid()) return Tensor();
-        auto result = empty(shape_, device_, dtype_);
+        if (!is_valid()) {
+            return Tensor();
+        }
 
-        CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(),
-                             device_ == Device::CUDA ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToHost));
+        auto result = clone();
+        if (result.numel() == 0) {
+            return result;
+        }
 
         if (device_ == Device::CUDA) {
-            tensor_ops::launch_clamp(result.ptr<float>(), min_val, max_val, numel(), 0);
+            tensor_ops::launch_clamp(result.ptr<float>(), min_val, max_val, result.numel(), 0);
             CHECK_CUDA(cudaDeviceSynchronize());
         } else {
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = std::clamp(dst[i], min_val, max_val);
+            float* data = result.ptr<float>();
+            for (size_t i = 0; i < result.numel(); ++i) {
+                data[i] = std::min(std::max(data[i], min_val), max_val);
             }
         }
+
         return result;
     }
 
@@ -100,76 +217,117 @@ namespace gs {
         return clamp(std::numeric_limits<float>::lowest(), max_val);
     }
 
+    // ============= Deep Learning Operations =============
+
     Tensor Tensor::normalize(int dim, float eps) const {
-        if (!is_valid()) return Tensor();
-        float m = mean();
-        float s = std();
-        if (s < eps) s = eps;
-        return (*this - m) / s;
-    }
-
-    // ============= Comparison Operations =============
-    bool Tensor::has_nan() const {
-        if (!is_valid() || numel() == 0) return false;
-        auto values = to_vector();
-        return std::any_of(values.begin(), values.end(), [](float v) { return std::isnan(v); });
-    }
-
-    bool Tensor::has_inf() const {
-        if (!is_valid() || numel() == 0) return false;
-        auto values = to_vector();
-        return std::any_of(values.begin(), values.end(), [](float v) { return std::isinf(v); });
-    }
-
-    bool Tensor::all_close(const Tensor& other, float rtol, float atol) const {
-        if (!is_valid() || !other.is_valid() || shape_ != other.shape_) return false;
-
-        if (device_ != other.device_) {
-            auto cpu_this = this->to(Device::CPU);
-            auto cpu_other = other.to(Device::CPU);
-            return cpu_this.all_close(cpu_other, rtol, atol);
+        if (!is_valid()) {
+            return Tensor();
         }
 
-        auto values1 = to_vector();
-        auto values2 = other.to_vector();
+        // For simplicity, normalize over the entire tensor if dim == -1
+        if (dim == -1) {
+            float m = mean();
+            float s = std();
 
-        for (size_t i = 0; i < values1.size(); ++i) {
-            float diff = std::abs(values1[i] - values2[i]);
-            float tol = atol + rtol * std::abs(values2[i]);
-            if (diff > tol) return false;
+            // result = (x - mean) / (std + eps)
+            auto result = sub(m);
+            result = result.div(s + eps);
+
+            return result;
         }
-        return true;
+
+        // More complex per-dimension normalization would go here
+        LOG_WARN("Per-dimension normalization not fully implemented");
+        return clone();
     }
 
-    // ============= Assertions =============
+    // ============= Validation & Assertions =============
+
     Tensor& Tensor::assert_shape(TensorShape expected, const std::string& msg) {
         if (shape_ != expected) {
-            std::string error_msg = msg.empty() ? "Shape assertion failed" : msg;
-            throw TensorError(error_msg + ": expected " + expected.str() +
-                                  ", got " + shape_.str(), this);
+            std::string error_msg = msg.empty() ?
+                "Shape assertion failed: expected " + expected.str() + " but got " + shape_.str() :
+                msg;
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg, this);
         }
         return *this;
     }
 
     Tensor& Tensor::assert_device(Device expected) {
         if (device_ != expected) {
-            throw TensorError("Device assertion failed", this);
+            std::string error_msg = "Device assertion failed: expected " +
+                std::string(device_name(expected)) + " but got " +
+                std::string(device_name(device_));
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg, this);
         }
         return *this;
     }
 
     Tensor& Tensor::assert_dtype(DataType expected) {
         if (dtype_ != expected) {
-            throw TensorError("Dtype assertion failed", this);
+            std::string error_msg = "DataType assertion failed: expected " +
+                std::string(dtype_name(expected)) + " but got " +
+                std::string(dtype_name(dtype_));
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg, this);
         }
         return *this;
     }
 
     Tensor& Tensor::assert_finite() {
         if (has_nan() || has_inf()) {
-            throw TensorError("Tensor contains NaN or Inf values", this);
+            std::string error_msg = "Tensor contains NaN or Inf values";
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg, this);
         }
         return *this;
+    }
+
+    // ============= Comparison Utilities =============
+
+    bool Tensor::has_nan() const {
+        if (!is_valid() || numel() == 0) {
+            return false;
+        }
+
+        auto values = to_vector();
+        return std::any_of(values.begin(), values.end(),
+                          [](float x) { return std::isnan(x); });
+    }
+
+    bool Tensor::has_inf() const {
+        if (!is_valid() || numel() == 0) {
+            return false;
+        }
+
+        auto values = to_vector();
+        return std::any_of(values.begin(), values.end(),
+                          [](float x) { return std::isinf(x); });
+    }
+
+    bool Tensor::all_close(const Tensor& other, float rtol, float atol) const {
+        if (!is_valid() || !other.is_valid()) {
+            return false;
+        }
+
+        if (shape_ != other.shape_ || device_ != other.device_) {
+            return false;
+        }
+
+        auto a_values = to_vector();
+        auto b_values = other.to_vector();
+
+        for (size_t i = 0; i < a_values.size(); ++i) {
+            float diff = std::abs(a_values[i] - b_values[i]);
+            float tol = atol + rtol * std::abs(b_values[i]);
+            if (diff > tol) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
 #undef CHECK_CUDA

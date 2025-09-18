@@ -110,6 +110,153 @@ namespace gs::tensor_ops {
         }
     }
 
+    // ============= Unary Operation Kernels (Unified) =============
+
+    enum class UnaryOp : uint8_t {
+        Abs = 0,
+        Sqrt,
+        Exp,
+        Log,
+        Sigmoid,
+        Relu,
+        Neg,
+        Reciprocal
+    };
+
+    template<typename T>
+    __device__ inline T unary_op_impl(T x, UnaryOp op) {
+        switch (op) {
+            case UnaryOp::Abs: return fabsf(x);
+            case UnaryOp::Sqrt: return sqrtf(fmaxf(0.0f, x));
+            case UnaryOp::Exp: return expf(x);
+            case UnaryOp::Log: return logf(fmaxf(1e-10f, x));
+            case UnaryOp::Sigmoid: return 1.0f / (1.0f + expf(-x));
+            case UnaryOp::Relu: return fmaxf(0.0f, x);
+            case UnaryOp::Neg: return -x;
+            case UnaryOp::Reciprocal: return 1.0f / (x + 1e-8f);
+            default: return x;
+        }
+    }
+
+    __global__ void unified_unary_kernel(const float* input, float* output, size_t n, UnaryOp op) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            output[idx] = unary_op_impl(input[idx], op);
+        }
+    }
+
+    __global__ void unified_unary_inplace_kernel(float* data, size_t n, UnaryOp op) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            data[idx] = unary_op_impl(data[idx], op);
+        }
+    }
+
+    // ============= Type Conversion Kernels =============
+
+    __global__ void bool_to_float_kernel(const unsigned char* src, float* dst, size_t n) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            dst[idx] = src[idx] ? 1.0f : 0.0f;
+        }
+    }
+
+    __global__ void float_to_bool_kernel(const float* src, unsigned char* dst, size_t n) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            dst[idx] = (src[idx] != 0.0f) ? 1 : 0;
+        }
+    }
+
+    // ============= Special Operations =============
+
+    __global__ void logit_kernel(const float* input, float* output, size_t n, float eps) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            float x = input[idx];
+            x = fmaxf(fminf(x, 1.0f - eps), eps);
+            output[idx] = logf(x / (1.0f - x));
+        }
+    }
+
+    __global__ void clamp_kernel(float* data, float min_val, float max_val, size_t n) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            data[idx] = fminf(fmaxf(data[idx], min_val), max_val);
+        }
+    }
+
+    // ============= Reduction Kernels =============
+
+    __global__ void reduce_sum_kernel_simple(const float* data, float* partial_sums, size_t n) {
+        extern __shared__ float sdata[];
+
+        unsigned int tid = threadIdx.x;
+        unsigned int i = blockIdx.x * blockDim.x + tid;
+        unsigned int gridSize = blockDim.x * gridDim.x;
+
+        float mySum = 0.0f;
+        while (i < n) {
+            mySum += data[i];
+            i += gridSize;
+        }
+
+        sdata[tid] = mySum;
+        __syncthreads();
+
+        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                sdata[tid] += sdata[tid + s];
+            }
+            __syncthreads();
+        }
+
+        if (tid == 0)
+            partial_sums[blockIdx.x] = sdata[0];
+    }
+
+    __global__ void reduce_min_kernel_simple(const float* data, float* partial_mins, size_t n) {
+        extern __shared__ float sdata[];
+
+        unsigned int tid = threadIdx.x;
+        unsigned int i = blockIdx.x * blockDim.x + tid;
+
+        float myMin = (i < n) ? data[i] : FLT_MAX;
+        sdata[tid] = myMin;
+        __syncthreads();
+
+        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                sdata[tid] = fminf(sdata[tid], sdata[tid + s]);
+            }
+            __syncthreads();
+        }
+
+        if (tid == 0)
+            partial_mins[blockIdx.x] = sdata[0];
+    }
+
+    __global__ void reduce_max_kernel_simple(const float* data, float* partial_maxs, size_t n) {
+        extern __shared__ float sdata[];
+
+        unsigned int tid = threadIdx.x;
+        unsigned int i = blockIdx.x * blockDim.x + tid;
+
+        float myMax = (i < n) ? data[i] : -FLT_MAX;
+        sdata[tid] = myMax;
+        __syncthreads();
+
+        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+            }
+            __syncthreads();
+        }
+
+        if (tid == 0)
+            partial_maxs[blockIdx.x] = sdata[0];
+    }
+
     // ============= Launch Functions Implementation =============
 
     void launch_binary_op(const void* a, const void* b, void* c,
@@ -198,212 +345,83 @@ namespace gs::tensor_ops {
             n, op);
     }
 
-    // ============= Legacy kernels (kept for compatibility) =============
+    // ============= Unary Operation Launch Functions =============
 
-    __global__ void bool_to_float_kernel(const unsigned char* src, float* dst, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            dst[idx] = src[idx] ? 1.0f : 0.0f;
-        }
+    void launch_abs(float* data, size_t n, cudaStream_t stream) {
+        if (n == 0) return;
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        unified_unary_inplace_kernel<<<grid_size, block_size, 0, stream>>>(data, n, UnaryOp::Abs);
     }
 
-    __global__ void float_to_bool_kernel(const float* src, unsigned char* dst, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            dst[idx] = (src[idx] != 0.0f) ? 1 : 0;
-        }
+    void launch_sqrt(float* data, size_t n, cudaStream_t stream) {
+        if (n == 0) return;
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        unified_unary_inplace_kernel<<<grid_size, block_size, 0, stream>>>(data, n, UnaryOp::Sqrt);
     }
 
-    __global__ void abs_kernel(float* data, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            data[idx] = fabsf(data[idx]);
-        }
+    void launch_exp(float* data, size_t n, cudaStream_t stream) {
+        if (n == 0) return;
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        unified_unary_inplace_kernel<<<grid_size, block_size, 0, stream>>>(data, n, UnaryOp::Exp);
     }
 
-    __global__ void sqrt_kernel(float* data, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            data[idx] = sqrtf(fmaxf(0.0f, data[idx]));
-        }
+    void launch_log(float* data, size_t n, cudaStream_t stream) {
+        if (n == 0) return;
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        unified_unary_inplace_kernel<<<grid_size, block_size, 0, stream>>>(data, n, UnaryOp::Log);
     }
 
-    __global__ void exp_kernel(float* data, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            data[idx] = expf(data[idx]);
-        }
+    void launch_sigmoid(float* data, size_t n, cudaStream_t stream) {
+        if (n == 0) return;
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        unified_unary_inplace_kernel<<<grid_size, block_size, 0, stream>>>(data, n, UnaryOp::Sigmoid);
     }
 
-    __global__ void log_kernel(float* data, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            data[idx] = logf(fmaxf(1e-10f, data[idx]));
-        }
+    void launch_relu(float* data, size_t n, cudaStream_t stream) {
+        if (n == 0) return;
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        unified_unary_inplace_kernel<<<grid_size, block_size, 0, stream>>>(data, n, UnaryOp::Relu);
     }
 
-    __global__ void sigmoid_kernel(float* data, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            float val = data[idx];
-            data[idx] = 1.0f / (1.0f + expf(-val));
-        }
-    }
-
-    __global__ void logit_kernel(const float* input, float* output, size_t n, float eps) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            float x = input[idx];
-            x = fmaxf(fminf(x, 1.0f - eps), eps);
-            output[idx] = logf(x / (1.0f - x));
-        }
-    }
-
-    __global__ void relu_kernel(float* data, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            data[idx] = fmaxf(0.0f, data[idx]);
-        }
-    }
-
-    __global__ void clamp_kernel(float* data, float min_val, float max_val, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            data[idx] = fminf(fmaxf(data[idx], min_val), max_val);
-        }
-    }
-
-    // Simple reduction kernel that works correctly with grid-stride loop
-    __global__ void reduce_sum_kernel_simple(const float* data, float* partial_sums, size_t n) {
-        extern __shared__ float sdata[];
-
-        unsigned int tid = threadIdx.x;
-        unsigned int i = blockIdx.x * blockDim.x + tid;
-        unsigned int gridSize = blockDim.x * gridDim.x;
-
-        float mySum = 0.0f;
-        while (i < n) {
-            mySum += data[i];
-            i += gridSize;
-        }
-
-        sdata[tid] = mySum;
-        __syncthreads();
-
-        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-            if (tid < s) {
-                sdata[tid] += sdata[tid + s];
-            }
-            __syncthreads();
-        }
-
-        if (tid == 0)
-            partial_sums[blockIdx.x] = sdata[0];
-    }
-
-    __global__ void reduce_min_kernel_simple(const float* data, float* partial_mins, size_t n) {
-        extern __shared__ float sdata[];
-
-        unsigned int tid = threadIdx.x;
-        unsigned int i = blockIdx.x * blockDim.x + tid;
-
-        float myMin = (i < n) ? data[i] : FLT_MAX;
-        sdata[tid] = myMin;
-        __syncthreads();
-
-        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-            if (tid < s) {
-                sdata[tid] = fminf(sdata[tid], sdata[tid + s]);
-            }
-            __syncthreads();
-        }
-
-        if (tid == 0)
-            partial_mins[blockIdx.x] = sdata[0];
-    }
-
-    __global__ void reduce_max_kernel_simple(const float* data, float* partial_maxs, size_t n) {
-        extern __shared__ float sdata[];
-
-        unsigned int tid = threadIdx.x;
-        unsigned int i = blockIdx.x * blockDim.x + tid;
-
-        float myMax = (i < n) ? data[i] : -FLT_MAX;
-        sdata[tid] = myMax;
-        __syncthreads();
-
-        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-            if (tid < s) {
-                sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
-            }
-            __syncthreads();
-        }
-
-        if (tid == 0)
-            partial_maxs[blockIdx.x] = sdata[0];
-    }
-
-    // ============= Launch Functions for Legacy Operations =============
+    // ============= Type Conversion Launch Functions =============
 
     void launch_bool_to_float(const unsigned char* src, float* dst, size_t n, cudaStream_t stream) {
+        if (n == 0) return;
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
         bool_to_float_kernel<<<grid_size, block_size, 0, stream>>>(src, dst, n);
     }
 
     void launch_float_to_bool(const float* src, unsigned char* dst, size_t n, cudaStream_t stream) {
+        if (n == 0) return;
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
         float_to_bool_kernel<<<grid_size, block_size, 0, stream>>>(src, dst, n);
     }
 
-    void launch_abs(float* data, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        abs_kernel<<<grid_size, block_size, 0, stream>>>(data, n);
-    }
-
-    void launch_sqrt(float* data, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        sqrt_kernel<<<grid_size, block_size, 0, stream>>>(data, n);
-    }
-
-    void launch_exp(float* data, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        exp_kernel<<<grid_size, block_size, 0, stream>>>(data, n);
-    }
-
-    void launch_log(float* data, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        log_kernel<<<grid_size, block_size, 0, stream>>>(data, n);
-    }
-
-    void launch_sigmoid(float* data, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        sigmoid_kernel<<<grid_size, block_size, 0, stream>>>(data, n);
-    }
+    // ============= Special Operations Launch Functions =============
 
     void launch_logit(const float* input, float* output, size_t n, float eps, cudaStream_t stream) {
+        if (n == 0) return;
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
         logit_kernel<<<grid_size, block_size, 0, stream>>>(input, output, n, eps);
     }
 
-    void launch_relu(float* data, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        relu_kernel<<<grid_size, block_size, 0, stream>>>(data, n);
-    }
-
     void launch_clamp(float* data, float min_val, float max_val, size_t n, cudaStream_t stream) {
+        if (n == 0) return;
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
         clamp_kernel<<<grid_size, block_size, 0, stream>>>(data, min_val, max_val, n);
     }
+
+    // ============= Reduction Operations =============
 
     void launch_reduce_sum(const float* data, float* result, size_t n, cudaStream_t stream) {
         if (n == 0) {
