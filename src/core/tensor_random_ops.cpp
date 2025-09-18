@@ -206,6 +206,120 @@ namespace gs {
         return result;
     }
 
+    Tensor Tensor::multinomial(const Tensor& weights, int num_samples, bool replacement) {
+        if (!weights.is_valid() || weights.ndim() != 1) {
+            LOG_ERROR("Multinomial requires 1D weight tensor");
+            return Tensor();
+        }
+
+        size_t n = weights.numel();
+
+        // For very large arrays (> 2^24), we need custom implementation
+        if (n > (1 << 24)) {
+            // Fallback to CPU implementation for huge arrays
+            auto weights_cpu = weights.to(Device::CPU);
+            auto weights_data = weights_cpu.to_vector();
+
+            // Normalize weights
+            float sum = 0.0f;
+            for (float w : weights_data) {
+                sum += w;
+            }
+
+            if (sum <= 0) {
+                LOG_ERROR("Weights must sum to positive value");
+                return Tensor();
+            }
+
+            // Create cumulative distribution
+            std::vector<float> cumsum(n);
+            cumsum[0] = weights_data[0] / sum;
+            for (size_t i = 1; i < n; ++i) {
+                cumsum[i] = cumsum[i-1] + weights_data[i] / sum;
+            }
+
+            // Sample
+            std::random_device rd;
+            std::mt19937 gen(rd());
+            std::uniform_real_distribution<float> dis(0.0f, 1.0f);
+
+            std::vector<int> sampled_indices;
+            sampled_indices.reserve(num_samples);
+
+            for (int i = 0; i < num_samples; ++i) {
+                float u = dis(gen);
+
+                // Binary search for the index
+                auto it = std::lower_bound(cumsum.begin(), cumsum.end(), u);
+                size_t idx = std::distance(cumsum.begin(), it);
+                if (idx >= n) idx = n - 1;
+
+                sampled_indices.push_back(static_cast<int>(idx));
+
+                if (!replacement) {
+                    // For without replacement, we'd need to update the CDF
+                    // This is complex, so for now we only support with replacement
+                    if (i == 0) {
+                        LOG_WARN("Multinomial without replacement for large arrays not fully implemented");
+                    }
+                }
+            }
+
+            // Create result tensor
+            auto result = empty({static_cast<size_t>(num_samples)}, weights.device(), DataType::Int32);
+
+            if (weights.device() == Device::CUDA) {
+                CHECK_CUDA(cudaMemcpy(result.ptr<int>(), sampled_indices.data(),
+                                      num_samples * sizeof(int), cudaMemcpyHostToDevice));
+            } else {
+                std::memcpy(result.ptr<int>(), sampled_indices.data(), num_samples * sizeof(int));
+            }
+
+            return result;
+        }
+
+        // For smaller arrays, use CUDA kernel
+        auto result = empty({static_cast<size_t>(num_samples)}, weights.device(), DataType::Int32);
+
+        if (weights.device() == Device::CUDA) {
+            tensor_ops::launch_multinomial(weights.ptr<float>(), result.ptr<int>(),
+                                          n, num_samples, replacement,
+                                          RandomGenerator::instance().get_seed(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            // CPU implementation
+            auto weights_data = weights.to_vector();
+
+            // Normalize
+            float sum = std::accumulate(weights_data.begin(), weights_data.end(), 0.0f);
+            if (sum <= 0) {
+                LOG_ERROR("Weights must sum to positive value");
+                return Tensor();
+            }
+
+            // Create CDF
+            std::vector<float> cdf(n);
+            cdf[0] = weights_data[0] / sum;
+            for (size_t i = 1; i < n; ++i) {
+                cdf[i] = cdf[i-1] + weights_data[i] / sum;
+            }
+
+            // Sample
+            std::random_device rd;
+            std::mt19937 gen(rd());
+            std::uniform_real_distribution<float> dis(0.0f, 1.0f);
+
+            int* samples = result.ptr<int>();
+            for (int i = 0; i < num_samples; ++i) {
+                float u = dis(gen);
+                auto it = std::lower_bound(cdf.begin(), cdf.end(), u);
+                samples[i] = static_cast<int>(std::distance(cdf.begin(), it));
+            }
+        }
+
+        return result;
+    }
+
     void Tensor::set_bool(std::initializer_list<size_t> indices, bool value) {
         if (dtype_ != DataType::Bool) {
             LOG_ERROR("set_bool only works on boolean tensors");

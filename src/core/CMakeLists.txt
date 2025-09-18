@@ -31,6 +31,7 @@ set(CORE_CUDA_SOURCES
         tensor_matrix_ops.cu    # CUDA kernels for matrix operations
         tensor_broadcast_ops.cu # CUDA kernels for broadcasting
         tensor_masking_ops.cu   # CUDA kernels for masking/indexing
+	tensor_random_ops.cu    # CUDA kernels for random ops
 )
 
 # Create CUDA library for tensor operations (C++20)

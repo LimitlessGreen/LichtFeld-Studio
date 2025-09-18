@@ -1753,6 +1753,256 @@ namespace gs {
         }
     }
 
-#undef CHECK_CUDA
+    Tensor& Tensor::index_add_(int dim, const Tensor& indices, const Tensor& src) {
+        if (!is_valid() || !indices.is_valid() || !src.is_valid()) {
+            LOG_ERROR("Invalid tensors for index_add_");
+            return *this;
+        }
+
+        if (indices.dtype() != DataType::Int32 && indices.dtype() != DataType::Int64) {
+            LOG_ERROR("Indices must be integer tensor");
+            return *this;
+        }
+
+        if (indices.ndim() != 1) {
+            LOG_ERROR("Indices must be 1D tensor");
+            return *this;
+        }
+
+        if (device_ != indices.device() || device_ != src.device()) {
+            LOG_ERROR("All tensors must be on same device");
+            return *this;
+        }
+
+        if (dtype_ != src.dtype()) {
+            LOG_ERROR("Tensor and src must have same dtype");
+            return *this;
+        }
+
+        // Handle negative dimension
+        if (dim < 0) {
+            dim = shape_.rank() + dim;
+        }
+
+        if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
+            LOG_ERROR("Dimension {} out of range", dim);
+            return *this;
+        }
+
+        // Check that src has correct shape
+        std::vector<size_t> expected_shape = shape_.dims();
+        expected_shape[dim] = indices.numel();
+        if (src.shape() != TensorShape(expected_shape)) {
+            LOG_ERROR("Source tensor has incorrect shape");
+            return *this;
+        }
+
+        if (device_ == Device::CUDA) {
+            tensor_ops::launch_index_add(ptr<float>(), indices.ptr<int>(),
+                                         src.ptr<float>(),
+                                         shape_.dims().data(), shape_.rank(),
+                                         dim, indices.numel(), 0);
+            cudaDeviceSynchronize();
+        } else {
+            // CPU implementation
+            float* dst_data = ptr<float>();
+            const int* idx_data = indices.ptr<int>();
+            const float* src_data = src.ptr<float>();
+
+            size_t dim_size = shape_[dim];
+            size_t outer_size = 1;
+            for (int i = 0; i < dim; ++i) {
+                outer_size *= shape_[i];
+            }
+            size_t inner_size = 1;
+            for (size_t i = dim + 1; i < shape_.rank(); ++i) {
+                inner_size *= shape_[i];
+            }
+
+            for (size_t outer = 0; outer < outer_size; ++outer) {
+                for (size_t idx_pos = 0; idx_pos < indices.numel(); ++idx_pos) {
+                    int idx = idx_data[idx_pos];
+                    if (idx < 0 || idx >= static_cast<int>(dim_size)) {
+                        LOG_ERROR("Index {} out of bounds for dimension {}", idx, dim);
+                        return *this;
+                    }
+
+                    for (size_t inner = 0; inner < inner_size; ++inner) {
+                        size_t dst_offset = outer * dim_size * inner_size +
+                                           idx * inner_size + inner;
+                        size_t src_offset = outer * indices.numel() * inner_size +
+                                           idx_pos * inner_size + inner;
+                        dst_data[dst_offset] += src_data[src_offset];  // ADD instead of copy
+                    }
+                }
+            }
+        }
+
+        return *this;
+    }
+
+    Tensor& Tensor::index_put_(const Tensor& indices, const Tensor& values) {
+        if (!is_valid() || !indices.is_valid() || !values.is_valid()) {
+            LOG_ERROR("Invalid tensors for index_put_");
+            return *this;
+        }
+
+        if (indices.dtype() != DataType::Int32 && indices.dtype() != DataType::Int64) {
+            LOG_ERROR("Indices must be integer tensor");
+            return *this;
+        }
+
+        if (device_ != indices.device() || device_ != values.device()) {
+            LOG_ERROR("All tensors must be on same device");
+            return *this;
+        }
+
+        if (dtype_ != values.dtype()) {
+            LOG_ERROR("Tensor and values must have same dtype");
+            return *this;
+        }
+
+        // For 1D indices, this is like scatter along dimension 0
+        if (indices.ndim() == 1) {
+            // Check values shape
+            if (values.ndim() == 1) {
+                // Simple case: 1D values for 1D indices
+                if (values.numel() != indices.numel()) {
+                    LOG_ERROR("Values size must match indices size");
+                    return *this;
+                }
+            } else {
+                // Values should have shape [indices.numel(), ...]
+                if (values.shape()[0] != indices.numel()) {
+                    LOG_ERROR("First dimension of values must match indices size");
+                    return *this;
+                }
+            }
+
+            if (device_ == Device::CUDA) {
+                tensor_ops::launch_index_put(ptr<float>(), indices.ptr<int>(),
+                                             values.ptr<float>(),
+                                             numel(), indices.numel(), 0);
+                cudaDeviceSynchronize();
+            } else {
+                // CPU implementation
+                float* data = ptr<float>();
+                const int* idx_data = indices.ptr<int>();
+                const float* val_data = values.ptr<float>();
+
+                if (values.ndim() == 1) {
+                    // 1D case
+                    for (size_t i = 0; i < indices.numel(); ++i) {
+                        int idx = idx_data[i];
+                        if (idx < 0 || idx >= static_cast<int>(numel())) {
+                            LOG_ERROR("Index {} out of bounds", idx);
+                            return *this;
+                        }
+                        data[idx] = val_data[i];
+                    }
+                } else {
+                    // Multi-dimensional case
+                    size_t stride = values.numel() / values.shape()[0];
+                    for (size_t i = 0; i < indices.numel(); ++i) {
+                        int idx = idx_data[i];
+                        if (idx < 0) idx += shape_[0];  // Handle negative indices
+                        if (idx < 0 || idx >= static_cast<int>(shape_[0])) {
+                            LOG_ERROR("Index {} out of bounds", idx_data[i]);
+                            return *this;
+                        }
+                        // Copy the slice
+                        std::memcpy(data + idx * stride,
+                                   val_data + i * stride,
+                                   stride * sizeof(float));
+                    }
+                }
+            }
+        } else {
+            LOG_ERROR("Multi-dimensional indices not yet supported for index_put_");
+            return *this;
+        }
+
+        return *this;
+    }
+
+    Tensor& Tensor::index_put_(const std::vector<Tensor>& indices, const Tensor& values) {
+        // This is for advanced indexing with multiple index tensors
+        // For now, just support the simple case of a single index tensor
+        if (indices.size() != 1) {
+            LOG_ERROR("Multi-dimensional indexing not yet fully supported");
+            return *this;
+        }
+        return index_put_(indices[0], values);
+    }
+
+    Tensor Tensor::nonzero() const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
+        // Count non-zero elements
+        size_t count = count_nonzero();
+
+        if (count == 0) {
+            // Return empty tensor with shape [0]
+            return empty({0}, device_, DataType::Int64);
+        }
+
+        // Create output tensor for indices
+        auto result = empty({count}, device_, DataType::Int64);
+
+        if (device_ == Device::CUDA) {
+            if (dtype_ == DataType::Bool) {
+                tensor_ops::launch_nonzero_bool(ptr<unsigned char>(),
+                                                reinterpret_cast<int64_t*>(result.ptr<float>()),
+                                                numel(), count, 0);
+            } else {
+                tensor_ops::launch_nonzero(ptr<float>(), reinterpret_cast<int64_t*>(result.ptr<float>()),
+                                           numel(), count, 0);
+            }
+            cudaDeviceSynchronize();
+        } else {
+            // CPU implementation
+            int64_t* indices = reinterpret_cast<int64_t*>(result.ptr<float>());
+            size_t idx = 0;
+
+            if (dtype_ == DataType::Bool) {
+                const unsigned char* data = ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    if (data[i]) {
+                        indices[idx++] = static_cast<int64_t>(i);
+                    }
+                }
+            } else {
+                const float* data = ptr<float>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    if (data[i] != 0.0f) {
+                        indices[idx++] = static_cast<int64_t>(i);
+                    }
+                }
+            }
+        }
+
+        return result;
+    }
+
+    std::vector<Tensor> Tensor::nonzero_split() const {
+        // This returns separate tensors for each dimension's indices
+        // Useful for multi-dimensional indexing
+
+        if (!is_valid() || shape_.rank() == 0) {
+            return {};
+        }
+
+        // For now, just return the flattened indices
+        // Full implementation would return [count, ndim] shaped tensor
+        auto flat_indices = nonzero();
+
+        // Convert to multi-dimensional indices if needed
+        // This is a simplified version - using move to avoid copy
+        std::vector<Tensor> result;
+        result.push_back(std::move(flat_indices));
+        return result;
+    }
 
 } // namespace gs

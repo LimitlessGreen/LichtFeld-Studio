@@ -4,7 +4,6 @@
 #include "core/tensor_ops.hpp"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
-#include <curand_kernel.h>
 
 namespace gs::tensor_ops {
 
@@ -97,61 +96,7 @@ namespace gs::tensor_ops {
         }
     }
 
-    // ============= Random Operations Kernels =============
-
-    // Uniform random generation
-    __global__ void uniform_kernel(float* data, size_t n, float low, float high,
-                                   unsigned long long seed) {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-        if (idx < n) {
-            curandState state;
-            curand_init(seed, idx, 0, &state);
-            float val = curand_uniform(&state);
-            data[idx] = val * (high - low) + low;
-        }
-    }
-
-    // Normal random generation
-    __global__ void normal_kernel(float* data, size_t n, float mean, float std,
-                                  unsigned long long seed) {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-        if (idx < n) {
-            curandState state;
-            curand_init(seed, idx, 0, &state);
-            data[idx] = curand_normal(&state) * std + mean;
-        }
-    }
-
-    // Bernoulli random generation
-    __global__ void bernoulli_kernel(float* data, size_t n, float p,
-                                     unsigned long long seed) {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-        if (idx < n) {
-            curandState state;
-            curand_init(seed, idx, 0, &state);
-            float val = curand_uniform(&state);
-            data[idx] = (val < p) ? 1.0f : 0.0f;
-        }
-    }
-
-    // Random integer generation
-    __global__ void randint_kernel(int* data, size_t n, int low, int high,
-                                   unsigned long long seed) {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-        if (idx < n) {
-            curandState state;
-            curand_init(seed, idx, 0, &state);
-            // Generate uniform [0, 1) and scale to [low, high)
-            float val = curand_uniform(&state);
-            data[idx] = static_cast<int>(val * (high - low)) + low;
-        }
-    }
-
-    // ============= Launch Functions =============
+    // ============= Launch Functions Implementation =============
 
     void launch_matmul(const float* a, const float* b, float* c,
                        size_t m, size_t n, size_t k,
@@ -162,17 +107,7 @@ namespace gs::tensor_ops {
         dim3 grid((n + block.x - 1) / block.x, (m + block.y - 1) / block.y);
 
         // Simple naive kernel (cuBLAS is preferred)
-        auto kernel = [=] __device__(int row, int col) {
-            if (row < m && col < n) {
-                float sum = 0.0f;
-                for (size_t i = 0; i < k; ++i) {
-                    sum += a[row * k + i] * b[i * n + col];
-                }
-                c[row * n + col] = sum;
-            }
-        };
-
-        // For actual implementation, use cuBLAS in tensor_matrix_ops.cpp
+        // Note: This is just a placeholder - actual implementation uses cuBLAS
     }
 
     void launch_batch_matmul(const float* a, const float* b, float* c,
@@ -204,34 +139,6 @@ namespace gs::tensor_ops {
                             size_t n, cudaStream_t stream) {
         // For dot product, use cuBLAS (handled in tensor_matrix_ops.cpp)
         // This is just a placeholder
-    }
-
-    void launch_uniform(float* data, size_t n, float low, float high,
-                        unsigned long long seed, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        uniform_kernel<<<grid_size, block_size, 0, stream>>>(data, n, low, high, seed);
-    }
-
-    void launch_normal(float* data, size_t n, float mean, float std,
-                       unsigned long long seed, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        normal_kernel<<<grid_size, block_size, 0, stream>>>(data, n, mean, std, seed);
-    }
-
-    void launch_bernoulli(float* data, size_t n, float p,
-                          unsigned long long seed, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        bernoulli_kernel<<<grid_size, block_size, 0, stream>>>(data, n, p, seed);
-    }
-
-    void launch_randint(int* data, size_t n, int low, int high,
-                        unsigned long long seed, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        randint_kernel<<<grid_size, block_size, 0, stream>>>(data, n, low, high, seed);
     }
 
     void launch_eye(float* data, size_t m, size_t n, cudaStream_t stream) {

@@ -131,6 +131,29 @@ namespace gs {
 
         return result;
     }
+    Tensor Tensor::logit(float eps) const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
+        auto result = empty(shape_, device_, dtype_);
+
+        if (device_ == Device::CUDA) {
+            CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(), cudaMemcpyDeviceToDevice));
+            tensor_ops::launch_logit(ptr<float>(), result.ptr<float>(), numel(), eps, 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            const float* src = ptr<float>();
+            float* dst = result.ptr<float>();
+            for (size_t i = 0; i < numel(); ++i) {
+                // Clamp to avoid log(0) or log(inf)
+                float x = std::clamp(src[i], eps, 1.0f - eps);
+                dst[i] = std::log(x / (1.0f - x));
+            }
+        }
+
+        return result;
+    }
 
     Tensor Tensor::relu() const {
         if (!is_valid()) {

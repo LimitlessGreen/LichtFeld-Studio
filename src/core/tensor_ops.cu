@@ -154,6 +154,15 @@ namespace gs::tensor_ops {
             data[idx] = 1.0f / (1.0f + expf(-val));
         }
     }
+    __global__ void logit_kernel(const float* input, float* output, size_t n, float eps) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            float x = input[idx];
+            // Clamp to avoid numerical issues
+            x = fmaxf(fminf(x, 1.0f - eps), eps);
+            output[idx] = logf(x / (1.0f - x));
+        }
+    }
 
     __global__ void relu_kernel(float* data, size_t n) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -367,6 +376,13 @@ namespace gs::tensor_ops {
         int grid_size = (n + block_size - 1) / block_size;
         sigmoid_kernel<<<grid_size, block_size, 0, stream>>>(data, n);
     }
+
+    void launch_logit(const float* input, float* output, size_t n, float eps, cudaStream_t stream) {
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        logit_kernel<<<grid_size, block_size, 0, stream>>>(input, output, n, eps);
+    }
+
 
     void launch_relu(float* data, size_t n, cudaStream_t stream) {
         int block_size = 256;

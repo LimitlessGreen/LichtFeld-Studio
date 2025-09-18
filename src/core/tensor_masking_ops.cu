@@ -1115,4 +1115,187 @@ namespace gs::tensor_ops {
             src, dst, d_src_shape.get(), d_dst_shape.get(), src_rank, dst_rank, dst_elements);
     }
 
+
+    __global__ void index_add_kernel(float* dst, const int* indices, const float* src,
+                                     size_t outer_size, size_t dim_size, size_t inner_size,
+                                     size_t num_indices) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        size_t total_adds = outer_size * num_indices * inner_size;
+
+        if (idx >= total_adds)
+            return;
+
+        size_t outer_idx = idx / (num_indices * inner_size);
+        size_t idx_pos = (idx / inner_size) % num_indices;
+        size_t inner_idx = idx % inner_size;
+
+        int add_idx = indices[idx_pos];
+
+        // Check bounds
+        if (add_idx < 0 || add_idx >= dim_size) {
+            return;
+        }
+
+        size_t dst_idx = outer_idx * dim_size * inner_size +
+                         add_idx * inner_size + inner_idx;
+        size_t src_idx = outer_idx * num_indices * inner_size +
+                         idx_pos * inner_size + inner_idx;
+
+        atomicAdd(&dst[dst_idx], src[src_idx]);  // Atomic add for thread safety
+    }
+
+    void launch_index_add(float* dst, const int* indices, const float* src,
+                          const size_t* shape, size_t rank, int dim,
+                          size_t num_indices, cudaStream_t stream) {
+        // Calculate dimensions
+        size_t outer_size = 1;
+        for (int i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+
+        size_t dim_size = shape[dim];
+
+        size_t inner_size = 1;
+        for (size_t i = dim + 1; i < rank; ++i) {
+            inner_size *= shape[i];
+        }
+
+        size_t total_adds = outer_size * num_indices * inner_size;
+
+        int block_size = 256;
+        int grid_size = (total_adds + block_size - 1) / block_size;
+
+        index_add_kernel<<<grid_size, block_size, 0, stream>>>(
+            dst, indices, src, outer_size, dim_size, inner_size, num_indices);
+    }
+
+    __global__ void index_put_kernel(float* data, const int* indices, const float* values,
+                                     size_t data_size, size_t index_size) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (idx >= index_size)
+            return;
+
+        int data_idx = indices[idx];
+        
+        // Handle negative indices
+        if (data_idx < 0) {
+            data_idx += data_size;
+        }
+
+        if (data_idx >= 0 && data_idx < data_size) {
+            data[data_idx] = values[idx];
+        }
+    }
+
+    void launch_index_put(float* data, const int* indices, const float* values,
+                          size_t data_size, size_t index_size, cudaStream_t stream) {
+        int block_size = 256;
+        int grid_size = (index_size + block_size - 1) / block_size;
+
+        index_put_kernel<<<grid_size, block_size, 0, stream>>>(
+            data, indices, values, data_size, index_size);
+    }
+
+    __global__ void nonzero_kernel(const float* data, int64_t* indices, 
+                                   const int* scan_result, size_t n) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        
+        if (idx < n && data[idx] != 0.0f) {
+            // Use exclusive scan result to get output position
+            indices[scan_result[idx]] = static_cast<int64_t>(idx);
+        }
+    }
+
+    // Helper kernel for nonzero operation - define this OUTSIDE any function
+    __global__ void create_nonzero_mask_kernel(const float* data, unsigned char* mask, size_t n) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            mask[idx] = (data[idx] != 0.0f) ? 1 : 0;
+        }
+    }
+
+    void launch_nonzero(const float* data, int64_t* indices,
+                        size_t n, size_t output_size, cudaStream_t stream) {
+        if (n == 0 || output_size == 0) {
+            return;
+        }
+
+        // First, create a mask of non-zero elements
+        CudaDeviceMemory<unsigned char> d_mask(n);
+        if (!d_mask.valid()) {
+            return;
+        }
+
+        // Create mask kernel
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+
+        // Use existing scan infrastructure for prefix sum
+        CudaDeviceMemory<int> d_scan_result(n);
+        if (!d_scan_result.valid()) {
+            return;
+        }
+
+        // Create the mask using our helper kernel
+        create_nonzero_mask_kernel<<<grid_size, block_size, 0, stream>>>(data, d_mask.get(), n);
+
+        // Perform exclusive scan to get output positions
+        size_t temp_storage_bytes = 0;
+        cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_bytes,
+                                      d_mask.get(), d_scan_result.get(), n, stream);
+
+        CudaDeviceMemory<uint8_t> d_temp_storage(temp_storage_bytes);
+        if (!d_temp_storage.valid()) {
+            return;
+        }
+
+        cub::DeviceScan::ExclusiveSum(d_temp_storage.get(), temp_storage_bytes,
+                                      d_mask.get(), d_scan_result.get(), n, stream);
+
+        // Now gather the indices
+        nonzero_kernel<<<grid_size, block_size, 0, stream>>>(
+            data, indices, d_scan_result.get(), n);
+    }
+
+    __global__ void nonzero_bool_kernel(const unsigned char* data, int64_t* indices,
+                                        const int* scan_result, size_t n) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        
+        if (idx < n && data[idx]) {
+            indices[scan_result[idx]] = static_cast<int64_t>(idx);
+        }
+    }
+
+    void launch_nonzero_bool(const unsigned char* data, int64_t* indices,
+                             size_t n, size_t output_size, cudaStream_t stream) {
+        if (n == 0 || output_size == 0) {
+            return;
+        }
+
+        // Use existing scan infrastructure
+        CudaDeviceMemory<int> d_scan_result(n);
+        if (!d_scan_result.valid()) {
+            return;
+        }
+
+        size_t temp_storage_bytes = 0;
+        cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_bytes,
+                                      data, d_scan_result.get(), n, stream);
+
+        CudaDeviceMemory<uint8_t> d_temp_storage(temp_storage_bytes);
+        if (!d_temp_storage.valid()) {
+            return;
+        }
+
+        cub::DeviceScan::ExclusiveSum(d_temp_storage.get(), temp_storage_bytes,
+                                      data, d_scan_result.get(), n, stream);
+
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+
+        nonzero_bool_kernel<<<grid_size, block_size, 0, stream>>>(
+            data, indices, d_scan_result.get(), n);
+    }
+
 } // namespace gs::tensor_ops

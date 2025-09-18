@@ -221,6 +221,8 @@ namespace gs {
                               Device device = Device::CUDA, DataType dtype = DataType::Int32);
         static Tensor bernoulli(TensorShape shape, float p = 0.5f,
                                 Device device = Device::CUDA, DataType dtype = DataType::Float32);
+        static Tensor multinomial(const Tensor& weights, int num_samples,
+                         bool replacement = false);
 
         // Create view from raw memory
         static Tensor from_blob(void* data, TensorShape shape, Device device, DataType dtype) {
@@ -330,6 +332,10 @@ namespace gs {
         Tensor matmul(const Tensor& other) const; // General matrix multiply
         Tensor dot(const Tensor& other) const;    // Dot product for 1D tensors
 
+        // Concatenation operations
+        static Tensor cat(const std::vector<Tensor>& tensors, int dim = 0);
+        Tensor cat(const Tensor& other, int dim = 0) const;
+
         // ============= Comparison Operations (NEW) =============
         Tensor eq(const Tensor& other) const; // Equal
         Tensor ne(const Tensor& other) const; // Not equal
@@ -363,12 +369,20 @@ namespace gs {
         Tensor gather(int dim, const Tensor& indices) const;
         Tensor take(const Tensor& indices) const; // 1D indexing
 
+        Tensor nonzero() const;  // Get indices of non-zero elements
+        std::vector<Tensor> nonzero_split() const;  // Get indices as separate tensors per dimension
+
         Tensor& scatter_(int dim, const Tensor& indices, const Tensor& src,
                          ScatterMode mode = ScatterMode::None);
         Tensor& scatter_(int dim, const Tensor& indices, float value,
                          ScatterMode mode = ScatterMode::None);
         Tensor& index_fill_(int dim, const Tensor& indices, float value);
         Tensor& index_copy_(int dim, const Tensor& indices, const Tensor& src);
+
+        // Additional indexing operations for densification
+        Tensor& index_add_(int dim, const Tensor& indices, const Tensor& src);
+        Tensor& index_put_(const Tensor& indices, const Tensor& values);
+        Tensor& index_put_(const std::vector<Tensor>& indices, const Tensor& values);
 
         // Advanced indexing with boundary modes
         Tensor index_select(int dim, const Tensor& indices, BoundaryMode mode) const;
@@ -483,6 +497,7 @@ namespace gs {
         Tensor exp() const;
         Tensor log() const;
         Tensor sigmoid() const;
+        Tensor logit(float eps = 1e-7f) const;  // Inverse sigmoid: log(x/(1-x))
         Tensor relu() const;
         Tensor clamp(float min, float max) const;
         Tensor clamp_min(float min) const;

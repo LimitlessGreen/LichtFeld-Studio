@@ -611,6 +611,14 @@ namespace gs {
         return result;
     }
 
+    Tensor Tensor::cat(const Tensor& other, int dim) const {
+        std::vector<Tensor> tensors;
+        tensors.push_back(clone());
+        tensors.push_back(other.clone());
+        return tensor::cat(std::move(tensors), dim);
+    }
+
+
     Tensor Tensor::flatten(int start_dim, int end_dim) const {
         if (start_dim < 0)
             start_dim = shape_.rank() + start_dim;

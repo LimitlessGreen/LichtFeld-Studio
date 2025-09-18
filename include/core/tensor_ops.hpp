@@ -5,6 +5,7 @@
 
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
+#include <vector>
 
 namespace gs::tensor_ops {
 
@@ -64,6 +65,7 @@ namespace gs::tensor_ops {
     void launch_sigmoid(float* data, size_t n, cudaStream_t stream);
     void launch_relu(float* data, size_t n, cudaStream_t stream);
     void launch_clamp(float* data, float min_val, float max_val, size_t n, cudaStream_t stream);
+    void launch_logit(const float* input, float* output, size_t n, float eps, cudaStream_t stream);
     void launch_pow_scalar(float* data, float exponent, size_t n, cudaStream_t stream);
     void launch_pow_tensor(const float* a, const float* b, float* c,
                            const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
@@ -105,10 +107,19 @@ namespace gs::tensor_ops {
     void launch_randint(int* data, size_t n, int low, int high,
                         unsigned long long seed, cudaStream_t stream);
 
+    void launch_multinomial(const float* weights, int* samples,
+                           unsigned long n, unsigned long num_samples, bool replacement,
+                           unsigned long long seed, cudaStream_t stream);
+
     // Matrix creation operations
     void launch_eye(float* data, size_t m, size_t n, cudaStream_t stream);
     void launch_diag(const float* diagonal, float* matrix, size_t n, cudaStream_t stream);
     void launch_extract_diag(const float* matrix, float* diagonal, size_t n, cudaStream_t stream);
+
+    // Concatenation operation
+    void launch_cat(const std::vector<const float*>& inputs, float* output,
+                    const std::vector<size_t>& input_sizes, size_t total_size,
+                    int dim, const size_t* shape, size_t rank, cudaStream_t stream);
 
     // ============= NEW: Comparison Operations =============
     void launch_compare_eq(const float* a, const float* b, unsigned char* result,
@@ -202,6 +213,20 @@ namespace gs::tensor_ops {
     void launch_index_copy(float* data, const int* indices, const float* src,
                            const size_t* shape, size_t rank, int dim,
                            size_t index_size, cudaStream_t stream);
+
+    // Additional indexing operations for densification
+    void launch_index_add(float* data, const int* indices, const float* src,
+                          const size_t* shape, size_t rank, int dim,
+                          size_t index_size, cudaStream_t stream);
+    
+    void launch_index_put(float* data, const int* indices, const float* values,
+                          size_t data_size, size_t index_size, cudaStream_t stream);
+    
+    void launch_nonzero(const float* data, int64_t* indices, 
+                        size_t n, size_t output_size, cudaStream_t stream);
+    
+    void launch_nonzero_bool(const unsigned char* data, int64_t* indices,
+                             size_t n, size_t output_size, cudaStream_t stream);
 
     // ============= Boolean Broadcasting Operations =============
     void launch_broadcast_bool(const unsigned char* src, unsigned char* dst,
