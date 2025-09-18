@@ -2,106 +2,203 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor_ops.hpp"
-#include <algorithm> // For std::min_element, std::max_element, std::min
+#include "core/tensor.hpp"
+#include <algorithm>
 #include <cfloat>
 #include <cstdio>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <vector> // For std::vector
+#include <vector>
 
 namespace gs::tensor_ops {
 
-    // ============= Scalar Operations Kernels =============
+    // ============= Unified Binary Operation Kernels =============
 
-    __global__ void scalar_add_kernel(float* data, float scalar, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            data[idx] += scalar;
+    template<typename T>
+    __device__ inline T binary_op_impl(T a, T b, BinaryOp op) {
+        switch (op) {
+            case BinaryOp::Add: return a + b;
+            case BinaryOp::Sub: return a - b;
+            case BinaryOp::Mul: return a * b;
+            case BinaryOp::Div: return a / (b + T(1e-8));
+            case BinaryOp::Pow: return powf(a, b);
+            case BinaryOp::Mod: return fmodf(a, b);
+            case BinaryOp::Maximum: return fmaxf(a, b);
+            case BinaryOp::Minimum: return fminf(a, b);
+            default: return T(0);
         }
     }
 
-    __global__ void scalar_sub_kernel(float* data, float scalar, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            data[idx] -= scalar;
+    template<typename T>
+    __device__ inline bool comparison_op_impl(T a, T b, BinaryOp op) {
+        switch (op) {
+            case BinaryOp::Equal: return a == b;
+            case BinaryOp::NotEqual: return a != b;
+            case BinaryOp::Less: return a < b;
+            case BinaryOp::LessEqual: return a <= b;
+            case BinaryOp::Greater: return a > b;
+            case BinaryOp::GreaterEqual: return a >= b;
+            default: return false;
         }
     }
 
-    __global__ void scalar_mul_kernel(float* data, float scalar, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            data[idx] *= scalar;
+    __device__ inline bool logical_op_impl(bool a, bool b, BinaryOp op) {
+        switch (op) {
+            case BinaryOp::LogicalAnd: return a && b;
+            case BinaryOp::LogicalOr: return a || b;
+            case BinaryOp::LogicalXor: return a != b;
+            default: return false;
         }
     }
 
-    __global__ void scalar_div_kernel(float* data, float scalar, size_t n) {
+    // Unified binary operation kernel
+    __global__ void unified_binary_op_kernel(const float* a, const float* b, float* c,
+                                            size_t n, BinaryOp op) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx < n) {
-            data[idx] /= scalar;
+            c[idx] = binary_op_impl(a[idx], b[idx], op);
         }
     }
 
-    // ============= Element-wise Operations Kernels =============
-
-    __global__ void element_add_kernel(const float* a, const float* b, float* c, size_t n) {
+    // Unified binary operation kernel with output as bool
+    __global__ void unified_comparison_kernel(const float* a, const float* b,
+                                             unsigned char* c, size_t n, BinaryOp op) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx < n) {
-            c[idx] = a[idx] + b[idx];
+            c[idx] = comparison_op_impl(a[idx], b[idx], op) ? 1 : 0;
         }
     }
 
-    __global__ void element_sub_kernel(const float* a, const float* b, float* c, size_t n) {
+    // Unified logical operation kernel
+    __global__ void unified_logical_kernel(const unsigned char* a, const unsigned char* b,
+                                          unsigned char* c, size_t n, BinaryOp op) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx < n) {
-            c[idx] = a[idx] - b[idx];
+            c[idx] = logical_op_impl(a[idx] != 0, b[idx] != 0, op) ? 1 : 0;
         }
     }
 
-    __global__ void element_mul_kernel(const float* a, const float* b, float* c, size_t n) {
+    // Scalar operation kernels
+    __global__ void unified_scalar_op_kernel(const float* data, float scalar,
+                                            float* result, size_t n, BinaryOp op) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx < n) {
-            c[idx] = a[idx] * b[idx];
+            result[idx] = binary_op_impl(data[idx], scalar, op);
         }
     }
 
-    __global__ void element_div_kernel(const float* a, const float* b, float* c, size_t n) {
+    __global__ void unified_scalar_comparison_kernel(const float* data, float scalar,
+                                                    unsigned char* result, size_t n, BinaryOp op) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx < n) {
-            c[idx] = a[idx] / (b[idx] + 1e-8f); // Safe division
+            result[idx] = comparison_op_impl(data[idx], scalar, op) ? 1 : 0;
         }
     }
 
-    // ============= In-place Element-wise Operations Kernels =============
-
-    __global__ void element_add_inplace_kernel(float* a, const float* b, size_t n) {
+    // In-place operation kernels
+    __global__ void unified_inplace_op_kernel(float* a, const float* b, size_t n, BinaryOp op) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx < n) {
-            a[idx] += b[idx];
+            a[idx] = binary_op_impl(a[idx], b[idx], op);
         }
     }
 
-    __global__ void element_sub_inplace_kernel(float* a, const float* b, size_t n) {
+    __global__ void unified_scalar_inplace_kernel(float* data, float scalar, size_t n, BinaryOp op) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx < n) {
-            a[idx] -= b[idx];
+            data[idx] = binary_op_impl(data[idx], scalar, op);
         }
     }
 
-    __global__ void element_mul_inplace_kernel(float* a, const float* b, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            a[idx] *= b[idx];
+    // ============= Launch Functions Implementation =============
+
+    void launch_binary_op(const void* a, const void* b, void* c,
+                         size_t n, BinaryOp op,
+                         DataType a_dtype, DataType b_dtype, DataType c_dtype,
+                         cudaStream_t stream) {
+        if (n == 0) return;
+
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+
+        // Dispatch based on operation type and data types
+        if (c_dtype == DataType::Bool && a_dtype == DataType::Float32) {
+            // Comparison operations
+            unified_comparison_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(a),
+                static_cast<const float*>(b),
+                static_cast<unsigned char*>(c),
+                n, op);
+        } else if (a_dtype == DataType::Bool && b_dtype == DataType::Bool && c_dtype == DataType::Bool) {
+            // Logical operations
+            unified_logical_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const unsigned char*>(a),
+                static_cast<const unsigned char*>(b),
+                static_cast<unsigned char*>(c),
+                n, op);
+        } else {
+            // Arithmetic operations
+            unified_binary_op_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(a),
+                static_cast<const float*>(b),
+                static_cast<float*>(c),
+                n, op);
         }
     }
 
-    __global__ void element_div_inplace_kernel(float* a, const float* b, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            a[idx] /= (b[idx] + 1e-8f); // Safe division
+    void launch_binary_scalar(const void* data, float scalar, void* result,
+                             size_t n, BinaryOp op,
+                             DataType src_dtype, DataType dst_dtype,
+                             cudaStream_t stream) {
+        if (n == 0) return;
+
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+
+        if (dst_dtype == DataType::Bool) {
+            // Comparison operations
+            unified_scalar_comparison_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(data),
+                scalar,
+                static_cast<unsigned char*>(result),
+                n, op);
+        } else {
+            // Arithmetic operations
+            unified_scalar_op_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(data),
+                scalar,
+                static_cast<float*>(result),
+                n, op);
         }
     }
 
-    // ============= Type Conversion Kernels =============
+    void launch_binary_op_inplace(void* a, const void* b, size_t n,
+                                 BinaryOp op, cudaStream_t stream) {
+        if (n == 0) return;
+
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+
+        unified_inplace_op_kernel<<<grid_size, block_size, 0, stream>>>(
+            static_cast<float*>(a),
+            static_cast<const float*>(b),
+            n, op);
+    }
+
+    void launch_binary_scalar_inplace(void* data, float scalar, size_t n,
+                                     BinaryOp op, cudaStream_t stream) {
+        if (n == 0) return;
+
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+
+        unified_scalar_inplace_kernel<<<grid_size, block_size, 0, stream>>>(
+            static_cast<float*>(data),
+            scalar,
+            n, op);
+    }
+
+    // ============= Legacy kernels (kept for compatibility) =============
 
     __global__ void bool_to_float_kernel(const unsigned char* src, float* dst, size_t n) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -116,8 +213,6 @@ namespace gs::tensor_ops {
             dst[idx] = (src[idx] != 0.0f) ? 1 : 0;
         }
     }
-
-    // ============= Math Function Kernels =============
 
     __global__ void abs_kernel(float* data, size_t n) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -154,11 +249,11 @@ namespace gs::tensor_ops {
             data[idx] = 1.0f / (1.0f + expf(-val));
         }
     }
+
     __global__ void logit_kernel(const float* input, float* output, size_t n, float eps) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx < n) {
             float x = input[idx];
-            // Clamp to avoid numerical issues
             x = fmaxf(fminf(x, 1.0f - eps), eps);
             output[idx] = logf(x / (1.0f - x));
         }
@@ -178,8 +273,6 @@ namespace gs::tensor_ops {
         }
     }
 
-    // ============= Reduction Kernels - FIXED =============
-
     // Simple reduction kernel that works correctly with grid-stride loop
     __global__ void reduce_sum_kernel_simple(const float* data, float* partial_sums, size_t n) {
         extern __shared__ float sdata[];
@@ -188,18 +281,15 @@ namespace gs::tensor_ops {
         unsigned int i = blockIdx.x * blockDim.x + tid;
         unsigned int gridSize = blockDim.x * gridDim.x;
 
-        // Grid-stride loop to handle arrays larger than grid
         float mySum = 0.0f;
         while (i < n) {
             mySum += data[i];
             i += gridSize;
         }
 
-        // Store in shared memory
         sdata[tid] = mySum;
         __syncthreads();
 
-        // Reduction in shared memory
         for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
             if (tid < s) {
                 sdata[tid] += sdata[tid + s];
@@ -207,7 +297,6 @@ namespace gs::tensor_ops {
             __syncthreads();
         }
 
-        // Write result for this block to global mem
         if (tid == 0)
             partial_sums[blockIdx.x] = sdata[0];
     }
@@ -222,7 +311,6 @@ namespace gs::tensor_ops {
         sdata[tid] = myMin;
         __syncthreads();
 
-        // Reduction in shared memory
         for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
             if (tid < s) {
                 sdata[tid] = fminf(sdata[tid], sdata[tid + s]);
@@ -244,7 +332,6 @@ namespace gs::tensor_ops {
         sdata[tid] = myMax;
         __syncthreads();
 
-        // Reduction in shared memory
         for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
             if (tid < s) {
                 sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
@@ -256,84 +343,8 @@ namespace gs::tensor_ops {
             partial_maxs[blockIdx.x] = sdata[0];
     }
 
-    // ============= Launch Functions Implementation =============
+    // ============= Launch Functions for Legacy Operations =============
 
-    // Scalar operations
-    void launch_scalar_add(float* data, float scalar, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        scalar_add_kernel<<<grid_size, block_size, 0, stream>>>(data, scalar, n);
-    }
-
-    void launch_scalar_sub(float* data, float scalar, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        scalar_sub_kernel<<<grid_size, block_size, 0, stream>>>(data, scalar, n);
-    }
-
-    void launch_scalar_mul(float* data, float scalar, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        scalar_mul_kernel<<<grid_size, block_size, 0, stream>>>(data, scalar, n);
-    }
-
-    void launch_scalar_div(float* data, float scalar, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        scalar_div_kernel<<<grid_size, block_size, 0, stream>>>(data, scalar, n);
-    }
-
-    // Element-wise operations
-    void launch_element_add(const float* a, const float* b, float* c, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        element_add_kernel<<<grid_size, block_size, 0, stream>>>(a, b, c, n);
-    }
-
-    void launch_element_sub(const float* a, const float* b, float* c, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        element_sub_kernel<<<grid_size, block_size, 0, stream>>>(a, b, c, n);
-    }
-
-    void launch_element_mul(const float* a, const float* b, float* c, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        element_mul_kernel<<<grid_size, block_size, 0, stream>>>(a, b, c, n);
-    }
-
-    void launch_element_div(const float* a, const float* b, float* c, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        element_div_kernel<<<grid_size, block_size, 0, stream>>>(a, b, c, n);
-    }
-
-    // In-place element-wise operations
-    void launch_element_add_inplace(float* a, const float* b, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        element_add_inplace_kernel<<<grid_size, block_size, 0, stream>>>(a, b, n);
-    }
-
-    void launch_element_sub_inplace(float* a, const float* b, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        element_sub_inplace_kernel<<<grid_size, block_size, 0, stream>>>(a, b, n);
-    }
-
-    void launch_element_mul_inplace(float* a, const float* b, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        element_mul_inplace_kernel<<<grid_size, block_size, 0, stream>>>(a, b, n);
-    }
-
-    void launch_element_div_inplace(float* a, const float* b, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        element_div_inplace_kernel<<<grid_size, block_size, 0, stream>>>(a, b, n);
-    }
-
-    // Type conversion operations
     void launch_bool_to_float(const unsigned char* src, float* dst, size_t n, cudaStream_t stream) {
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
@@ -346,7 +357,6 @@ namespace gs::tensor_ops {
         float_to_bool_kernel<<<grid_size, block_size, 0, stream>>>(src, dst, n);
     }
 
-    // Math functions
     void launch_abs(float* data, size_t n, cudaStream_t stream) {
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
@@ -383,7 +393,6 @@ namespace gs::tensor_ops {
         logit_kernel<<<grid_size, block_size, 0, stream>>>(input, output, n, eps);
     }
 
-
     void launch_relu(float* data, size_t n, cudaStream_t stream) {
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
@@ -396,7 +405,6 @@ namespace gs::tensor_ops {
         clamp_kernel<<<grid_size, block_size, 0, stream>>>(data, min_val, max_val, n);
     }
 
-    // Reduction operations - COMPLETELY FIXED
     void launch_reduce_sum(const float* data, float* result, size_t n, cudaStream_t stream) {
         if (n == 0) {
             *result = 0.0f;
@@ -406,11 +414,9 @@ namespace gs::tensor_ops {
         const int threads = 256;
         const int blocks = std::min(1024, (int)((n + threads - 1) / threads));
 
-        // Allocate temporary buffer for block results
         float* d_block_results;
         cudaMalloc(&d_block_results, blocks * sizeof(float));
 
-        // First pass: reduce each block
         reduce_sum_kernel_simple<<<blocks, threads, threads * sizeof(float), stream>>>(
             data, d_block_results, n);
 
@@ -418,7 +424,6 @@ namespace gs::tensor_ops {
             cudaDeviceSynchronize();
         }
 
-        // If we have multiple blocks, do final reduction on CPU
         if (blocks > 1) {
             std::vector<float> block_results(blocks);
             cudaMemcpy(block_results.data(), d_block_results, blocks * sizeof(float), cudaMemcpyDeviceToHost);
@@ -428,7 +433,6 @@ namespace gs::tensor_ops {
             }
             *result = sum;
         } else {
-            // Single block, copy result directly
             cudaMemcpy(result, d_block_results, sizeof(float), cudaMemcpyDeviceToHost);
         }
 

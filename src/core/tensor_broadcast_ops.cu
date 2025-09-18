@@ -8,7 +8,7 @@
 
 namespace gs::tensor_ops {
 
-// ============= Broadcasting Utilities =============
+// Broadcasting index calculation device function
 __device__ inline size_t map_broadcast_index_device(size_t linear_idx,
                                                     const size_t* out_shape,
                                                     const size_t* in_shape,
@@ -36,7 +36,7 @@ __device__ inline size_t map_broadcast_index_device(size_t linear_idx,
     return in_idx;
 }
 
-// ============= Broadcast Expansion Kernel =============
+// Broadcast expansion kernel
 __global__ void broadcast_kernel(const float* src, float* dst,
                                  const size_t* src_shape, const size_t* dst_shape,
                                  size_t src_rank, size_t dst_rank,
@@ -61,7 +61,7 @@ __global__ void broadcast_bool_kernel(const unsigned char* src, unsigned char* d
     dst[idx] = src[src_idx];
 }
 
-// ============= Broadcasting Binary Operations =============
+// Broadcasting binary operations
 template<typename Op>
 __global__ void broadcast_binary_kernel(const float* a, const float* b, float* c,
                                        const size_t* a_shape, const size_t* b_shape,
@@ -77,7 +77,7 @@ __global__ void broadcast_binary_kernel(const float* a, const float* b, float* c
     c[idx] = op(a[a_idx], b[b_idx]);
 }
 
-// ============= Public API Functions =============
+// Public API functions
 void launch_broadcast(const float* src, float* dst,
                      const size_t* src_shape, const size_t* dst_shape,
                      size_t src_rank, size_t dst_rank,

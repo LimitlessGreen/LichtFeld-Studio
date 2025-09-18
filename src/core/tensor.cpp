@@ -653,19 +653,21 @@ namespace gs {
             return Tensor();
         }
 
-        return BroadcastHelper::expand(*this, target_shape);
+        return gs::broadcast_to(*this, target_shape);
     }
 
     Tensor Tensor::broadcast_to(const TensorShape& target_shape) const {
-        return expand(target_shape);
+        return gs::broadcast_to(*this, target_shape);
     }
 
     bool Tensor::can_broadcast_to(const TensorShape& target) const {
-        return BroadcastHelper::can_broadcast(shape_, target);
+        auto result = broadcast::shape(shape_.dims(), target.dims());
+        return !result.empty() && result == target.dims();
     }
 
     TensorShape Tensor::broadcast_shape(const TensorShape& other) const {
-        return BroadcastHelper::broadcast_shape(shape_, other);
+        auto result = broadcast::shape(shape_.dims(), other.dims());
+        return result.empty() ? TensorShape() : TensorShape(result);
     }
 
     // ============= TensorShape Implementation =============
@@ -845,13 +847,13 @@ namespace gs {
         return *this;
     }
 
-    std::expected<Tensor, std::string> Tensor::try_reshape(TensorShape shape) const {
+    std::optional<Tensor> Tensor::try_reshape(TensorShape shape) const {
         if (!is_valid()) {
-            return std::unexpected("Tensor is not valid");
+            return std::nullopt;
         }
 
         if (shape.elements() != numel()) {
-            return std::unexpected("Shape mismatch: new shape has different number of elements");
+            return std::nullopt;
         }
 
         return reshape(shape);

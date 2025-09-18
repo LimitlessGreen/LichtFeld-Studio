@@ -7,67 +7,59 @@
 
 namespace gs {
 
-// CPU expansion implementation
-void BroadcastExpander::expand_cpu(const Tensor& src, Tensor& dst) {
-    auto src_shape = src.shape().dims();
-    auto dst_shape = dst.shape().dims();
-    size_t total = dst.numel();
+Tensor broadcast_to(const Tensor& src, const TensorShape& target) {
+    if (src.shape() == target) return src.clone();
 
-    if (src.dtype() == DataType::Bool) {
-        const auto* src_data = src.ptr<unsigned char>();
-        auto* dst_data = dst.ptr<unsigned char>();
-
-        #ifdef __cpp_lib_parallel_algorithm
-        std::for_each(std::execution::par_unseq,
-                     std::views::iota(0uz, total).begin(),
-                     std::views::iota(0uz, total).end(),
-                     [&](size_t i) {
-            size_t src_idx = BroadcastUtil::map_broadcast_index(i, dst_shape, src_shape);
-            dst_data[i] = src_data[src_idx];
-        });
-        #else
-        for (size_t i = 0; i < total; ++i) {
-            size_t src_idx = BroadcastUtil::map_broadcast_index(i, dst_shape, src_shape);
-            dst_data[i] = src_data[src_idx];
-        }
-        #endif
-    } else {
-        const float* src_data = src.ptr<float>();
-        float* dst_data = dst.ptr<float>();
-
-        #ifdef __cpp_lib_parallel_algorithm
-        std::for_each(std::execution::par_unseq,
-                     std::views::iota(0uz, total).begin(),
-                     std::views::iota(0uz, total).end(),
-                     [&](size_t i) {
-            size_t src_idx = BroadcastUtil::map_broadcast_index(i, dst_shape, src_shape);
-            dst_data[i] = src_data[src_idx];
-        });
-        #else
-        for (size_t i = 0; i < total; ++i) {
-            size_t src_idx = BroadcastUtil::map_broadcast_index(i, dst_shape, src_shape);
-            dst_data[i] = src_data[src_idx];
-        }
-        #endif
+    // Check if valid broadcast
+    auto bcast = broadcast::shape(src.shape().dims(), target.dims());
+    if (bcast.empty() || bcast != target.dims()) {
+        LOG_ERROR("Cannot broadcast {} to {}", src.shape().str(), target.str());
+        return {};
     }
-}
 
-// Bridge to CUDA kernels
-void BroadcastExpander::launch_broadcast_kernel(const Tensor& src, Tensor& dst) {
-    if (src.dtype() == DataType::Bool) {
-        tensor_ops::launch_broadcast_bool(
-            src.ptr<unsigned char>(), dst.ptr<unsigned char>(),
-            src.shape().dims().data(), dst.shape().dims().data(),
-            src.shape().rank(), dst.shape().rank(),
-            dst.numel(), 0);
+    auto result = Tensor::empty(target, src.device(), src.dtype());
+
+    if (src.device() == Device::CUDA) {
+        if (src.dtype() == DataType::Bool) {
+            tensor_ops::launch_broadcast_bool(
+                src.ptr<unsigned char>(), result.ptr<unsigned char>(),
+                src.shape().dims().data(), target.dims().data(),
+                src.shape().rank(), target.rank(),
+                result.numel(), 0);
+        } else {
+            tensor_ops::launch_broadcast(
+                src.ptr<float>(), result.ptr<float>(),
+                src.shape().dims().data(), target.dims().data(),
+                src.shape().rank(), target.rank(),
+                result.numel(), 0);
+        }
+        cudaDeviceSynchronize();
     } else {
-        tensor_ops::launch_broadcast(
-            src.ptr<float>(), dst.ptr<float>(),
-            src.shape().dims().data(), dst.shape().dims().data(),
-            src.shape().rank(), dst.shape().rank(),
-            dst.numel(), 0);
+        // CPU implementation
+        size_t total = result.numel();
+        auto src_shape = src.shape().dims();
+        auto dst_shape = target.dims();
+
+        if (src.dtype() == DataType::Bool) {
+            const auto* src_data = src.ptr<unsigned char>();
+            auto* dst_data = result.ptr<unsigned char>();
+
+            #pragma omp parallel for if(total > 1024)
+            for (size_t i = 0; i < total; ++i) {
+                dst_data[i] = src_data[broadcast::index(i, dst_shape, src_shape)];
+            }
+        } else {
+            const float* src_data = src.ptr<float>();
+            float* dst_data = result.ptr<float>();
+
+            #pragma omp parallel for if(total > 1024)
+            for (size_t i = 0; i < total; ++i) {
+                dst_data[i] = src_data[broadcast::index(i, dst_shape, src_shape)];
+            }
+        }
     }
-    cudaDeviceSynchronize();
+
+    return result;
 }
 
 } // namespace gs

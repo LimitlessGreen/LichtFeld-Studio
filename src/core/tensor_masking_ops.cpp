@@ -18,183 +18,7 @@
 
 namespace gs {
 
-// ============= Unified Comparison Template =============
-template<typename Op>
-static Tensor compare_tensors(const Tensor& a, const Tensor& b, Op op,
-                              void(*cuda_fn)(const float*, const float*, unsigned char*,
-                                           const size_t*, const size_t*, const size_t*,
-                                           size_t, size_t, size_t, size_t, cudaStream_t)) {
-    if (!a.is_valid() || !b.is_valid() || a.device() != b.device()) return {};
-
-    auto out_shape = BroadcastHelper::broadcast_shape(a.shape(), b.shape());
-    if (!out_shape.is_initialized()) return {};
-
-    auto result = Tensor::empty(out_shape, a.device(), DataType::Bool);
-
-    if (a.device() == Device::CUDA) {
-        cuda_fn(a.template ptr<float>(), b.template ptr<float>(),
-                result.template ptr<unsigned char>(),
-                a.shape().dims().data(), b.shape().dims().data(),
-                out_shape.dims().data(), a.shape().rank(),
-                b.shape().rank(), out_shape.rank(),
-                out_shape.elements(), 0);
-        cudaDeviceSynchronize();
-    } else {
-        // Manual broadcasting for mixed types (float -> unsigned char)
-        const float* a_data = a.template ptr<float>();
-        const float* b_data = b.template ptr<float>();
-        unsigned char* c_data = result.template ptr<unsigned char>();
-
-        size_t total = out_shape.elements();
-        auto a_shape = a.shape().dims();
-        auto b_shape = b.shape().dims();
-        auto c_shape = out_shape.dims();
-
-        if (a_shape == b_shape) {
-            // Fast path - no broadcasting needed
-            std::transform(std::execution::par_unseq,
-                          a_data, a_data + total, b_data, c_data,
-                          [op](float x, float y) -> unsigned char {
-                              return op(x, y) ? 1 : 0;
-                          });
-        } else {
-            // Broadcasting needed
-            #ifdef __cpp_lib_parallel_algorithm
-            std::for_each(std::execution::par_unseq,
-                         std::views::iota(0uz, total).begin(),
-                         std::views::iota(0uz, total).end(),
-                         [&](size_t i) {
-                size_t a_idx = BroadcastUtil::map_broadcast_index(i, c_shape, a_shape);
-                size_t b_idx = BroadcastUtil::map_broadcast_index(i, c_shape, b_shape);
-                c_data[i] = op(a_data[a_idx], b_data[b_idx]) ? 1 : 0;
-            });
-            #else
-            for (size_t i = 0; i < total; ++i) {
-                size_t a_idx = BroadcastUtil::map_broadcast_index(i, c_shape, a_shape);
-                size_t b_idx = BroadcastUtil::map_broadcast_index(i, c_shape, b_shape);
-                c_data[i] = op(a_data[a_idx], b_data[b_idx]) ? 1 : 0;
-            }
-            #endif
-        }
-    }
-    return result;
-}
-
-template<typename Op>
-static Tensor compare_scalar(const Tensor& tensor, float scalar, Op op,
-                            void(*cuda_fn)(const float*, float, unsigned char*, size_t, cudaStream_t)) {
-    if (!tensor.is_valid()) return {};
-
-    auto result = Tensor::empty(tensor.shape(), tensor.device(), DataType::Bool);
-
-    if (tensor.device() == Device::CUDA) {
-        cuda_fn(tensor.template ptr<float>(), scalar, result.template ptr<unsigned char>(),
-                tensor.numel(), 0);
-        cudaDeviceSynchronize();
-    } else {
-        std::transform(std::execution::par_unseq,
-                      tensor.template ptr<float>(),
-                      tensor.template ptr<float>() + tensor.numel(),
-                      result.template ptr<unsigned char>(),
-                      [op, scalar](float x) -> unsigned char {
-                          return op(x, scalar) ? 1 : 0;
-                      });
-    }
-    return result;
-}
-
-// ============= Comparison Operations (10 lines each instead of 20+) =============
-Tensor Tensor::eq(const Tensor& o) const {
-    return compare_tensors(*this, o, std::equal_to<float>{},
-                          tensor_ops::launch_compare_eq);
-}
-
-Tensor Tensor::eq(float v) const {
-    return compare_scalar(*this, v, std::equal_to<float>{},
-                          tensor_ops::launch_compare_scalar_eq);
-}
-
-Tensor Tensor::lt(const Tensor& o) const {
-    return compare_tensors(*this, o, std::less<float>{},
-                          tensor_ops::launch_compare_lt);
-}
-
-Tensor Tensor::lt(float v) const {
-    return compare_scalar(*this, v, std::less<float>{},
-                          tensor_ops::launch_compare_scalar_lt);
-}
-
-Tensor Tensor::gt(const Tensor& o) const {
-    return compare_tensors(*this, o, std::greater<float>{},
-                          tensor_ops::launch_compare_gt);
-}
-
-Tensor Tensor::gt(float v) const {
-    return compare_scalar(*this, v, std::greater<float>{},
-                          tensor_ops::launch_compare_scalar_gt);
-}
-
-// Derived operations using logical_not
-Tensor Tensor::ne(const Tensor& o) const { return eq(o).logical_not(); }
-Tensor Tensor::ne(float v) const { return eq(v).logical_not(); }
-Tensor Tensor::le(const Tensor& o) const { return gt(o).logical_not(); }
-Tensor Tensor::le(float v) const { return gt(v).logical_not(); }
-Tensor Tensor::ge(const Tensor& o) const { return lt(o).logical_not(); }
-Tensor Tensor::ge(float v) const { return lt(v).logical_not(); }
-
-// ============= Logical Operations - Unified Template =============
-template<typename Op>
-static Tensor logical_impl(const Tensor& a, const Tensor& b, Op op,
-                          void(*cuda_fn)(const unsigned char*, const unsigned char*, unsigned char*,
-                                       const size_t*, const size_t*, const size_t*,
-                                       size_t, size_t, size_t, size_t, cudaStream_t)) {
-    if (!a.is_valid() || !b.is_valid() ||
-        a.dtype() != DataType::Bool || b.dtype() != DataType::Bool ||
-        a.device() != b.device()) return {};
-
-    auto out_shape = BroadcastHelper::broadcast_shape(a.shape(), b.shape());
-    if (!out_shape.is_initialized()) return {};
-
-    auto result = Tensor::empty(out_shape, a.device(), DataType::Bool);
-
-    if (a.device() == Device::CUDA) {
-        cuda_fn(a.template ptr<unsigned char>(), b.template ptr<unsigned char>(),
-                result.template ptr<unsigned char>(),
-                a.shape().dims().data(), b.shape().dims().data(),
-                out_shape.dims().data(), a.shape().rank(),
-                b.shape().rank(), out_shape.rank(),
-                out_shape.elements(), 0);
-        cudaDeviceSynchronize();
-    } else {
-        broadcast_op_cpu(a.template ptr<unsigned char>(), b.template ptr<unsigned char>(),
-                        result.template ptr<unsigned char>(),
-                        a.shape().dims(), b.shape().dims(),
-                        out_shape.dims(), op);
-    }
-    return result;
-}
-
-Tensor Tensor::logical_and(const Tensor& o) const {
-    auto op = [](unsigned char a, unsigned char b) -> unsigned char {
-        return (a && b) ? 1 : 0;
-    };
-    return logical_impl(*this, o, op, tensor_ops::launch_logical_and);
-}
-
-Tensor Tensor::logical_or(const Tensor& o) const {
-    auto op = [](unsigned char a, unsigned char b) -> unsigned char {
-        return (a || b) ? 1 : 0;
-    };
-    return logical_impl(*this, o, op, tensor_ops::launch_logical_or);
-}
-
-Tensor Tensor::logical_xor(const Tensor& o) const {
-    auto op = [](unsigned char a, unsigned char b) -> unsigned char {
-        return ((a != 0) != (b != 0)) ? 1 : 0;
-    };
-    return logical_impl(*this, o, op, tensor_ops::launch_logical_xor);
-}
-
+// Logical not is a special case - not a binary operation
 Tensor Tensor::logical_not() const {
     if (!is_valid() || dtype_ != DataType::Bool) return {};
 
@@ -213,7 +37,7 @@ Tensor Tensor::logical_not() const {
     return result;
 }
 
-// ============= Masking Operations =============
+// Masking Operations
 Tensor Tensor::masked_select(const Tensor& mask) const {
     if (!is_valid() || !mask.is_valid() || mask.dtype() != DataType::Bool ||
         shape_ != mask.shape() || device_ != mask.device()) return {};
@@ -232,12 +56,12 @@ Tensor Tensor::masked_select(const Tensor& mask) const {
         const unsigned char* msk = mask.ptr<unsigned char>();
         float* dst = result.ptr<float>();
 
-        // Use parallel scan for CPU too
-        std::copy_if(std::execution::par_unseq,
-                    std::views::iota(0uz, numel()).begin(),
-                    std::views::iota(0uz, numel()).end(),
-                    dst,
-                    [src, msk](size_t i) { return msk[i] ? src[i] : 0.0f; });
+        size_t dst_idx = 0;
+        for (size_t i = 0; i < numel(); ++i) {
+            if (msk[i]) {
+                dst[dst_idx++] = src[i];
+            }
+        }
     }
     return result;
 }
@@ -279,10 +103,14 @@ Tensor Tensor::where(const Tensor& cond, const Tensor& x, const Tensor& y) {
         cond.dtype() != DataType::Bool || x.device() != y.device() ||
         x.device() != cond.device() || x.dtype() != y.dtype()) return {};
 
-    auto shape = BroadcastHelper::broadcast_shape(
-        BroadcastHelper::broadcast_shape(x.shape(), y.shape()), cond.shape());
-    if (!shape.is_initialized()) return {};
+    // Get broadcast shape for all three tensors
+    auto xy_shape = broadcast::shape(x.shape().dims(), y.shape().dims());
+    if (xy_shape.empty()) return {};
 
+    auto final_shape = broadcast::shape(xy_shape, cond.shape().dims());
+    if (final_shape.empty()) return {};
+
+    TensorShape shape(final_shape);
     auto result = empty(shape, x.device(), x.dtype());
 
     if (x.device() == Device::CUDA) {
@@ -295,83 +123,82 @@ Tensor Tensor::where(const Tensor& cond, const Tensor& x, const Tensor& y) {
                                shape.elements(), 0);
         cudaDeviceSynchronize();
     } else {
-        // Use broadcasting infrastructure
-        BroadcastIterator c_it(cond.shape(), shape);
-        BroadcastIterator x_it(x.shape(), shape);
-        BroadcastIterator y_it(y.shape(), shape);
-
+        // Simple CPU implementation using broadcast::index
         const unsigned char* c_data = cond.ptr<unsigned char>();
         const float* x_data = x.ptr<float>();
         const float* y_data = y.ptr<float>();
         float* r_data = result.ptr<float>();
 
-        for (size_t i = 0; !c_it.done(); ++i, c_it.next(), x_it.next(), y_it.next()) {
-            r_data[i] = c_data[c_it.index()] ? x_data[x_it.index()] : y_data[y_it.index()];
+        auto c_shape = cond.shape().dims();
+        auto x_shape = x.shape().dims();
+        auto y_shape = y.shape().dims();
+        auto r_shape = shape.dims();
+
+        #pragma omp parallel for if(shape.elements() > 1024)
+        for (size_t i = 0; i < shape.elements(); ++i) {
+            size_t c_idx = broadcast::index(i, r_shape, c_shape);
+            size_t x_idx = broadcast::index(i, r_shape, x_shape);
+            size_t y_idx = broadcast::index(i, r_shape, y_shape);
+            r_data[i] = c_data[c_idx] ? x_data[x_idx] : y_data[y_idx];
         }
     }
     return result;
 }
 
-// ============= Indexing Operations - Simplified with Templates =============
-template<typename IndexOp>
-static Tensor index_op_impl(const Tensor& t, int dim, const Tensor& idx,
-                            BoundaryMode mode, IndexOp op) {
-    if (!t.is_valid() || !idx.is_valid() || idx.ndim() != 1) return {};
-
-    dim = (dim < 0) ? t.shape().rank() + dim : dim;
-    if (dim < 0 || dim >= static_cast<int>(t.shape().rank())) return {};
-
-    return op(t, dim, idx, mode);
+// Indexing Operations
+Tensor Tensor::index_select(int dim, const Tensor& indices) const {
+    return index_select(dim, indices, BoundaryMode::Assert);
 }
 
 Tensor Tensor::index_select(int dim, const Tensor& indices, BoundaryMode mode) const {
-    return index_op_impl(*this, dim, indices, mode,
-        [](const Tensor& t, int d, const Tensor& idx, BoundaryMode m) {
-            auto dims = t.shape().dims();
-            dims[d] = idx.numel();
-            auto result = empty(TensorShape(dims), t.device(), t.dtype());
+    if (!is_valid() || !indices.is_valid() || indices.ndim() != 1) return {};
 
-            if (t.device() == Device::CUDA) {
-                tensor_ops::launch_index_select(t.ptr<float>(), idx.ptr<int>(),
-                    result.ptr<float>(), t.shape().dims().data(),
-                    t.shape().rank(), d, idx.numel(), static_cast<int>(m), 0);
-                cudaDeviceSynchronize();
-            } else {
-                // Simplified CPU implementation using ranges
-                size_t outer = 1, inner = 1;
-                for (int i = 0; i < d; ++i) outer *= t.shape()[i];
-                for (size_t i = d + 1; i < t.shape().rank(); ++i) inner *= t.shape()[i];
+    dim = (dim < 0) ? shape_.rank() + dim : dim;
+    if (dim < 0 || dim >= static_cast<int>(shape_.rank())) return {};
 
-                const float* src = t.ptr<float>();
-                float* dst = result.ptr<float>();
-                const int* indices = idx.ptr<int>();
+    auto dims = shape_.dims();
+    dims[dim] = indices.numel();
+    auto result = empty(TensorShape(dims), device_, dtype_);
 
-                auto process_idx = [&](int sel) -> int {
-                    if (m == BoundaryMode::Clamp) {
-                        return std::clamp(sel, 0, static_cast<int>(t.shape()[d]) - 1);
-                    } else if (m == BoundaryMode::Wrap) {
-                        return ((sel % static_cast<int>(t.shape()[d])) + t.shape()[d]) % t.shape()[d];
-                    }
-                    return sel;
-                };
+    if (device_ == Device::CUDA) {
+        tensor_ops::launch_index_select(ptr<float>(), indices.ptr<int>(),
+            result.ptr<float>(), shape_.dims().data(),
+            shape_.rank(), dim, indices.numel(), static_cast<int>(mode), 0);
+        cudaDeviceSynchronize();
+    } else {
+        size_t outer = 1, inner = 1;
+        for (int i = 0; i < dim; ++i) outer *= shape_[i];
+        for (size_t i = dim + 1; i < shape_.rank(); ++i) inner *= shape_[i];
 
-                for (size_t o = 0; o < outer; ++o) {
-                    for (size_t i = 0; i < idx.numel(); ++i) {
-                        int sel = process_idx(indices[i]);
-                        if (sel >= 0 && sel < static_cast<int>(t.shape()[d])) {
-                            std::copy_n(src + (o * t.shape()[d] + sel) * inner,
-                                       inner,
-                                       dst + (o * idx.numel() + i) * inner);
-                        }
-                    }
+        const float* src = ptr<float>();
+        float* dst = result.ptr<float>();
+        const int* idx = indices.ptr<int>();
+
+        auto process_idx = [&](int sel) -> int {
+            if (mode == BoundaryMode::Clamp) {
+                return std::clamp(sel, 0, static_cast<int>(shape_[dim]) - 1);
+            } else if (mode == BoundaryMode::Wrap) {
+                return ((sel % static_cast<int>(shape_[dim])) + shape_[dim]) % shape_[dim];
+            }
+            return sel;
+        };
+
+        for (size_t o = 0; o < outer; ++o) {
+            for (size_t i = 0; i < indices.numel(); ++i) {
+                int sel = process_idx(idx[i]);
+                if (sel >= 0 && sel < static_cast<int>(shape_[dim])) {
+                    std::copy_n(src + (o * shape_[dim] + sel) * inner,
+                               inner,
+                               dst + (o * indices.numel() + i) * inner);
                 }
             }
-            return result;
-        });
+        }
+    }
+    return result;
 }
 
-Tensor Tensor::index_select(int dim, const Tensor& indices) const {
-    return index_select(dim, indices, BoundaryMode::Assert);
+Tensor Tensor::gather(int dim, const Tensor& indices) const {
+    return gather(dim, indices, BoundaryMode::Assert);
 }
 
 Tensor Tensor::gather(int dim, const Tensor& indices, BoundaryMode mode) const {
@@ -380,7 +207,6 @@ Tensor Tensor::gather(int dim, const Tensor& indices, BoundaryMode mode) const {
     dim = (dim < 0) ? shape_.rank() + dim : dim;
     if (dim < 0 || dim >= static_cast<int>(shape_.rank())) return {};
 
-    // The result shape should match indices shape
     auto result = empty(indices.shape(), device_, dtype_);
 
     if (device_ == Device::CUDA) {
@@ -390,14 +216,9 @@ Tensor Tensor::gather(int dim, const Tensor& indices, BoundaryMode mode) const {
             indices.numel(), static_cast<int>(mode), 0);
         cudaDeviceSynchronize();
     } else {
-        // CPU implementation for gather
         const float* src = ptr<float>();
         float* dst = result.ptr<float>();
         const int* idx_data = indices.ptr<int>();
-
-        // For the general gather operation:
-        // The output shape matches the indices shape
-        // For each position in output/indices, we gather from input along dim
 
         // Calculate strides for all tensors
         std::vector<size_t> src_strides(shape_.rank());
@@ -436,8 +257,6 @@ Tensor Tensor::gather(int dim, const Tensor& indices, BoundaryMode mode) const {
             }
 
             // Build source coordinates
-            // Use output coordinates for all dimensions except dim
-            // For dim, use the gathered index
             size_t src_idx = 0;
             for (size_t d = 0; d < shape_.rank(); ++d) {
                 size_t coord;
@@ -468,10 +287,6 @@ Tensor Tensor::gather(int dim, const Tensor& indices, BoundaryMode mode) const {
     return result;
 }
 
-Tensor Tensor::gather(int dim, const Tensor& indices) const {
-    return gather(dim, indices, BoundaryMode::Assert);
-}
-
 Tensor Tensor::take(const Tensor& indices) const {
     if (!is_valid() || !indices.is_valid()) return {};
 
@@ -498,7 +313,7 @@ Tensor Tensor::take(const Tensor& indices) const {
     return result;
 }
 
-// ============= Scatter Operations - Simplified =============
+// Scatter Operations
 template<typename Op>
 static Tensor& scatter_impl(Tensor& t, int dim, const Tensor& idx,
                            const Tensor& src, Op op, int mode) {
@@ -610,7 +425,7 @@ Tensor& Tensor::index_put_(const std::vector<Tensor>& indices, const Tensor& val
     return (indices.size() == 1) ? index_put_(indices[0], vals) : *this;
 }
 
-// ============= Nonzero & Count =============
+// Nonzero & Count
 size_t Tensor::count_nonzero() const {
     if (!is_valid() || numel() == 0) return 0;
 
@@ -657,14 +472,16 @@ Tensor Tensor::nonzero() const {
 
         if (dtype_ == DataType::Bool) {
             const unsigned char* data = ptr<unsigned char>();
-            auto nonzero_indices = std::views::iota(0uz, numel())
-                                 | std::views::filter([data](size_t i) { return data[i]; });
-            std::ranges::copy(nonzero_indices, indices);
+            size_t idx = 0;
+            for (size_t i = 0; i < numel(); ++i) {
+                if (data[i]) indices[idx++] = i;
+            }
         } else {
             const float* data = ptr<float>();
-            auto nonzero_indices = std::views::iota(0uz, numel())
-                                 | std::views::filter([data](size_t i) { return data[i] != 0.0f; });
-            std::ranges::copy(nonzero_indices, indices);
+            size_t idx = 0;
+            for (size_t i = 0; i < numel(); ++i) {
+                if (data[i] != 0.0f) indices[idx++] = i;
+            }
         }
     }
     return result;
@@ -684,7 +501,7 @@ bool Tensor::all() const {
     return dtype_ == DataType::Bool && count_nonzero() == numel();
 }
 
-// ============= Pythonic Indexing =============
+// Pythonic Indexing
 TensorIndexer Tensor::operator[](const Tensor& idx) {
     std::vector<Tensor> indices;
     indices.reserve(1);
@@ -704,7 +521,7 @@ MaskedTensorProxy Tensor::operator[](const Tensor& mask) const {
     return MaskedTensorProxy(this, mask.clone());
 }
 
-// ============= Element Access =============
+// Element Access
 float& Tensor::at(std::initializer_list<size_t> indices) {
     static float dummy = 0;
     if (dtype_ != DataType::Float32 || indices.size() != shape_.rank()) return dummy;
@@ -742,7 +559,7 @@ float Tensor::at(std::initializer_list<size_t> indices) const {
     return ptr<float>()[idx];
 }
 
-// ============= Boolean Operations =============
+// Boolean Operations
 Tensor Tensor::full_bool(TensorShape shape, bool value, Device device) {
     auto t = empty(shape, device, DataType::Bool);
     if (t.is_valid() && t.numel() > 0) {
@@ -764,7 +581,7 @@ Tensor Tensor::ones_bool(TensorShape shape, Device device) {
     return full_bool(shape, true, device);
 }
 
-// ============= From Vector =============
+// From Vector
 template<typename T>
 static Tensor from_vector_impl(const std::vector<T>& data, TensorShape shape,
                                Device device, DataType dtype) {
@@ -798,7 +615,7 @@ Tensor Tensor::from_vector(const std::vector<bool>& data, TensorShape shape, Dev
     return from_vector_impl(bytes, shape, device, DataType::Bool);
 }
 
-// ============= Conversion =============
+// Conversion
 std::vector<int> Tensor::to_vector_int() const {
     if (dtype_ != DataType::Int32 || !is_valid() || numel() == 0) return {};
 
@@ -865,7 +682,7 @@ bool Tensor::get_bool(std::initializer_list<size_t> indices) const {
     return ptr<unsigned char>()[idx] != 0;
 }
 
-// ============= Proxy Implementations =============
+// Proxy Implementations
 void MaskedTensorProxy::operator=(float value) {
     const_cast<Tensor*>(tensor_)->masked_fill_(mask_, value);
 }

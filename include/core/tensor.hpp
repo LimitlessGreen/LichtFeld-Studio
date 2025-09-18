@@ -7,17 +7,17 @@
 #include <atomic>
 #include <chrono>
 #include <cuda_runtime.h>
-#include <expected>
+#include <optional>
 #include <functional>
 #include <initializer_list>
 #include <memory>
-#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
 #include <vector>
 #include <concepts>
 #include <type_traits>
+#include <utility>
 
 namespace gs {
 
@@ -63,6 +63,51 @@ namespace gs {
         return device == Device::CPU ? "cpu" : "cuda";
     }
 
+    // Type promotion for mixed dtype operations
+    inline DataType promote_types(DataType a, DataType b) {
+        if (a == b) return a;
+
+        // Promotion hierarchy: Bool -> Int32 -> Float32
+        // Bool -> Float32 is also allowed
+
+        // Handle Bool promotion
+        if (a == DataType::Bool) {
+            if (b == DataType::Float32 || b == DataType::Float16) return b;
+            if (b == DataType::Int32 || b == DataType::Int64) return b;
+            return DataType::Float32; // Default
+        }
+        if (b == DataType::Bool) {
+            if (a == DataType::Float32 || a == DataType::Float16) return a;
+            if (a == DataType::Int32 || a == DataType::Int64) return a;
+            return DataType::Float32; // Default
+        }
+
+        // Int -> Float promotion
+        if ((a == DataType::Int32 || a == DataType::Int64) &&
+            (b == DataType::Float32 || b == DataType::Float16)) {
+            return (b == DataType::Float16) ? DataType::Float16 : DataType::Float32;
+        }
+        if ((b == DataType::Int32 || b == DataType::Int64) &&
+            (a == DataType::Float32 || a == DataType::Float16)) {
+            return (a == DataType::Float16) ? DataType::Float16 : DataType::Float32;
+        }
+
+        // Int32 -> Int64 promotion
+        if ((a == DataType::Int32 && b == DataType::Int64) ||
+            (a == DataType::Int64 && b == DataType::Int32)) {
+            return DataType::Int64;
+        }
+
+        // Float16 -> Float32 promotion
+        if ((a == DataType::Float16 && b == DataType::Float32) ||
+            (a == DataType::Float32 && b == DataType::Float16)) {
+            return DataType::Float32;
+        }
+
+        // Default to Float32 for safety
+        return DataType::Float32;
+    }
+
     enum class BoundaryMode : uint8_t {
         Assert = 0,
         Clamp = 1,
@@ -77,13 +122,39 @@ namespace gs {
         Min = 4
     };
 
-    // Binary operation types for dispatch
+    // Comprehensive Binary operation types for unified dispatch
     enum class BinaryOp : uint8_t {
+        // Arithmetic
         Add = 0,
         Sub = 1,
         Mul = 2,
         Div = 3,
-        Pow = 4
+        Pow = 4,
+        Mod = 5,
+
+        // Comparison
+        Equal = 6,
+        NotEqual = 7,
+        Less = 8,
+        LessEqual = 9,
+        Greater = 10,
+        GreaterEqual = 11,
+
+        // Logical (for bool tensors)
+        LogicalAnd = 12,
+        LogicalOr = 13,
+        LogicalXor = 14,
+
+        // Min/Max
+        Maximum = 15,
+        Minimum = 16,
+
+        // Bitwise (for integer tensors)
+        BitwiseAnd = 17,
+        BitwiseOr = 18,
+        BitwiseXor = 19,
+        LeftShift = 20,
+        RightShift = 21
     };
 
     class TensorShape {
@@ -174,6 +245,12 @@ namespace gs {
 
         template<typename T>
         Tensor& binary_op_inplace_impl(const T& other, BinaryOp op);
+
+        // Broadcasting and type promotion helper
+        std::pair<Tensor, Tensor> _broadcasted(const Tensor& other, bool match_dtype = true) const;
+
+        template<typename T>
+        std::pair<Tensor, Tensor> _broadcasted(const T& scalar) const;
 
     public:
         // ============= Constructors & Destructor =============
@@ -294,7 +371,7 @@ namespace gs {
         TensorShape broadcast_shape(const TensorShape& other) const;
 
         // ============= Unified Arithmetic Operations =============
-        // Using template + concepts approach for cleaner interface
+        // Arithmetic operations
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor add(const T& other) const { return binary_op_impl(other, BinaryOp::Add); }
 
@@ -310,7 +387,37 @@ namespace gs {
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor pow(const T& other) const { return binary_op_impl(other, BinaryOp::Pow); }
 
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor mod(const T& other) const { return binary_op_impl(other, BinaryOp::Mod); }
+
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor maximum(const T& other) const { return binary_op_impl(other, BinaryOp::Maximum); }
+
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor minimum(const T& other) const { return binary_op_impl(other, BinaryOp::Minimum); }
+
         Tensor neg() const { return mul(-1.0f); }
+
+        // Comparison operations - now use unified implementation
+        Tensor eq(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Equal); }
+        Tensor ne(const Tensor& other) const { return binary_op_impl(other, BinaryOp::NotEqual); }
+        Tensor lt(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Less); }
+        Tensor le(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LessEqual); }
+        Tensor gt(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Greater); }
+        Tensor ge(const Tensor& other) const { return binary_op_impl(other, BinaryOp::GreaterEqual); }
+
+        Tensor eq(float value) const { return binary_op_impl(value, BinaryOp::Equal); }
+        Tensor ne(float value) const { return binary_op_impl(value, BinaryOp::NotEqual); }
+        Tensor lt(float value) const { return binary_op_impl(value, BinaryOp::Less); }
+        Tensor le(float value) const { return binary_op_impl(value, BinaryOp::LessEqual); }
+        Tensor gt(float value) const { return binary_op_impl(value, BinaryOp::Greater); }
+        Tensor ge(float value) const { return binary_op_impl(value, BinaryOp::GreaterEqual); }
+
+        // Logical operations for bool tensors
+        Tensor logical_and(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LogicalAnd); }
+        Tensor logical_or(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LogicalOr); }
+        Tensor logical_xor(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LogicalXor); }
+        Tensor logical_not() const;
 
         // In-place operations
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
@@ -333,26 +440,6 @@ namespace gs {
 
         static Tensor cat(const std::vector<Tensor>& tensors, int dim = 0);
         Tensor cat(const Tensor& other, int dim = 0) const;
-
-        // ============= Comparison Operations =============
-        Tensor eq(const Tensor& other) const;
-        Tensor ne(const Tensor& other) const;
-        Tensor lt(const Tensor& other) const;
-        Tensor le(const Tensor& other) const;
-        Tensor gt(const Tensor& other) const;
-        Tensor ge(const Tensor& other) const;
-
-        Tensor eq(float value) const;
-        Tensor ne(float value) const;
-        Tensor lt(float value) const;
-        Tensor le(float value) const;
-        Tensor gt(float value) const;
-        Tensor ge(float value) const;
-
-        Tensor logical_and(const Tensor& other) const;
-        Tensor logical_or(const Tensor& other) const;
-        Tensor logical_not() const;
-        Tensor logical_xor(const Tensor& other) const;
 
         // ============= Masking Operations =============
         Tensor masked_select(const Tensor& mask) const;
@@ -390,7 +477,7 @@ namespace gs {
         float& at(std::initializer_list<size_t> indices);
         float at(std::initializer_list<size_t> indices) const;
 
-        // Operator overloads - now use unified implementation
+        // Operator overloads - use unified implementation
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor operator+(const T& other) const { return add(other); }
 
@@ -402,6 +489,9 @@ namespace gs {
 
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor operator/(const T& other) const { return div(other); }
+
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor operator%(const T& other) const { return mod(other); }
 
         Tensor operator-() const { return neg(); }
 
@@ -430,7 +520,8 @@ namespace gs {
         Tensor& uniform_(float low = 0.0f, float high = 1.0f);
         Tensor& normal_(float mean = 0.0f, float std = 1.0f);
 
-        std::expected<Tensor, std::string> try_reshape(TensorShape shape) const;
+        // Changed from std::expected to std::optional for CUDA compatibility
+        std::optional<Tensor> try_reshape(TensorShape shape) const;
 
         static std::vector<Tensor> split_batch(const Tensor& tensor, size_t batch_size);
         static void enable_profiling(bool enable) { profiling_enabled_ = enable; }
@@ -667,8 +758,9 @@ namespace gs {
         template <typename... Funcs>
         auto pipe(Funcs... funcs) {
             return [=](const Tensor& input) -> Tensor {
-                Tensor result = input;
-                ((result = funcs(result)), ...);
+                // Use a temporary to avoid copying - work with rvalue
+                Tensor result = input.clone();  // Start with a copy
+                ((result = funcs(std::move(result))), ...);  // Use move semantics
                 return result;
             };
         }

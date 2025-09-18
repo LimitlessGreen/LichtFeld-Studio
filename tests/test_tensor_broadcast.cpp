@@ -64,35 +64,63 @@ protected:
 // ============= Basic Broadcasting Tests =============
 
 TEST_F(TensorBroadcastTest, CanBroadcast) {
-    // Compatible shapes
-    EXPECT_TRUE(BroadcastHelper::can_broadcast({3, 4}, {3, 4}));       // Same shape
-    EXPECT_TRUE(BroadcastHelper::can_broadcast({3, 1}, {3, 4}));       // Broadcast dim 1
-    EXPECT_TRUE(BroadcastHelper::can_broadcast({1, 4}, {3, 4}));       // Broadcast dim 0
-    EXPECT_TRUE(BroadcastHelper::can_broadcast({1}, {3, 4}));          // Broadcast scalar
-    EXPECT_TRUE(BroadcastHelper::can_broadcast({4}, {3, 4}));          // Broadcast 1D to 2D
-    EXPECT_TRUE(BroadcastHelper::can_broadcast({3, 1, 5}, {3, 4, 5})); // 3D broadcast
+    // Test can_broadcast_to method
+    auto a = Tensor::empty({3, 4});
+    EXPECT_TRUE(a.can_broadcast_to({3, 4}));       // Same shape
+
+    auto b = Tensor::empty({3, 1});
+    EXPECT_TRUE(b.can_broadcast_to({3, 4}));       // Broadcast dim 1
+
+    auto c = Tensor::empty({1, 4});
+    EXPECT_TRUE(c.can_broadcast_to({3, 4}));       // Broadcast dim 0
+
+    auto d = Tensor::empty({1});
+    EXPECT_TRUE(d.can_broadcast_to({3, 4}));       // Broadcast scalar
+
+    auto e = Tensor::empty({4});
+    EXPECT_TRUE(e.can_broadcast_to({3, 4}));       // Broadcast 1D to 2D
+
+    auto f = Tensor::empty({3, 1, 5});
+    EXPECT_TRUE(f.can_broadcast_to({3, 4, 5}));    // 3D broadcast
 
     // Incompatible shapes
-    EXPECT_FALSE(BroadcastHelper::can_broadcast({3, 4}, {3, 5})); // Mismatch in dim 1
-    EXPECT_FALSE(BroadcastHelper::can_broadcast({3, 4}, {4, 4})); // Mismatch in dim 0
-    EXPECT_FALSE(BroadcastHelper::can_broadcast({3}, {4}));       // Different 1D sizes
+    auto g = Tensor::empty({3, 4});
+    EXPECT_FALSE(g.can_broadcast_to({3, 5}));      // Mismatch in dim 1
+    EXPECT_FALSE(g.can_broadcast_to({4, 4}));      // Mismatch in dim 0
+
+    auto h = Tensor::empty({3});
+    EXPECT_FALSE(h.can_broadcast_to({4}));         // Different 1D sizes
 }
 
 TEST_F(TensorBroadcastTest, BroadcastShape) {
-    // Test broadcast shape computation
-    auto check_broadcast_shape = [](TensorShape a, TensorShape b, TensorShape expected) {
-        auto result = BroadcastHelper::broadcast_shape(a, b);
-        return result == expected;
-    };
+    // Test broadcast_shape method
+    auto a = Tensor::empty({3, 4});
+    auto b = Tensor::empty({3, 4});
+    EXPECT_EQ(a.broadcast_shape(b.shape()), TensorShape({3, 4}));
 
-    EXPECT_TRUE(check_broadcast_shape({3, 4}, {3, 4}, {3, 4}));
-    EXPECT_TRUE(check_broadcast_shape({3, 1}, {3, 4}, {3, 4}));
-    EXPECT_TRUE(check_broadcast_shape({1, 4}, {3, 4}, {3, 4}));
-    EXPECT_TRUE(check_broadcast_shape({1}, {3, 4}, {3, 4}));
-    EXPECT_TRUE(check_broadcast_shape({4}, {3, 4}, {3, 4}));
-    EXPECT_TRUE(check_broadcast_shape({1, 1}, {3, 4}, {3, 4}));
-    EXPECT_TRUE(check_broadcast_shape({5, 1, 4}, {5, 3, 4}, {5, 3, 4}));
-    EXPECT_TRUE(check_broadcast_shape({1, 3, 1}, {5, 1, 4}, {5, 3, 4}));
+    auto c = Tensor::empty({3, 1});
+    auto d = Tensor::empty({3, 4});
+    EXPECT_EQ(c.broadcast_shape(d.shape()), TensorShape({3, 4}));
+
+    auto e = Tensor::empty({1, 4});
+    EXPECT_EQ(e.broadcast_shape(a.shape()), TensorShape({3, 4}));
+
+    auto f = Tensor::empty({1});
+    EXPECT_EQ(f.broadcast_shape(a.shape()), TensorShape({3, 4}));
+
+    auto g = Tensor::empty({4});
+    EXPECT_EQ(g.broadcast_shape(a.shape()), TensorShape({3, 4}));
+
+    auto h = Tensor::empty({1, 1});
+    EXPECT_EQ(h.broadcast_shape(a.shape()), TensorShape({3, 4}));
+
+    auto i = Tensor::empty({5, 1, 4});
+    auto j = Tensor::empty({5, 3, 4});
+    EXPECT_EQ(i.broadcast_shape(j.shape()), TensorShape({5, 3, 4}));
+
+    auto k = Tensor::empty({1, 3, 1});
+    auto l = Tensor::empty({5, 1, 4});
+    EXPECT_EQ(k.broadcast_shape(l.shape()), TensorShape({5, 3, 4}));
 }
 
 // ============= Scalar Broadcasting Tests =============
@@ -340,7 +368,7 @@ TEST_F(TensorBroadcastTest, BroadcastOnCPU) {
 
 TEST_F(TensorBroadcastTest, ExpandTensor) {
     auto tensor = Tensor::full({3, 1}, 2.0f, Device::CUDA);
-    auto expanded = BroadcastHelper::expand(tensor, {3, 4});
+    auto expanded = tensor.expand({3, 4});
 
     EXPECT_EQ(expanded.shape(), TensorShape({3, 4}));
 
@@ -350,9 +378,21 @@ TEST_F(TensorBroadcastTest, ExpandTensor) {
     }
 }
 
+TEST_F(TensorBroadcastTest, BroadcastToTensor) {
+    auto tensor = Tensor::full({3, 1}, 2.0f, Device::CUDA);
+    auto broadcasted = tensor.broadcast_to({3, 4});
+
+    EXPECT_EQ(broadcasted.shape(), TensorShape({3, 4}));
+
+    auto values = broadcasted.to_vector();
+    for (float val : values) {
+        EXPECT_FLOAT_EQ(val, 2.0f);
+    }
+}
+
 TEST_F(TensorBroadcastTest, ExpandMultipleDimensions) {
     auto tensor = Tensor::full({1, 3, 1}, 3.0f, Device::CUDA);
-    auto expanded = BroadcastHelper::expand(tensor, {2, 3, 4});
+    auto expanded = tensor.expand({2, 3, 4});
 
     EXPECT_EQ(expanded.shape(), TensorShape({2, 3, 4}));
 

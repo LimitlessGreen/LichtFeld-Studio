@@ -351,9 +351,14 @@ TEST_F(TensorAdvancedTest, ErrorHandling) {
     auto t3 = Tensor::ones({12}, Device::CUDA);
     auto reshaped = t3.try_reshape({5, 3}); // 15 != 12
     EXPECT_FALSE(reshaped.has_value());
-    if (!reshaped.has_value()) {
-        std::string error = reshaped.error();
-        EXPECT_FALSE(error.empty());
+
+    // Test valid reshape
+    auto valid_reshaped = t3.try_reshape({3, 4}); // 12 = 3*4
+    EXPECT_TRUE(valid_reshaped.has_value());
+    if (valid_reshaped.has_value()) {
+        EXPECT_EQ(valid_reshaped->shape()[0], 3);
+        EXPECT_EQ(valid_reshaped->shape()[1], 4);
+        EXPECT_EQ(valid_reshaped->numel(), 12);
     }
 
     // Test operations on invalid tensors
