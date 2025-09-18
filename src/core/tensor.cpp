@@ -263,7 +263,6 @@ namespace gs {
             }
 
             if (device_ == Device::CUDA) {
-                // Launch a simple conversion kernel
                 tensor_ops::launch_bool_to_float(ptr<unsigned char>(), result.ptr<float>(),
                                                 numel(), 0);
                 CHECK_CUDA(cudaDeviceSynchronize());
@@ -287,7 +286,6 @@ namespace gs {
             }
 
             if (device_ == Device::CUDA) {
-                // Launch a simple conversion kernel
                 tensor_ops::launch_float_to_bool(ptr<float>(), result.ptr<unsigned char>(),
                                                 numel(), 0);
                 CHECK_CUDA(cudaDeviceSynchronize());
@@ -307,7 +305,6 @@ namespace gs {
         return Tensor();
     }
 
-    // ============= In-place fill with zeros =============
     Tensor& Tensor::zero_() {
         if (!is_valid() || numel() == 0) {
             return *this;
@@ -322,338 +319,11 @@ namespace gs {
         return *this;
     }
 
-    // ============= Shape Operations =============
-    Tensor Tensor::reshape(TensorShape new_shape) const {
-        return view(new_shape);
-    }
-
-    Tensor Tensor::view(TensorShape new_shape) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        size_t new_elements = new_shape.elements();
-
-        // Check for -1 dimension (infer)
-        int infer_dim = -1;
-        size_t known_elements = 1;
-        for (size_t i = 0; i < new_shape.rank(); ++i) {
-            if (new_shape[i] == static_cast<size_t>(-1)) {
-                if (infer_dim != -1) {
-                    LOG_ERROR("Can only infer one dimension");
-                    return Tensor();
-                }
-                infer_dim = i;
-            } else {
-                known_elements *= new_shape[i];
-            }
-        }
-
-        // Infer dimension if needed
-        if (infer_dim != -1) {
-            if (shape_.elements() % known_elements != 0) {
-                LOG_ERROR("Cannot infer dimension: {} is not divisible by {}",
-                          shape_.elements(), known_elements);
-                return Tensor();
-            }
-            // Create mutable shape to modify
-            std::vector<size_t> dims = new_shape.dims();
-            dims[infer_dim] = shape_.elements() / known_elements;
-            new_shape = TensorShape(dims);
-            new_elements = new_shape.elements();
-        }
-
-        if (new_elements != shape_.elements()) {
-            LOG_ERROR("View shape {} has {} elements, but tensor has {} elements",
-                      new_shape.str(), new_elements, shape_.elements());
-            return Tensor();
-        }
-
-        Tensor t(data_, new_shape, device_, dtype_);
-        t.initialized_ = true;
-        return t;
-    }
-
-    Tensor Tensor::slice(size_t dim, size_t start, size_t end) const {
-        if (dim >= shape_.rank()) {
-            LOG_ERROR("Slice dimension {} out of range for rank {}", dim, shape_.rank());
-            return Tensor();
-        }
-
-        if (start >= end || end > shape_[dim]) {
-            LOG_ERROR("Invalid slice range [{}, {}) for dimension {} of size {}",
-                      start, end, dim, shape_[dim]);
-            return Tensor();
-        }
-
-        // Calculate new shape
-        std::vector<size_t> new_dims = shape_.dims();
-        new_dims[dim] = end - start;
-        TensorShape new_shape(new_dims);
-
-        // Calculate offset in elements
-        size_t offset = 0;
-        size_t stride = 1;
-
-        // Calculate the stride for the dimension we're slicing
-        for (size_t i = shape_.rank(); i > dim + 1; --i) {
-            stride *= shape_[i - 1];
-        }
-
-        // Calculate the offset to the start of the slice
-        offset = start * stride;
-
-        // Calculate offset in bytes
-        size_t byte_offset = offset * dtype_size(dtype_);
-        void* new_data = static_cast<char*>(data_) + byte_offset;
-
-        // Return a view into the sliced data
-        Tensor t(new_data, new_shape, device_, dtype_);
-        t.initialized_ = true;
-        return t;
-    }
-
-    Tensor Tensor::squeeze(int dim) const {
-        std::vector<size_t> new_dims;
-
-        if (dim == -1) {
-            // Squeeze all dimensions of size 1
-            for (size_t i = 0; i < shape_.rank(); ++i) {
-                if (shape_[i] != 1) {
-                    new_dims.push_back(shape_[i]);
-                }
-            }
-        } else {
-            // Handle negative indexing
-            if (dim < 0) {
-                dim = shape_.rank() + dim;
-            }
-
-            // Check bounds
-            if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
-                Tensor t(data_, shape_, device_, dtype_);
-                t.initialized_ = true;
-                return t;
-            }
-
-            // Only squeeze if dimension is 1
-            if (shape_[dim] != 1) {
-                Tensor t(data_, shape_, device_, dtype_);
-                t.initialized_ = true;
-                return t;
-            }
-
-            // Build new shape without the squeezed dimension
-            for (size_t i = 0; i < shape_.rank(); ++i) {
-                if (static_cast<int>(i) != dim) {
-                    new_dims.push_back(shape_[i]);
-                }
-            }
-        }
-
-        // Handle edge case where all dims are 1
-        if (new_dims.empty()) {
-            new_dims.push_back(1);
-        }
-
-        return view(TensorShape(new_dims));
-    }
-
-    Tensor Tensor::unsqueeze(int dim) const {
-        if (dim < 0)
-            dim = shape_.rank() + dim + 1;
-
-        std::vector<size_t> new_dims = shape_.dims();
-        new_dims.insert(new_dims.begin() + dim, 1);
-
-        return view(TensorShape(new_dims));
-    }
-
-    Tensor Tensor::permute(std::vector<int> dims) const {
-        // For now, return clone() - implement proper permutation later
-        LOG_WARN_ONCE("Permute not fully implemented - returning copy");
-        return clone();
-    }
-
-    Tensor Tensor::transpose(int dim1, int dim2) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        // Handle negative indices
-        if (dim1 < 0)
-            dim1 = shape_.rank() + dim1;
-        if (dim2 < 0)
-            dim2 = shape_.rank() + dim2;
-
-        // Check bounds
-        if (dim1 < 0 || dim1 >= static_cast<int>(shape_.rank()) ||
-            dim2 < 0 || dim2 >= static_cast<int>(shape_.rank())) {
-            LOG_ERROR("Transpose dimensions out of bounds");
-            return Tensor();
-        }
-
-        // If same dimension, just return clone
-        if (dim1 == dim2) {
-            return clone();
-        }
-
-        // Create new shape with swapped dimensions
-        std::vector<size_t> new_shape = shape_.dims();
-        std::swap(new_shape[dim1], new_shape[dim2]);
-
-        auto result = empty(TensorShape(new_shape), device_, dtype_);
-
-        // For now, implement a general transpose by copying data
-        // This is not optimal but works correctly
-        size_t total_elements = numel();
-
-        if (device_ == Device::CUDA) {
-            // Copy to CPU, transpose, copy back
-            std::vector<float> src_data(total_elements);
-            std::vector<float> dst_data(total_elements);
-
-            cudaMemcpy(src_data.data(), ptr<float>(), total_elements * sizeof(float),
-                       cudaMemcpyDeviceToHost);
-
-            // Calculate strides for source and destination
-            std::vector<size_t> src_strides(shape_.rank());
-            std::vector<size_t> dst_strides(shape_.rank());
-
-            src_strides[shape_.rank() - 1] = 1;
-            dst_strides[shape_.rank() - 1] = 1;
-
-            for (int i = shape_.rank() - 2; i >= 0; --i) {
-                src_strides[i] = src_strides[i + 1] * shape_[i + 1];
-                dst_strides[i] = dst_strides[i + 1] * new_shape[i + 1];
-            }
-
-            // Perform the transpose
-            std::vector<size_t> indices(shape_.rank(), 0);
-
-            for (size_t i = 0; i < total_elements; ++i) {
-                // Calculate source linear index
-                size_t src_idx = 0;
-                for (size_t d = 0; d < shape_.rank(); ++d) {
-                    src_idx += indices[d] * src_strides[d];
-                }
-
-                // Calculate destination indices (with dims swapped)
-                std::vector<size_t> dst_indices = indices;
-                std::swap(dst_indices[dim1], dst_indices[dim2]);
-
-                // Calculate destination linear index
-                size_t dst_idx = 0;
-                for (size_t d = 0; d < shape_.rank(); ++d) {
-                    dst_idx += dst_indices[d] * dst_strides[d];
-                }
-
-                dst_data[dst_idx] = src_data[src_idx];
-
-                // Increment indices
-                for (int d = shape_.rank() - 1; d >= 0; --d) {
-                    indices[d]++;
-                    if (indices[d] < shape_[d]) {
-                        break;
-                    }
-                    indices[d] = 0;
-                }
-            }
-
-            cudaMemcpy(result.ptr<float>(), dst_data.data(), total_elements * sizeof(float),
-                       cudaMemcpyHostToDevice);
-        } else {
-            // CPU implementation (similar logic)
-            const float* src = ptr<float>();
-            float* dst = result.ptr<float>();
-
-            // Calculate strides
-            std::vector<size_t> src_strides(shape_.rank());
-            std::vector<size_t> dst_strides(shape_.rank());
-
-            src_strides[shape_.rank() - 1] = 1;
-            dst_strides[shape_.rank() - 1] = 1;
-
-            for (int i = shape_.rank() - 2; i >= 0; --i) {
-                src_strides[i] = src_strides[i + 1] * shape_[i + 1];
-                dst_strides[i] = dst_strides[i + 1] * new_shape[i + 1];
-            }
-
-            // Perform the transpose
-            std::vector<size_t> indices(shape_.rank(), 0);
-
-            for (size_t i = 0; i < total_elements; ++i) {
-                size_t src_idx = 0;
-                for (size_t d = 0; d < shape_.rank(); ++d) {
-                    src_idx += indices[d] * src_strides[d];
-                }
-
-                std::vector<size_t> dst_indices = indices;
-                std::swap(dst_indices[dim1], dst_indices[dim2]);
-
-                size_t dst_idx = 0;
-                for (size_t d = 0; d < shape_.rank(); ++d) {
-                    dst_idx += dst_indices[d] * dst_strides[d];
-                }
-
-                dst[dst_idx] = src[src_idx];
-
-                for (int d = shape_.rank() - 1; d >= 0; --d) {
-                    indices[d]++;
-                    if (indices[d] < shape_[d]) {
-                        break;
-                    }
-                    indices[d] = 0;
-                }
-            }
-        }
-
-        return result;
-    }
-
     Tensor Tensor::cat(const Tensor& other, int dim) const {
         std::vector<Tensor> tensors;
         tensors.push_back(clone());
         tensors.push_back(other.clone());
         return tensor::cat(std::move(tensors), dim);
-    }
-
-
-    Tensor Tensor::flatten(int start_dim, int end_dim) const {
-        if (start_dim < 0)
-            start_dim = shape_.rank() + start_dim;
-        if (end_dim < 0)
-            end_dim = shape_.rank() + end_dim;
-
-        std::vector<size_t> new_dims;
-
-        // Keep dimensions before start_dim
-        for (int i = 0; i < start_dim; ++i) {
-            new_dims.push_back(shape_[i]);
-        }
-
-        // Flatten dimensions from start_dim to end_dim
-        size_t flattened_size = 1;
-        for (int i = start_dim; i <= end_dim; ++i) {
-            flattened_size *= shape_[i];
-        }
-        new_dims.push_back(flattened_size);
-
-        // Keep dimensions after end_dim
-        for (size_t i = end_dim + 1; i < shape_.rank(); ++i) {
-            new_dims.push_back(shape_[i]);
-        }
-
-        return view(TensorShape(new_dims));
-    }
-
-    // ============= Broadcasting Methods Implementation =============
-    Tensor Tensor::expand(const TensorShape& target_shape) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        return gs::broadcast_to(*this, target_shape);
     }
 
     Tensor Tensor::broadcast_to(const TensorShape& target_shape) const {
@@ -718,7 +388,6 @@ namespace gs {
             return;
         }
 
-        // Get a few values for display
         auto values = debug_values(10);
 
         std::ostringstream oss;
@@ -748,7 +417,7 @@ namespace gs {
         } else {
             std::println("  [Higher dimensional tensor - showing first slice]");
             auto first_slice = slice(0, 0, 1);
-            first_slice.squeeze(0).print_2d(max_per_dim);
+            first_slice.squeeze().print_2d(max_per_dim);
         }
     }
 
@@ -775,7 +444,6 @@ namespace gs {
         size_t rows = std::min(max_per_dim, shape_[0]);
         size_t cols = std::min(max_per_dim, shape_[1]);
 
-        // Get values
         auto values = debug_values(shape_[0] * shape_[1]);
 
         for (size_t i = 0; i < rows; ++i) {

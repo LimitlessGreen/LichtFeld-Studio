@@ -20,6 +20,7 @@ set(CORE_SOURCES
         tensor_random_ops.cpp   # Random generation operations
         tensor_broadcast.cpp    # Broadcasting implementation
         tensor_math_ops.cpp     # Math functions
+	tensor_shape_ops.cpp     # Shape functions
         tensor_reduction_ops.cpp # Reduction operations
         tensor_masking_ops.cpp  # Masking and indexing operations
         tinyply.cpp

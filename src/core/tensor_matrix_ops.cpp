@@ -291,18 +291,19 @@ namespace gs {
             const float beta = 0.0f;
 
             // Create temporary reshaped views for matrix multiplication
+            // Use the new shape_ops API!
             Tensor a_2d, b_2d;
 
             if (shape_.rank() == 1) {
-                a_2d = view({1, shape_[0]});
+                a_2d = view({1, static_cast<int>(shape_[0])});
             } else {
-                a_2d = view(shape_); // Create a view with same shape
+                a_2d = view(shape_);
             }
 
             if (other.shape_.rank() == 1) {
-                b_2d = other.view({other.shape_[0], 1});
+                b_2d = other.view({static_cast<int>(other.shape_[0]), 1});
             } else {
-                b_2d = other.view(other.shape_); // Create a view with same shape
+                b_2d = other.view(other.shape_);
             }
 
             // cuBLAS uses column-major, we have row-major
@@ -406,95 +407,6 @@ namespace gs {
         return result;
     }
 
-    // ============= Transpose =============
-    Tensor Tensor::t() const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        if (shape_.rank() < 2) {
-            LOG_ERROR("Transpose requires at least 2D tensor");
-            return Tensor();
-        }
-
-        // Determine new shape (transpose last two dimensions)
-        std::vector<size_t> new_shape = shape_.dims();
-        size_t rank = shape_.rank();
-        std::swap(new_shape[rank - 2], new_shape[rank - 1]);
-
-        auto result = empty(TensorShape(new_shape), device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            // Use CUDA kernel for transpose
-            if (shape_.rank() == 2) {
-                tensor_ops::launch_transpose(
-                    ptr<float>(), result.ptr<float>(),
-                    shape_[0], shape_[1], 0);
-            } else {
-                // For higher dimensions, transpose last two dims for each batch
-                size_t batch_size = 1;
-                for (size_t i = 0; i < rank - 2; ++i) {
-                    batch_size *= shape_[i];
-                }
-
-                size_t rows = shape_[rank - 2];
-                size_t cols = shape_[rank - 1];
-                size_t matrix_size = rows * cols;
-
-                for (size_t b = 0; b < batch_size; ++b) {
-                    tensor_ops::launch_transpose(
-                        ptr<float>() + b * matrix_size,
-                        result.ptr<float>() + b * matrix_size,
-                        rows, cols, 0);
-                }
-            }
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            // CPU implementation
-            const float* src = ptr<float>();
-            float* dst = result.ptr<float>();
-
-            if (shape_.rank() == 2) {
-                size_t rows = shape_[0];
-                size_t cols = shape_[1];
-
-                for (size_t i = 0; i < rows; ++i) {
-                    for (size_t j = 0; j < cols; ++j) {
-                        dst[j * rows + i] = src[i * cols + j];
-                    }
-                }
-            } else {
-                // For higher dimensions
-                size_t batch_size = 1;
-                for (size_t i = 0; i < rank - 2; ++i) {
-                    batch_size *= shape_[i];
-                }
-
-                size_t rows = shape_[rank - 2];
-                size_t cols = shape_[rank - 1];
-
-                for (size_t b = 0; b < batch_size; ++b) {
-                    const float* batch_src = src + b * rows * cols;
-                    float* batch_dst = dst + b * rows * cols;
-
-                    for (size_t i = 0; i < rows; ++i) {
-                        for (size_t j = 0; j < cols; ++j) {
-                            batch_dst[j * rows + i] = batch_src[i * cols + j];
-                        }
-                    }
-                }
-            }
-        }
-
-        return result;
-    }
-
-    // ============= Special Matrix Creation =============
-    namespace tensor {
-
-        // These are already defined in tensor_utils.cpp, so we don't redefine them here
-
-    } // namespace tensor
 
 #undef CHECK_CUDA
 #undef CHECK_CUBLAS

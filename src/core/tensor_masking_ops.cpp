@@ -290,6 +290,7 @@ Tensor Tensor::gather(int dim, const Tensor& indices, BoundaryMode mode) const {
 Tensor Tensor::take(const Tensor& indices) const {
     if (!is_valid() || !indices.is_valid()) return {};
 
+    // Use the new flatten from shape_ops!
     auto flat = flatten();
     auto result = empty(indices.shape(), device_, dtype_);
 

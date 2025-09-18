@@ -64,13 +64,13 @@ TEST_F(TensorViewTest, ViewWithInferredDimension) {
     auto tensor = create_test_tensor({2, 3, 4});
 
     // Use -1 to infer dimension
-    auto view1 = tensor.view({static_cast<size_t>(-1), 4});
+    auto view1 = tensor.view({-1, 4});
     EXPECT_TRUE(shapes_equal(view1, {6, 4}));
 
-    auto view2 = tensor.view({2, static_cast<size_t>(-1)});
+    auto view2 = tensor.view({2, -1});
     EXPECT_TRUE(shapes_equal(view2, {2, 12}));
 
-    auto view3 = tensor.view({static_cast<size_t>(-1)});
+    auto view3 = tensor.view({-1});
     EXPECT_TRUE(shapes_equal(view3, {24}));
 }
 
@@ -82,7 +82,7 @@ TEST_F(TensorViewTest, InvalidView) {
     EXPECT_FALSE(invalid.is_valid());
 
     // Multiple -1
-    auto invalid2 = tensor.view({static_cast<size_t>(-1), static_cast<size_t>(-1)});
+    auto invalid2 = tensor.view({-1, -1});
     EXPECT_FALSE(invalid2.is_valid());
 }
 
@@ -118,6 +118,22 @@ TEST_F(TensorViewTest, Slice) {
     }
 }
 
+TEST_F(TensorViewTest, SliceWithPairs) {
+    auto tensor = create_test_tensor({10, 5, 3});
+
+    // Slice using pairs API
+    auto slice1 = tensor.slice({{2, 5}, {1, 4}});  // Slice first two dimensions
+    EXPECT_TRUE(shapes_equal(slice1, {3, 3, 3}));
+
+    // Slice with negative indices
+    auto slice2 = tensor.slice({{0, -1}, {-2, -1}});  // Last row of second-to-last column
+    EXPECT_TRUE(shapes_equal(slice2, {9, 1, 3}));
+
+    // Partial slice (not all dimensions specified)
+    auto slice3 = tensor.slice({{2, 8}});  // Only slice first dimension
+    EXPECT_TRUE(shapes_equal(slice3, {6, 5, 3}));
+}
+
 TEST_F(TensorViewTest, InvalidSlice) {
     auto tensor = create_test_tensor({10, 5});
 
@@ -137,6 +153,10 @@ TEST_F(TensorViewTest, Squeeze) {
     // Test squeezing dimensions of size 1
     auto tensor = create_test_tensor({1, 3, 1, 4});
 
+    // Squeeze all dimensions of size 1
+    auto squeezed_all = tensor.squeeze();
+    EXPECT_TRUE(shapes_equal(squeezed_all, {3, 4}));
+
     // Squeeze specific dimension
     auto squeezed0 = tensor.squeeze(0);
     EXPECT_TRUE(shapes_equal(squeezed0, {3, 1, 4}));
@@ -148,7 +168,7 @@ TEST_F(TensorViewTest, Squeeze) {
     auto squeezed_neg = tensor.squeeze(-2);
     EXPECT_TRUE(shapes_equal(squeezed_neg, {1, 3, 4}));
 
-    // Try to squeeze non-1 dimension (should return same shape)
+    // Try to squeeze non-1 dimension (should return copy)
     auto not_squeezed = tensor.squeeze(1);
     EXPECT_TRUE(shapes_equal(not_squeezed, {1, 3, 1, 4}));
 }
@@ -191,6 +211,23 @@ TEST_F(TensorViewTest, Flatten) {
     // Flatten single dimension (should not change)
     auto flat_single = tensor.flatten(1, 1);
     EXPECT_TRUE(shapes_equal(flat_single, {2, 3, 4, 5}));
+}
+
+TEST_F(TensorViewTest, Expand) {
+    auto tensor = create_test_tensor({1, 3, 1});
+
+    // Expand dimensions of size 1
+    auto expanded = tensor.expand({2, 3, 4});
+    EXPECT_TRUE(shapes_equal(expanded, {2, 3, 4}));
+
+    // Use -1 to keep original dimension
+    auto expanded2 = tensor.expand({5, -1, 3});
+    EXPECT_TRUE(shapes_equal(expanded2, {5, 3, 3}));
+
+    // Expand to more dimensions
+    auto tensor2d = create_test_tensor({3, 1});
+    auto expanded3 = tensor2d.expand({2, 3, 4});
+    EXPECT_TRUE(shapes_equal(expanded3, {2, 3, 4}));
 }
 
 TEST_F(TensorViewTest, ChainedViewOperations) {
@@ -252,8 +289,8 @@ TEST_F(TensorViewTest, ComplexReshaping) {
     // Test complex reshaping scenarios
     auto tensor = create_test_tensor({2, 3, 4, 5});
 
-    // Multiple valid reshapes
-    std::vector<std::vector<size_t>> valid_shapes = {
+    // Multiple valid reshapes using initializer lists
+    std::vector<std::vector<int>> valid_shapes = {
         {120},
         {2, 60},
         {6, 20},
@@ -263,9 +300,15 @@ TEST_F(TensorViewTest, ComplexReshaping) {
         {2, 3, 2, 10}};
 
     for (const auto& shape : valid_shapes) {
-        auto view = tensor.view(TensorShape(shape));
+        auto view = tensor.view(shape);
         EXPECT_TRUE(view.is_valid());
-        EXPECT_TRUE(shapes_equal(view, shape));
+        
+        // Check shape matches
+        std::vector<size_t> expected_shape;
+        for (int s : shape) {
+            expected_shape.push_back(static_cast<size_t>(s));
+        }
+        EXPECT_TRUE(shapes_equal(view, expected_shape));
         EXPECT_EQ(view.numel(), tensor.numel());
     }
 }
@@ -275,8 +318,7 @@ TEST_F(TensorViewTest, TransposeBasic) {
 
     // Transpose dimensions 0 and 1
     auto transposed = tensor.transpose(0, 1);
-    // Note: Currently returns a clone, not a true view
-    // Shape should be {4, 3, 5} but implementation may differ
+    EXPECT_TRUE(shapes_equal(transposed, {4, 3, 5}));
     EXPECT_TRUE(transposed.is_valid());
     EXPECT_EQ(transposed.numel(), tensor.numel());
 }
@@ -286,9 +328,19 @@ TEST_F(TensorViewTest, PermuteBasic) {
 
     // Permute dimensions
     auto permuted = tensor.permute({2, 0, 1});
-    // Note: Currently returns a clone
+    EXPECT_TRUE(shapes_equal(permuted, {4, 2, 3}));
     EXPECT_TRUE(permuted.is_valid());
     EXPECT_EQ(permuted.numel(), tensor.numel());
+
+    // Check that permutation is correct by verifying a specific element
+    // Original tensor element at [0, 0, 0] should be at [0, 0, 0] in permuted
+    // Original tensor element at [0, 0, 1] should be at [1, 0, 0] in permuted
+    auto orig_values = tensor.to_vector();
+    auto perm_values = permuted.to_vector();
+    
+    // Element at original [0, 0, 1] (linear index 1)
+    // Should be at permuted [1, 0, 0] (linear index 1 * 2 * 3 = 6)
+    EXPECT_FLOAT_EQ(orig_values[1], perm_values[6]);
 }
 
 TEST_F(TensorViewTest, ViewOnCPUTensor) {
@@ -322,4 +374,47 @@ TEST_F(TensorViewTest, EdgeCases) {
     auto large = Tensor::empty({100, 100}, Device::CUDA);
     auto view_large = large.view({10000});
     EXPECT_TRUE(shapes_equal(view_large, {10000}));
+}
+
+TEST_F(TensorViewTest, TFunction) {
+    // Test the .t() function for 2D tensors
+    auto tensor2d = create_test_tensor({3, 4});
+    auto transposed = tensor2d.t();
+    EXPECT_TRUE(shapes_equal(transposed, {4, 3}));
+    
+    // For 1D tensor, t() should be no-op
+    auto tensor1d = create_test_tensor({5});
+    auto transposed1d = tensor1d.t();
+    EXPECT_TRUE(shapes_equal(transposed1d, {5}));
+    
+    // For 3D tensor, t() transposes last two dimensions
+    auto tensor3d = create_test_tensor({2, 3, 4});
+    auto transposed3d = tensor3d.t();
+    EXPECT_TRUE(shapes_equal(transposed3d, {2, 4, 3}));
+}
+
+TEST_F(TensorViewTest, SqueezeEdgeCases) {
+    // All dimensions are 1
+    auto all_ones = create_test_tensor({1, 1, 1});
+    auto squeezed = all_ones.squeeze();
+    EXPECT_TRUE(shapes_equal(squeezed, {1})); // Should keep at least one dimension
+    
+    // No dimensions of size 1
+    auto no_ones = create_test_tensor({2, 3, 4});
+    auto squeezed2 = no_ones.squeeze();
+    EXPECT_TRUE(shapes_equal(squeezed2, {2, 3, 4}));
+}
+
+TEST_F(TensorViewTest, ExpandErrors) {
+    auto tensor = create_test_tensor({3, 4});
+    
+    // Cannot expand non-singleton dimension to different size
+    auto invalid = tensor.expand({3, 5}); // 4 != 5
+    EXPECT_FALSE(invalid.is_valid());
+    
+    // Valid expand from singleton
+    auto tensor_with_singleton = create_test_tensor({3, 1});
+    auto valid = tensor_with_singleton.expand({3, 5});
+    EXPECT_TRUE(valid.is_valid());
+    EXPECT_TRUE(shapes_equal(valid, {3, 5}));
 }

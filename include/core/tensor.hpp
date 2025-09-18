@@ -18,6 +18,7 @@
 #include <concepts>
 #include <type_traits>
 #include <utility>
+#include <span>
 
 namespace gs {
 
@@ -67,22 +68,17 @@ namespace gs {
     inline DataType promote_types(DataType a, DataType b) {
         if (a == b) return a;
 
-        // Promotion hierarchy: Bool -> Int32 -> Float32
-        // Bool -> Float32 is also allowed
-
-        // Handle Bool promotion
         if (a == DataType::Bool) {
             if (b == DataType::Float32 || b == DataType::Float16) return b;
             if (b == DataType::Int32 || b == DataType::Int64) return b;
-            return DataType::Float32; // Default
+            return DataType::Float32;
         }
         if (b == DataType::Bool) {
             if (a == DataType::Float32 || a == DataType::Float16) return a;
             if (a == DataType::Int32 || a == DataType::Int64) return a;
-            return DataType::Float32; // Default
+            return DataType::Float32;
         }
 
-        // Int -> Float promotion
         if ((a == DataType::Int32 || a == DataType::Int64) &&
             (b == DataType::Float32 || b == DataType::Float16)) {
             return (b == DataType::Float16) ? DataType::Float16 : DataType::Float32;
@@ -92,19 +88,16 @@ namespace gs {
             return (a == DataType::Float16) ? DataType::Float16 : DataType::Float32;
         }
 
-        // Int32 -> Int64 promotion
         if ((a == DataType::Int32 && b == DataType::Int64) ||
             (a == DataType::Int64 && b == DataType::Int32)) {
             return DataType::Int64;
         }
 
-        // Float16 -> Float32 promotion
         if ((a == DataType::Float16 && b == DataType::Float32) ||
             (a == DataType::Float32 && b == DataType::Float16)) {
             return DataType::Float32;
         }
 
-        // Default to Float32 for safety
         return DataType::Float32;
     }
 
@@ -122,7 +115,6 @@ namespace gs {
         Min = 4
     };
 
-    // Comprehensive Binary operation types for unified dispatch
     enum class BinaryOp : uint8_t {
         // Arithmetic
         Add = 0,
@@ -140,7 +132,7 @@ namespace gs {
         Greater = 10,
         GreaterEqual = 11,
 
-        // Logical (for bool tensors)
+        // Logical
         LogicalAnd = 12,
         LogicalOr = 13,
         LogicalXor = 14,
@@ -149,7 +141,7 @@ namespace gs {
         Maximum = 15,
         Minimum = 16,
 
-        // Bitwise (for integer tensors)
+        // Bitwise
         BitwiseAnd = 17,
         BitwiseOr = 18,
         BitwiseXor = 19,
@@ -169,6 +161,9 @@ namespace gs {
             compute_total();
         }
         explicit TensorShape(const std::vector<size_t>& dims) : dims_(dims), initialized_(true) {
+            compute_total();
+        }
+        explicit TensorShape(std::span<const size_t> dims) : dims_(dims.begin(), dims.end()), initialized_(true) {
             compute_total();
         }
 
@@ -232,25 +227,34 @@ namespace gs {
         static std::atomic<size_t> next_id_;
         static inline bool profiling_enabled_ = false;
 
-        // Concepts for arithmetic operations
         template<typename T>
         static constexpr bool is_scalar_v = std::is_arithmetic_v<T>;
 
         template<typename T>
         static constexpr bool is_tensor_v = std::is_same_v<std::remove_cvref_t<T>, Tensor>;
 
-        // Unified binary operation implementation
         template<typename T>
         Tensor binary_op_impl(const T& other, BinaryOp op) const;
 
         template<typename T>
         Tensor& binary_op_inplace_impl(const T& other, BinaryOp op);
 
-        // Broadcasting and type promotion helper
         std::pair<Tensor, Tensor> _broadcasted(const Tensor& other, bool match_dtype = true) const;
 
         template<typename T>
         std::pair<Tensor, Tensor> _broadcasted(const T& scalar) const;
+
+        int resolve_dim(int dim) const {
+            return dim < 0 ? static_cast<int>(shape_.rank()) + dim : dim;
+        }
+
+        std::vector<size_t> resolve_dims(std::span<const int> dims) const;
+        bool is_contiguous_slice(const std::vector<size_t>& starts,
+                                 const std::vector<size_t>& ends) const;
+        size_t calculate_offset(const std::vector<size_t>& indices) const;
+        Tensor copy_slice(const std::vector<size_t>& starts,
+                         const std::vector<size_t>& ends,
+                         const std::vector<size_t>& new_shape) const;
 
     public:
         // ============= Constructors & Destructor =============
@@ -353,25 +357,52 @@ namespace gs {
         Tensor to(DataType dtype) const;
         bool is_contiguous() const { return true; }
 
-        // ============= Shape Operations =============
+        // ============= Tinygrad-Style Shape Operations =============
+        Tensor reshape(std::span<const int> sizes) const;
+        Tensor reshape(std::initializer_list<int> sizes) const {
+            return reshape(std::span<const int>(sizes));
+        }
         Tensor reshape(TensorShape new_shape) const;
-        Tensor view(TensorShape new_shape) const;
-        Tensor slice(size_t dim, size_t start, size_t end) const;
-        Tensor squeeze(int dim = -1) const;
+
+        Tensor view(std::span<const int> sizes) const { return reshape(sizes); }
+        Tensor view(std::initializer_list<int> sizes) const {
+            return reshape(std::span<const int>(sizes));
+        }
+        Tensor view(TensorShape new_shape) const { return reshape(new_shape); }
+
+        Tensor squeeze(std::optional<int> dim = std::nullopt) const;
+        Tensor squeeze(int dim) const { return squeeze(std::optional<int>(dim)); }
+
         Tensor unsqueeze(int dim) const;
-        Tensor permute(std::vector<int> dims) const;
-        Tensor transpose(int dim1 = -2, int dim2 = -1) const;
-        Tensor t() const;
+
+        Tensor expand(std::span<const int> sizes) const;
+        Tensor expand(std::initializer_list<int> sizes) const {
+            return expand(std::span<const int>(sizes));
+        }
+        Tensor expand(const TensorShape& target_shape) const;
+
         Tensor flatten(int start_dim = 0, int end_dim = -1) const;
 
+        Tensor permute(std::span<const int> axes) const;
+        Tensor permute(std::initializer_list<int> axes) const {
+            return permute(std::span<const int>(axes));
+        }
+
+        Tensor transpose(int dim1 = -2, int dim2 = -1) const;
+        Tensor t() const;
+
+        Tensor slice(std::span<const std::pair<int, int>> ranges) const;
+        Tensor slice(std::initializer_list<std::pair<int, int>> ranges) const {
+            return slice(std::span<const std::pair<int, int>>(ranges));
+        }
+        Tensor slice(size_t dim, size_t start, size_t end) const;
+
         // ============= Broadcasting Operations =============
-        Tensor expand(const TensorShape& target_shape) const;
         Tensor broadcast_to(const TensorShape& target_shape) const;
         bool can_broadcast_to(const TensorShape& target) const;
         TensorShape broadcast_shape(const TensorShape& other) const;
 
         // ============= Unified Arithmetic Operations =============
-        // Arithmetic operations
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor add(const T& other) const { return binary_op_impl(other, BinaryOp::Add); }
 
@@ -398,7 +429,7 @@ namespace gs {
 
         Tensor neg() const { return mul(-1.0f); }
 
-        // Comparison operations - now use unified implementation
+        // Comparison operations
         Tensor eq(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Equal); }
         Tensor ne(const Tensor& other) const { return binary_op_impl(other, BinaryOp::NotEqual); }
         Tensor lt(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Less); }
@@ -477,7 +508,7 @@ namespace gs {
         float& at(std::initializer_list<size_t> indices);
         float at(std::initializer_list<size_t> indices) const;
 
-        // Operator overloads - use unified implementation
+        // Operator overloads
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor operator+(const T& other) const { return add(other); }
 
@@ -520,7 +551,6 @@ namespace gs {
         Tensor& uniform_(float low = 0.0f, float high = 1.0f);
         Tensor& normal_(float mean = 0.0f, float std = 1.0f);
 
-        // Changed from std::expected to std::optional for CUDA compatibility
         std::optional<Tensor> try_reshape(TensorShape shape) const;
 
         static std::vector<Tensor> split_batch(const Tensor& tensor, size_t batch_size);
@@ -758,9 +788,8 @@ namespace gs {
         template <typename... Funcs>
         auto pipe(Funcs... funcs) {
             return [=](const Tensor& input) -> Tensor {
-                // Use a temporary to avoid copying - work with rvalue
-                Tensor result = input.clone();  // Start with a copy
-                ((result = funcs(std::move(result))), ...);  // Use move semantics
+                Tensor result = input.clone();
+                ((result = funcs(std::move(result))), ...);
                 return result;
             };
         }
