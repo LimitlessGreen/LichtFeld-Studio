@@ -776,10 +776,10 @@ TEST_F(TensorMaskingTest, PaddingMaskCreation) {
     auto mask = Tensor::zeros_bool({batch, seq_len}, Device::CUDA);
     auto cpu_mask = mask.to(Device::CPU);
 
-    // Set valid positions to true
+    // Set valid positions to true - USE set_bool for boolean tensors!
     for (size_t b = 0; b < batch; ++b) {
         for (size_t s = 0; s < lengths[b]; ++s) {
-            cpu_mask.at({b, s}) = 1.0f;  // Will be converted to bool
+            cpu_mask.set_bool({b, s}, true);  // Use set_bool for boolean tensors
         }
     }
 

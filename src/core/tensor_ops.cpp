@@ -6,7 +6,6 @@
 #include "core/tensor_broadcast.hpp"
 #include <cmath>
 #include <cuda_runtime.h>
-#include <numeric>
 
 #define CHECK_CUDA(call)                              \
     do {                                              \
@@ -21,593 +20,251 @@
 
 namespace gs {
 
-    // ============= Scalar Operations =============
-    Tensor Tensor::add(float scalar) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
+    // Single unified implementation for ALL arithmetic operations
+    template<typename T>
+    Tensor Tensor::binary_op_impl(const T& other, BinaryOp op) const {
+        if (!is_valid()) return Tensor();
 
-        if (numel() == 0) {
-            return clone();
-        }
+        if constexpr (std::is_arithmetic_v<T>) {
+            // Scalar operations
+            if (numel() == 0) return clone();  // Empty tensor + scalar = empty tensor
 
-        Tensor result = clone();
+            Tensor result = clone();
+            float scalar = static_cast<float>(other);
 
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_scalar_add(result.ptr<float>(), scalar, numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* data = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                data[i] += scalar;
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::sub(float scalar) const {
-        return add(-scalar);
-    }
-
-    Tensor Tensor::mul(float scalar) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        if (numel() == 0) {
-            return clone();
-        }
-
-        Tensor result = clone();
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_scalar_mul(result.ptr<float>(), scalar, numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* data = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                data[i] *= scalar;
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::div(float scalar) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        // Allow division by very small numbers but not exactly zero
-        if (std::abs(scalar) < 1e-10f) {
-            LOG_WARN("Division by near-zero scalar: {}", scalar);
-            // Return valid result with large values
-            return mul(1e10f); // Multiply by large number instead
-        }
-
-        if (numel() == 0) {
-            return clone();
-        }
-
-        Tensor result = clone();
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_scalar_div(result.ptr<float>(), scalar, numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* data = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                data[i] /= scalar;
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::neg() const {
-        return mul(-1.0f);
-    }
-
-    // ============= Element-wise Operations with Broadcasting =============
-    Tensor Tensor::add(const Tensor& other) const {
-        if (!is_valid() || !other.is_valid()) {
-            return Tensor();
-        }
-
-        if (device_ != other.device_) {
-            LOG_ERROR("Tensors must be on the same device for addition");
-            return Tensor();
-        }
-
-        if (dtype_ != other.dtype_) {
-            LOG_ERROR("Dtype mismatch for addition");
-            return Tensor();
-        }
-
-        // Check if broadcasting is needed
-        if (shape_ == other.shape_) {
-            // Same shape, use non-broadcast path
-            if (numel() == 0) {
-                return clone();
-            }
-
-            Tensor result = empty(shape_, device_, dtype_);
             if (device_ == Device::CUDA) {
-                tensor_ops::launch_element_add(ptr<float>(), other.ptr<float>(),
-                                               result.ptr<float>(), numel(), 0);
-                CHECK_CUDA(cudaDeviceSynchronize());
+                void(*fn)(float*, float, size_t, cudaStream_t) = nullptr;
+                switch (op) {
+                    case BinaryOp::Add: fn = tensor_ops::launch_scalar_add; break;
+                    case BinaryOp::Sub: fn = tensor_ops::launch_scalar_sub; break;
+                    case BinaryOp::Mul: fn = tensor_ops::launch_scalar_mul; break;
+                    case BinaryOp::Div: fn = tensor_ops::launch_scalar_div; break;
+                    case BinaryOp::Pow:
+                        CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(), cudaMemcpyDeviceToDevice));
+                        tensor_ops::launch_pow_scalar(result.ptr<float>(), scalar, numel(), 0);
+                        CHECK_CUDA(cudaDeviceSynchronize());
+                        return result;
+                }
+                if (fn) {
+                    fn(result.ptr<float>(), scalar, numel(), 0);
+                    CHECK_CUDA(cudaDeviceSynchronize());
+                }
             } else {
-                const float* a = ptr<float>();
-                const float* b = other.ptr<float>();
-                float* c = result.ptr<float>();
+                float* data = result.ptr<float>();
                 for (size_t i = 0; i < numel(); ++i) {
-                    c[i] = a[i] + b[i];
+                    switch (op) {
+                        case BinaryOp::Add: data[i] += scalar; break;
+                        case BinaryOp::Sub: data[i] -= scalar; break;
+                        case BinaryOp::Mul: data[i] *= scalar; break;
+                        case BinaryOp::Div: data[i] /= scalar; break;
+                        case BinaryOp::Pow: data[i] = std::pow(data[i], scalar); break;
+                    }
+                }
+            }
+            return result;
+        } else {
+            // Tensor operations
+            const Tensor& b = other;
+            if (!b.is_valid()) return Tensor();
+
+            if (device_ != b.device_ || dtype_ != b.dtype_) {
+                LOG_ERROR("Tensors must have same device and dtype");
+                return Tensor();
+            }
+
+            // Check for empty tensors - operations with empty should fail
+            if (numel() == 0 || b.numel() == 0) {
+                // Special case: if shapes are identical and both empty, return empty clone
+                if (shape_ == b.shape_ && numel() == 0) {
+                    return clone();
+                }
+                // Otherwise, can't broadcast empty with non-empty
+                LOG_ERROR("Cannot perform operations between empty and non-empty tensors");
+                return Tensor();
+            }
+
+            // Determine if broadcasting needed
+            TensorShape out_shape;
+            if (shape_ == b.shape_) {
+                out_shape = shape_;
+            } else {
+                if (!BroadcastHelper::can_broadcast(shape_, b.shape_)) {
+                    LOG_ERROR("Cannot broadcast shapes {} and {}", shape_.str(), b.shape_.str());
+                    return Tensor();
+                }
+                out_shape = BroadcastHelper::broadcast_shape(shape_, b.shape_);
+                if (!out_shape.is_initialized()) {
+                    return Tensor();
+                }
+            }
+
+            Tensor result = empty(out_shape, device_, dtype_);
+
+            if (device_ == Device::CUDA) {
+                if (shape_ == b.shape_) {
+                    // Fast path - no broadcast
+                    void(*fn)(const float*, const float*, float*, size_t, cudaStream_t) = nullptr;
+                    switch (op) {
+                        case BinaryOp::Add: fn = tensor_ops::launch_element_add; break;
+                        case BinaryOp::Sub: fn = tensor_ops::launch_element_sub; break;
+                        case BinaryOp::Mul: fn = tensor_ops::launch_element_mul; break;
+                        case BinaryOp::Div: fn = tensor_ops::launch_element_div; break;
+                        case BinaryOp::Pow:
+                            tensor_ops::launch_pow_tensor(ptr<float>(), b.ptr<float>(), result.ptr<float>(),
+                                shape_.dims().data(), b.shape_.dims().data(), out_shape.dims().data(),
+                                shape_.rank(), b.shape_.rank(), out_shape.rank(), out_shape.elements(), 0);
+                            CHECK_CUDA(cudaDeviceSynchronize());
+                            return result;
+                    }
+                    if (fn) {
+                        fn(ptr<float>(), b.ptr<float>(), result.ptr<float>(), numel(), 0);
+                        CHECK_CUDA(cudaDeviceSynchronize());
+                    }
+                } else {
+                    // Broadcast path
+                    void(*fn)(const float*, const float*, float*, const size_t*, const size_t*, const size_t*,
+                              size_t, size_t, size_t, size_t, cudaStream_t) = nullptr;
+                    switch (op) {
+                        case BinaryOp::Add: fn = tensor_ops::launch_broadcast_add; break;
+                        case BinaryOp::Sub: fn = tensor_ops::launch_broadcast_sub; break;
+                        case BinaryOp::Mul: fn = tensor_ops::launch_broadcast_mul; break;
+                        case BinaryOp::Div: fn = tensor_ops::launch_broadcast_div; break;
+                        case BinaryOp::Pow:
+                            tensor_ops::launch_pow_tensor(ptr<float>(), b.ptr<float>(), result.ptr<float>(),
+                                shape_.dims().data(), b.shape_.dims().data(), out_shape.dims().data(),
+                                shape_.rank(), b.shape_.rank(), out_shape.rank(), out_shape.elements(), 0);
+                            CHECK_CUDA(cudaDeviceSynchronize());
+                            return result;
+                    }
+                    if (fn) {
+                        fn(ptr<float>(), b.ptr<float>(), result.ptr<float>(),
+                           shape_.dims().data(), b.shape_.dims().data(), out_shape.dims().data(),
+                           shape_.rank(), b.shape_.rank(), out_shape.rank(), out_shape.elements(), 0);
+                        CHECK_CUDA(cudaDeviceSynchronize());
+                    }
+                }
+            } else {
+                // CPU path
+                const float* a_data = ptr<float>();
+                const float* b_data = b.ptr<float>();
+                float* r_data = result.ptr<float>();
+
+                if (shape_ == b.shape_) {
+                    for (size_t i = 0; i < numel(); ++i) {
+                        switch (op) {
+                            case BinaryOp::Add: r_data[i] = a_data[i] + b_data[i]; break;
+                            case BinaryOp::Sub: r_data[i] = a_data[i] - b_data[i]; break;
+                            case BinaryOp::Mul: r_data[i] = a_data[i] * b_data[i]; break;
+                            case BinaryOp::Div: r_data[i] = a_data[i] / (b_data[i] + 1e-8f); break;
+                            case BinaryOp::Pow: r_data[i] = std::pow(a_data[i], b_data[i]); break;
+                        }
+                    }
+                } else {
+                    BroadcastIterator iter_a(shape_, out_shape);
+                    BroadcastIterator iter_b(b.shape_, out_shape);
+                    for (size_t i = 0; !iter_a.done(); ++i, iter_a.next(), iter_b.next()) {
+                        switch (op) {
+                            case BinaryOp::Add: r_data[i] = a_data[iter_a.index()] + b_data[iter_b.index()]; break;
+                            case BinaryOp::Sub: r_data[i] = a_data[iter_a.index()] - b_data[iter_b.index()]; break;
+                            case BinaryOp::Mul: r_data[i] = a_data[iter_a.index()] * b_data[iter_b.index()]; break;
+                            case BinaryOp::Div: r_data[i] = a_data[iter_a.index()] / (b_data[iter_b.index()] + 1e-8f); break;
+                            case BinaryOp::Pow: r_data[i] = std::pow(a_data[iter_a.index()], b_data[iter_b.index()]); break;
+                        }
+                    }
                 }
             }
             return result;
         }
-
-        // Shapes differ, try broadcasting
-        if (!BroadcastHelper::can_broadcast(shape_, other.shape_)) {
-            LOG_ERROR("Cannot broadcast shapes {} and {} for addition",
-                      shape_.str(), other.shape_.str());
-            return Tensor();
-        }
-
-        // Get broadcast shape
-        TensorShape broadcast_shape = BroadcastHelper::broadcast_shape(shape_, other.shape_);
-        Tensor result = empty(broadcast_shape, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_broadcast_add(
-                ptr<float>(), other.ptr<float>(), result.ptr<float>(),
-                shape_.dims().data(), other.shape_.dims().data(), broadcast_shape.dims().data(),
-                shape_.rank(), other.shape_.rank(), broadcast_shape.rank(),
-                broadcast_shape.elements(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            // CPU implementation with broadcasting
-            BroadcastIterator iter_a(shape_, broadcast_shape);
-            BroadcastIterator iter_b(other.shape_, broadcast_shape);
-            const float* a_data = ptr<float>();
-            const float* b_data = other.ptr<float>();
-            float* result_data = result.ptr<float>();
-
-            size_t idx = 0;
-            while (!iter_a.done()) {
-                result_data[idx++] = a_data[iter_a.index()] + b_data[iter_b.index()];
-                iter_a.next();
-                iter_b.next();
-            }
-        }
-
-        return result;
     }
 
-    Tensor Tensor::sub(const Tensor& other) const {
-        if (!is_valid() || !other.is_valid()) {
-            return Tensor();
-        }
+    // In-place version - much simpler, no broadcasting
+    template<typename T>
+    Tensor& Tensor::binary_op_inplace_impl(const T& other, BinaryOp op) {
+        if (!is_valid() || numel() == 0) return *this;
 
-        if (device_ != other.device_) {
-            LOG_ERROR("Tensors must be on the same device for subtraction");
-            return Tensor();
-        }
-
-        if (dtype_ != other.dtype_) {
-            LOG_ERROR("Dtype mismatch for subtraction");
-            return Tensor();
-        }
-
-        // Check if broadcasting is needed
-        if (shape_ == other.shape_) {
-            // Same shape, use non-broadcast path
-            if (numel() == 0) {
-                return clone();
-            }
-
-            Tensor result = empty(shape_, device_, dtype_);
+        if constexpr (std::is_arithmetic_v<T>) {
+            float scalar = static_cast<float>(other);
             if (device_ == Device::CUDA) {
-                tensor_ops::launch_element_sub(ptr<float>(), other.ptr<float>(),
-                                               result.ptr<float>(), numel(), 0);
-                CHECK_CUDA(cudaDeviceSynchronize());
+                void(*fn)(float*, float, size_t, cudaStream_t) = nullptr;
+                switch (op) {
+                    case BinaryOp::Add: fn = tensor_ops::launch_scalar_add; break;
+                    case BinaryOp::Sub: fn = tensor_ops::launch_scalar_sub; break;
+                    case BinaryOp::Mul: fn = tensor_ops::launch_scalar_mul; break;
+                    case BinaryOp::Div:
+                        if (std::abs(scalar) < 1e-10f) {
+                            LOG_WARN("Division by near-zero scalar: {}", scalar);
+                            scalar = 1e-10f;
+                        }
+                        fn = tensor_ops::launch_scalar_div;
+                        break;
+                }
+                if (fn) {
+                    fn(ptr<float>(), scalar, numel(), 0);
+                    CHECK_CUDA(cudaDeviceSynchronize());
+                }
             } else {
-                const float* a = ptr<float>();
-                const float* b = other.ptr<float>();
-                float* c = result.ptr<float>();
+                float* data = ptr<float>();
                 for (size_t i = 0; i < numel(); ++i) {
-                    c[i] = a[i] - b[i];
+                    switch (op) {
+                        case BinaryOp::Add: data[i] += scalar; break;
+                        case BinaryOp::Sub: data[i] -= scalar; break;
+                        case BinaryOp::Mul: data[i] *= scalar; break;
+                        case BinaryOp::Div:
+                            if (std::abs(scalar) < 1e-10f) {
+                                LOG_WARN("Division by near-zero scalar: {}", scalar);
+                                data[i] /= 1e-10f;
+                            } else {
+                                data[i] /= scalar;
+                            }
+                            break;
+                    }
                 }
             }
-            return result;
-        }
-
-        // Shapes differ, try broadcasting
-        if (!BroadcastHelper::can_broadcast(shape_, other.shape_)) {
-            LOG_ERROR("Cannot broadcast shapes {} and {} for subtraction",
-                      shape_.str(), other.shape_.str());
-            return Tensor();
-        }
-
-        TensorShape broadcast_shape = BroadcastHelper::broadcast_shape(shape_, other.shape_);
-        Tensor result = empty(broadcast_shape, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_broadcast_sub(
-                ptr<float>(), other.ptr<float>(), result.ptr<float>(),
-                shape_.dims().data(), other.shape_.dims().data(), broadcast_shape.dims().data(),
-                shape_.rank(), other.shape_.rank(), broadcast_shape.rank(),
-                broadcast_shape.elements(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
         } else {
-            BroadcastIterator iter_a(shape_, broadcast_shape);
-            BroadcastIterator iter_b(other.shape_, broadcast_shape);
-            const float* a_data = ptr<float>();
-            const float* b_data = other.ptr<float>();
-            float* result_data = result.ptr<float>();
-
-            size_t idx = 0;
-            while (!iter_a.done()) {
-                result_data[idx++] = a_data[iter_a.index()] - b_data[iter_b.index()];
-                iter_a.next();
-                iter_b.next();
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::mul(const Tensor& other) const {
-        if (!is_valid() || !other.is_valid()) {
-            return Tensor();
-        }
-
-        if (device_ != other.device_) {
-            LOG_ERROR("Tensors must be on the same device for multiplication");
-            return Tensor();
-        }
-
-        if (dtype_ != other.dtype_) {
-            LOG_ERROR("Dtype mismatch for multiplication");
-            return Tensor();
-        }
-
-        // Check if broadcasting is needed
-        if (shape_ == other.shape_) {
-            // Same shape, use non-broadcast path
-            if (numel() == 0) {
-                return clone();
+            const Tensor& b = other;
+            if (!b.is_valid() || shape_ != b.shape_ || device_ != b.device_) {
+                LOG_ERROR("Invalid tensors for in-place operation");
+                return *this;
             }
 
-            Tensor result = empty(shape_, device_, dtype_);
             if (device_ == Device::CUDA) {
-                tensor_ops::launch_element_mul(ptr<float>(), other.ptr<float>(),
-                                               result.ptr<float>(), numel(), 0);
-                CHECK_CUDA(cudaDeviceSynchronize());
+                void(*fn)(float*, const float*, size_t, cudaStream_t) = nullptr;
+                switch (op) {
+                    case BinaryOp::Add: fn = tensor_ops::launch_element_add_inplace; break;
+                    case BinaryOp::Sub: fn = tensor_ops::launch_element_sub_inplace; break;
+                    case BinaryOp::Mul: fn = tensor_ops::launch_element_mul_inplace; break;
+                    case BinaryOp::Div: fn = tensor_ops::launch_element_div_inplace; break;
+                }
+                if (fn) {
+                    fn(ptr<float>(), b.ptr<float>(), numel(), 0);
+                    CHECK_CUDA(cudaDeviceSynchronize());
+                }
             } else {
-                const float* a = ptr<float>();
-                const float* b = other.ptr<float>();
-                float* c = result.ptr<float>();
+                float* a = ptr<float>();
+                const float* b_data = b.ptr<float>();
                 for (size_t i = 0; i < numel(); ++i) {
-                    c[i] = a[i] * b[i];
+                    switch (op) {
+                        case BinaryOp::Add: a[i] += b_data[i]; break;
+                        case BinaryOp::Sub: a[i] -= b_data[i]; break;
+                        case BinaryOp::Mul: a[i] *= b_data[i]; break;
+                        case BinaryOp::Div: a[i] /= (b_data[i] + 1e-8f); break;
+                    }
                 }
             }
-            return result;
         }
-
-        // Shapes differ, try broadcasting
-        if (!BroadcastHelper::can_broadcast(shape_, other.shape_)) {
-            LOG_ERROR("Cannot broadcast shapes {} and {} for multiplication",
-                      shape_.str(), other.shape_.str());
-            return Tensor();
-        }
-
-        TensorShape broadcast_shape = BroadcastHelper::broadcast_shape(shape_, other.shape_);
-        Tensor result = empty(broadcast_shape, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_broadcast_mul(
-                ptr<float>(), other.ptr<float>(), result.ptr<float>(),
-                shape_.dims().data(), other.shape_.dims().data(), broadcast_shape.dims().data(),
-                shape_.rank(), other.shape_.rank(), broadcast_shape.rank(),
-                broadcast_shape.elements(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            BroadcastIterator iter_a(shape_, broadcast_shape);
-            BroadcastIterator iter_b(other.shape_, broadcast_shape);
-            const float* a_data = ptr<float>();
-            const float* b_data = other.ptr<float>();
-            float* result_data = result.ptr<float>();
-
-            size_t idx = 0;
-            while (!iter_a.done()) {
-                result_data[idx++] = a_data[iter_a.index()] * b_data[iter_b.index()];
-                iter_a.next();
-                iter_b.next();
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::div(const Tensor& other) const {
-        if (!is_valid() || !other.is_valid()) {
-            return Tensor();
-        }
-
-        if (device_ != other.device_) {
-            LOG_ERROR("Tensors must be on the same device for division");
-            return Tensor();
-        }
-
-        if (dtype_ != other.dtype_) {
-            LOG_ERROR("Dtype mismatch for division");
-            return Tensor();
-        }
-
-        // Check if broadcasting is needed
-        if (shape_ == other.shape_) {
-            // Same shape, use non-broadcast path
-            if (numel() == 0) {
-                return clone();
-            }
-
-            Tensor result = empty(shape_, device_, dtype_);
-            if (device_ == Device::CUDA) {
-                tensor_ops::launch_element_div(ptr<float>(), other.ptr<float>(),
-                                               result.ptr<float>(), numel(), 0);
-                CHECK_CUDA(cudaDeviceSynchronize());
-            } else {
-                const float* a = ptr<float>();
-                const float* b = other.ptr<float>();
-                float* c = result.ptr<float>();
-                for (size_t i = 0; i < numel(); ++i) {
-                    c[i] = a[i] / (b[i] + 1e-8f); // Safe division
-                }
-            }
-            return result;
-        }
-
-        // Shapes differ, try broadcasting
-        if (!BroadcastHelper::can_broadcast(shape_, other.shape_)) {
-            LOG_ERROR("Cannot broadcast shapes {} and {} for division",
-                      shape_.str(), other.shape_.str());
-            return Tensor();
-        }
-
-        TensorShape broadcast_shape = BroadcastHelper::broadcast_shape(shape_, other.shape_);
-        Tensor result = empty(broadcast_shape, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_broadcast_div(
-                ptr<float>(), other.ptr<float>(), result.ptr<float>(),
-                shape_.dims().data(), other.shape_.dims().data(), broadcast_shape.dims().data(),
-                shape_.rank(), other.shape_.rank(), broadcast_shape.rank(),
-                broadcast_shape.elements(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            BroadcastIterator iter_a(shape_, broadcast_shape);
-            BroadcastIterator iter_b(other.shape_, broadcast_shape);
-            const float* a_data = ptr<float>();
-            const float* b_data = other.ptr<float>();
-            float* result_data = result.ptr<float>();
-
-            size_t idx = 0;
-            while (!iter_a.done()) {
-                result_data[idx++] = a_data[iter_a.index()] / (b_data[iter_b.index()] + 1e-8f);
-                iter_a.next();
-                iter_b.next();
-            }
-        }
-
-        return result;
-    }
-
-    // ============= In-place Operations =============
-    Tensor& Tensor::add_(float scalar) {
-        if (!is_valid() || numel() == 0) {
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_scalar_add(ptr<float>(), scalar, numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* data = ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                data[i] += scalar;
-            }
-        }
-
         return *this;
     }
 
-    Tensor& Tensor::sub_(float scalar) {
-        return add_(-scalar);
-    }
+    // Explicit instantiations
+    template Tensor Tensor::binary_op_impl<float>(const float&, BinaryOp) const;
+    template Tensor Tensor::binary_op_impl<double>(const double&, BinaryOp) const;
+    template Tensor Tensor::binary_op_impl<int>(const int&, BinaryOp) const;
+    template Tensor Tensor::binary_op_impl<Tensor>(const Tensor&, BinaryOp) const;
 
-    Tensor& Tensor::mul_(float scalar) {
-        if (!is_valid() || numel() == 0) {
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_scalar_mul(ptr<float>(), scalar, numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* data = ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                data[i] *= scalar;
-            }
-        }
-
-        return *this;
-    }
-
-    Tensor& Tensor::div_(float scalar) {
-        if (std::abs(scalar) < 1e-10f) {
-            LOG_WARN("Division by near-zero scalar: {}", scalar);
-            return mul_(1e10f);
-        }
-
-        if (!is_valid() || numel() == 0) {
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_scalar_div(ptr<float>(), scalar, numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* data = ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                data[i] /= scalar;
-            }
-        }
-
-        return *this;
-    }
-
-    Tensor& Tensor::add_(const Tensor& other) {
-        if (!is_valid() || !other.is_valid()) {
-            LOG_ERROR("Invalid tensors for in-place addition");
-            return *this;
-        }
-
-        if (shape_ != other.shape_) {
-            LOG_ERROR("In-place operations require same shape: {} vs {}",
-                      shape_.str(), other.shape_.str());
-            return *this;
-        }
-
-        if (device_ != other.device_) {
-            LOG_ERROR("Tensors must be on the same device");
-            return *this;
-        }
-
-        if (numel() == 0) {
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_element_add_inplace(ptr<float>(), other.ptr<float>(),
-                                                   numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* a = ptr<float>();
-            const float* b = other.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                a[i] += b[i];
-            }
-        }
-
-        return *this;
-    }
-
-    Tensor& Tensor::sub_(const Tensor& other) {
-        if (!is_valid() || !other.is_valid()) {
-            LOG_ERROR("Invalid tensors for in-place subtraction");
-            return *this;
-        }
-
-        if (shape_ != other.shape_) {
-            LOG_ERROR("In-place operations require same shape");
-            return *this;
-        }
-
-        if (device_ != other.device_) {
-            LOG_ERROR("Tensors must be on the same device");
-            return *this;
-        }
-
-        if (numel() == 0) {
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_element_sub_inplace(ptr<float>(), other.ptr<float>(),
-                                                   numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* a = ptr<float>();
-            const float* b = other.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                a[i] -= b[i];
-            }
-        }
-
-        return *this;
-    }
-
-    Tensor& Tensor::mul_(const Tensor& other) {
-        if (!is_valid() || !other.is_valid()) {
-            LOG_ERROR("Invalid tensors for in-place multiplication");
-            return *this;
-        }
-
-        if (shape_ != other.shape_) {
-            LOG_ERROR("In-place operations require same shape");
-            return *this;
-        }
-
-        if (device_ != other.device_) {
-            LOG_ERROR("Tensors must be on the same device");
-            return *this;
-        }
-
-        if (numel() == 0) {
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_element_mul_inplace(ptr<float>(), other.ptr<float>(),
-                                                   numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* a = ptr<float>();
-            const float* b = other.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                a[i] *= b[i];
-            }
-        }
-
-        return *this;
-    }
-
-    Tensor& Tensor::div_(const Tensor& other) {
-        if (!is_valid() || !other.is_valid()) {
-            LOG_ERROR("Invalid tensors for in-place division");
-            return *this;
-        }
-
-        if (shape_ != other.shape_) {
-            LOG_ERROR("In-place operations require same shape");
-            return *this;
-        }
-
-        if (device_ != other.device_) {
-            LOG_ERROR("Tensors must be on the same device");
-            return *this;
-        }
-
-        if (numel() == 0) {
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_element_div_inplace(ptr<float>(), other.ptr<float>(),
-                                                   numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* a = ptr<float>();
-            const float* b = other.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                a[i] /= (b[i] + 1e-8f);
-            }
-        }
-
-        return *this;
-    }
+    template Tensor& Tensor::binary_op_inplace_impl<float>(const float&, BinaryOp);
+    template Tensor& Tensor::binary_op_inplace_impl<double>(const double&, BinaryOp);
+    template Tensor& Tensor::binary_op_inplace_impl<int>(const int&, BinaryOp);
+    template Tensor& Tensor::binary_op_inplace_impl<Tensor>(const Tensor&, BinaryOp);
 
 #undef CHECK_CUDA
 

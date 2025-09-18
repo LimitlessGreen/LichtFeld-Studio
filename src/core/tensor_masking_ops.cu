@@ -4,1298 +4,793 @@
 #include "core/tensor_ops.hpp"
 #include "core/cuda_memory_guard.hpp"
 #include <cub/cub.cuh>
-#include <cuda_runtime.h>
 
 namespace gs::tensor_ops {
 
-    // ============= Comparison Kernels =============
-    template <typename Op>
-    __global__ void compare_broadcast_kernel(const float* a, const float* b, unsigned char* c,
-                                             const size_t* a_shape, const size_t* b_shape,
-                                             const size_t* c_shape,
-                                             size_t a_rank, size_t b_rank, size_t c_rank,
-                                             size_t c_elements, Op op) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+// ============= Import broadcast index calculator =============
+// This function is defined in tensor_ops.cu
+__device__ inline size_t compute_broadcast_index(
+    size_t idx, const size_t* src_shape, size_t src_rank,
+    const size_t* dst_shape, size_t dst_rank) {
 
-        if (idx >= c_elements)
-            return;
+    size_t src_idx = 0, dst_stride = 1;
 
-        // Calculate indices for result tensor
-        size_t indices[10];
-        size_t temp = idx;
-        for (int i = c_rank - 1; i >= 0; --i) {
-            indices[i] = temp % c_shape[i];
-            temp /= c_shape[i];
-        }
+    #pragma unroll 8
+    for (int i = dst_rank - 1; i >= 0; --i) {
+        size_t dst_coord = (idx / dst_stride) % dst_shape[i];
+        int src_dim = i - (dst_rank - src_rank);
 
-        // Map to a index - FIXED: properly handle rank differences and broadcasting
-        size_t a_idx = 0;
-        if (a_rank > 0) {
-            int rank_diff = c_rank - a_rank;
-            size_t a_stride = 1;
-            for (int i = a_rank - 1; i >= 0; --i) {
-                int c_dim_idx = i + rank_diff;
-                // Only use the index if this dimension exists and is not broadcast (size 1)
-                size_t dim_idx = (a_shape[i] == 1) ? 0 : indices[c_dim_idx];
-                a_idx += dim_idx * a_stride;
-                a_stride *= a_shape[i];
+        if (src_dim >= 0) {
+            size_t src_coord = (src_shape[src_dim] == 1) ? 0 : dst_coord;
+            size_t src_stride = 1;
+            for (int j = src_dim + 1; j < src_rank; ++j) {
+                src_stride *= src_shape[j];
             }
+            src_idx += src_coord * src_stride;
         }
 
-        // Map to b index - FIXED: properly handle rank differences and broadcasting
-        size_t b_idx = 0;
-        if (b_rank > 0) {
-            int rank_diff = c_rank - b_rank;
-            size_t b_stride = 1;
-            for (int i = b_rank - 1; i >= 0; --i) {
-                int c_dim_idx = i + rank_diff;
-                // Only use the index if this dimension exists and is not broadcast (size 1)
-                size_t dim_idx = (b_shape[i] == 1) ? 0 : indices[c_dim_idx];
-                b_idx += dim_idx * b_stride;
-                b_stride *= b_shape[i];
-            }
-        }
-
-        c[idx] = op(a[a_idx], b[b_idx]) ? 1 : 0;
+        dst_stride *= dst_shape[i];
     }
 
-    template <typename Op>
-    __global__ void compare_scalar_kernel(const float* a, float value, unsigned char* result,
-                                          size_t n, Op op) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            result[idx] = op(a[idx], value) ? 1 : 0;
-        }
+    return src_idx;
+}
+
+// ============= Comparison Kernels =============
+__global__ void compare_eq_kernel(const float* a, const float* b, unsigned char* c,
+                                  const size_t* shapes, size_t info, size_t total) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+
+    size_t a_rank = info & 0x1F;
+    size_t b_rank = (info >> 5) & 0x1F;
+    size_t c_rank = (info >> 10) & 0x1F;
+    bool fast_path = info & 0x8000;
+
+    if (fast_path) {
+        c[idx] = (a[idx] == b[idx]) ? 1 : 0;
+    } else {
+        size_t a_idx = compute_broadcast_index(idx, shapes, a_rank, shapes + 20, c_rank);
+        size_t b_idx = compute_broadcast_index(idx, shapes + 10, b_rank, shapes + 20, c_rank);
+        c[idx] = (a[a_idx] == b[b_idx]) ? 1 : 0;
     }
+}
 
-    struct EqOp {
-        __device__ bool operator()(float a, float b) const { return a == b; }
-    };
+__global__ void compare_lt_kernel(const float* a, const float* b, unsigned char* c,
+                                  const size_t* shapes, size_t info, size_t total) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
 
-    struct LtOp {
-        __device__ bool operator()(float a, float b) const { return a < b; }
-    };
+    size_t a_rank = info & 0x1F;
+    size_t b_rank = (info >> 5) & 0x1F;
+    size_t c_rank = (info >> 10) & 0x1F;
+    bool fast_path = info & 0x8000;
 
-    struct GtOp {
-        __device__ bool operator()(float a, float b) const { return a > b; }
-    };
-
-    // Launch functions for comparisons - UPDATED with RAII
-    void launch_compare_eq(const float* a, const float* b, unsigned char* result,
-                           const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
-                           size_t a_rank, size_t b_rank, size_t c_rank,
-                           size_t c_elements, cudaStream_t stream) {
-        CudaDeviceMemory<size_t> d_a_shape(a_rank);
-        CudaDeviceMemory<size_t> d_b_shape(b_rank);
-        CudaDeviceMemory<size_t> d_c_shape(c_rank);
-
-        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
-            return; // Memory allocation failed
-        }
-
-        d_a_shape.copy_from_host(a_shape, a_rank);
-        d_b_shape.copy_from_host(b_shape, b_rank);
-        d_c_shape.copy_from_host(c_shape, c_rank);
-
-        int block_size = 256;
-        int grid_size = (c_elements + block_size - 1) / block_size;
-
-        compare_broadcast_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, result, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
-            a_rank, b_rank, c_rank, c_elements, EqOp());
+    if (fast_path) {
+        c[idx] = (a[idx] < b[idx]) ? 1 : 0;
+    } else {
+        size_t a_idx = compute_broadcast_index(idx, shapes, a_rank, shapes + 20, c_rank);
+        size_t b_idx = compute_broadcast_index(idx, shapes + 10, b_rank, shapes + 20, c_rank);
+        c[idx] = (a[a_idx] < b[b_idx]) ? 1 : 0;
     }
+}
 
-    void launch_compare_lt(const float* a, const float* b, unsigned char* result,
-                           const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
-                           size_t a_rank, size_t b_rank, size_t c_rank,
-                           size_t c_elements, cudaStream_t stream) {
-        CudaDeviceMemory<size_t> d_a_shape(a_rank);
-        CudaDeviceMemory<size_t> d_b_shape(b_rank);
-        CudaDeviceMemory<size_t> d_c_shape(c_rank);
+__global__ void compare_gt_kernel(const float* a, const float* b, unsigned char* c,
+                                  const size_t* shapes, size_t info, size_t total) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
 
-        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
-            return;
-        }
+    size_t a_rank = info & 0x1F;
+    size_t b_rank = (info >> 5) & 0x1F;
+    size_t c_rank = (info >> 10) & 0x1F;
+    bool fast_path = info & 0x8000;
 
-        d_a_shape.copy_from_host(a_shape, a_rank);
-        d_b_shape.copy_from_host(b_shape, b_rank);
-        d_c_shape.copy_from_host(c_shape, c_rank);
-
-        int block_size = 256;
-        int grid_size = (c_elements + block_size - 1) / block_size;
-
-        compare_broadcast_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, result, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
-            a_rank, b_rank, c_rank, c_elements, LtOp());
+    if (fast_path) {
+        c[idx] = (a[idx] > b[idx]) ? 1 : 0;
+    } else {
+        size_t a_idx = compute_broadcast_index(idx, shapes, a_rank, shapes + 20, c_rank);
+        size_t b_idx = compute_broadcast_index(idx, shapes + 10, b_rank, shapes + 20, c_rank);
+        c[idx] = (a[a_idx] > b[b_idx]) ? 1 : 0;
     }
+}
 
-    void launch_compare_gt(const float* a, const float* b, unsigned char* result,
-                           const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
-                           size_t a_rank, size_t b_rank, size_t c_rank,
-                           size_t c_elements, cudaStream_t stream) {
-        CudaDeviceMemory<size_t> d_a_shape(a_rank);
-        CudaDeviceMemory<size_t> d_b_shape(b_rank);
-        CudaDeviceMemory<size_t> d_c_shape(c_rank);
+// Scalar comparison kernels
+__global__ void compare_scalar_eq_kernel(const float* a, float val, unsigned char* r, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) r[idx] = (a[idx] == val) ? 1 : 0;
+}
 
-        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
-            return;
-        }
+__global__ void compare_scalar_lt_kernel(const float* a, float val, unsigned char* r, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) r[idx] = (a[idx] < val) ? 1 : 0;
+}
 
-        d_a_shape.copy_from_host(a_shape, a_rank);
-        d_b_shape.copy_from_host(b_shape, b_rank);
-        d_c_shape.copy_from_host(c_shape, c_rank);
+__global__ void compare_scalar_gt_kernel(const float* a, float val, unsigned char* r, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) r[idx] = (a[idx] > val) ? 1 : 0;
+}
 
-        int block_size = 256;
-        int grid_size = (c_elements + block_size - 1) / block_size;
+// ============= Logical Operation Kernels =============
+__global__ void logical_and_kernel(const unsigned char* a, const unsigned char* b,
+                                   unsigned char* c, const size_t* shapes,
+                                   size_t info, size_t total) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
 
-        compare_broadcast_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, result, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
-            a_rank, b_rank, c_rank, c_elements, GtOp());
+    size_t a_rank = info & 0x1F;
+    size_t b_rank = (info >> 5) & 0x1F;
+    size_t c_rank = (info >> 10) & 0x1F;
+    bool fast_path = info & 0x8000;
+
+    if (fast_path) {
+        c[idx] = (a[idx] && b[idx]) ? 1 : 0;
+    } else {
+        size_t a_idx = compute_broadcast_index(idx, shapes, a_rank, shapes + 20, c_rank);
+        size_t b_idx = compute_broadcast_index(idx, shapes + 10, b_rank, shapes + 20, c_rank);
+        c[idx] = (a[a_idx] && b[b_idx]) ? 1 : 0;
     }
+}
 
-    void launch_compare_scalar_eq(const float* a, float value, unsigned char* result,
-                                  size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        compare_scalar_kernel<<<grid_size, block_size, 0, stream>>>(a, value, result, n, EqOp());
+__global__ void logical_or_kernel(const unsigned char* a, const unsigned char* b,
+                                  unsigned char* c, const size_t* shapes,
+                                  size_t info, size_t total) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+
+    size_t a_rank = info & 0x1F;
+    size_t b_rank = (info >> 5) & 0x1F;
+    size_t c_rank = (info >> 10) & 0x1F;
+    bool fast_path = info & 0x8000;
+
+    if (fast_path) {
+        c[idx] = (a[idx] || b[idx]) ? 1 : 0;
+    } else {
+        size_t a_idx = compute_broadcast_index(idx, shapes, a_rank, shapes + 20, c_rank);
+        size_t b_idx = compute_broadcast_index(idx, shapes + 10, b_rank, shapes + 20, c_rank);
+        c[idx] = (a[a_idx] || b[b_idx]) ? 1 : 0;
     }
+}
 
-    void launch_compare_scalar_lt(const float* a, float value, unsigned char* result,
-                                  size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        compare_scalar_kernel<<<grid_size, block_size, 0, stream>>>(a, value, result, n, LtOp());
+__global__ void logical_xor_kernel(const unsigned char* a, const unsigned char* b,
+                                   unsigned char* c, const size_t* shapes,
+                                   size_t info, size_t total) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+
+    size_t a_rank = info & 0x1F;
+    size_t b_rank = (info >> 5) & 0x1F;
+    size_t c_rank = (info >> 10) & 0x1F;
+    bool fast_path = info & 0x8000;
+
+    if (fast_path) {
+        c[idx] = ((a[idx] != 0) != (b[idx] != 0)) ? 1 : 0;
+    } else {
+        size_t a_idx = compute_broadcast_index(idx, shapes, a_rank, shapes + 20, c_rank);
+        size_t b_idx = compute_broadcast_index(idx, shapes + 10, b_rank, shapes + 20, c_rank);
+        c[idx] = ((a[a_idx] != 0) != (b[b_idx] != 0)) ? 1 : 0;
     }
+}
 
-    void launch_compare_scalar_gt(const float* a, float value, unsigned char* result,
-                                  size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        compare_scalar_kernel<<<grid_size, block_size, 0, stream>>>(a, value, result, n, GtOp());
+__global__ void logical_not_kernel(const unsigned char* a, unsigned char* r, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) r[idx] = !a[idx];
+}
+
+// ============= Launch Functions =============
+void launch_compare_eq(const float* a, const float* b, unsigned char* c,
+                      const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                      size_t a_rank, size_t b_rank, size_t c_rank,
+                      size_t c_elements, cudaStream_t stream) {
+    static thread_local CudaDeviceMemory<size_t> shapes(30);
+
+    size_t h_shapes[30] = {0};
+    std::copy(a_shape, a_shape + a_rank, h_shapes);
+    std::copy(b_shape, b_shape + b_rank, h_shapes + 10);
+    std::copy(c_shape, c_shape + c_rank, h_shapes + 20);
+    shapes.copy_from_host(h_shapes, 30);
+
+    bool fast_path = (a_rank == c_rank && b_rank == c_rank &&
+                     std::equal(a_shape, a_shape + a_rank, c_shape) &&
+                     std::equal(b_shape, b_shape + b_rank, c_shape));
+    size_t info = a_rank | (b_rank << 5) | (c_rank << 10) | (fast_path << 15);
+
+    int blocks = (c_elements + 255) / 256;
+    compare_eq_kernel<<<blocks, 256, 0, stream>>>(a, b, c, shapes.get(), info, c_elements);
+}
+
+void launch_compare_lt(const float* a, const float* b, unsigned char* c,
+                      const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                      size_t a_rank, size_t b_rank, size_t c_rank,
+                      size_t c_elements, cudaStream_t stream) {
+    static thread_local CudaDeviceMemory<size_t> shapes(30);
+
+    size_t h_shapes[30] = {0};
+    std::copy(a_shape, a_shape + a_rank, h_shapes);
+    std::copy(b_shape, b_shape + b_rank, h_shapes + 10);
+    std::copy(c_shape, c_shape + c_rank, h_shapes + 20);
+    shapes.copy_from_host(h_shapes, 30);
+
+    bool fast_path = (a_rank == c_rank && b_rank == c_rank &&
+                     std::equal(a_shape, a_shape + a_rank, c_shape) &&
+                     std::equal(b_shape, b_shape + b_rank, c_shape));
+    size_t info = a_rank | (b_rank << 5) | (c_rank << 10) | (fast_path << 15);
+
+    int blocks = (c_elements + 255) / 256;
+    compare_lt_kernel<<<blocks, 256, 0, stream>>>(a, b, c, shapes.get(), info, c_elements);
+}
+
+void launch_compare_gt(const float* a, const float* b, unsigned char* c,
+                      const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                      size_t a_rank, size_t b_rank, size_t c_rank,
+                      size_t c_elements, cudaStream_t stream) {
+    static thread_local CudaDeviceMemory<size_t> shapes(30);
+
+    size_t h_shapes[30] = {0};
+    std::copy(a_shape, a_shape + a_rank, h_shapes);
+    std::copy(b_shape, b_shape + b_rank, h_shapes + 10);
+    std::copy(c_shape, c_shape + c_rank, h_shapes + 20);
+    shapes.copy_from_host(h_shapes, 30);
+
+    bool fast_path = (a_rank == c_rank && b_rank == c_rank &&
+                     std::equal(a_shape, a_shape + a_rank, c_shape) &&
+                     std::equal(b_shape, b_shape + b_rank, c_shape));
+    size_t info = a_rank | (b_rank << 5) | (c_rank << 10) | (fast_path << 15);
+
+    int blocks = (c_elements + 255) / 256;
+    compare_gt_kernel<<<blocks, 256, 0, stream>>>(a, b, c, shapes.get(), info, c_elements);
+}
+
+// Scalar comparisons
+void launch_compare_scalar_eq(const float* a, float val, unsigned char* r, size_t n, cudaStream_t s) {
+    compare_scalar_eq_kernel<<<(n + 255) / 256, 256, 0, s>>>(a, val, r, n);
+}
+
+void launch_compare_scalar_lt(const float* a, float val, unsigned char* r, size_t n, cudaStream_t s) {
+    compare_scalar_lt_kernel<<<(n + 255) / 256, 256, 0, s>>>(a, val, r, n);
+}
+
+void launch_compare_scalar_gt(const float* a, float val, unsigned char* r, size_t n, cudaStream_t s) {
+    compare_scalar_gt_kernel<<<(n + 255) / 256, 256, 0, s>>>(a, val, r, n);
+}
+
+// Logical operations
+void launch_logical_and(const unsigned char* a, const unsigned char* b, unsigned char* c,
+                       const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                       size_t a_rank, size_t b_rank, size_t c_rank,
+                       size_t c_elements, cudaStream_t stream) {
+    static thread_local CudaDeviceMemory<size_t> shapes(30);
+
+    size_t h_shapes[30] = {0};
+    std::copy(a_shape, a_shape + a_rank, h_shapes);
+    std::copy(b_shape, b_shape + b_rank, h_shapes + 10);
+    std::copy(c_shape, c_shape + c_rank, h_shapes + 20);
+    shapes.copy_from_host(h_shapes, 30);
+
+    bool fast_path = (a_rank == c_rank && b_rank == c_rank &&
+                     std::equal(a_shape, a_shape + a_rank, c_shape) &&
+                     std::equal(b_shape, b_shape + b_rank, c_shape));
+    size_t info = a_rank | (b_rank << 5) | (c_rank << 10) | (fast_path << 15);
+
+    int blocks = (c_elements + 255) / 256;
+    logical_and_kernel<<<blocks, 256, 0, stream>>>(a, b, c, shapes.get(), info, c_elements);
+}
+
+void launch_logical_or(const unsigned char* a, const unsigned char* b, unsigned char* c,
+                      const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                      size_t a_rank, size_t b_rank, size_t c_rank,
+                      size_t c_elements, cudaStream_t stream) {
+    static thread_local CudaDeviceMemory<size_t> shapes(30);
+
+    size_t h_shapes[30] = {0};
+    std::copy(a_shape, a_shape + a_rank, h_shapes);
+    std::copy(b_shape, b_shape + b_rank, h_shapes + 10);
+    std::copy(c_shape, c_shape + c_rank, h_shapes + 20);
+    shapes.copy_from_host(h_shapes, 30);
+
+    bool fast_path = (a_rank == c_rank && b_rank == c_rank &&
+                     std::equal(a_shape, a_shape + a_rank, c_shape) &&
+                     std::equal(b_shape, b_shape + b_rank, c_shape));
+    size_t info = a_rank | (b_rank << 5) | (c_rank << 10) | (fast_path << 15);
+
+    int blocks = (c_elements + 255) / 256;
+    logical_or_kernel<<<blocks, 256, 0, stream>>>(a, b, c, shapes.get(), info, c_elements);
+}
+
+void launch_logical_xor(const unsigned char* a, const unsigned char* b, unsigned char* c,
+                       const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                       size_t a_rank, size_t b_rank, size_t c_rank,
+                       size_t c_elements, cudaStream_t stream) {
+    static thread_local CudaDeviceMemory<size_t> shapes(30);
+
+    size_t h_shapes[30] = {0};
+    std::copy(a_shape, a_shape + a_rank, h_shapes);
+    std::copy(b_shape, b_shape + b_rank, h_shapes + 10);
+    std::copy(c_shape, c_shape + c_rank, h_shapes + 20);
+    shapes.copy_from_host(h_shapes, 30);
+
+    bool fast_path = (a_rank == c_rank && b_rank == c_rank &&
+                     std::equal(a_shape, a_shape + a_rank, c_shape) &&
+                     std::equal(b_shape, b_shape + b_rank, c_shape));
+    size_t info = a_rank | (b_rank << 5) | (c_rank << 10) | (fast_path << 15);
+
+    int blocks = (c_elements + 255) / 256;
+    logical_xor_kernel<<<blocks, 256, 0, stream>>>(a, b, c, shapes.get(), info, c_elements);
+}
+
+void launch_logical_not(const unsigned char* a, unsigned char* r, size_t n, cudaStream_t s) {
+    logical_not_kernel<<<(n + 255) / 256, 256, 0, s>>>(a, r, n);
+}
+
+// ============= Masking Operations =============
+__global__ void masked_fill_kernel(float* data, const unsigned char* mask, float val, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n && mask[idx]) data[idx] = val;
+}
+
+void launch_masked_fill(float* data, const unsigned char* mask, float val, size_t n, cudaStream_t s) {
+    masked_fill_kernel<<<(n + 255) / 256, 256, 0, s>>>(data, mask, val, n);
+}
+
+__global__ void masked_select_compact_kernel(const float* input, const unsigned char* mask,
+                                            float* output, const int* scan, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n && mask[idx]) {
+        output[scan[idx]] = input[idx];
     }
+}
 
-    // ============= Logical Operations Kernels =============
-    template <typename Op>
-    __global__ void logical_binary_kernel(const unsigned char* a, const unsigned char* b,
-                                          unsigned char* c,
-                                          const size_t* a_shape, const size_t* b_shape,
-                                          const size_t* c_shape,
-                                          size_t a_rank, size_t b_rank, size_t c_rank,
-                                          size_t c_elements, Op op) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+void launch_masked_select(const float* input, const unsigned char* mask,
+                         float* output, size_t n, size_t output_size, cudaStream_t stream) {
+    if (n == 0 || output_size == 0) return;
 
-        if (idx >= c_elements)
-            return;
+    CudaDeviceMemory<int> scan_result(n);
+    if (!scan_result.valid()) return;
 
-        // Calculate indices
-        size_t indices[10];
-        size_t temp = idx;
-        for (int i = c_rank - 1; i >= 0; --i) {
-            indices[i] = temp % c_shape[i];
-            temp /= c_shape[i];
-        }
+    size_t temp_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, mask, scan_result.get(), n, stream);
 
-        // Map to a index
-        size_t a_idx = 0;
-        int a_rank_diff = c_rank - a_rank;
-        size_t a_stride = 1;
-        for (int i = a_rank - 1; i >= 0; --i) {
-            int c_dim_idx = i + a_rank_diff;
-            size_t dim_idx = (a_shape[i] == 1) ? 0 : indices[c_dim_idx];
-            a_idx += dim_idx * a_stride;
-            a_stride *= a_shape[i];
-        }
+    CudaDeviceMemory<uint8_t> temp_storage(temp_bytes);
+    if (!temp_storage.valid()) return;
 
-        // Map to b index
-        size_t b_idx = 0;
-        int b_rank_diff = c_rank - b_rank;
-        size_t b_stride = 1;
-        for (int i = b_rank - 1; i >= 0; --i) {
-            int c_dim_idx = i + b_rank_diff;
-            size_t dim_idx = (b_shape[i] == 1) ? 0 : indices[c_dim_idx];
-            b_idx += dim_idx * b_stride;
-            b_stride *= b_shape[i];
-        }
+    cub::DeviceScan::ExclusiveSum(temp_storage.get(), temp_bytes,
+                                  mask, scan_result.get(), n, stream);
 
-        c[idx] = op(a[a_idx], b[b_idx]);
+    if (stream != 0) cudaStreamSynchronize(stream);
+
+    int blocks = (n + 255) / 256;
+    masked_select_compact_kernel<<<blocks, 256, 0, stream>>>(
+        input, mask, output, scan_result.get(), n);
+}
+
+__global__ void masked_scatter_compact_kernel(float* data, const unsigned char* mask,
+                                             const float* src, const int* scan, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n && mask[idx]) {
+        data[idx] = src[scan[idx]];
     }
+}
 
-    struct AndOp {
-        __device__ unsigned char operator()(unsigned char a, unsigned char b) const {
-            return (a && b) ? 1 : 0;
-        }
-    };
+void launch_masked_scatter(float* data, const unsigned char* mask,
+                          const float* src, size_t n, size_t src_size, cudaStream_t stream) {
+    if (n == 0 || src_size == 0) return;
 
-    struct OrOp {
-        __device__ unsigned char operator()(unsigned char a, unsigned char b) const {
-            return (a || b) ? 1 : 0;
-        }
-    };
+    CudaDeviceMemory<int> scan_result(n);
+    if (!scan_result.valid()) return;
 
-    struct XorOp {
-        __device__ unsigned char operator()(unsigned char a, unsigned char b) const {
-            return ((a != 0) != (b != 0)) ? 1 : 0;
-        }
-    };
+    size_t temp_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, mask, scan_result.get(), n, stream);
 
-    __global__ void logical_not_kernel(const unsigned char* a, unsigned char* result, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            result[idx] = a[idx] ? 0 : 1;
-        }
-    }
+    CudaDeviceMemory<uint8_t> temp_storage(temp_bytes);
+    if (!temp_storage.valid()) return;
 
-    void launch_logical_and(const unsigned char* a, const unsigned char* b, unsigned char* result,
-                            const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
-                            size_t a_rank, size_t b_rank, size_t c_rank,
-                            size_t c_elements, cudaStream_t stream) {
-        CudaDeviceMemory<size_t> d_a_shape(a_rank);
-        CudaDeviceMemory<size_t> d_b_shape(b_rank);
-        CudaDeviceMemory<size_t> d_c_shape(c_rank);
+    cub::DeviceScan::ExclusiveSum(temp_storage.get(), temp_bytes,
+                                  mask, scan_result.get(), n, stream);
 
-        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
-            return;
-        }
+    if (stream != 0) cudaStreamSynchronize(stream);
 
-        d_a_shape.copy_from_host(a_shape, a_rank);
-        d_b_shape.copy_from_host(b_shape, b_rank);
-        d_c_shape.copy_from_host(c_shape, c_rank);
+    int blocks = (n + 255) / 256;
+    masked_scatter_compact_kernel<<<blocks, 256, 0, stream>>>(
+        data, mask, src, scan_result.get(), n);
+}
 
-        int block_size = 256;
-        int grid_size = (c_elements + block_size - 1) / block_size;
+// ============= Where Operation =============
+__global__ void where_kernel(const unsigned char* cond, const float* x, const float* y,
+                            float* r, const size_t* shapes,
+                            size_t cr, size_t xr, size_t yr, size_t rr, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
 
-        logical_binary_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, result, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
-            a_rank, b_rank, c_rank, c_elements, AndOp());
-    }
+    size_t c_idx = compute_broadcast_index(idx, shapes, cr, shapes + 30, rr);
+    size_t x_idx = compute_broadcast_index(idx, shapes + 10, xr, shapes + 30, rr);
+    size_t y_idx = compute_broadcast_index(idx, shapes + 20, yr, shapes + 30, rr);
 
-    void launch_logical_or(const unsigned char* a, const unsigned char* b, unsigned char* result,
-                           const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
-                           size_t a_rank, size_t b_rank, size_t c_rank,
-                           size_t c_elements, cudaStream_t stream) {
-        CudaDeviceMemory<size_t> d_a_shape(a_rank);
-        CudaDeviceMemory<size_t> d_b_shape(b_rank);
-        CudaDeviceMemory<size_t> d_c_shape(c_rank);
+    r[idx] = cond[c_idx] ? x[x_idx] : y[y_idx];
+}
 
-        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
-            return;
-        }
+void launch_where(const unsigned char* cond, const float* x, const float* y, float* r,
+                 const size_t* cond_shape, const size_t* x_shape,
+                 const size_t* y_shape, const size_t* r_shape,
+                 size_t cond_rank, size_t x_rank, size_t y_rank, size_t r_rank,
+                 size_t total, cudaStream_t stream) {
 
-        d_a_shape.copy_from_host(a_shape, a_rank);
-        d_b_shape.copy_from_host(b_shape, b_rank);
-        d_c_shape.copy_from_host(c_shape, c_rank);
+    static thread_local CudaDeviceMemory<size_t> shapes(40);
 
-        int block_size = 256;
-        int grid_size = (c_elements + block_size - 1) / block_size;
+    size_t h_shapes[40] = {0};
+    std::copy(cond_shape, cond_shape + cond_rank, h_shapes);
+    std::copy(x_shape, x_shape + x_rank, h_shapes + 10);
+    std::copy(y_shape, y_shape + y_rank, h_shapes + 20);
+    std::copy(r_shape, r_shape + r_rank, h_shapes + 30);
+    shapes.copy_from_host(h_shapes, 40);
 
-        logical_binary_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, result, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
-            a_rank, b_rank, c_rank, c_elements, OrOp());
-    }
+    where_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
+        cond, x, y, r, shapes.get(), cond_rank, x_rank, y_rank, r_rank, total);
+}
 
-    void launch_logical_xor(const unsigned char* a, const unsigned char* b, unsigned char* result,
-                            const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
-                            size_t a_rank, size_t b_rank, size_t c_rank,
-                            size_t c_elements, cudaStream_t stream) {
-        CudaDeviceMemory<size_t> d_a_shape(a_rank);
-        CudaDeviceMemory<size_t> d_b_shape(b_rank);
-        CudaDeviceMemory<size_t> d_c_shape(c_rank);
+// ============= Count Nonzero =============
+template<typename T>
+__global__ void count_nonzero_kernel(const T* data, unsigned long long* cnt, size_t n) {
+    extern __shared__ unsigned long long sdata[];
 
-        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
-            return;
-        }
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * blockDim.x + tid;
 
-        d_a_shape.copy_from_host(a_shape, a_rank);
-        d_b_shape.copy_from_host(b_shape, b_rank);
-        d_c_shape.copy_from_host(c_shape, c_rank);
+    sdata[tid] = (i < n && data[i] != T(0)) ? 1 : 0;
+    __syncthreads();
 
-        int block_size = 256;
-        int grid_size = (c_elements + block_size - 1) / block_size;
-
-        logical_binary_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, result, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
-            a_rank, b_rank, c_rank, c_elements, XorOp());
-    }
-
-    void launch_logical_not(const unsigned char* a, unsigned char* result,
-                            size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        logical_not_kernel<<<grid_size, block_size, 0, stream>>>(a, result, n);
-    }
-
-    // ============= Masking Operations Kernels =============
-    __global__ void masked_select_kernel(const float* input, const unsigned char* mask,
-                                         float* output, const int* scan_result, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n && mask[idx]) {
-            output[scan_result[idx]] = input[idx];
-        }
-    }
-
-    void launch_masked_select(const float* input, const unsigned char* mask,
-                              float* output, size_t n, size_t output_size, cudaStream_t stream) {
-        // Early exit for empty case
-        if (n == 0 || output_size == 0) {
-            return;
-        }
-
-        // Use RAII for scan result
-        CudaDeviceMemory<int> d_scan_result(n);
-        if (!d_scan_result.valid()) {
-            return;
-        }
-
-        // Use CUB for efficient parallel prefix sum
-        size_t temp_storage_bytes = 0;
-        cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_bytes,
-                                      mask, d_scan_result.get(), n, stream);
-
-        CudaDeviceMemory<uint8_t> d_temp_storage(temp_storage_bytes);
-        if (!d_temp_storage.valid()) {
-            return;
-        }
-
-        cub::DeviceScan::ExclusiveSum(d_temp_storage.get(), temp_storage_bytes,
-                                      mask, d_scan_result.get(), n, stream);
-
-        // Synchronize to ensure scan is complete before using results
-        if (stream != 0) {
-            cudaStreamSynchronize(stream);
-        }
-
-        // Now gather the selected elements
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        masked_select_kernel<<<grid_size, block_size, 0, stream>>>(
-            input, mask, output, d_scan_result.get(), n);
-    }
-
-    __global__ void masked_fill_kernel(float* data, const unsigned char* mask,
-                                       float value, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n && mask[idx]) {
-            data[idx] = value;
-        }
-    }
-
-    void launch_masked_fill(float* data, const unsigned char* mask,
-                            float value, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        masked_fill_kernel<<<grid_size, block_size, 0, stream>>>(data, mask, value, n);
-    }
-
-    __global__ void masked_scatter_kernel(float* data, const unsigned char* mask,
-                                          const float* src, const int* scan_result, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n && mask[idx]) {
-            data[idx] = src[scan_result[idx]];
-        }
-    }
-
-    void launch_masked_scatter(float* data, const unsigned char* mask,
-                               const float* src, size_t n, size_t src_size, cudaStream_t stream) {
-        // Early exit for empty case
-        if (n == 0 || src_size == 0) {
-            return;
-        }
-
-        // Use RAII for scan result
-        CudaDeviceMemory<int> d_scan_result(n);
-        if (!d_scan_result.valid()) {
-            return;
-        }
-
-        size_t temp_storage_bytes = 0;
-        cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_bytes,
-                                      mask, d_scan_result.get(), n, stream);
-
-        CudaDeviceMemory<uint8_t> d_temp_storage(temp_storage_bytes);
-        if (!d_temp_storage.valid()) {
-            return;
-        }
-
-        cub::DeviceScan::ExclusiveSum(d_temp_storage.get(), temp_storage_bytes,
-                                      mask, d_scan_result.get(), n, stream);
-
-        // Synchronize to ensure scan is complete
-        if (stream != 0) {
-            cudaStreamSynchronize(stream);
-        }
-
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        masked_scatter_kernel<<<grid_size, block_size, 0, stream>>>(
-            data, mask, src, d_scan_result.get(), n);
-    }
-
-    // Fixed where kernel with proper broadcasting support
-    __global__ void where_broadcast_kernel(const unsigned char* condition,
-                                           const float* x, const float* y, float* result,
-                                           const size_t* cond_shape, const size_t* x_shape,
-                                           const size_t* y_shape, const size_t* result_shape,
-                                           size_t cond_rank, size_t x_rank,
-                                           size_t y_rank, size_t result_rank,
-                                           size_t result_elements) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= result_elements)
-            return;
-
-        // Calculate multi-dimensional indices for result
-        size_t indices[10];
-        size_t temp = idx;
-        for (int i = result_rank - 1; i >= 0; --i) {
-            indices[i] = temp % result_shape[i];
-            temp /= result_shape[i];
-        }
-
-        // Map to condition index
-        size_t cond_idx = 0;
-        int cond_rank_diff = result_rank - cond_rank;
-        size_t cond_stride = 1;
-        for (int i = cond_rank - 1; i >= 0; --i) {
-            int result_dim_idx = i + cond_rank_diff;
-            size_t dim_idx = (cond_shape[i] == 1) ? 0 : indices[result_dim_idx];
-            cond_idx += dim_idx * cond_stride;
-            cond_stride *= cond_shape[i];
-        }
-
-        // Map to x index
-        size_t x_idx = 0;
-        int x_rank_diff = result_rank - x_rank;
-        size_t x_stride = 1;
-        for (int i = x_rank - 1; i >= 0; --i) {
-            int result_dim_idx = i + x_rank_diff;
-            size_t dim_idx = (x_shape[i] == 1) ? 0 : indices[result_dim_idx];
-            x_idx += dim_idx * x_stride;
-            x_stride *= x_shape[i];
-        }
-
-        // Map to y index
-        size_t y_idx = 0;
-        int y_rank_diff = result_rank - y_rank;
-        size_t y_stride = 1;
-        for (int i = y_rank - 1; i >= 0; --i) {
-            int result_dim_idx = i + y_rank_diff;
-            size_t dim_idx = (y_shape[i] == 1) ? 0 : indices[result_dim_idx];
-            y_idx += dim_idx * y_stride;
-            y_stride *= y_shape[i];
-        }
-
-        result[idx] = condition[cond_idx] ? x[x_idx] : y[y_idx];
-    }
-
-    void launch_where(const unsigned char* condition,
-                      const float* x, const float* y, float* result,
-                      const size_t* cond_shape, const size_t* x_shape,
-                      const size_t* y_shape, const size_t* result_shape,
-                      size_t cond_rank, size_t x_rank, size_t y_rank, size_t result_rank,
-                      size_t result_elements, cudaStream_t stream) {
-
-        // Allocate device memory for shapes using RAII
-        CudaDeviceMemory<size_t> d_cond_shape(cond_rank);
-        CudaDeviceMemory<size_t> d_x_shape(x_rank);
-        CudaDeviceMemory<size_t> d_y_shape(y_rank);
-        CudaDeviceMemory<size_t> d_result_shape(result_rank);
-
-        if (!d_cond_shape.valid() || !d_x_shape.valid() ||
-            !d_y_shape.valid() || !d_result_shape.valid()) {
-            return;
-        }
-
-        d_cond_shape.copy_from_host(cond_shape, cond_rank);
-        d_x_shape.copy_from_host(x_shape, x_rank);
-        d_y_shape.copy_from_host(y_shape, y_rank);
-        d_result_shape.copy_from_host(result_shape, result_rank);
-
-        int block_size = 256;
-        int grid_size = (result_elements + block_size - 1) / block_size;
-
-        where_broadcast_kernel<<<grid_size, block_size, 0, stream>>>(
-            condition, x, y, result,
-            d_cond_shape.get(), d_x_shape.get(), d_y_shape.get(), d_result_shape.get(),
-            cond_rank, x_rank, y_rank, result_rank,
-            result_elements);
-    }
-
-    __global__ void count_nonzero_bool_kernel(const unsigned char* data, unsigned long long* count, size_t n) {
-        extern __shared__ unsigned long long sdata[];
-
-        unsigned int tid = threadIdx.x;
-        unsigned int i = blockIdx.x * blockDim.x + tid;
-
-        unsigned long long myCount = 0;
-        if (i < n) {
-            myCount = data[i] ? 1 : 0;
-        }
-
-        sdata[tid] = myCount;
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
         __syncthreads();
-
-        // Reduction in shared memory
-        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-            if (tid < s) {
-                sdata[tid] += sdata[tid + s];
-            }
-            __syncthreads();
-        }
-
-        if (tid == 0) {
-            atomicAdd(count, sdata[0]);
-        }
     }
 
-    void launch_count_nonzero_bool(const unsigned char* data, size_t* count,
-                                   size_t n, cudaStream_t stream) {
-        if (n == 0) {
-            *count = 0;
-            return;
-        }
+    if (tid == 0) atomicAdd(cnt, sdata[0]);
+}
 
-        // Use RAII for count
-        CudaDeviceMemory<unsigned long long> d_count(1);
-        if (!d_count.valid()) {
-            *count = 0;
-            return;
-        }
+template<typename T>
+void count_nonzero_impl(const T* data, size_t* count, size_t n, cudaStream_t stream) {
+    static thread_local CudaDeviceMemory<unsigned long long> d_count(1);
 
-        cudaMemsetAsync(d_count.get(), 0, sizeof(unsigned long long), stream);
+    cudaMemsetAsync(d_count.get(), 0, sizeof(unsigned long long), stream);
 
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
+    int blocks = (n + 255) / 256;
+    count_nonzero_kernel<T><<<blocks, 256, 256 * sizeof(unsigned long long), stream>>>(
+        data, d_count.get(), n);
 
-        count_nonzero_bool_kernel<<<grid_size, block_size,
-                                    block_size * sizeof(unsigned long long), stream>>>(
-            data, d_count.get(), n);
+    cudaStreamSynchronize(stream);
 
-        // Synchronize before copying result
-        cudaStreamSynchronize(stream);
+    unsigned long long h_count;
+    d_count.copy_to_host(&h_count, 1);
+    *count = static_cast<size_t>(h_count);
+}
 
-        // Copy result back to size_t
-        unsigned long long h_count = 0;
-        d_count.copy_to_host(&h_count, 1);
-        *count = static_cast<size_t>(h_count);
+void launch_count_nonzero_bool(const unsigned char* data, size_t* count,
+                              size_t n, cudaStream_t stream) {
+    count_nonzero_impl(data, count, n, stream);
+}
+
+void launch_count_nonzero_float(const float* data, size_t* count,
+                               size_t n, cudaStream_t stream) {
+    count_nonzero_impl(data, count, n, stream);
+}
+
+// ============= Index Operations =============
+__global__ void index_select_kernel(const float* in, const int* idx, float* out,
+                                   size_t outer, size_t dim_size, size_t inner,
+                                   size_t idx_size, int boundary) {
+    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = outer * idx_size * inner;
+
+    if (tid >= total) return;
+
+    size_t o = tid / (idx_size * inner);
+    size_t i = (tid / inner) % idx_size;
+    size_t j = tid % inner;
+
+    int sel = idx[i];
+
+    if (boundary == 1) sel = max(0, min((int)dim_size - 1, sel));
+    else if (boundary == 2) sel = ((sel % (int)dim_size) + dim_size) % dim_size;
+    else if (sel < 0 || sel >= dim_size) { out[tid] = 0; return; }
+
+    out[tid] = in[o * dim_size * inner + sel * inner + j];
+}
+
+void launch_index_select(const float* in, const int* idx, float* out,
+                        const size_t* shape, size_t rank, int dim,
+                        size_t idx_size, int boundary, cudaStream_t stream) {
+    size_t outer = 1, inner = 1;
+    for (int i = 0; i < dim; ++i) outer *= shape[i];
+    for (size_t i = dim + 1; i < rank; ++i) inner *= shape[i];
+
+    size_t total = outer * idx_size * inner;
+    index_select_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
+        in, idx, out, outer, shape[dim], inner, idx_size, boundary);
+}
+
+// Fixed gather kernel
+__global__ void gather_kernel(const float* in, const int* idx, float* out,
+                              const size_t* in_shape, const size_t* idx_shape,
+                              size_t in_rank, size_t idx_rank, int dim, size_t total, int boundary) {
+    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= total) return;
+
+    // Calculate strides for input tensor
+    size_t in_strides[10];  // Max rank
+    in_strides[in_rank - 1] = 1;
+    for (int i = in_rank - 2; i >= 0; --i) {
+        in_strides[i] = in_strides[i + 1] * in_shape[i + 1];
     }
 
-    __global__ void count_nonzero_float_kernel(const float* data, unsigned long long* count, size_t n) {
-        extern __shared__ unsigned long long sdata[];
-
-        unsigned int tid = threadIdx.x;
-        unsigned int i = blockIdx.x * blockDim.x + tid;
-
-        unsigned long long myCount = 0;
-        if (i < n) {
-            myCount = (data[i] != 0.0f) ? 1 : 0;
-        }
-
-        sdata[tid] = myCount;
-        __syncthreads();
-
-        // Reduction in shared memory
-        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-            if (tid < s) {
-                sdata[tid] += sdata[tid + s];
-            }
-            __syncthreads();
-        }
-
-        if (tid == 0) {
-            atomicAdd(count, sdata[0]);
-        }
+    // Calculate strides for output/indices tensor
+    size_t out_strides[10];  // Max rank
+    out_strides[idx_rank - 1] = 1;
+    for (int i = idx_rank - 2; i >= 0; --i) {
+        out_strides[i] = out_strides[i + 1] * idx_shape[i + 1];
     }
 
-    void launch_count_nonzero_float(const float* data, size_t* count,
-                                    size_t n, cudaStream_t stream) {
-        if (n == 0) {
-            *count = 0;
-            return;
-        }
-
-        // Use RAII for count
-        CudaDeviceMemory<unsigned long long> d_count(1);
-        if (!d_count.valid()) {
-            *count = 0;
-            return;
-        }
-
-        cudaMemsetAsync(d_count.get(), 0, sizeof(unsigned long long), stream);
-
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-
-        count_nonzero_float_kernel<<<grid_size, block_size,
-                                     block_size * sizeof(unsigned long long), stream>>>(
-            data, d_count.get(), n);
-
-        // Synchronize before copying result
-        cudaStreamSynchronize(stream);
-
-        // Copy result back to size_t
-        unsigned long long h_count = 0;
-        d_count.copy_to_host(&h_count, 1);
-        *count = static_cast<size_t>(h_count);
+    // Get coordinates in output/indices tensor
+    size_t out_coords[10] = {0};
+    size_t temp = tid;
+    for (size_t d = 0; d < idx_rank; ++d) {
+        out_coords[d] = temp / out_strides[d];
+        temp %= out_strides[d];
     }
 
-    // ============= Indexing Operations Kernels =============
-    __global__ void index_select_kernel(const float* input, const int* indices, float* output,
-                                        size_t outer_size, size_t dim_size, size_t inner_size,
-                                        size_t index_size, int boundary_mode) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        size_t total_output = outer_size * index_size * inner_size;
+    // Get the gather index
+    int gather_idx = idx[tid];
 
-        if (idx >= total_output)
-            return;
-
-        size_t outer_idx = idx / (index_size * inner_size);
-        size_t idx_pos = (idx / inner_size) % index_size;
-        size_t inner_idx = idx % inner_size;
-
-        int selected_idx = indices[idx_pos];
-
-        // Handle boundary modes
-        if (boundary_mode == 1) { // Clamp
-            selected_idx = max(0, min((int)dim_size - 1, selected_idx));
-        } else if (boundary_mode == 2) { // Wrap
-            selected_idx = ((selected_idx % (int)dim_size) + dim_size) % dim_size;
-        } else if (selected_idx < 0 || selected_idx >= dim_size) {
-            // Assert mode - invalid index, set to 0
-            output[idx] = 0;
-            return;
-        }
-
-        size_t src_idx = outer_idx * dim_size * inner_size +
-                         selected_idx * inner_size + inner_idx;
-        output[idx] = input[src_idx];
+    // Apply boundary mode
+    if (boundary == 1) { // Clamp
+        gather_idx = max(0, min((int)in_shape[dim] - 1, gather_idx));
+    } else if (boundary == 2) { // Wrap
+        gather_idx = ((gather_idx % (int)in_shape[dim]) + in_shape[dim]) % in_shape[dim];
+    } else if (gather_idx < 0 || gather_idx >= in_shape[dim]) { // Assert
+        out[tid] = 0;
+        return;
     }
 
-    void launch_index_select(const float* input, const int* indices, float* output,
-                             const size_t* shape, size_t rank, int dim,
-                             size_t index_size, int boundary_mode, cudaStream_t stream) {
-        // Calculate dimensions
-        size_t outer_size = 1;
-        for (int i = 0; i < dim; ++i) {
-            outer_size *= shape[i];
+    // Build source coordinates
+    // Use output coordinates for all dimensions except dim
+    // For dim, use the gathered index
+    size_t src_idx = 0;
+    for (size_t d = 0; d < in_rank; ++d) {
+        size_t coord;
+        if (d == dim) {
+            coord = gather_idx;
+        } else if (d < idx_rank) {
+            coord = out_coords[d];
+        } else {
+            coord = 0;
         }
 
-        size_t dim_size = shape[dim];
-
-        size_t inner_size = 1;
-        for (size_t i = dim + 1; i < rank; ++i) {
-            inner_size *= shape[i];
-        }
-
-        size_t total_output = outer_size * index_size * inner_size;
-
-        int block_size = 256;
-        int grid_size = (total_output + block_size - 1) / block_size;
-
-        index_select_kernel<<<grid_size, block_size, 0, stream>>>(
-            input, indices, output, outer_size, dim_size, inner_size,
-            index_size, boundary_mode);
-    }
-
-    // Fixed gather kernel with proper index calculations
-    __global__ void gather_kernel(const float* input, const int* indices, float* output,
-                                  size_t outer_size, size_t dim_size, size_t inner_size,
-                                  size_t index_size, int boundary_mode) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        size_t total_output = outer_size * index_size * inner_size;
-
-        if (idx >= total_output)
-            return;
-
-        size_t outer_idx = idx / (index_size * inner_size);
-        size_t idx_pos = (idx / inner_size) % index_size;
-        size_t inner_idx = idx % inner_size;
-
-        // Get the index for this position from indices tensor
-        int gather_idx = indices[outer_idx * index_size * inner_size + idx_pos * inner_size + inner_idx];
-
-        // Handle boundary modes
-        if (boundary_mode == 1) { // Clamp
-            gather_idx = max(0, min((int)dim_size - 1, gather_idx));
-        } else if (boundary_mode == 2) { // Wrap
-            gather_idx = ((gather_idx % (int)dim_size) + dim_size) % dim_size;
-        } else if (gather_idx < 0 || gather_idx >= dim_size) {
-            // Assert mode - invalid index
-            output[idx] = 0;
+        // Bounds check
+        if (coord >= in_shape[d]) {
+            out[tid] = 0;
             return;
         }
 
-        // Calculate source index
-        size_t src_idx = outer_idx * dim_size * inner_size +
-                         gather_idx * inner_size + inner_idx;
-        output[idx] = input[src_idx];
+        src_idx += coord * in_strides[d];
     }
 
-    void launch_gather(const float* input, const int* indices, float* output,
-                       const size_t* input_shape, const size_t* indices_shape,
-                       size_t rank, int dim, size_t indices_elements,
-                       int boundary_mode, cudaStream_t stream) {
-        // Calculate dimensions
-        size_t outer_size = 1;
-        for (int i = 0; i < dim; ++i) {
-            outer_size *= input_shape[i];
-        }
+    out[tid] = in[src_idx];
+}
 
-        size_t dim_size = input_shape[dim];
-        size_t index_size = indices_shape[dim];
+void launch_gather(const float* in, const int* idx, float* out,
+                  const size_t* in_shape, const size_t* idx_shape,
+                  size_t rank, int dim, size_t total, int boundary, cudaStream_t stream) {
+    // Need to pass both shapes to the kernel
+    CudaDeviceMemory<size_t> d_in_shape(10);
+    CudaDeviceMemory<size_t> d_idx_shape(10);
 
-        size_t inner_size = 1;
-        for (size_t i = dim + 1; i < rank; ++i) {
-            inner_size *= input_shape[i];
-        }
+    size_t h_in_shape[10] = {0};
+    size_t h_idx_shape[10] = {0};
 
-        int block_size = 256;
-        int grid_size = (indices_elements + block_size - 1) / block_size;
+    // Calculate idx_rank from total and idx_shape
+    // The total is the number of elements in indices tensor
+    size_t idx_rank = rank; // Default to same rank as input
 
-        gather_kernel<<<grid_size, block_size, 0, stream>>>(
-            input, indices, output, outer_size, dim_size, inner_size,
-            index_size, boundary_mode);
-    }
-
-    __global__ void take_kernel(const float* input, const int* indices, float* output,
-                                size_t input_size, size_t output_size) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-        if (idx >= output_size)
-            return;
-
-        int index = indices[idx];
-
-        // Handle negative indices
-        if (index < 0) {
-            index += input_size;
-        }
-
-        // Check bounds
-        if (index < 0 || index >= input_size) {
-            output[idx] = 0; // Or could assert/error
-            return;
-        }
-
-        output[idx] = input[index];
-    }
-
-    void launch_take(const float* input, const int* indices, float* output,
-                     size_t input_size, size_t output_size, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (output_size + block_size - 1) / block_size;
-
-        take_kernel<<<grid_size, block_size, 0, stream>>>(
-            input, indices, output, input_size, output_size);
-    }
-
-    // Fixed scatter kernel
-    __global__ void scatter_kernel(float* output, const int* indices, const float* input,
-                                   size_t outer_size, size_t dim_size, size_t inner_size,
-                                   size_t index_size, int scatter_mode) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        size_t total_input = outer_size * index_size * inner_size;
-
-        if (idx >= total_input)
-            return;
-
-        size_t outer_idx = idx / (index_size * inner_size);
-        size_t idx_pos = (idx / inner_size) % index_size;
-        size_t inner_idx = idx % inner_size;
-
-        // Get the scatter index for this position in the indices array
-        int scatter_idx = indices[idx_pos];
-
-        // Check bounds
-        if (scatter_idx < 0 || scatter_idx >= dim_size) {
-            return; // Invalid index
-        }
-
-        size_t src_idx = idx; // Source index is just the linear index in input
-        size_t dst_idx = outer_idx * dim_size * inner_size +
-                         scatter_idx * inner_size + inner_idx;
-
-        // Apply scatter mode
-        switch (scatter_mode) {
-        case 0: // None
-            output[dst_idx] = input[src_idx];
-            break;
-        case 1: // Add
-            atomicAdd(&output[dst_idx], input[src_idx]);
-            break;
-        case 2: // Multiply
-            // Note: atomic multiply is not native, would need custom implementation
-            // For now, just overwrite
-            output[dst_idx] = input[src_idx];
-            break;
-        case 3: // Max
-            // atomicMax only works with integers, need custom for float
-            // For now, just overwrite
-            output[dst_idx] = input[src_idx];
-            break;
-        case 4: // Min
-            // atomicMin only works with integers, need custom for float
-            // For now, just overwrite
-            output[dst_idx] = input[src_idx];
+    // Try to infer idx_rank from the shapes if possible
+    // For the gather operation, indices typically has same rank as input
+    // But we can calculate it from the total elements
+    size_t idx_elements = 1;
+    for (size_t i = 0; i < rank; ++i) {
+        if (idx_shape[i] > 0) {
+            h_idx_shape[i] = idx_shape[i];
+            idx_elements *= idx_shape[i];
+        } else {
             break;
         }
     }
 
-    void launch_scatter(float* output, const int* indices, const float* input,
-                        const size_t* output_shape, const size_t* input_shape,
-                        size_t rank, int dim, size_t input_elements,
-                        int scatter_mode, cudaStream_t stream) {
-        // Calculate dimensions
-        size_t outer_size = 1;
-        for (int i = 0; i < dim; ++i) {
-            outer_size *= output_shape[i];
-        }
-
-        size_t dim_size = output_shape[dim];
-
-        size_t inner_size = 1;
-        for (size_t i = dim + 1; i < rank; ++i) {
-            inner_size *= output_shape[i];
-        }
-
-        size_t index_size = input_shape[dim]; // Number of indices
-
-        int block_size = 256;
-        int grid_size = (input_elements + block_size - 1) / block_size;
-
-        scatter_kernel<<<grid_size, block_size, 0, stream>>>(
-            output, indices, input, outer_size, dim_size, inner_size,
-            index_size, scatter_mode);
-    }
-
-    __global__ void index_fill_kernel(float* data, const int* indices, float value,
-                                      size_t outer_size, size_t dim_size, size_t inner_size,
-                                      size_t num_indices) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        size_t total_fills = outer_size * num_indices * inner_size;
-
-        if (idx >= total_fills)
-            return;
-
-        size_t outer_idx = idx / (num_indices * inner_size);
-        size_t idx_pos = (idx / inner_size) % num_indices;
-        size_t inner_idx = idx % inner_size;
-
-        int fill_idx = indices[idx_pos];
-
-        // Check bounds
-        if (fill_idx < 0 || fill_idx >= dim_size) {
-            return;
-        }
-
-        size_t dst_idx = outer_idx * dim_size * inner_size +
-                         fill_idx * inner_size + inner_idx;
-        data[dst_idx] = value;
-    }
-
-    void launch_index_fill(float* data, const int* indices, float value,
-                           const size_t* shape, size_t rank, int dim,
-                           size_t num_indices, cudaStream_t stream) {
-        // Calculate dimensions
-        size_t outer_size = 1;
-        for (int i = 0; i < dim; ++i) {
-            outer_size *= shape[i];
-        }
-
-        size_t dim_size = shape[dim];
-
-        size_t inner_size = 1;
-        for (size_t i = dim + 1; i < rank; ++i) {
-            inner_size *= shape[i];
-        }
-
-        size_t total_fills = outer_size * num_indices * inner_size;
-
-        int block_size = 256;
-        int grid_size = (total_fills + block_size - 1) / block_size;
-
-        index_fill_kernel<<<grid_size, block_size, 0, stream>>>(
-            data, indices, value, outer_size, dim_size, inner_size, num_indices);
-    }
-
-    __global__ void index_copy_kernel(float* dst, const int* indices, const float* src,
-                                      size_t outer_size, size_t dim_size, size_t inner_size,
-                                      size_t num_indices) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        size_t total_copies = outer_size * num_indices * inner_size;
-
-        if (idx >= total_copies)
-            return;
-
-        size_t outer_idx = idx / (num_indices * inner_size);
-        size_t idx_pos = (idx / inner_size) % num_indices;
-        size_t inner_idx = idx % inner_size;
-
-        int copy_idx = indices[idx_pos];
-
-        // Check bounds
-        if (copy_idx < 0 || copy_idx >= dim_size) {
-            return;
-        }
-
-        size_t dst_idx = outer_idx * dim_size * inner_size +
-                         copy_idx * inner_size + inner_idx;
-        size_t src_idx = outer_idx * num_indices * inner_size +
-                         idx_pos * inner_size + inner_idx;
-
-        dst[dst_idx] = src[src_idx];
-    }
-
-    void launch_index_copy(float* dst, const int* indices, const float* src,
-                           const size_t* shape, size_t rank, int dim,
-                           size_t num_indices, cudaStream_t stream) {
-        // Calculate dimensions
-        size_t outer_size = 1;
-        for (int i = 0; i < dim; ++i) {
-            outer_size *= shape[i];
-        }
-
-        size_t dim_size = shape[dim];
-
-        size_t inner_size = 1;
-        for (size_t i = dim + 1; i < rank; ++i) {
-            inner_size *= shape[i];
-        }
-
-        size_t total_copies = outer_size * num_indices * inner_size;
-
-        int block_size = 256;
-        int grid_size = (total_copies + block_size - 1) / block_size;
-
-        index_copy_kernel<<<grid_size, block_size, 0, stream>>>(
-            dst, indices, src, outer_size, dim_size, inner_size, num_indices);
-    }
-
-    // ============= Power Operations =============
-
-    __global__ void pow_scalar_kernel(float* data, float exponent, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            data[idx] = powf(data[idx], exponent);
+    // Find actual rank of indices
+    idx_rank = 0;
+    size_t check_elements = 1;
+    for (size_t i = 0; i < 10; ++i) {
+        if (idx_shape[i] > 0) {
+            check_elements *= idx_shape[i];
+            idx_rank++;
+            if (check_elements == total) break;
+        } else {
+            break;
         }
     }
 
-    void launch_pow_scalar(float* data, float exponent, size_t n, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        pow_scalar_kernel<<<grid_size, block_size, 0, stream>>>(data, exponent, n);
+    if (idx_rank == 0) idx_rank = 1; // At least 1D
+
+    // Copy shapes
+    for (size_t i = 0; i < rank; ++i) {
+        h_in_shape[i] = in_shape[i];
     }
 
-    template <typename Op>
-    __global__ void pow_broadcast_kernel(const float* a, const float* b, float* c,
-                                         const size_t* a_shape, const size_t* b_shape,
-                                         const size_t* c_shape,
-                                         size_t a_rank, size_t b_rank, size_t c_rank,
-                                         size_t c_elements, Op op) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    d_in_shape.copy_from_host(h_in_shape, 10);
+    d_idx_shape.copy_from_host(h_idx_shape, 10);
 
-        if (idx >= c_elements)
-            return;
+    int blocks = (total + 255) / 256;
+    gather_kernel<<<blocks, 256, 0, stream>>>(
+        in, idx, out, d_in_shape.get(), d_idx_shape.get(),
+        rank, idx_rank, dim, total, boundary);
+}
 
-        // Calculate indices
-        size_t indices[10];
-        size_t temp = idx;
-        for (int i = c_rank - 1; i >= 0; --i) {
-            indices[i] = temp % c_shape[i];
-            temp /= c_shape[i];
-        }
+__global__ void take_kernel(const float* in, const int* idx, float* out,
+                           size_t in_size, size_t out_size) {
+    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= out_size) return;
 
-        // Map to a index
-        size_t a_idx = 0;
-        int a_rank_diff = c_rank - a_rank;
-        size_t a_stride = 1;
-        for (int i = a_rank - 1; i >= 0; --i) {
-            int c_dim_idx = i + a_rank_diff;
-            size_t dim_idx = (a_shape[i] == 1) ? 0 : indices[c_dim_idx];
-            a_idx += dim_idx * a_stride;
-            a_stride *= a_shape[i];
-        }
+    int pos = idx[tid];
+    if (pos < 0) pos += in_size;
+    out[tid] = (pos >= 0 && pos < in_size) ? in[pos] : 0;
+}
 
-        // Map to b index
-        size_t b_idx = 0;
-        int b_rank_diff = c_rank - b_rank;
-        size_t b_stride = 1;
-        for (int i = b_rank - 1; i >= 0; --i) {
-            int c_dim_idx = i + b_rank_diff;
-            size_t dim_idx = (b_shape[i] == 1) ? 0 : indices[c_dim_idx];
-            b_idx += dim_idx * b_stride;
-            b_stride *= b_shape[i];
-        }
+void launch_take(const float* in, const int* idx, float* out,
+                size_t in_size, size_t out_size, cudaStream_t stream) {
+    take_kernel<<<(out_size + 255) / 256, 256, 0, stream>>>(in, idx, out, in_size, out_size);
+}
 
-        c[idx] = op(a[a_idx], b[b_idx]);
+// Scatter operations
+__global__ void scatter_kernel(float* out, const int* idx, const float* in,
+                              size_t outer, size_t dim_sz, size_t inner,
+                              size_t idx_sz, int mode) {
+    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t n = outer * idx_sz * inner;
+    if (tid >= n) return;
+
+    size_t outer_idx = tid / (idx_sz * inner);
+    size_t idx_pos = (tid / inner) % idx_sz;
+    size_t inner_idx = tid % inner;
+
+    int scatter_idx = idx[idx_pos];
+    if (scatter_idx < 0 || scatter_idx >= dim_sz) return;
+
+    size_t dst_idx = outer_idx * dim_sz * inner + scatter_idx * inner + inner_idx;
+
+    if (mode == 1) { // Add
+        atomicAdd(&out[dst_idx], in[tid]);
+    } else { // Assign
+        out[dst_idx] = in[tid];
     }
+}
 
-    struct PowOp {
-        __device__ float operator()(float a, float b) const { return powf(a, b); }
-    };
+void launch_scatter(float* out, const int* idx, const float* in,
+                   const size_t* out_shape, const size_t* in_shape,
+                   size_t rank, int dim, size_t total, int mode, cudaStream_t stream) {
+    size_t outer = 1, inner = 1;
+    for (int i = 0; i < dim; ++i) outer *= out_shape[i];
+    for (size_t i = dim + 1; i < rank; ++i) inner *= out_shape[i];
 
-    void launch_pow_tensor(const float* a, const float* b, float* c,
-                           const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
-                           size_t a_rank, size_t b_rank, size_t c_rank,
-                           size_t c_elements, cudaStream_t stream) {
-        CudaDeviceMemory<size_t> d_a_shape(a_rank);
-        CudaDeviceMemory<size_t> d_b_shape(b_rank);
-        CudaDeviceMemory<size_t> d_c_shape(c_rank);
+    scatter_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
+        out, idx, in, outer, out_shape[dim], inner, in_shape[dim], mode);
+}
 
-        if (!d_a_shape.valid() || !d_b_shape.valid() || !d_c_shape.valid()) {
-            return;
-        }
+void launch_index_fill(float* data, const int* idx, float val,
+                      const size_t* shape, size_t rank, int dim,
+                      size_t n_idx, cudaStream_t stream) {
+    CudaDeviceMemory<float> val_buffer(n_idx);
+    cudaMemsetAsync(val_buffer.get(), *(int*)&val, n_idx * sizeof(float), stream);
 
-        d_a_shape.copy_from_host(a_shape, a_rank);
-        d_b_shape.copy_from_host(b_shape, b_rank);
-        d_c_shape.copy_from_host(c_shape, c_rank);
+    size_t in_shape[10] = {0};
+    std::copy(shape, shape + rank, in_shape);
+    in_shape[dim] = n_idx;
 
-        int block_size = 256;
-        int grid_size = (c_elements + block_size - 1) / block_size;
+    launch_scatter(data, idx, val_buffer.get(), shape, in_shape, rank, dim,
+                  n_idx, 0, stream);
+}
 
-        pow_broadcast_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, c, d_a_shape.get(), d_b_shape.get(), d_c_shape.get(),
-            a_rank, b_rank, c_rank, c_elements, PowOp());
+void launch_index_copy(float* dst, const int* idx, const float* src,
+                      const size_t* shape, size_t rank, int dim,
+                      size_t n_idx, cudaStream_t stream) {
+    size_t in_shape[10] = {0};
+    std::copy(shape, shape + rank, in_shape);
+    in_shape[dim] = n_idx;
+
+    launch_scatter(dst, idx, src, shape, in_shape, rank, dim, n_idx, 0, stream);
+}
+
+void launch_index_add(float* dst, const int* idx, const float* src,
+                     const size_t* shape, size_t rank, int dim,
+                     size_t n_idx, cudaStream_t stream) {
+    size_t in_shape[10] = {0};
+    std::copy(shape, shape + rank, in_shape);
+    in_shape[dim] = n_idx;
+
+    launch_scatter(dst, idx, src, shape, in_shape, rank, dim, n_idx, 1, stream);
+}
+
+__global__ void index_put_kernel(float* data, const int* idx, const float* vals,
+                                size_t data_size, size_t idx_size) {
+    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= idx_size) return;
+
+    int pos = idx[tid];
+    if (pos < 0) pos += data_size;
+    if (pos >= 0 && pos < data_size) data[pos] = vals[tid];
+}
+
+void launch_index_put(float* data, const int* idx, const float* vals,
+                     size_t data_size, size_t idx_size, cudaStream_t stream) {
+    index_put_kernel<<<(idx_size + 255) / 256, 256, 0, stream>>>(
+        data, idx, vals, data_size, idx_size);
+}
+
+// Nonzero operations
+__global__ void nonzero_kernel(const float* data, int64_t* indices,
+                              const int* scan, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n && data[idx] != 0.0f) {
+        indices[scan[idx]] = idx;
     }
+}
 
-    // ============= Boolean Broadcasting Operations =============
-    __global__ void broadcast_bool_kernel(const unsigned char* src, unsigned char* dst,
-                                          const size_t* src_shape, const size_t* dst_shape,
-                                          size_t src_rank, size_t dst_rank,
-                                          size_t dst_elements) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-        if (idx >= dst_elements)
-            return;
-
-        // Convert linear index to multi-dimensional indices in dst
-        size_t dst_indices[10]; // Max 10 dimensions
-        size_t temp = idx;
-        for (int i = dst_rank - 1; i >= 0; --i) {
-            dst_indices[i] = temp % dst_shape[i];
-            temp /= dst_shape[i];
-        }
-
-        // Map dst indices to src indices (considering broadcasting)
-        size_t src_idx = 0;
-        int rank_diff = dst_rank - src_rank;
-        size_t src_stride = 1;
-
-        for (int i = src_rank - 1; i >= 0; --i) {
-            int dst_dim_idx = i + rank_diff;
-
-            // If this dimension is 1 in source, always use index 0
-            // Otherwise use the corresponding destination index
-            size_t dim_idx = (src_shape[i] == 1) ? 0 : dst_indices[dst_dim_idx];
-
-            src_idx += dim_idx * src_stride;
-            src_stride *= src_shape[i];
-        }
-
-        dst[idx] = src[src_idx];
+__global__ void nonzero_bool_kernel(const unsigned char* data, int64_t* indices,
+                                   const int* scan, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n && data[idx]) {
+        indices[scan[idx]] = idx;
     }
+}
 
-    void launch_broadcast_bool(const unsigned char* src, unsigned char* dst,
-                               const size_t* src_shape, const size_t* dst_shape,
-                               size_t src_rank, size_t dst_rank,
-                               size_t dst_elements, cudaStream_t stream) {
-        // Allocate device memory for shapes using RAII
-        CudaDeviceMemory<size_t> d_src_shape(src_rank);
-        CudaDeviceMemory<size_t> d_dst_shape(dst_rank);
+__global__ void create_nonzero_mask_kernel(const float* data, unsigned char* mask, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) mask[idx] = (data[idx] != 0.0f) ? 1 : 0;
+}
 
-        if (!d_src_shape.valid() || !d_dst_shape.valid()) {
-            return;
-        }
+void launch_nonzero(const float* data, int64_t* indices,
+                   size_t n, size_t output_size, cudaStream_t stream) {
+    if (n == 0 || output_size == 0) return;
 
-        d_src_shape.copy_from_host(src_shape, src_rank);
-        d_dst_shape.copy_from_host(dst_shape, dst_rank);
+    CudaDeviceMemory<unsigned char> mask(n);
+    create_nonzero_mask_kernel<<<(n + 255) / 256, 256, 0, stream>>>(data, mask.get(), n);
 
-        int block_size = 256;
-        int grid_size = (dst_elements + block_size - 1) / block_size;
+    CudaDeviceMemory<int> scan_result(n);
+    size_t temp_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, mask.get(), scan_result.get(), n, stream);
 
-        broadcast_bool_kernel<<<grid_size, block_size, 0, stream>>>(
-            src, dst, d_src_shape.get(), d_dst_shape.get(), src_rank, dst_rank, dst_elements);
-    }
+    CudaDeviceMemory<uint8_t> temp_storage(temp_bytes);
+    cub::DeviceScan::ExclusiveSum(temp_storage.get(), temp_bytes,
+                                  mask.get(), scan_result.get(), n, stream);
 
+    nonzero_kernel<<<(n + 255) / 256, 256, 0, stream>>>(data, indices, scan_result.get(), n);
+}
 
-    __global__ void index_add_kernel(float* dst, const int* indices, const float* src,
-                                     size_t outer_size, size_t dim_size, size_t inner_size,
-                                     size_t num_indices) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        size_t total_adds = outer_size * num_indices * inner_size;
+void launch_nonzero_bool(const unsigned char* data, int64_t* indices,
+                         size_t n, size_t output_size, cudaStream_t stream) {
+    if (n == 0 || output_size == 0) return;
 
-        if (idx >= total_adds)
-            return;
+    CudaDeviceMemory<int> scan_result(n);
+    size_t temp_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, data, scan_result.get(), n, stream);
 
-        size_t outer_idx = idx / (num_indices * inner_size);
-        size_t idx_pos = (idx / inner_size) % num_indices;
-        size_t inner_idx = idx % inner_size;
+    CudaDeviceMemory<uint8_t> temp_storage(temp_bytes);
+    cub::DeviceScan::ExclusiveSum(temp_storage.get(), temp_bytes,
+                                  data, scan_result.get(), n, stream);
 
-        int add_idx = indices[idx_pos];
+    nonzero_bool_kernel<<<(n + 255) / 256, 256, 0, stream>>>(data, indices, scan_result.get(), n);
+}
 
-        // Check bounds
-        if (add_idx < 0 || add_idx >= dim_size) {
-            return;
-        }
+__global__ void pow_scalar_kernel(float* d, float e, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) d[idx] = powf(d[idx], e);
+}
 
-        size_t dst_idx = outer_idx * dim_size * inner_size +
-                         add_idx * inner_size + inner_idx;
-        size_t src_idx = outer_idx * num_indices * inner_size +
-                         idx_pos * inner_size + inner_idx;
-
-        atomicAdd(&dst[dst_idx], src[src_idx]);  // Atomic add for thread safety
-    }
-
-    void launch_index_add(float* dst, const int* indices, const float* src,
-                          const size_t* shape, size_t rank, int dim,
-                          size_t num_indices, cudaStream_t stream) {
-        // Calculate dimensions
-        size_t outer_size = 1;
-        for (int i = 0; i < dim; ++i) {
-            outer_size *= shape[i];
-        }
-
-        size_t dim_size = shape[dim];
-
-        size_t inner_size = 1;
-        for (size_t i = dim + 1; i < rank; ++i) {
-            inner_size *= shape[i];
-        }
-
-        size_t total_adds = outer_size * num_indices * inner_size;
-
-        int block_size = 256;
-        int grid_size = (total_adds + block_size - 1) / block_size;
-
-        index_add_kernel<<<grid_size, block_size, 0, stream>>>(
-            dst, indices, src, outer_size, dim_size, inner_size, num_indices);
-    }
-
-    __global__ void index_put_kernel(float* data, const int* indices, const float* values,
-                                     size_t data_size, size_t index_size) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-        if (idx >= index_size)
-            return;
-
-        int data_idx = indices[idx];
-        
-        // Handle negative indices
-        if (data_idx < 0) {
-            data_idx += data_size;
-        }
-
-        if (data_idx >= 0 && data_idx < data_size) {
-            data[data_idx] = values[idx];
-        }
-    }
-
-    void launch_index_put(float* data, const int* indices, const float* values,
-                          size_t data_size, size_t index_size, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (index_size + block_size - 1) / block_size;
-
-        index_put_kernel<<<grid_size, block_size, 0, stream>>>(
-            data, indices, values, data_size, index_size);
-    }
-
-    __global__ void nonzero_kernel(const float* data, int64_t* indices, 
-                                   const int* scan_result, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        
-        if (idx < n && data[idx] != 0.0f) {
-            // Use exclusive scan result to get output position
-            indices[scan_result[idx]] = static_cast<int64_t>(idx);
-        }
-    }
-
-    // Helper kernel for nonzero operation - define this OUTSIDE any function
-    __global__ void create_nonzero_mask_kernel(const float* data, unsigned char* mask, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            mask[idx] = (data[idx] != 0.0f) ? 1 : 0;
-        }
-    }
-
-    void launch_nonzero(const float* data, int64_t* indices,
-                        size_t n, size_t output_size, cudaStream_t stream) {
-        if (n == 0 || output_size == 0) {
-            return;
-        }
-
-        // First, create a mask of non-zero elements
-        CudaDeviceMemory<unsigned char> d_mask(n);
-        if (!d_mask.valid()) {
-            return;
-        }
-
-        // Create mask kernel
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-
-        // Use existing scan infrastructure for prefix sum
-        CudaDeviceMemory<int> d_scan_result(n);
-        if (!d_scan_result.valid()) {
-            return;
-        }
-
-        // Create the mask using our helper kernel
-        create_nonzero_mask_kernel<<<grid_size, block_size, 0, stream>>>(data, d_mask.get(), n);
-
-        // Perform exclusive scan to get output positions
-        size_t temp_storage_bytes = 0;
-        cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_bytes,
-                                      d_mask.get(), d_scan_result.get(), n, stream);
-
-        CudaDeviceMemory<uint8_t> d_temp_storage(temp_storage_bytes);
-        if (!d_temp_storage.valid()) {
-            return;
-        }
-
-        cub::DeviceScan::ExclusiveSum(d_temp_storage.get(), temp_storage_bytes,
-                                      d_mask.get(), d_scan_result.get(), n, stream);
-
-        // Now gather the indices
-        nonzero_kernel<<<grid_size, block_size, 0, stream>>>(
-            data, indices, d_scan_result.get(), n);
-    }
-
-    __global__ void nonzero_bool_kernel(const unsigned char* data, int64_t* indices,
-                                        const int* scan_result, size_t n) {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        
-        if (idx < n && data[idx]) {
-            indices[scan_result[idx]] = static_cast<int64_t>(idx);
-        }
-    }
-
-    void launch_nonzero_bool(const unsigned char* data, int64_t* indices,
-                             size_t n, size_t output_size, cudaStream_t stream) {
-        if (n == 0 || output_size == 0) {
-            return;
-        }
-
-        // Use existing scan infrastructure
-        CudaDeviceMemory<int> d_scan_result(n);
-        if (!d_scan_result.valid()) {
-            return;
-        }
-
-        size_t temp_storage_bytes = 0;
-        cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_bytes,
-                                      data, d_scan_result.get(), n, stream);
-
-        CudaDeviceMemory<uint8_t> d_temp_storage(temp_storage_bytes);
-        if (!d_temp_storage.valid()) {
-            return;
-        }
-
-        cub::DeviceScan::ExclusiveSum(d_temp_storage.get(), temp_storage_bytes,
-                                      data, d_scan_result.get(), n, stream);
-
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-
-        nonzero_bool_kernel<<<grid_size, block_size, 0, stream>>>(
-            data, indices, d_scan_result.get(), n);
-    }
+void launch_pow_scalar(float* data, float exponent, size_t n, cudaStream_t stream) {
+    pow_scalar_kernel<<<(n + 255) / 256, 256, 0, stream>>>(data, exponent, n);
+}
 
 } // namespace gs::tensor_ops

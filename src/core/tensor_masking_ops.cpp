@@ -5,2004 +5,930 @@
 #include "core/tensor_broadcast.hpp"
 #include "core/tensor_ops.hpp"
 #include <algorithm>
-#include <cmath>
+#include <execution>
+#include <cstring>
 #include <numeric>
+#include <ranges>
 
-#define CHECK_CUDA(call)                              \
-    do {                                              \
-        cudaError_t error = call;                     \
-        if (error != cudaSuccess) {                   \
-            LOG_ERROR("CUDA error at {}:{} - {}: {}", \
-                      __FILE__, __LINE__,             \
-                      cudaGetErrorName(error),        \
-                      cudaGetErrorString(error));     \
-        }                                             \
-    } while (0)
+#define CHECK_CUDA(call) do { \
+    if (auto e = call; e != cudaSuccess) { \
+        LOG_ERROR("CUDA error: {}", cudaGetErrorString(e)); \
+    } \
+} while(0)
 
 namespace gs {
 
-    // ============= Boolean Tensor Creation =============
-    Tensor Tensor::full_bool(TensorShape shape, bool value, Device device) {
-        auto t = empty(shape, device, DataType::Bool);
-        if (t.is_valid() && t.numel() > 0) {
-            unsigned char fill_val = value ? 1 : 0;
-            if (device == Device::CUDA) {
-                CHECK_CUDA(cudaMemset(t.data_, fill_val, t.bytes()));
+// ============= Unified Comparison Template =============
+template<typename Op>
+static Tensor compare_tensors(const Tensor& a, const Tensor& b, Op op,
+                              void(*cuda_fn)(const float*, const float*, unsigned char*,
+                                           const size_t*, const size_t*, const size_t*,
+                                           size_t, size_t, size_t, size_t, cudaStream_t)) {
+    if (!a.is_valid() || !b.is_valid() || a.device() != b.device()) return {};
+
+    auto out_shape = BroadcastHelper::broadcast_shape(a.shape(), b.shape());
+    if (!out_shape.is_initialized()) return {};
+
+    auto result = Tensor::empty(out_shape, a.device(), DataType::Bool);
+
+    if (a.device() == Device::CUDA) {
+        cuda_fn(a.template ptr<float>(), b.template ptr<float>(),
+                result.template ptr<unsigned char>(),
+                a.shape().dims().data(), b.shape().dims().data(),
+                out_shape.dims().data(), a.shape().rank(),
+                b.shape().rank(), out_shape.rank(),
+                out_shape.elements(), 0);
+        cudaDeviceSynchronize();
+    } else {
+        // Manual broadcasting for mixed types (float -> unsigned char)
+        const float* a_data = a.template ptr<float>();
+        const float* b_data = b.template ptr<float>();
+        unsigned char* c_data = result.template ptr<unsigned char>();
+
+        size_t total = out_shape.elements();
+        auto a_shape = a.shape().dims();
+        auto b_shape = b.shape().dims();
+        auto c_shape = out_shape.dims();
+
+        if (a_shape == b_shape) {
+            // Fast path - no broadcasting needed
+            std::transform(std::execution::par_unseq,
+                          a_data, a_data + total, b_data, c_data,
+                          [op](float x, float y) -> unsigned char {
+                              return op(x, y) ? 1 : 0;
+                          });
+        } else {
+            // Broadcasting needed
+            #ifdef __cpp_lib_parallel_algorithm
+            std::for_each(std::execution::par_unseq,
+                         std::views::iota(0uz, total).begin(),
+                         std::views::iota(0uz, total).end(),
+                         [&](size_t i) {
+                size_t a_idx = BroadcastUtil::map_broadcast_index(i, c_shape, a_shape);
+                size_t b_idx = BroadcastUtil::map_broadcast_index(i, c_shape, b_shape);
+                c_data[i] = op(a_data[a_idx], b_data[b_idx]) ? 1 : 0;
+            });
+            #else
+            for (size_t i = 0; i < total; ++i) {
+                size_t a_idx = BroadcastUtil::map_broadcast_index(i, c_shape, a_shape);
+                size_t b_idx = BroadcastUtil::map_broadcast_index(i, c_shape, b_shape);
+                c_data[i] = op(a_data[a_idx], b_data[b_idx]) ? 1 : 0;
+            }
+            #endif
+        }
+    }
+    return result;
+}
+
+template<typename Op>
+static Tensor compare_scalar(const Tensor& tensor, float scalar, Op op,
+                            void(*cuda_fn)(const float*, float, unsigned char*, size_t, cudaStream_t)) {
+    if (!tensor.is_valid()) return {};
+
+    auto result = Tensor::empty(tensor.shape(), tensor.device(), DataType::Bool);
+
+    if (tensor.device() == Device::CUDA) {
+        cuda_fn(tensor.template ptr<float>(), scalar, result.template ptr<unsigned char>(),
+                tensor.numel(), 0);
+        cudaDeviceSynchronize();
+    } else {
+        std::transform(std::execution::par_unseq,
+                      tensor.template ptr<float>(),
+                      tensor.template ptr<float>() + tensor.numel(),
+                      result.template ptr<unsigned char>(),
+                      [op, scalar](float x) -> unsigned char {
+                          return op(x, scalar) ? 1 : 0;
+                      });
+    }
+    return result;
+}
+
+// ============= Comparison Operations (10 lines each instead of 20+) =============
+Tensor Tensor::eq(const Tensor& o) const {
+    return compare_tensors(*this, o, std::equal_to<float>{},
+                          tensor_ops::launch_compare_eq);
+}
+
+Tensor Tensor::eq(float v) const {
+    return compare_scalar(*this, v, std::equal_to<float>{},
+                          tensor_ops::launch_compare_scalar_eq);
+}
+
+Tensor Tensor::lt(const Tensor& o) const {
+    return compare_tensors(*this, o, std::less<float>{},
+                          tensor_ops::launch_compare_lt);
+}
+
+Tensor Tensor::lt(float v) const {
+    return compare_scalar(*this, v, std::less<float>{},
+                          tensor_ops::launch_compare_scalar_lt);
+}
+
+Tensor Tensor::gt(const Tensor& o) const {
+    return compare_tensors(*this, o, std::greater<float>{},
+                          tensor_ops::launch_compare_gt);
+}
+
+Tensor Tensor::gt(float v) const {
+    return compare_scalar(*this, v, std::greater<float>{},
+                          tensor_ops::launch_compare_scalar_gt);
+}
+
+// Derived operations using logical_not
+Tensor Tensor::ne(const Tensor& o) const { return eq(o).logical_not(); }
+Tensor Tensor::ne(float v) const { return eq(v).logical_not(); }
+Tensor Tensor::le(const Tensor& o) const { return gt(o).logical_not(); }
+Tensor Tensor::le(float v) const { return gt(v).logical_not(); }
+Tensor Tensor::ge(const Tensor& o) const { return lt(o).logical_not(); }
+Tensor Tensor::ge(float v) const { return lt(v).logical_not(); }
+
+// ============= Logical Operations - Unified Template =============
+template<typename Op>
+static Tensor logical_impl(const Tensor& a, const Tensor& b, Op op,
+                          void(*cuda_fn)(const unsigned char*, const unsigned char*, unsigned char*,
+                                       const size_t*, const size_t*, const size_t*,
+                                       size_t, size_t, size_t, size_t, cudaStream_t)) {
+    if (!a.is_valid() || !b.is_valid() ||
+        a.dtype() != DataType::Bool || b.dtype() != DataType::Bool ||
+        a.device() != b.device()) return {};
+
+    auto out_shape = BroadcastHelper::broadcast_shape(a.shape(), b.shape());
+    if (!out_shape.is_initialized()) return {};
+
+    auto result = Tensor::empty(out_shape, a.device(), DataType::Bool);
+
+    if (a.device() == Device::CUDA) {
+        cuda_fn(a.template ptr<unsigned char>(), b.template ptr<unsigned char>(),
+                result.template ptr<unsigned char>(),
+                a.shape().dims().data(), b.shape().dims().data(),
+                out_shape.dims().data(), a.shape().rank(),
+                b.shape().rank(), out_shape.rank(),
+                out_shape.elements(), 0);
+        cudaDeviceSynchronize();
+    } else {
+        broadcast_op_cpu(a.template ptr<unsigned char>(), b.template ptr<unsigned char>(),
+                        result.template ptr<unsigned char>(),
+                        a.shape().dims(), b.shape().dims(),
+                        out_shape.dims(), op);
+    }
+    return result;
+}
+
+Tensor Tensor::logical_and(const Tensor& o) const {
+    auto op = [](unsigned char a, unsigned char b) -> unsigned char {
+        return (a && b) ? 1 : 0;
+    };
+    return logical_impl(*this, o, op, tensor_ops::launch_logical_and);
+}
+
+Tensor Tensor::logical_or(const Tensor& o) const {
+    auto op = [](unsigned char a, unsigned char b) -> unsigned char {
+        return (a || b) ? 1 : 0;
+    };
+    return logical_impl(*this, o, op, tensor_ops::launch_logical_or);
+}
+
+Tensor Tensor::logical_xor(const Tensor& o) const {
+    auto op = [](unsigned char a, unsigned char b) -> unsigned char {
+        return ((a != 0) != (b != 0)) ? 1 : 0;
+    };
+    return logical_impl(*this, o, op, tensor_ops::launch_logical_xor);
+}
+
+Tensor Tensor::logical_not() const {
+    if (!is_valid() || dtype_ != DataType::Bool) return {};
+
+    auto result = empty(shape_, device_, DataType::Bool);
+
+    if (device_ == Device::CUDA) {
+        tensor_ops::launch_logical_not(ptr<unsigned char>(),
+                                       result.ptr<unsigned char>(), numel(), 0);
+        cudaDeviceSynchronize();
+    } else {
+        std::transform(std::execution::par_unseq,
+                      ptr<unsigned char>(), ptr<unsigned char>() + numel(),
+                      result.ptr<unsigned char>(),
+                      [](unsigned char x) { return !x; });
+    }
+    return result;
+}
+
+// ============= Masking Operations =============
+Tensor Tensor::masked_select(const Tensor& mask) const {
+    if (!is_valid() || !mask.is_valid() || mask.dtype() != DataType::Bool ||
+        shape_ != mask.shape() || device_ != mask.device()) return {};
+
+    size_t count = mask.count_nonzero();
+    if (count == 0) return empty({0}, device_, dtype_);
+
+    auto result = empty({count}, device_, dtype_);
+
+    if (device_ == Device::CUDA) {
+        tensor_ops::launch_masked_select(ptr<float>(), mask.ptr<unsigned char>(),
+                                        result.ptr<float>(), numel(), count, 0);
+        cudaDeviceSynchronize();
+    } else {
+        const float* src = ptr<float>();
+        const unsigned char* msk = mask.ptr<unsigned char>();
+        float* dst = result.ptr<float>();
+
+        // Use parallel scan for CPU too
+        std::copy_if(std::execution::par_unseq,
+                    std::views::iota(0uz, numel()).begin(),
+                    std::views::iota(0uz, numel()).end(),
+                    dst,
+                    [src, msk](size_t i) { return msk[i] ? src[i] : 0.0f; });
+    }
+    return result;
+}
+
+Tensor& Tensor::masked_fill_(const Tensor& mask, float value) {
+    if (!is_valid() || !mask.is_valid() || mask.dtype() != DataType::Bool ||
+        shape_ != mask.shape() || device_ != mask.device()) return *this;
+
+    if (device_ == Device::CUDA) {
+        tensor_ops::launch_masked_fill(ptr<float>(), mask.ptr<unsigned char>(),
+                                       value, numel(), 0);
+        cudaDeviceSynchronize();
+    } else {
+        float* data = ptr<float>();
+        const unsigned char* msk = mask.ptr<unsigned char>();
+
+        std::for_each(std::execution::par_unseq,
+                     std::views::iota(0uz, numel()).begin(),
+                     std::views::iota(0uz, numel()).end(),
+                     [data, msk, value](size_t i) {
+                         if (msk[i]) data[i] = value;
+                     });
+    }
+    return *this;
+}
+
+Tensor Tensor::masked_fill(const Tensor& mask, float value) const {
+    auto result = clone();
+    result.masked_fill_(mask, value);
+    return result;
+}
+
+Tensor Tensor::where(const Tensor& condition, const Tensor& other) const {
+    return Tensor::where(condition, *this, other);
+}
+
+Tensor Tensor::where(const Tensor& cond, const Tensor& x, const Tensor& y) {
+    if (!cond.is_valid() || !x.is_valid() || !y.is_valid() ||
+        cond.dtype() != DataType::Bool || x.device() != y.device() ||
+        x.device() != cond.device() || x.dtype() != y.dtype()) return {};
+
+    auto shape = BroadcastHelper::broadcast_shape(
+        BroadcastHelper::broadcast_shape(x.shape(), y.shape()), cond.shape());
+    if (!shape.is_initialized()) return {};
+
+    auto result = empty(shape, x.device(), x.dtype());
+
+    if (x.device() == Device::CUDA) {
+        tensor_ops::launch_where(cond.ptr<unsigned char>(),
+                               x.ptr<float>(), y.ptr<float>(), result.ptr<float>(),
+                               cond.shape().dims().data(), x.shape().dims().data(),
+                               y.shape().dims().data(), shape.dims().data(),
+                               cond.shape().rank(), x.shape().rank(),
+                               y.shape().rank(), shape.rank(),
+                               shape.elements(), 0);
+        cudaDeviceSynchronize();
+    } else {
+        // Use broadcasting infrastructure
+        BroadcastIterator c_it(cond.shape(), shape);
+        BroadcastIterator x_it(x.shape(), shape);
+        BroadcastIterator y_it(y.shape(), shape);
+
+        const unsigned char* c_data = cond.ptr<unsigned char>();
+        const float* x_data = x.ptr<float>();
+        const float* y_data = y.ptr<float>();
+        float* r_data = result.ptr<float>();
+
+        for (size_t i = 0; !c_it.done(); ++i, c_it.next(), x_it.next(), y_it.next()) {
+            r_data[i] = c_data[c_it.index()] ? x_data[x_it.index()] : y_data[y_it.index()];
+        }
+    }
+    return result;
+}
+
+// ============= Indexing Operations - Simplified with Templates =============
+template<typename IndexOp>
+static Tensor index_op_impl(const Tensor& t, int dim, const Tensor& idx,
+                            BoundaryMode mode, IndexOp op) {
+    if (!t.is_valid() || !idx.is_valid() || idx.ndim() != 1) return {};
+
+    dim = (dim < 0) ? t.shape().rank() + dim : dim;
+    if (dim < 0 || dim >= static_cast<int>(t.shape().rank())) return {};
+
+    return op(t, dim, idx, mode);
+}
+
+Tensor Tensor::index_select(int dim, const Tensor& indices, BoundaryMode mode) const {
+    return index_op_impl(*this, dim, indices, mode,
+        [](const Tensor& t, int d, const Tensor& idx, BoundaryMode m) {
+            auto dims = t.shape().dims();
+            dims[d] = idx.numel();
+            auto result = empty(TensorShape(dims), t.device(), t.dtype());
+
+            if (t.device() == Device::CUDA) {
+                tensor_ops::launch_index_select(t.ptr<float>(), idx.ptr<int>(),
+                    result.ptr<float>(), t.shape().dims().data(),
+                    t.shape().rank(), d, idx.numel(), static_cast<int>(m), 0);
+                cudaDeviceSynchronize();
             } else {
-                std::memset(t.data_, fill_val, t.bytes());
-            }
-        }
-        return t;
-    }
-
-    Tensor Tensor::zeros_bool(TensorShape shape, Device device) {
-        return full_bool(shape, false, device);
-    }
-
-    Tensor Tensor::ones_bool(TensorShape shape, Device device) {
-        return full_bool(shape, true, device);
-    }
-
-    // ============= From Vector Creation =============
-    Tensor Tensor::from_vector(const std::vector<float>& data, TensorShape shape, Device device) {
-        if (shape.elements() != data.size()) {
-            LOG_ERROR("Shape elements {} doesn't match data size {}",
-                      shape.elements(), data.size());
-            return Tensor();
-        }
-
-        auto t = empty(shape, device, DataType::Float32);
-        if (!t.is_valid() || t.numel() == 0) {
-            return t;
-        }
-
-        if (device == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(t.data_, data.data(), t.bytes(), cudaMemcpyHostToDevice));
-        } else {
-            std::memcpy(t.data_, data.data(), t.bytes());
-        }
-
-        return t;
-    }
-
-    Tensor Tensor::from_vector(const std::vector<int>& data, TensorShape shape, Device device) {
-        if (shape.elements() != data.size()) {
-            LOG_ERROR("Shape elements {} doesn't match data size {}",
-                      shape.elements(), data.size());
-            return Tensor();
-        }
-
-        auto t = empty(shape, device, DataType::Int32);
-        if (!t.is_valid() || t.numel() == 0) {
-            return t;
-        }
-
-        if (device == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(t.data_, data.data(), t.bytes(), cudaMemcpyHostToDevice));
-        } else {
-            std::memcpy(t.data_, data.data(), t.bytes());
-        }
-
-        return t;
-    }
-
-    Tensor Tensor::from_vector(const std::vector<bool>& data, TensorShape shape, Device device) {
-        if (shape.elements() != data.size()) {
-            LOG_ERROR("Shape elements {} doesn't match data size {}",
-                      shape.elements(), data.size());
-            return Tensor();
-        }
-
-        auto t = empty(shape, device, DataType::Bool);
-        if (!t.is_valid() || t.numel() == 0) {
-            return t;
-        }
-
-        // Convert bool vector to byte array
-        std::vector<unsigned char> byte_data(data.size());
-        for (size_t i = 0; i < data.size(); ++i) {
-            byte_data[i] = data[i] ? 1 : 0;
-        }
-
-        if (device == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(t.data_, byte_data.data(), t.bytes(), cudaMemcpyHostToDevice));
-        } else {
-            std::memcpy(t.data_, byte_data.data(), t.bytes());
-        }
-
-        return t;
-    }
-
-    // ============= Comparison Operations =============
-    Tensor Tensor::eq(const Tensor& other) const {
-        if (!is_valid() || !other.is_valid()) {
-            return Tensor();
-        }
-
-        if (device_ != other.device_) {
-            LOG_ERROR("Tensors must be on the same device for comparison");
-            return Tensor();
-        }
-
-        if (dtype_ != other.dtype_) {
-            LOG_ERROR("Dtype mismatch for comparison");
-            return Tensor();
-        }
-
-        // Handle broadcasting - use this-> to avoid name collision
-        TensorShape bcast_shape = this->broadcast_shape(other.shape_);
-        if (!bcast_shape.is_initialized()) {
-            LOG_ERROR("Cannot broadcast shapes for comparison");
-            return Tensor();
-        }
-
-        auto result = empty(bcast_shape, device_, DataType::Bool);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_compare_eq(ptr<float>(), other.ptr<float>(),
-                                          result.ptr<unsigned char>(),
-                                          shape_.dims().data(), other.shape_.dims().data(),
-                                          bcast_shape.dims().data(),
-                                          shape_.rank(), other.shape_.rank(),
-                                          bcast_shape.rank(),
-                                          bcast_shape.elements(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            // CPU implementation
-            const float* a_data = ptr<float>();
-            const float* b_data = other.ptr<float>();
-            unsigned char* result_data = result.ptr<unsigned char>();
-
-            // Simple case: same shape
-            if (shape_ == other.shape_) {
-                for (size_t i = 0; i < numel(); ++i) {
-                    result_data[i] = (a_data[i] == b_data[i]) ? 1 : 0;
-                }
-            } else {
-                // Broadcasting needed - use BroadcastIterator
-                BroadcastIterator iter_a(shape_, bcast_shape);
-                BroadcastIterator iter_b(other.shape_, bcast_shape);
-
-                size_t idx = 0;
-                while (!iter_a.done()) {
-                    result_data[idx++] = (a_data[iter_a.index()] == b_data[iter_b.index()]) ? 1 : 0;
-                    iter_a.next();
-                    iter_b.next();
-                }
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::eq(float value) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        auto result = empty(shape_, device_, DataType::Bool);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_compare_scalar_eq(ptr<float>(), value,
-                                                 result.ptr<unsigned char>(),
-                                                 numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* data = ptr<float>();
-            unsigned char* result_data = result.ptr<unsigned char>();
-            for (size_t i = 0; i < numel(); ++i) {
-                result_data[i] = (data[i] == value) ? 1 : 0;
-            }
-        }
-
-        return result;
-    }
-
-    // Similar implementations for other comparison operations
-    Tensor Tensor::ne(const Tensor& other) const {
-        auto eq_result = eq(other);
-        return eq_result.logical_not();
-    }
-
-    Tensor Tensor::ne(float value) const {
-        auto eq_result = eq(value);
-        return eq_result.logical_not();
-    }
-
-    Tensor Tensor::lt(const Tensor& other) const {
-        if (!is_valid() || !other.is_valid()) {
-            return Tensor();
-        }
-
-        if (device_ != other.device_ || dtype_ != other.dtype_) {
-            LOG_ERROR("Tensors must have same device and dtype for comparison");
-            return Tensor();
-        }
-
-        TensorShape bcast_shape = this->broadcast_shape(other.shape_);
-        if (!bcast_shape.is_initialized()) {
-            return Tensor();
-        }
-
-        auto result = empty(bcast_shape, device_, DataType::Bool);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_compare_lt(ptr<float>(), other.ptr<float>(),
-                                          result.ptr<unsigned char>(),
-                                          shape_.dims().data(), other.shape_.dims().data(),
-                                          bcast_shape.dims().data(),
-                                          shape_.rank(), other.shape_.rank(),
-                                          bcast_shape.rank(),
-                                          bcast_shape.elements(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* a_data = ptr<float>();
-            const float* b_data = other.ptr<float>();
-            unsigned char* result_data = result.ptr<unsigned char>();
-
-            if (shape_ == other.shape_) {
-                for (size_t i = 0; i < numel(); ++i) {
-                    result_data[i] = (a_data[i] < b_data[i]) ? 1 : 0;
-                }
-            } else {
-                BroadcastIterator iter_a(shape_, bcast_shape);
-                BroadcastIterator iter_b(other.shape_, bcast_shape);
-
-                size_t idx = 0;
-                while (!iter_a.done()) {
-                    result_data[idx++] = (a_data[iter_a.index()] < b_data[iter_b.index()]) ? 1 : 0;
-                    iter_a.next();
-                    iter_b.next();
-                }
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::lt(float value) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        auto result = empty(shape_, device_, DataType::Bool);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_compare_scalar_lt(ptr<float>(), value,
-                                                 result.ptr<unsigned char>(),
-                                                 numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* data = ptr<float>();
-            unsigned char* result_data = result.ptr<unsigned char>();
-            for (size_t i = 0; i < numel(); ++i) {
-                result_data[i] = (data[i] < value) ? 1 : 0;
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::le(const Tensor& other) const {
-        // a <= b is equivalent to !(a > b)
-        return gt(other).logical_not();
-    }
-
-    Tensor Tensor::le(float value) const {
-        return gt(value).logical_not();
-    }
-
-    Tensor Tensor::gt(const Tensor& other) const {
-        if (!is_valid() || !other.is_valid()) {
-            return Tensor();
-        }
-
-        if (device_ != other.device_ || dtype_ != other.dtype_) {
-            LOG_ERROR("Tensors must have same device and dtype for comparison");
-            return Tensor();
-        }
-
-        TensorShape bcast_shape = this->broadcast_shape(other.shape_);
-        if (!bcast_shape.is_initialized()) {
-            return Tensor();
-        }
-
-        auto result = empty(bcast_shape, device_, DataType::Bool);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_compare_gt(ptr<float>(), other.ptr<float>(),
-                                          result.ptr<unsigned char>(),
-                                          shape_.dims().data(), other.shape_.dims().data(),
-                                          bcast_shape.dims().data(),
-                                          shape_.rank(), other.shape_.rank(),
-                                          bcast_shape.rank(),
-                                          bcast_shape.elements(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* a_data = ptr<float>();
-            const float* b_data = other.ptr<float>();
-            unsigned char* result_data = result.ptr<unsigned char>();
-
-            if (shape_ == other.shape_) {
-                for (size_t i = 0; i < numel(); ++i) {
-                    result_data[i] = (a_data[i] > b_data[i]) ? 1 : 0;
-                }
-            } else {
-                BroadcastIterator iter_a(shape_, bcast_shape);
-                BroadcastIterator iter_b(other.shape_, bcast_shape);
-
-                size_t idx = 0;
-                while (!iter_a.done()) {
-                    result_data[idx++] = (a_data[iter_a.index()] > b_data[iter_b.index()]) ? 1 : 0;
-                    iter_a.next();
-                    iter_b.next();
-                }
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::gt(float value) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        auto result = empty(shape_, device_, DataType::Bool);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_compare_scalar_gt(ptr<float>(), value,
-                                                 result.ptr<unsigned char>(),
-                                                 numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* data = ptr<float>();
-            unsigned char* result_data = result.ptr<unsigned char>();
-            for (size_t i = 0; i < numel(); ++i) {
-                result_data[i] = (data[i] > value) ? 1 : 0;
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::ge(const Tensor& other) const {
-        // a >= b is equivalent to !(a < b)
-        return lt(other).logical_not();
-    }
-
-    Tensor Tensor::ge(float value) const {
-        return lt(value).logical_not();
-    }
-
-    // ============= Logical Operations =============
-    Tensor Tensor::logical_and(const Tensor& other) const {
-        if (!is_valid() || !other.is_valid()) {
-            return Tensor();
-        }
-
-        if (dtype_ != DataType::Bool || other.dtype_ != DataType::Bool) {
-            LOG_ERROR("Logical operations require boolean tensors");
-            return Tensor();
-        }
-
-        if (device_ != other.device_) {
-            LOG_ERROR("Tensors must be on same device");
-            return Tensor();
-        }
-
-        TensorShape bcast_shape = this->broadcast_shape(other.shape_);
-        if (!bcast_shape.is_initialized()) {
-            return Tensor();
-        }
-
-        auto result = empty(bcast_shape, device_, DataType::Bool);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_logical_and(ptr<unsigned char>(), other.ptr<unsigned char>(),
-                                           result.ptr<unsigned char>(),
-                                           shape_.dims().data(), other.shape_.dims().data(),
-                                           bcast_shape.dims().data(),
-                                           shape_.rank(), other.shape_.rank(),
-                                           bcast_shape.rank(),
-                                           bcast_shape.elements(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const unsigned char* a_data = ptr<unsigned char>();
-            const unsigned char* b_data = other.ptr<unsigned char>();
-            unsigned char* result_data = result.ptr<unsigned char>();
-
-            if (shape_ == other.shape_) {
-                for (size_t i = 0; i < numel(); ++i) {
-                    result_data[i] = (a_data[i] && b_data[i]) ? 1 : 0;
-                }
-            } else {
-                BroadcastIterator iter_a(shape_, bcast_shape);
-                BroadcastIterator iter_b(other.shape_, bcast_shape);
-
-                size_t idx = 0;
-                while (!iter_a.done()) {
-                    result_data[idx++] = (a_data[iter_a.index()] && b_data[iter_b.index()]) ? 1 : 0;
-                    iter_a.next();
-                    iter_b.next();
-                }
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::logical_or(const Tensor& other) const {
-        if (!is_valid() || !other.is_valid()) {
-            return Tensor();
-        }
-
-        if (dtype_ != DataType::Bool || other.dtype_ != DataType::Bool) {
-            LOG_ERROR("Logical operations require boolean tensors");
-            return Tensor();
-        }
-
-        if (device_ != other.device_) {
-            LOG_ERROR("Tensors must be on same device");
-            return Tensor();
-        }
-
-        TensorShape bcast_shape = this->broadcast_shape(other.shape_);
-        if (!bcast_shape.is_initialized()) {
-            return Tensor();
-        }
-
-        auto result = empty(bcast_shape, device_, DataType::Bool);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_logical_or(ptr<unsigned char>(), other.ptr<unsigned char>(),
-                                          result.ptr<unsigned char>(),
-                                          shape_.dims().data(), other.shape_.dims().data(),
-                                          bcast_shape.dims().data(),
-                                          shape_.rank(), other.shape_.rank(),
-                                          bcast_shape.rank(),
-                                          bcast_shape.elements(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const unsigned char* a_data = ptr<unsigned char>();
-            const unsigned char* b_data = other.ptr<unsigned char>();
-            unsigned char* result_data = result.ptr<unsigned char>();
-
-            if (shape_ == other.shape_) {
-                for (size_t i = 0; i < numel(); ++i) {
-                    result_data[i] = (a_data[i] || b_data[i]) ? 1 : 0;
-                }
-            } else {
-                BroadcastIterator iter_a(shape_, bcast_shape);
-                BroadcastIterator iter_b(other.shape_, bcast_shape);
-
-                size_t idx = 0;
-                while (!iter_a.done()) {
-                    result_data[idx++] = (a_data[iter_a.index()] || b_data[iter_b.index()]) ? 1 : 0;
-                    iter_a.next();
-                    iter_b.next();
-                }
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::logical_not() const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        if (dtype_ != DataType::Bool) {
-            LOG_ERROR("Logical not requires boolean tensor");
-            return Tensor();
-        }
-
-        auto result = empty(shape_, device_, DataType::Bool);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_logical_not(ptr<unsigned char>(),
-                                           result.ptr<unsigned char>(),
-                                           numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const unsigned char* data = ptr<unsigned char>();
-            unsigned char* result_data = result.ptr<unsigned char>();
-            for (size_t i = 0; i < numel(); ++i) {
-                result_data[i] = data[i] ? 0 : 1;
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::logical_xor(const Tensor& other) const {
-        if (!is_valid() || !other.is_valid()) {
-            return Tensor();
-        }
-
-        if (dtype_ != DataType::Bool || other.dtype_ != DataType::Bool) {
-            LOG_ERROR("Logical operations require boolean tensors");
-            return Tensor();
-        }
-
-        if (device_ != other.device_) {
-            LOG_ERROR("Tensors must be on same device");
-            return Tensor();
-        }
-
-        TensorShape bcast_shape = this->broadcast_shape(other.shape_);
-        if (!bcast_shape.is_initialized()) {
-            return Tensor();
-        }
-
-        auto result = empty(bcast_shape, device_, DataType::Bool);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_logical_xor(ptr<unsigned char>(), other.ptr<unsigned char>(),
-                                           result.ptr<unsigned char>(),
-                                           shape_.dims().data(), other.shape_.dims().data(),
-                                           bcast_shape.dims().data(),
-                                           shape_.rank(), other.shape_.rank(),
-                                           bcast_shape.rank(),
-                                           bcast_shape.elements(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const unsigned char* a_data = ptr<unsigned char>();
-            const unsigned char* b_data = other.ptr<unsigned char>();
-            unsigned char* result_data = result.ptr<unsigned char>();
-
-            if (shape_ == other.shape_) {
-                for (size_t i = 0; i < numel(); ++i) {
-                    result_data[i] = ((a_data[i] != 0) != (b_data[i] != 0)) ? 1 : 0;
-                }
-            } else {
-                BroadcastIterator iter_a(shape_, bcast_shape);
-                BroadcastIterator iter_b(other.shape_, bcast_shape);
-
-                size_t idx = 0;
-                while (!iter_a.done()) {
-                    result_data[idx++] = ((a_data[iter_a.index()] != 0) != (b_data[iter_b.index()] != 0)) ? 1 : 0;
-                    iter_a.next();
-                    iter_b.next();
-                }
-            }
-        }
-
-        return result;
-    }
-
-    // ============= Masking Operations =============
-    Tensor Tensor::masked_select(const Tensor& mask) const {
-        if (!is_valid() || !mask.is_valid()) {
-            return Tensor();
-        }
-
-        if (mask.dtype() != DataType::Bool) {
-            LOG_ERROR("Mask must be boolean tensor");
-            return Tensor();
-        }
-
-        if (shape_ != mask.shape()) {
-            LOG_ERROR("Tensor and mask must have same shape for masked_select");
-            return Tensor();
-        }
-
-        if (device_ != mask.device()) {
-            LOG_ERROR("Tensor and mask must be on same device");
-            return Tensor();
-        }
-
-        // Count true elements in mask
-        size_t count = mask.count_nonzero();
-        if (count == 0) {
-            return empty({0}, device_, dtype_);
-        }
-
-        // Create output tensor
-        auto result = empty({count}, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            // Use stream compaction for efficient gathering
-            tensor_ops::launch_masked_select(ptr<float>(), mask.ptr<unsigned char>(),
-                                             result.ptr<float>(), numel(), count, 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* data = ptr<float>();
-            const unsigned char* mask_data = mask.ptr<unsigned char>();
-            float* result_data = result.ptr<float>();
-
-            size_t out_idx = 0;
-            for (size_t i = 0; i < numel(); ++i) {
-                if (mask_data[i]) {
-                    result_data[out_idx++] = data[i];
-                }
-            }
-        }
-
-        return result;
-    }
-
-    Tensor& Tensor::masked_fill_(const Tensor& mask, float value) {
-        if (!is_valid() || !mask.is_valid()) {
-            LOG_ERROR("Invalid tensors for masked_fill_");
-            return *this;
-        }
-
-        if (mask.dtype() != DataType::Bool) {
-            LOG_ERROR("Mask must be boolean tensor");
-            return *this;
-        }
-
-        if (shape_ != mask.shape()) {
-            LOG_ERROR("Tensor and mask must have same shape");
-            return *this;
-        }
-
-        if (device_ != mask.device()) {
-            LOG_ERROR("Tensor and mask must be on same device");
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_masked_fill(ptr<float>(), mask.ptr<unsigned char>(),
-                                           value, numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* data = ptr<float>();
-            const unsigned char* mask_data = mask.ptr<unsigned char>();
-
-            for (size_t i = 0; i < numel(); ++i) {
-                if (mask_data[i]) {
-                    data[i] = value;
-                }
-            }
-        }
-
-        return *this;
-    }
-
-    Tensor Tensor::masked_fill(const Tensor& mask, float value) const {
-        auto result = clone();
-        result.masked_fill_(mask, value);
-        return result;
-    }
-
-    Tensor Tensor::where(const Tensor& condition, const Tensor& other) const {
-        return Tensor::where(condition, *this, other);
-    }
-
-    Tensor Tensor::where(const Tensor& condition, const Tensor& x, const Tensor& y) {
-        if (!condition.is_valid() || !x.is_valid() || !y.is_valid()) {
-            return Tensor();
-        }
-
-        if (condition.dtype() != DataType::Bool) {
-            LOG_ERROR("Condition must be boolean tensor");
-            return Tensor();
-        }
-
-        if (x.device() != y.device() || x.device() != condition.device()) {
-            LOG_ERROR("All tensors must be on same device");
-            return Tensor();
-        }
-
-        if (x.dtype() != y.dtype()) {
-            LOG_ERROR("x and y must have same dtype");
-            return Tensor();
-        }
-
-        // Determine broadcast shape
-        TensorShape bcast_shape = BroadcastHelper::broadcast_shape(x.shape(), y.shape());
-        bcast_shape = BroadcastHelper::broadcast_shape(condition.shape(), bcast_shape);
-
-        if (!bcast_shape.is_initialized()) {
-            LOG_ERROR("Cannot broadcast shapes for where operation");
-            return Tensor();
-        }
-
-        auto result = empty(bcast_shape, x.device(), x.dtype());
-
-        if (x.device() == Device::CUDA) {
-            tensor_ops::launch_where(condition.ptr<unsigned char>(),
-                                     x.ptr<float>(), y.ptr<float>(),
-                                     result.ptr<float>(),
-                                     condition.shape().dims().data(),
-                                     x.shape().dims().data(),
-                                     y.shape().dims().data(),
-                                     bcast_shape.dims().data(),
-                                     condition.shape().rank(),
-                                     x.shape().rank(),
-                                     y.shape().rank(),
-                                     bcast_shape.rank(),
-                                     bcast_shape.elements(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const unsigned char* cond_data = condition.ptr<unsigned char>();
-            const float* x_data = x.ptr<float>();
-            const float* y_data = y.ptr<float>();
-            float* result_data = result.ptr<float>();
-
-            // Simple case: all same shape
-            if (condition.shape() == x.shape() && x.shape() == y.shape()) {
-                for (size_t i = 0; i < x.numel(); ++i) {
-                    result_data[i] = cond_data[i] ? x_data[i] : y_data[i];
-                }
-            } else {
-                // Broadcasting needed
-                BroadcastIterator cond_iter(condition.shape(), bcast_shape);
-                BroadcastIterator x_iter(x.shape(), bcast_shape);
-                BroadcastIterator y_iter(y.shape(), bcast_shape);
-
-                size_t idx = 0;
-                while (!cond_iter.done()) {
-                    result_data[idx++] = cond_data[cond_iter.index()] ? x_data[x_iter.index()] : y_data[y_iter.index()];
-                    cond_iter.next();
-                    x_iter.next();
-                    y_iter.next();
-                }
-            }
-        }
-
-        return result;
-    }
-
-    // ============= Indexing Operations =============
-    Tensor Tensor::index_select(int dim, const Tensor& indices) const {
-        return index_select(dim, indices, BoundaryMode::Assert);
-    }
-
-    Tensor Tensor::index_select(int dim, const Tensor& indices, BoundaryMode mode) const {
-        if (!is_valid() || !indices.is_valid()) {
-            return Tensor();
-        }
-
-        if (indices.dtype() != DataType::Int32 && indices.dtype() != DataType::Int64) {
-            LOG_ERROR("Indices must be integer tensor");
-            return Tensor();
-        }
-
-        if (indices.ndim() != 1) {
-            LOG_ERROR("Indices must be 1D tensor");
-            return Tensor();
-        }
-
-        if (device_ != indices.device()) {
-            LOG_ERROR("Tensor and indices must be on same device");
-            return Tensor();
-        }
-
-        // Handle negative dimension
-        if (dim < 0) {
-            dim = shape_.rank() + dim;
-        }
-
-        if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
-            LOG_ERROR("Dimension {} out of range for tensor with {} dimensions",
-                      dim, shape_.rank());
-            return Tensor();
-        }
-
-        // Create output shape
-        std::vector<size_t> out_dims = shape_.dims();
-        out_dims[dim] = indices.numel();
-
-        auto result = empty(TensorShape(out_dims), device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_index_select(ptr<float>(), indices.ptr<int>(),
-                                            result.ptr<float>(),
-                                            shape_.dims().data(), shape_.rank(),
-                                            dim, indices.numel(),
-                                            static_cast<int>(mode), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            // CPU implementation
-            const float* src_data = ptr<float>();
-            const int* idx_data = indices.ptr<int>();
-            float* dst_data = result.ptr<float>();
-
-            size_t dim_size = shape_[dim];
-            size_t outer_size = 1;
-            for (int i = 0; i < dim; ++i) {
-                outer_size *= shape_[i];
-            }
-            size_t inner_size = 1;
-            for (size_t i = dim + 1; i < shape_.rank(); ++i) {
-                inner_size *= shape_[i];
-            }
-
-            for (size_t outer = 0; outer < outer_size; ++outer) {
-                for (size_t idx_pos = 0; idx_pos < indices.numel(); ++idx_pos) {
-                    int idx = idx_data[idx_pos];
-
-                    // Handle boundary modes
-                    if (mode == BoundaryMode::Assert) {
-                        if (idx < 0 || idx >= static_cast<int>(dim_size)) {
-                            LOG_ERROR("Index {} out of bounds for dimension {} of size {}",
-                                      idx, dim, dim_size);
-                            return Tensor();
-                        }
-                    } else if (mode == BoundaryMode::Clamp) {
-                        idx = std::max(0, std::min(idx, static_cast<int>(dim_size) - 1));
-                    } else if (mode == BoundaryMode::Wrap) {
-                        idx = ((idx % static_cast<int>(dim_size)) + dim_size) % dim_size;
+                // Simplified CPU implementation using ranges
+                size_t outer = 1, inner = 1;
+                for (int i = 0; i < d; ++i) outer *= t.shape()[i];
+                for (size_t i = d + 1; i < t.shape().rank(); ++i) inner *= t.shape()[i];
+
+                const float* src = t.ptr<float>();
+                float* dst = result.ptr<float>();
+                const int* indices = idx.ptr<int>();
+
+                auto process_idx = [&](int sel) -> int {
+                    if (m == BoundaryMode::Clamp) {
+                        return std::clamp(sel, 0, static_cast<int>(t.shape()[d]) - 1);
+                    } else if (m == BoundaryMode::Wrap) {
+                        return ((sel % static_cast<int>(t.shape()[d])) + t.shape()[d]) % t.shape()[d];
                     }
+                    return sel;
+                };
 
-                    for (size_t inner = 0; inner < inner_size; ++inner) {
-                        size_t src_offset = outer * dim_size * inner_size +
-                                            idx * inner_size + inner;
-                        size_t dst_offset = outer * indices.numel() * inner_size +
-                                            idx_pos * inner_size + inner;
-                        dst_data[dst_offset] = src_data[src_offset];
-                    }
-                }
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::gather(int dim, const Tensor& indices) const {
-        return gather(dim, indices, BoundaryMode::Assert);
-    }
-
-    Tensor Tensor::gather(int dim, const Tensor& indices, BoundaryMode mode) const {
-        if (!is_valid() || !indices.is_valid()) {
-            return Tensor();
-        }
-
-        if (indices.dtype() != DataType::Int32 && indices.dtype() != DataType::Int64) {
-            LOG_ERROR("Indices must be integer tensor");
-            return Tensor();
-        }
-
-        if (indices.ndim() != shape_.rank()) {
-            LOG_ERROR("Indices must have same number of dimensions as input");
-            return Tensor();
-        }
-
-        if (device_ != indices.device()) {
-            LOG_ERROR("Tensor and indices must be on same device");
-            return Tensor();
-        }
-
-        // Handle negative dimension
-        if (dim < 0) {
-            dim = shape_.rank() + dim;
-        }
-
-        if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
-            LOG_ERROR("Dimension {} out of range", dim);
-            return Tensor();
-        }
-
-        // Output has same shape as indices
-        auto result = empty(indices.shape(), device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_gather(ptr<float>(), indices.ptr<int>(),
-                                      result.ptr<float>(),
-                                      shape_.dims().data(),
-                                      indices.shape().dims().data(),
-                                      shape_.rank(), dim,
-                                      indices.numel(),
-                                      static_cast<int>(mode), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            // CPU implementation
-            const float* src_data = ptr<float>();
-            const int* idx_data = indices.ptr<int>();
-            float* dst_data = result.ptr<float>();
-
-            size_t total_elements = indices.numel();
-            std::vector<size_t> strides(shape_.rank());
-            strides[shape_.rank() - 1] = 1;
-            for (int i = shape_.rank() - 2; i >= 0; --i) {
-                strides[i] = strides[i + 1] * shape_[i + 1];
-            }
-
-            std::vector<size_t> idx_strides(indices.shape().rank());
-            idx_strides[indices.shape().rank() - 1] = 1;
-            for (int i = indices.shape().rank() - 2; i >= 0; --i) {
-                idx_strides[i] = idx_strides[i + 1] * indices.shape()[i + 1];
-            }
-
-            for (size_t i = 0; i < total_elements; ++i) {
-                // Calculate multi-dimensional index for the output/index position
-                std::vector<size_t> multi_idx(shape_.rank());
-                size_t temp = i;
-                for (int d = shape_.rank() - 1; d >= 0; --d) {
-                    multi_idx[d] = temp % indices.shape()[d];
-                    temp /= indices.shape()[d];
-                }
-
-                // Get the gather index for this position
-                int gather_idx = idx_data[i];
-
-                // Handle boundary modes
-                size_t dim_size = shape_[dim];
-                if (mode == BoundaryMode::Assert) {
-                    if (gather_idx < 0 || gather_idx >= static_cast<int>(dim_size)) {
-                        LOG_ERROR("Index {} out of bounds for dimension {}",
-                                  gather_idx, dim);
-                        return Tensor();
-                    }
-                } else if (mode == BoundaryMode::Clamp) {
-                    gather_idx = std::max(0, std::min(gather_idx,
-                                                      static_cast<int>(dim_size) - 1));
-                } else if (mode == BoundaryMode::Wrap) {
-                    gather_idx = ((gather_idx % static_cast<int>(dim_size)) + dim_size) % dim_size;
-                }
-
-                // Replace the dimension with the gathered index
-                multi_idx[dim] = gather_idx;
-
-                // Calculate linear index in source
-                size_t src_idx = 0;
-                for (size_t d = 0; d < shape_.rank(); ++d) {
-                    src_idx += multi_idx[d] * strides[d];
-                }
-
-                dst_data[i] = src_data[src_idx];
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::take(const Tensor& indices) const {
-        if (!is_valid() || !indices.is_valid()) {
-            return Tensor();
-        }
-
-        if (indices.dtype() != DataType::Int32 && indices.dtype() != DataType::Int64) {
-            LOG_ERROR("Indices must be integer tensor");
-            return Tensor();
-        }
-
-        if (device_ != indices.device()) {
-            LOG_ERROR("Tensor and indices must be on same device");
-            return Tensor();
-        }
-
-        // Flatten the input tensor
-        auto flat = flatten();
-
-        // Create output with same shape as indices
-        auto result = empty(indices.shape(), device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_take(flat.ptr<float>(), indices.ptr<int>(),
-                                    result.ptr<float>(),
-                                    flat.numel(), indices.numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* src_data = flat.ptr<float>();
-            const int* idx_data = indices.ptr<int>();
-            float* dst_data = result.ptr<float>();
-
-            size_t total_size = flat.numel();
-            for (size_t i = 0; i < indices.numel(); ++i) {
-                int idx = idx_data[i];
-                if (idx < 0) {
-                    idx += total_size;
-                }
-                if (idx < 0 || idx >= static_cast<int>(total_size)) {
-                    LOG_ERROR("Index {} out of bounds for tensor with {} elements",
-                              idx_data[i], total_size);
-                    return Tensor();
-                }
-                dst_data[i] = src_data[idx];
-            }
-        }
-
-        return result;
-    }
-
-    // ============= Scatter Operations =============
-    Tensor& Tensor::scatter_(int dim, const Tensor& indices, const Tensor& src,
-                             ScatterMode mode) {
-        if (!is_valid() || !indices.is_valid() || !src.is_valid()) {
-            LOG_ERROR("Invalid tensors for scatter_");
-            return *this;
-        }
-
-        if (indices.dtype() != DataType::Int32 && indices.dtype() != DataType::Int64) {
-            LOG_ERROR("Indices must be integer tensor");
-            return *this;
-        }
-
-        // For scatter_, indices should be 1D when scattering along a dimension
-        if (indices.ndim() != 1) {
-            LOG_ERROR("Indices must be 1D tensor for scatter_");
-            return *this;
-        }
-
-        if (device_ != indices.device() || device_ != src.device()) {
-            LOG_ERROR("All tensors must be on same device");
-            return *this;
-        }
-
-        if (dtype_ != src.dtype()) {
-            LOG_ERROR("Tensor and src must have same dtype");
-            return *this;
-        }
-
-        // Handle negative dimension
-        if (dim < 0) {
-            dim = shape_.rank() + dim;
-        }
-
-        if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
-            LOG_ERROR("Dimension {} out of range", dim);
-            return *this;
-        }
-
-        // Check that src has the expected shape:
-        // - Same as self except dimension 'dim' should match indices.numel()
-        std::vector<size_t> expected_shape = shape_.dims();
-        expected_shape[dim] = indices.numel();
-        if (src.shape() != TensorShape(expected_shape)) {
-            LOG_ERROR("Source tensor shape {} doesn't match expected shape {}",
-                      src.shape().str(), TensorShape(expected_shape).str());
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_scatter(ptr<float>(), indices.ptr<int>(),
-                                       src.ptr<float>(),
-                                       shape_.dims().data(),
-                                       src.shape().dims().data(), // Use src shape, not indices shape
-                                       shape_.rank(), dim,
-                                       src.numel(), // Total elements in src
-                                       static_cast<int>(mode), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            // CPU implementation
-            float* dst_data = ptr<float>();
-            const int* idx_data = indices.ptr<int>();
-            const float* src_data = src.ptr<float>();
-
-            size_t dim_size = shape_[dim];
-            size_t outer_size = 1;
-            for (int i = 0; i < dim; ++i) {
-                outer_size *= shape_[i];
-            }
-            size_t inner_size = 1;
-            for (size_t i = dim + 1; i < shape_.rank(); ++i) {
-                inner_size *= shape_[i];
-            }
-
-            // Iterate through all positions in src tensor
-            for (size_t outer = 0; outer < outer_size; ++outer) {
-                for (size_t idx_pos = 0; idx_pos < indices.numel(); ++idx_pos) {
-                    int scatter_idx = idx_data[idx_pos];
-
-                    // Check bounds
-                    if (scatter_idx < 0 || scatter_idx >= static_cast<int>(dim_size)) {
-                        LOG_ERROR("Scatter index {} out of bounds for dimension {} of size {}",
-                                  scatter_idx, dim, dim_size);
-                        return *this;
-                    }
-
-                    for (size_t inner = 0; inner < inner_size; ++inner) {
-                        size_t src_offset = outer * indices.numel() * inner_size +
-                                            idx_pos * inner_size + inner;
-                        size_t dst_offset = outer * dim_size * inner_size +
-                                            scatter_idx * inner_size + inner;
-
-                        // Apply scatter mode
-                        switch (mode) {
-                        case ScatterMode::None:
-                            dst_data[dst_offset] = src_data[src_offset];
-                            break;
-                        case ScatterMode::Add:
-                            dst_data[dst_offset] += src_data[src_offset];
-                            break;
-                        case ScatterMode::Multiply:
-                            dst_data[dst_offset] *= src_data[src_offset];
-                            break;
-                        case ScatterMode::Max:
-                            dst_data[dst_offset] = std::max(dst_data[dst_offset], src_data[src_offset]);
-                            break;
-                        case ScatterMode::Min:
-                            dst_data[dst_offset] = std::min(dst_data[dst_offset], src_data[src_offset]);
-                            break;
+                for (size_t o = 0; o < outer; ++o) {
+                    for (size_t i = 0; i < idx.numel(); ++i) {
+                        int sel = process_idx(indices[i]);
+                        if (sel >= 0 && sel < static_cast<int>(t.shape()[d])) {
+                            std::copy_n(src + (o * t.shape()[d] + sel) * inner,
+                                       inner,
+                                       dst + (o * idx.numel() + i) * inner);
                         }
                     }
                 }
             }
+            return result;
+        });
+}
+
+Tensor Tensor::index_select(int dim, const Tensor& indices) const {
+    return index_select(dim, indices, BoundaryMode::Assert);
+}
+
+Tensor Tensor::gather(int dim, const Tensor& indices, BoundaryMode mode) const {
+    if (!is_valid() || !indices.is_valid()) return {};
+
+    dim = (dim < 0) ? shape_.rank() + dim : dim;
+    if (dim < 0 || dim >= static_cast<int>(shape_.rank())) return {};
+
+    // The result shape should match indices shape
+    auto result = empty(indices.shape(), device_, dtype_);
+
+    if (device_ == Device::CUDA) {
+        tensor_ops::launch_gather(ptr<float>(), indices.ptr<int>(),
+            result.ptr<float>(), shape_.dims().data(),
+            indices.shape().dims().data(), shape_.rank(), dim,
+            indices.numel(), static_cast<int>(mode), 0);
+        cudaDeviceSynchronize();
+    } else {
+        // CPU implementation for gather
+        const float* src = ptr<float>();
+        float* dst = result.ptr<float>();
+        const int* idx_data = indices.ptr<int>();
+
+        // For the general gather operation:
+        // The output shape matches the indices shape
+        // For each position in output/indices, we gather from input along dim
+
+        // Calculate strides for all tensors
+        std::vector<size_t> src_strides(shape_.rank());
+        src_strides[shape_.rank() - 1] = 1;
+        for (int i = shape_.rank() - 2; i >= 0; --i) {
+            src_strides[i] = src_strides[i + 1] * shape_[i + 1];
         }
 
-        return *this;
-    }
-
-    Tensor& Tensor::scatter_(int dim, const Tensor& indices, float value,
-                             ScatterMode mode) {
-        // Create a tensor filled with the value
-        auto src = full(indices.shape(), value, device_, dtype_);
-        return scatter_(dim, indices, src, mode);
-    }
-
-    Tensor& Tensor::index_fill_(int dim, const Tensor& indices, float value) {
-        if (!is_valid() || !indices.is_valid()) {
-            LOG_ERROR("Invalid tensors for index_fill_");
-            return *this;
+        std::vector<size_t> idx_strides(indices.shape().rank());
+        idx_strides[indices.shape().rank() - 1] = 1;
+        for (int i = indices.shape().rank() - 2; i >= 0; --i) {
+            idx_strides[i] = idx_strides[i + 1] * indices.shape()[i + 1];
         }
 
-        if (indices.dtype() != DataType::Int32 && indices.dtype() != DataType::Int64) {
-            LOG_ERROR("Indices must be integer tensor");
-            return *this;
-        }
-
-        if (indices.ndim() != 1) {
-            LOG_ERROR("Indices must be 1D tensor");
-            return *this;
-        }
-
-        if (device_ != indices.device()) {
-            LOG_ERROR("Tensor and indices must be on same device");
-            return *this;
-        }
-
-        // Handle negative dimension
-        if (dim < 0) {
-            dim = shape_.rank() + dim;
-        }
-
-        if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
-            LOG_ERROR("Dimension {} out of range", dim);
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_index_fill(ptr<float>(), indices.ptr<int>(),
-                                          value,
-                                          shape_.dims().data(), shape_.rank(),
-                                          dim, indices.numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            // CPU implementation
-            float* data = ptr<float>();
-            const int* idx_data = indices.ptr<int>();
-
-            size_t dim_size = shape_[dim];
-            size_t outer_size = 1;
-            for (int i = 0; i < dim; ++i) {
-                outer_size *= shape_[i];
-            }
-            size_t inner_size = 1;
-            for (size_t i = dim + 1; i < shape_.rank(); ++i) {
-                inner_size *= shape_[i];
+        // Process each element in the output
+        for (size_t out_idx = 0; out_idx < indices.numel(); ++out_idx) {
+            // Get multi-dimensional coordinates in the indices/output tensor
+            std::vector<size_t> out_coords(indices.shape().rank());
+            size_t temp = out_idx;
+            for (size_t d = 0; d < indices.shape().rank(); ++d) {
+                out_coords[d] = temp / idx_strides[d];
+                temp %= idx_strides[d];
             }
 
-            for (size_t idx_pos = 0; idx_pos < indices.numel(); ++idx_pos) {
-                int idx = idx_data[idx_pos];
-                if (idx < 0 || idx >= static_cast<int>(dim_size)) {
-                    LOG_ERROR("Index {} out of bounds for dimension {}", idx, dim);
-                    return *this;
-                }
+            // Get the index to gather
+            int gather_idx = idx_data[out_idx];
 
-                for (size_t outer = 0; outer < outer_size; ++outer) {
-                    for (size_t inner = 0; inner < inner_size; ++inner) {
-                        size_t offset = outer * dim_size * inner_size +
-                                        idx * inner_size + inner;
-                        data[offset] = value;
-                    }
-                }
-            }
-        }
-
-        return *this;
-    }
-
-    Tensor& Tensor::index_copy_(int dim, const Tensor& indices, const Tensor& src) {
-        if (!is_valid() || !indices.is_valid() || !src.is_valid()) {
-            LOG_ERROR("Invalid tensors for index_copy_");
-            return *this;
-        }
-
-        if (indices.dtype() != DataType::Int32 && indices.dtype() != DataType::Int64) {
-            LOG_ERROR("Indices must be integer tensor");
-            return *this;
-        }
-
-        if (indices.ndim() != 1) {
-            LOG_ERROR("Indices must be 1D tensor");
-            return *this;
-        }
-
-        if (device_ != indices.device() || device_ != src.device()) {
-            LOG_ERROR("All tensors must be on same device");
-            return *this;
-        }
-
-        if (dtype_ != src.dtype()) {
-            LOG_ERROR("Tensor and src must have same dtype");
-            return *this;
-        }
-
-        // Handle negative dimension
-        if (dim < 0) {
-            dim = shape_.rank() + dim;
-        }
-
-        if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
-            LOG_ERROR("Dimension {} out of range", dim);
-            return *this;
-        }
-
-        // Check that src has correct shape
-        std::vector<size_t> expected_shape = shape_.dims();
-        expected_shape[dim] = indices.numel();
-        if (src.shape() != TensorShape(expected_shape)) {
-            LOG_ERROR("Source tensor has incorrect shape");
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_index_copy(ptr<float>(), indices.ptr<int>(),
-                                          src.ptr<float>(),
-                                          shape_.dims().data(), shape_.rank(),
-                                          dim, indices.numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            // CPU implementation
-            float* dst_data = ptr<float>();
-            const int* idx_data = indices.ptr<int>();
-            const float* src_data = src.ptr<float>();
-
-            size_t dim_size = shape_[dim];
-            size_t outer_size = 1;
-            for (int i = 0; i < dim; ++i) {
-                outer_size *= shape_[i];
-            }
-            size_t inner_size = 1;
-            for (size_t i = dim + 1; i < shape_.rank(); ++i) {
-                inner_size *= shape_[i];
+            // Apply boundary mode
+            if (mode == BoundaryMode::Clamp) {
+                gather_idx = std::clamp(gather_idx, 0, static_cast<int>(shape_[dim]) - 1);
+            } else if (mode == BoundaryMode::Wrap) {
+                gather_idx = ((gather_idx % static_cast<int>(shape_[dim])) + shape_[dim]) % shape_[dim];
+            } else if (gather_idx < 0 || gather_idx >= static_cast<int>(shape_[dim])) {
+                dst[out_idx] = 0.0f;
+                continue;
             }
 
-            for (size_t outer = 0; outer < outer_size; ++outer) {
-                for (size_t idx_pos = 0; idx_pos < indices.numel(); ++idx_pos) {
-                    int idx = idx_data[idx_pos];
-                    if (idx < 0 || idx >= static_cast<int>(dim_size)) {
-                        LOG_ERROR("Index {} out of bounds for dimension {}", idx, dim);
-                        return *this;
-                    }
-
-                    for (size_t inner = 0; inner < inner_size; ++inner) {
-                        size_t dst_offset = outer * dim_size * inner_size +
-                                            idx * inner_size + inner;
-                        size_t src_offset = outer * indices.numel() * inner_size +
-                                            idx_pos * inner_size + inner;
-                        dst_data[dst_offset] = src_data[src_offset];
-                    }
-                }
-            }
-        }
-
-        return *this;
-    }
-
-    // ============= Fixed Python-like Indexing =============
-    TensorIndexer Tensor::operator[](const Tensor& indices) {
-        // Check if it's a boolean mask
-        if (indices.dtype() == DataType::Bool) {
-            // For boolean mask, we need to convert to indices
-            // This is a placeholder - actual implementation would need to handle this properly
-            std::vector<Tensor> idx_vec;
-            idx_vec.push_back(indices.clone());
-            return TensorIndexer(this, std::move(idx_vec));
-        } else {
-            // Integer indices
-            std::vector<Tensor> idx_vec;
-            idx_vec.push_back(indices.clone());
-            return TensorIndexer(this, std::move(idx_vec));
-        }
-    }
-
-    TensorIndexer Tensor::operator[](const std::vector<Tensor>& indices) {
-        // Create copies that we can move
-        std::vector<Tensor> idx_vec;
-        for (const auto& idx : indices) {
-            idx_vec.push_back(idx.clone());
-        }
-        return TensorIndexer(this, std::move(idx_vec));
-    }
-
-    MaskedTensorProxy Tensor::operator[](const Tensor& mask) const {
-        // Create a copy that we can move
-        return MaskedTensorProxy(this, mask.clone());
-    }
-
-        float& Tensor::at(std::initializer_list<size_t> indices) {
-        if (indices.size() != shape_.rank()) {
-            LOG_ERROR("Number of indices must match tensor rank");
-            static float dummy = 0;
-            return dummy;
-        }
-
-        size_t linear_idx = 0;
-        size_t stride = 1;
-        auto it = indices.end();
-        for (int i = shape_.rank() - 1; i >= 0; --i) {
-            --it;
-            if (*it >= shape_[i]) {
-                LOG_ERROR("Index {} out of bounds for dimension {}", *it, i);
-                static float dummy = 0;
-                return dummy;
-            }
-            linear_idx += (*it) * stride;
-            stride *= shape_[i];
-        }
-
-        if (device_ == Device::CUDA) {
-            LOG_ERROR("Cannot get mutable reference to CUDA tensor element");
-            static float dummy = 0;
-            return dummy;
-        }
-
-        // Handle boolean tensors
-        if (dtype_ == DataType::Bool) {
-            // For boolean tensors, we need to provide a way to set them
-            // This is a bit hacky but necessary for the test to work
-            // We'll use a static variable and convert on assignment
-            static thread_local struct BoolProxy {
-                unsigned char* ptr;
-                size_t idx;
-
-                operator float() const {
-                    return ptr[idx] ? 1.0f : 0.0f;
-                }
-
-                BoolProxy& operator=(float val) {
-                    ptr[idx] = (val != 0.0f) ? 1 : 0;
-                    return *this;
-                }
-            } bool_proxy;
-
-            bool_proxy.ptr = ptr<unsigned char>();
-            bool_proxy.idx = linear_idx;
-            return reinterpret_cast<float&>(bool_proxy);
-        }
-
-        return ptr<float>()[linear_idx];
-    }
-
-    float Tensor::at(std::initializer_list<size_t> indices) const {
-        if (indices.size() != shape_.rank()) {
-            LOG_ERROR("Number of indices must match tensor rank");
-            return 0;
-        }
-
-        size_t linear_idx = 0;
-        size_t stride = 1;
-        auto it = indices.end();
-        for (int i = shape_.rank() - 1; i >= 0; --i) {
-            --it;
-            if (*it >= shape_[i]) {
-                LOG_ERROR("Index {} out of bounds for dimension {}", *it, i);
-                return 0;
-            }
-            linear_idx += (*it) * stride;
-            stride *= shape_[i];
-        }
-
-        if (device_ == Device::CUDA) {
-            if (dtype_ == DataType::Bool) {
-                unsigned char value;
-                CHECK_CUDA(cudaMemcpy(&value, ptr<unsigned char>() + linear_idx, sizeof(unsigned char),
-                                      cudaMemcpyDeviceToHost));
-                return value ? 1.0f : 0.0f;
-            } else {
-                float value;
-                CHECK_CUDA(cudaMemcpy(&value, ptr<float>() + linear_idx, sizeof(float),
-                                      cudaMemcpyDeviceToHost));
-                return value;
-            }
-        }
-
-        // Handle boolean tensors
-        if (dtype_ == DataType::Bool) {
-            return ptr<unsigned char>()[linear_idx] ? 1.0f : 0.0f;
-        }
-
-        return ptr<float>()[linear_idx];
-    }
-
-    // ============= Additional Helper Functions =============
-    size_t Tensor::count_nonzero() const {
-        if (!is_valid() || numel() == 0) {
-            return 0;
-        }
-
-        if (dtype_ == DataType::Bool) {
-            if (device_ == Device::CUDA) {
-                size_t count;
-                tensor_ops::launch_count_nonzero_bool(ptr<unsigned char>(),
-                                                      &count, numel(), 0);
-                CHECK_CUDA(cudaDeviceSynchronize());
-                return count;
-            } else {
-                const unsigned char* data = ptr<unsigned char>();
-                size_t count = 0;
-                for (size_t i = 0; i < numel(); ++i) {
-                    if (data[i])
-                        count++;
-                }
-                return count;
-            }
-        } else if (dtype_ == DataType::Float32) {
-            if (device_ == Device::CUDA) {
-                size_t count;
-                tensor_ops::launch_count_nonzero_float(ptr<float>(),
-                                                       &count, numel(), 0);
-                CHECK_CUDA(cudaDeviceSynchronize());
-                return count;
-            } else {
-                const float* data = ptr<float>();
-                size_t count = 0;
-                for (size_t i = 0; i < numel(); ++i) {
-                    if (data[i] != 0.0f)
-                        count++;
-                }
-                return count;
-            }
-        }
-
-        return 0;
-    }
-
-    bool Tensor::any() const {
-        if (!is_valid() || numel() == 0) {
-            return false;
-        }
-
-        if (dtype_ != DataType::Bool) {
-            LOG_ERROR("any() requires boolean tensor");
-            return false;
-        }
-
-        return count_nonzero() > 0;
-    }
-
-    bool Tensor::all() const {
-        if (!is_valid() || numel() == 0) {
-            return true; // Empty tensor, all true by convention
-        }
-
-        if (dtype_ != DataType::Bool) {
-            LOG_ERROR("all() requires boolean tensor");
-            return false;
-        }
-
-        return count_nonzero() == numel();
-    }
-
-    std::vector<int> Tensor::to_vector_int() const {
-        if (dtype_ != DataType::Int32 || !is_valid()) {
-            LOG_ERROR("to_vector_int only supports valid int32 tensors");
-            return {};
-        }
-
-        if (numel() == 0) {
-            return {};
-        }
-
-        std::vector<int> result(numel());
-
-        if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.data(), data_, bytes(), cudaMemcpyDeviceToHost));
-        } else {
-            std::memcpy(result.data(), data_, bytes());
-        }
-
-        return result;
-    }
-
-    std::vector<bool> Tensor::to_vector_bool() const {
-        if (dtype_ != DataType::Bool || !is_valid()) {
-            LOG_ERROR("to_vector_bool only supports valid bool tensors");
-            return {};
-        }
-
-        if (numel() == 0) {
-            return {};
-        }
-
-        std::vector<unsigned char> byte_data(numel());
-
-        if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(byte_data.data(), data_, bytes(), cudaMemcpyDeviceToHost));
-        } else {
-            std::memcpy(byte_data.data(), data_, bytes());
-        }
-
-        std::vector<bool> result(numel());
-        for (size_t i = 0; i < numel(); ++i) {
-            result[i] = byte_data[i] != 0;
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::pow(float exponent) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        auto result = empty(shape_, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(),
-                                  cudaMemcpyDeviceToDevice));
-            tensor_ops::launch_pow_scalar(result.ptr<float>(), exponent, numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* src = ptr<float>();
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = std::pow(src[i], exponent);
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::pow(const Tensor& other) const {
-        if (!is_valid() || !other.is_valid()) {
-            return Tensor();
-        }
-
-        if (device_ != other.device_ || dtype_ != other.dtype_) {
-            LOG_ERROR("Tensors must have same device and dtype for pow");
-            return Tensor();
-        }
-
-        // Handle broadcasting
-        TensorShape bcast_shape = this->broadcast_shape(other.shape_);
-        if (!bcast_shape.is_initialized()) {
-            return Tensor();
-        }
-
-        auto result = empty(bcast_shape, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_pow_tensor(ptr<float>(), other.ptr<float>(),
-                                          result.ptr<float>(),
-                                          shape_.dims().data(), other.shape_.dims().data(),
-                                          bcast_shape.dims().data(),
-                                          shape_.rank(), other.shape_.rank(),
-                                          bcast_shape.rank(),
-                                          bcast_shape.elements(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* a_data = ptr<float>();
-            const float* b_data = other.ptr<float>();
-            float* result_data = result.ptr<float>();
-
-            if (shape_ == other.shape_) {
-                for (size_t i = 0; i < numel(); ++i) {
-                    result_data[i] = std::pow(a_data[i], b_data[i]);
-                }
-            } else {
-                BroadcastIterator iter_a(shape_, bcast_shape);
-                BroadcastIterator iter_b(other.shape_, bcast_shape);
-
-                size_t idx = 0;
-                while (!iter_a.done()) {
-                    result_data[idx++] = std::pow(a_data[iter_a.index()], b_data[iter_b.index()]);
-                    iter_a.next();
-                    iter_b.next();
-                }
-            }
-        }
-
-        return result;
-    }
-
-    // ============= Fixed MaskedTensorProxy Implementation =============
-    void MaskedTensorProxy::operator=(float value) {
-        const_cast<Tensor*>(tensor_)->masked_fill_(mask_, value);
-    }
-
-    void MaskedTensorProxy::operator=(const Tensor& other) {
-        // For masked assignment with another tensor
-        auto selected = tensor_->masked_select(mask_);
-        if (selected.numel() != other.numel()) {
-            LOG_ERROR("Number of masked elements {} doesn't match source tensor size {}",
-                      selected.numel(), other.numel());
-            return;
-        }
-
-        // This is more complex - would need scatter operation based on mask
-        // For now, simplified implementation
-        if (tensor_->device() == Device::CUDA) {
-            tensor_ops::launch_masked_scatter(const_cast<Tensor*>(tensor_)->ptr<float>(),
-                                              mask_.ptr<unsigned char>(),
-                                              other.ptr<float>(),
-                                              tensor_->numel(), other.numel(), 0);
-            cudaDeviceSynchronize();
-        } else {
-            float* data = const_cast<Tensor*>(tensor_)->ptr<float>();
-            const unsigned char* mask_data = mask_.ptr<unsigned char>();
-            const float* src_data = other.ptr<float>();
-
+            // Build source coordinates
+            // Use output coordinates for all dimensions except dim
+            // For dim, use the gathered index
             size_t src_idx = 0;
-            for (size_t i = 0; i < tensor_->numel(); ++i) {
-                if (mask_data[i]) {
-                    if (src_idx >= other.numel()) {
-                        LOG_ERROR("Source tensor too small for masked assignment");
-                        return;
-                    }
-                    data[i] = src_data[src_idx++];
-                }
-            }
-        }
-    }
-
-    MaskedTensorProxy::operator Tensor() const {
-        return tensor_->masked_select(mask_);
-    }
-
-    // ============= Fixed TensorIndexer Implementation =============
-    void TensorIndexer::operator=(float value) {
-        // Check if we have a boolean mask
-        if (indices_.size() == 1 && indices_[0].dtype() == DataType::Bool) {
-            // This is a masked assignment
-            tensor_->masked_fill_(indices_[0], value);
-        } else if (indices_.size() == 1 && (indices_[0].dtype() == DataType::Int32 ||
-                                            indices_[0].dtype() == DataType::Int64)) {
-            // Integer indexing - use scatter
-            auto src = Tensor::full(indices_[0].shape(), value, tensor_->device(), tensor_->dtype());
-
-            // If indices is 1D, assume indexing dimension 0
-            if (indices_[0].ndim() == 1) {
-                // Create proper shape for src
-                std::vector<size_t> src_dims = tensor_->shape().dims();
-                src_dims[0] = indices_[0].numel();
-                src = Tensor::full(TensorShape(src_dims), value, tensor_->device(), tensor_->dtype());
-
-                // Use scatter to set values at indexed positions
-                tensor_->scatter_(0, indices_[0], src);
-            } else {
-                // Multi-dimensional indexing not fully supported yet
-                LOG_ERROR("Multi-dimensional indexing assignment not yet supported");
-            }
-        } else {
-            LOG_ERROR("Unsupported indexing type for assignment");
-        }
-    }
-
-    void TensorIndexer::operator=(const Tensor& other) {
-        // Check if we have a boolean mask
-        if (indices_.size() == 1 && indices_[0].dtype() == DataType::Bool) {
-            // This is a masked assignment - need masked scatter
-            auto selected = tensor_->masked_select(indices_[0]);
-            if (selected.numel() != other.numel()) {
-                LOG_ERROR("Number of masked elements doesn't match source tensor size");
-                return;
-            }
-
-            // Use masked scatter
-            if (tensor_->device() == Device::CUDA) {
-                tensor_ops::launch_masked_scatter(tensor_->ptr<float>(),
-                                                  indices_[0].ptr<unsigned char>(),
-                                                  other.ptr<float>(),
-                                                  tensor_->numel(), other.numel(), 0);
-                cudaDeviceSynchronize();
-            } else {
-                float* data = tensor_->ptr<float>();
-                const unsigned char* mask_data = indices_[0].ptr<unsigned char>();
-                const float* src_data = other.ptr<float>();
-
-                size_t src_idx = 0;
-                for (size_t i = 0; i < tensor_->numel(); ++i) {
-                    if (mask_data[i]) {
-                        if (src_idx >= other.numel()) {
-                            LOG_ERROR("Source tensor too small for masked assignment");
-                            return;
-                        }
-                        data[i] = src_data[src_idx++];
-                    }
-                }
-            }
-        } else if (indices_.size() == 1 && (indices_[0].dtype() == DataType::Int32 ||
-                                            indices_[0].dtype() == DataType::Int64)) {
-            // Integer indexing
-            if (indices_[0].ndim() == 1) {
-                // Check that other has the right shape
-                std::vector<size_t> expected_dims = tensor_->shape().dims();
-                expected_dims[0] = indices_[0].numel();
-                TensorShape expected_shape(expected_dims);
-
-                if (other.shape() != expected_shape) {
-                    LOG_ERROR("Source tensor shape {} doesn't match expected shape {}",
-                              other.shape().str(), expected_shape.str());
-                    return;
-                }
-
-                tensor_->scatter_(0, indices_[0], other);
-            } else {
-                LOG_ERROR("Multi-dimensional indexing assignment not yet supported");
-            }
-        } else {
-            LOG_ERROR("Unsupported indexing type for assignment");
-        }
-    }
-
-    TensorIndexer::operator Tensor() const {
-        // Check if we have a boolean mask
-        if (indices_.size() == 1 && indices_[0].dtype() == DataType::Bool) {
-            // This is masked selection
-            return tensor_->masked_select(indices_[0]);
-        } else if (indices_.size() == 1 && (indices_[0].dtype() == DataType::Int32 ||
-                                            indices_[0].dtype() == DataType::Int64)) {
-            // Integer indexing
-            if (indices_[0].ndim() == 1) {
-                // Use index_select for 1D indices
-                return tensor_->index_select(0, indices_[0]);
-            } else {
-                // Use take for flattened indexing
-                return tensor_->take(indices_[0]);
-            }
-        } else {
-            LOG_ERROR("Unsupported indexing type for selection");
-            return Tensor();
-        }
-    }
-
-    Tensor& Tensor::index_add_(int dim, const Tensor& indices, const Tensor& src) {
-        if (!is_valid() || !indices.is_valid() || !src.is_valid()) {
-            LOG_ERROR("Invalid tensors for index_add_");
-            return *this;
-        }
-
-        if (indices.dtype() != DataType::Int32 && indices.dtype() != DataType::Int64) {
-            LOG_ERROR("Indices must be integer tensor");
-            return *this;
-        }
-
-        if (indices.ndim() != 1) {
-            LOG_ERROR("Indices must be 1D tensor");
-            return *this;
-        }
-
-        if (device_ != indices.device() || device_ != src.device()) {
-            LOG_ERROR("All tensors must be on same device");
-            return *this;
-        }
-
-        if (dtype_ != src.dtype()) {
-            LOG_ERROR("Tensor and src must have same dtype");
-            return *this;
-        }
-
-        // Handle negative dimension
-        if (dim < 0) {
-            dim = shape_.rank() + dim;
-        }
-
-        if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
-            LOG_ERROR("Dimension {} out of range", dim);
-            return *this;
-        }
-
-        // Check that src has correct shape
-        std::vector<size_t> expected_shape = shape_.dims();
-        expected_shape[dim] = indices.numel();
-        if (src.shape() != TensorShape(expected_shape)) {
-            LOG_ERROR("Source tensor has incorrect shape");
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_index_add(ptr<float>(), indices.ptr<int>(),
-                                         src.ptr<float>(),
-                                         shape_.dims().data(), shape_.rank(),
-                                         dim, indices.numel(), 0);
-            cudaDeviceSynchronize();
-        } else {
-            // CPU implementation
-            float* dst_data = ptr<float>();
-            const int* idx_data = indices.ptr<int>();
-            const float* src_data = src.ptr<float>();
-
-            size_t dim_size = shape_[dim];
-            size_t outer_size = 1;
-            for (int i = 0; i < dim; ++i) {
-                outer_size *= shape_[i];
-            }
-            size_t inner_size = 1;
-            for (size_t i = dim + 1; i < shape_.rank(); ++i) {
-                inner_size *= shape_[i];
-            }
-
-            for (size_t outer = 0; outer < outer_size; ++outer) {
-                for (size_t idx_pos = 0; idx_pos < indices.numel(); ++idx_pos) {
-                    int idx = idx_data[idx_pos];
-                    if (idx < 0 || idx >= static_cast<int>(dim_size)) {
-                        LOG_ERROR("Index {} out of bounds for dimension {}", idx, dim);
-                        return *this;
-                    }
-
-                    for (size_t inner = 0; inner < inner_size; ++inner) {
-                        size_t dst_offset = outer * dim_size * inner_size +
-                                           idx * inner_size + inner;
-                        size_t src_offset = outer * indices.numel() * inner_size +
-                                           idx_pos * inner_size + inner;
-                        dst_data[dst_offset] += src_data[src_offset];  // ADD instead of copy
-                    }
-                }
-            }
-        }
-
-        return *this;
-    }
-
-    Tensor& Tensor::index_put_(const Tensor& indices, const Tensor& values) {
-        if (!is_valid() || !indices.is_valid() || !values.is_valid()) {
-            LOG_ERROR("Invalid tensors for index_put_");
-            return *this;
-        }
-
-        if (indices.dtype() != DataType::Int32 && indices.dtype() != DataType::Int64) {
-            LOG_ERROR("Indices must be integer tensor");
-            return *this;
-        }
-
-        if (device_ != indices.device() || device_ != values.device()) {
-            LOG_ERROR("All tensors must be on same device");
-            return *this;
-        }
-
-        if (dtype_ != values.dtype()) {
-            LOG_ERROR("Tensor and values must have same dtype");
-            return *this;
-        }
-
-        // For 1D indices, this is like scatter along dimension 0
-        if (indices.ndim() == 1) {
-            // Check values shape
-            if (values.ndim() == 1) {
-                // Simple case: 1D values for 1D indices
-                if (values.numel() != indices.numel()) {
-                    LOG_ERROR("Values size must match indices size");
-                    return *this;
-                }
-            } else {
-                // Values should have shape [indices.numel(), ...]
-                if (values.shape()[0] != indices.numel()) {
-                    LOG_ERROR("First dimension of values must match indices size");
-                    return *this;
-                }
-            }
-
-            if (device_ == Device::CUDA) {
-                tensor_ops::launch_index_put(ptr<float>(), indices.ptr<int>(),
-                                             values.ptr<float>(),
-                                             numel(), indices.numel(), 0);
-                cudaDeviceSynchronize();
-            } else {
-                // CPU implementation
-                float* data = ptr<float>();
-                const int* idx_data = indices.ptr<int>();
-                const float* val_data = values.ptr<float>();
-
-                if (values.ndim() == 1) {
-                    // 1D case
-                    for (size_t i = 0; i < indices.numel(); ++i) {
-                        int idx = idx_data[i];
-                        if (idx < 0 || idx >= static_cast<int>(numel())) {
-                            LOG_ERROR("Index {} out of bounds", idx);
-                            return *this;
-                        }
-                        data[idx] = val_data[i];
-                    }
+            for (size_t d = 0; d < shape_.rank(); ++d) {
+                size_t coord;
+                if (static_cast<int>(d) == dim) {
+                    coord = gather_idx;
+                } else if (d < indices.shape().rank()) {
+                    coord = out_coords[d];
                 } else {
-                    // Multi-dimensional case
-                    size_t stride = values.numel() / values.shape()[0];
-                    for (size_t i = 0; i < indices.numel(); ++i) {
-                        int idx = idx_data[i];
-                        if (idx < 0) idx += shape_[0];  // Handle negative indices
-                        if (idx < 0 || idx >= static_cast<int>(shape_[0])) {
-                            LOG_ERROR("Index {} out of bounds", idx_data[i]);
-                            return *this;
-                        }
-                        // Copy the slice
-                        std::memcpy(data + idx * stride,
-                                   val_data + i * stride,
-                                   stride * sizeof(float));
-                    }
+                    coord = 0;
+                }
+
+                // Bounds check
+                if (coord >= shape_[d]) {
+                    dst[out_idx] = 0.0f;
+                    break;
+                }
+
+                src_idx += coord * src_strides[d];
+            }
+
+            // Only set if we didn't break out of the loop
+            if (src_idx < numel()) {
+                dst[out_idx] = src[src_idx];
+            }
+        }
+    }
+
+    return result;
+}
+
+Tensor Tensor::gather(int dim, const Tensor& indices) const {
+    return gather(dim, indices, BoundaryMode::Assert);
+}
+
+Tensor Tensor::take(const Tensor& indices) const {
+    if (!is_valid() || !indices.is_valid()) return {};
+
+    auto flat = flatten();
+    auto result = empty(indices.shape(), device_, dtype_);
+
+    if (device_ == Device::CUDA) {
+        tensor_ops::launch_take(flat.ptr<float>(), indices.ptr<int>(),
+                               result.ptr<float>(), flat.numel(), indices.numel(), 0);
+        cudaDeviceSynchronize();
+    } else {
+        const float* src = flat.ptr<float>();
+        float* dst = result.ptr<float>();
+        const int* idx = indices.ptr<int>();
+        size_t total = flat.numel();
+
+        std::transform(std::execution::par_unseq,
+                      idx, idx + indices.numel(), dst,
+                      [src, total](int pos) {
+                          if (pos < 0) pos += total;
+                          return (pos >= 0 && pos < static_cast<int>(total)) ? src[pos] : 0.0f;
+                      });
+    }
+    return result;
+}
+
+// ============= Scatter Operations - Simplified =============
+template<typename Op>
+static Tensor& scatter_impl(Tensor& t, int dim, const Tensor& idx,
+                           const Tensor& src, Op op, int mode) {
+    if (!t.is_valid() || !idx.is_valid() || !src.is_valid()) return t;
+
+    dim = (dim < 0) ? t.shape().rank() + dim : dim;
+    if (dim < 0 || dim >= static_cast<int>(t.shape().rank())) return t;
+
+    if (t.device() == Device::CUDA) {
+        tensor_ops::launch_scatter(t.ptr<float>(), idx.ptr<int>(),
+            src.ptr<float>(), t.shape().dims().data(), src.shape().dims().data(),
+            t.shape().rank(), dim, src.numel(), mode, 0);
+        cudaDeviceSynchronize();
+    } else {
+        size_t outer = 1, inner = 1;
+        for (int i = 0; i < dim; ++i) outer *= t.shape()[i];
+        for (size_t i = dim + 1; i < t.shape().rank(); ++i) inner *= t.shape()[i];
+
+        float* dst = t.ptr<float>();
+        const int* indices = idx.ptr<int>();
+        const float* src_data = src.ptr<float>();
+
+        for (size_t o = 0; o < outer; ++o) {
+            for (size_t i = 0; i < idx.numel(); ++i) {
+                int pos = indices[i];
+                if (pos < 0 || pos >= static_cast<int>(t.shape()[dim])) continue;
+
+                for (size_t j = 0; j < inner; ++j) {
+                    size_t src_idx = o * idx.numel() * inner + i * inner + j;
+                    size_t dst_idx = o * t.shape()[dim] * inner + pos * inner + j;
+                    op(dst[dst_idx], src_data[src_idx]);
                 }
             }
+        }
+    }
+    return t;
+}
+
+Tensor& Tensor::scatter_(int dim, const Tensor& idx, const Tensor& src, ScatterMode mode) {
+    using OpFunc = std::function<void(float&, float)>;
+    OpFunc op;
+
+    switch (mode) {
+        case ScatterMode::Add:
+            op = [](float& d, float s) { d += s; };
+            break;
+        case ScatterMode::Multiply:
+            op = [](float& d, float s) { d *= s; };
+            break;
+        case ScatterMode::Max:
+            op = [](float& d, float s) { d = std::max(d, s); };
+            break;
+        case ScatterMode::Min:
+            op = [](float& d, float s) { d = std::min(d, s); };
+            break;
+        default:
+            op = [](float& d, float s) { d = s; };
+            break;
+    }
+
+    return scatter_impl(*this, dim, idx, src, op, static_cast<int>(mode));
+}
+
+Tensor& Tensor::scatter_(int dim, const Tensor& idx, float val, ScatterMode mode) {
+    auto src = full(idx.shape(), val, device_, dtype_);
+    return scatter_(dim, idx, src, mode);
+}
+
+Tensor& Tensor::index_fill_(int dim, const Tensor& idx, float val) {
+    return scatter_(dim, idx, val, ScatterMode::None);
+}
+
+Tensor& Tensor::index_copy_(int dim, const Tensor& idx, const Tensor& src) {
+    return scatter_(dim, idx, src, ScatterMode::None);
+}
+
+Tensor& Tensor::index_add_(int dim, const Tensor& idx, const Tensor& src) {
+    return scatter_(dim, idx, src, ScatterMode::Add);
+}
+
+Tensor& Tensor::index_put_(const Tensor& idx, const Tensor& vals) {
+    if (!is_valid() || !idx.is_valid() || !vals.is_valid()) return *this;
+
+    if (device_ == Device::CUDA) {
+        tensor_ops::launch_index_put(ptr<float>(), idx.ptr<int>(),
+                                     vals.ptr<float>(), numel(), idx.numel(), 0);
+        cudaDeviceSynchronize();
+    } else {
+        float* data = ptr<float>();
+        const int* indices = idx.ptr<int>();
+        const float* values = vals.ptr<float>();
+        size_t num_elements = numel();
+
+        std::for_each(std::execution::par_unseq,
+                     std::views::iota(0uz, idx.numel()).begin(),
+                     std::views::iota(0uz, idx.numel()).end(),
+                     [data, indices, values, num_elements](size_t i) {
+                         int pos = indices[i];
+                         if (pos < 0) pos += num_elements;
+                         if (pos >= 0 && pos < static_cast<int>(num_elements)) {
+                             data[pos] = values[i];
+                         }
+                     });
+    }
+    return *this;
+}
+
+Tensor& Tensor::index_put_(const std::vector<Tensor>& indices, const Tensor& vals) {
+    return (indices.size() == 1) ? index_put_(indices[0], vals) : *this;
+}
+
+// ============= Nonzero & Count =============
+size_t Tensor::count_nonzero() const {
+    if (!is_valid() || numel() == 0) return 0;
+
+    if (device_ == Device::CUDA) {
+        size_t count;
+        if (dtype_ == DataType::Bool) {
+            tensor_ops::launch_count_nonzero_bool(ptr<unsigned char>(), &count, numel(), 0);
         } else {
-            LOG_ERROR("Multi-dimensional indices not yet supported for index_put_");
-            return *this;
+            tensor_ops::launch_count_nonzero_float(ptr<float>(), &count, numel(), 0);
         }
-
-        return *this;
+        cudaDeviceSynchronize();
+        return count;
+    } else {
+        if (dtype_ == DataType::Bool) {
+            return std::count(ptr<unsigned char>(), ptr<unsigned char>() + numel(), 1);
+        } else {
+            return std::count_if(ptr<float>(), ptr<float>() + numel(),
+                                [](float x) { return x != 0.0f; });
+        }
     }
+}
 
-    Tensor& Tensor::index_put_(const std::vector<Tensor>& indices, const Tensor& values) {
-        // This is for advanced indexing with multiple index tensors
-        // For now, just support the simple case of a single index tensor
-        if (indices.size() != 1) {
-            LOG_ERROR("Multi-dimensional indexing not yet fully supported");
-            return *this;
-        }
-        return index_put_(indices[0], values);
-    }
+Tensor Tensor::nonzero() const {
+    if (!is_valid()) return {};
 
-    Tensor Tensor::nonzero() const {
-        if (!is_valid()) {
-            return Tensor();
-        }
+    size_t count = count_nonzero();
+    if (count == 0) return empty({0}, device_, DataType::Int64);
 
-        // Count non-zero elements
-        size_t count = count_nonzero();
+    auto result = empty({count}, device_, DataType::Int64);
 
-        if (count == 0) {
-            // Return empty tensor with shape [0]
-            return empty({0}, device_, DataType::Int64);
-        }
-
-        // Create output tensor for indices
-        auto result = empty({count}, device_, DataType::Int64);
-
-        if (device_ == Device::CUDA) {
-            if (dtype_ == DataType::Bool) {
-                tensor_ops::launch_nonzero_bool(ptr<unsigned char>(),
-                                                reinterpret_cast<int64_t*>(result.ptr<float>()),
-                                                numel(), count, 0);
-            } else {
-                tensor_ops::launch_nonzero(ptr<float>(), reinterpret_cast<int64_t*>(result.ptr<float>()),
+    if (device_ == Device::CUDA) {
+        if (dtype_ == DataType::Bool) {
+            tensor_ops::launch_nonzero_bool(ptr<unsigned char>(),
+                                           reinterpret_cast<int64_t*>(result.raw_ptr()),
                                            numel(), count, 0);
-            }
-            cudaDeviceSynchronize();
         } else {
-            // CPU implementation
-            int64_t* indices = reinterpret_cast<int64_t*>(result.ptr<float>());
-            size_t idx = 0;
-
-            if (dtype_ == DataType::Bool) {
-                const unsigned char* data = ptr<unsigned char>();
-                for (size_t i = 0; i < numel(); ++i) {
-                    if (data[i]) {
-                        indices[idx++] = static_cast<int64_t>(i);
-                    }
-                }
-            } else {
-                const float* data = ptr<float>();
-                for (size_t i = 0; i < numel(); ++i) {
-                    if (data[i] != 0.0f) {
-                        indices[idx++] = static_cast<int64_t>(i);
-                    }
-                }
-            }
+            tensor_ops::launch_nonzero(ptr<float>(),
+                                      reinterpret_cast<int64_t*>(result.raw_ptr()),
+                                      numel(), count, 0);
         }
+        cudaDeviceSynchronize();
+    } else {
+        int64_t* indices = reinterpret_cast<int64_t*>(result.raw_ptr());
 
-        return result;
+        if (dtype_ == DataType::Bool) {
+            const unsigned char* data = ptr<unsigned char>();
+            auto nonzero_indices = std::views::iota(0uz, numel())
+                                 | std::views::filter([data](size_t i) { return data[i]; });
+            std::ranges::copy(nonzero_indices, indices);
+        } else {
+            const float* data = ptr<float>();
+            auto nonzero_indices = std::views::iota(0uz, numel())
+                                 | std::views::filter([data](size_t i) { return data[i] != 0.0f; });
+            std::ranges::copy(nonzero_indices, indices);
+        }
+    }
+    return result;
+}
+
+std::vector<Tensor> Tensor::nonzero_split() const {
+    std::vector<Tensor> result;
+    result.push_back(nonzero());
+    return result;
+}
+
+bool Tensor::any() const {
+    return dtype_ == DataType::Bool && count_nonzero() > 0;
+}
+
+bool Tensor::all() const {
+    return dtype_ == DataType::Bool && count_nonzero() == numel();
+}
+
+// ============= Pythonic Indexing =============
+TensorIndexer Tensor::operator[](const Tensor& idx) {
+    std::vector<Tensor> indices;
+    indices.reserve(1);
+    indices.push_back(idx.clone());
+    return TensorIndexer(this, std::move(indices));
+}
+
+TensorIndexer Tensor::operator[](const std::vector<Tensor>& idx) {
+    std::vector<Tensor> cloned;
+    cloned.reserve(idx.size());
+    std::ranges::transform(idx, std::back_inserter(cloned),
+                          [](const auto& i) { return i.clone(); });
+    return TensorIndexer(this, std::move(cloned));
+}
+
+MaskedTensorProxy Tensor::operator[](const Tensor& mask) const {
+    return MaskedTensorProxy(this, mask.clone());
+}
+
+// ============= Element Access =============
+float& Tensor::at(std::initializer_list<size_t> indices) {
+    static float dummy = 0;
+    if (dtype_ != DataType::Float32 || indices.size() != shape_.rank()) return dummy;
+
+    size_t idx = 0, stride = 1;
+    auto it = indices.end();
+    for (int i = shape_.rank() - 1; i >= 0; --i) {
+        --it;
+        if (*it >= shape_[i]) return dummy;
+        idx += (*it) * stride;
+        stride *= shape_[i];
     }
 
-    std::vector<Tensor> Tensor::nonzero_split() const {
-        // This returns separate tensors for each dimension's indices
-        // Useful for multi-dimensional indexing
+    if (device_ == Device::CUDA) return dummy;
+    return ptr<float>()[idx];
+}
 
-        if (!is_valid() || shape_.rank() == 0) {
-            return {};
-        }
+float Tensor::at(std::initializer_list<size_t> indices) const {
+    if (dtype_ != DataType::Float32 || indices.size() != shape_.rank()) return 0;
 
-        // For now, just return the flattened indices
-        // Full implementation would return [count, ndim] shaped tensor
-        auto flat_indices = nonzero();
-
-        // Convert to multi-dimensional indices if needed
-        // This is a simplified version - using move to avoid copy
-        std::vector<Tensor> result;
-        result.push_back(std::move(flat_indices));
-        return result;
+    size_t idx = 0, stride = 1;
+    auto it = indices.end();
+    for (int i = shape_.rank() - 1; i >= 0; --i) {
+        --it;
+        if (*it >= shape_[i]) return 0;
+        idx += (*it) * stride;
+        stride *= shape_[i];
     }
+
+    if (device_ == Device::CUDA) {
+        float value;
+        cudaMemcpy(&value, ptr<float>() + idx, sizeof(float), cudaMemcpyDeviceToHost);
+        return value;
+    }
+    return ptr<float>()[idx];
+}
+
+// ============= Boolean Operations =============
+Tensor Tensor::full_bool(TensorShape shape, bool value, Device device) {
+    auto t = empty(shape, device, DataType::Bool);
+    if (t.is_valid() && t.numel() > 0) {
+        unsigned char fill = value ? 1 : 0;
+        if (device == Device::CUDA) {
+            cudaMemset(t.data_, fill, t.bytes());
+        } else {
+            std::memset(t.data_, fill, t.bytes());
+        }
+    }
+    return t;
+}
+
+Tensor Tensor::zeros_bool(TensorShape shape, Device device) {
+    return full_bool(shape, false, device);
+}
+
+Tensor Tensor::ones_bool(TensorShape shape, Device device) {
+    return full_bool(shape, true, device);
+}
+
+// ============= From Vector =============
+template<typename T>
+static Tensor from_vector_impl(const std::vector<T>& data, TensorShape shape,
+                               Device device, DataType dtype) {
+    if (shape.elements() != data.size()) return {};
+    auto t = Tensor::empty(shape, device, dtype);
+    if (!t.is_valid() || t.numel() == 0) return t;
+
+    if (device == Device::CUDA) {
+        cudaMemcpy(t.raw_ptr(), data.data(), t.bytes(), cudaMemcpyHostToDevice);
+    } else {
+        std::memcpy(t.raw_ptr(), data.data(), t.bytes());
+    }
+    return t;
+}
+
+Tensor Tensor::from_vector(const std::vector<float>& data, TensorShape shape, Device device) {
+    return from_vector_impl(data, shape, device, DataType::Float32);
+}
+
+Tensor Tensor::from_vector(const std::vector<int>& data, TensorShape shape, Device device) {
+    return from_vector_impl(data, shape, device, DataType::Int32);
+}
+
+Tensor Tensor::from_vector(const std::vector<bool>& data, TensorShape shape, Device device) {
+    if (shape.elements() != data.size()) return {};
+
+    std::vector<unsigned char> bytes(data.size());
+    std::ranges::transform(data, bytes.begin(),
+                          [](bool b) { return b ? 1 : 0; });
+
+    return from_vector_impl(bytes, shape, device, DataType::Bool);
+}
+
+// ============= Conversion =============
+std::vector<int> Tensor::to_vector_int() const {
+    if (dtype_ != DataType::Int32 || !is_valid() || numel() == 0) return {};
+
+    std::vector<int> result(numel());
+    if (device_ == Device::CUDA) {
+        cudaMemcpy(result.data(), data_, bytes(), cudaMemcpyDeviceToHost);
+    } else {
+        std::memcpy(result.data(), data_, bytes());
+    }
+    return result;
+}
+
+std::vector<bool> Tensor::to_vector_bool() const {
+    if (dtype_ != DataType::Bool || !is_valid() || numel() == 0) return {};
+
+    std::vector<unsigned char> bytes(numel());
+    if (device_ == Device::CUDA) {
+        cudaMemcpy(bytes.data(), data_, this->bytes(), cudaMemcpyDeviceToHost);
+    } else {
+        std::memcpy(bytes.data(), data_, this->bytes());
+    }
+
+    std::vector<bool> result(numel());
+    std::ranges::transform(bytes, result.begin(),
+                          [](auto x) { return x != 0; });
+    return result;
+}
+
+void Tensor::set_bool(std::initializer_list<size_t> indices, bool value) {
+    if (dtype_ != DataType::Bool) return;
+
+    size_t idx = 0, stride = 1;
+    auto it = indices.end();
+    for (int i = shape_.rank() - 1; i >= 0; --i) {
+        --it;
+        idx += (*it) * stride;
+        stride *= shape_[i];
+    }
+
+    unsigned char val = value ? 1 : 0;
+    if (device_ == Device::CUDA) {
+        cudaMemcpy(ptr<unsigned char>() + idx, &val, 1, cudaMemcpyHostToDevice);
+    } else {
+        ptr<unsigned char>()[idx] = val;
+    }
+}
+
+bool Tensor::get_bool(std::initializer_list<size_t> indices) const {
+    if (dtype_ != DataType::Bool) return false;
+
+    size_t idx = 0, stride = 1;
+    auto it = indices.end();
+    for (int i = shape_.rank() - 1; i >= 0; --i) {
+        --it;
+        idx += (*it) * stride;
+        stride *= shape_[i];
+    }
+
+    if (device_ == Device::CUDA) {
+        unsigned char val;
+        cudaMemcpy(&val, ptr<unsigned char>() + idx, 1, cudaMemcpyDeviceToHost);
+        return val != 0;
+    }
+    return ptr<unsigned char>()[idx] != 0;
+}
+
+// ============= Proxy Implementations =============
+void MaskedTensorProxy::operator=(float value) {
+    const_cast<Tensor*>(tensor_)->masked_fill_(mask_, value);
+}
+
+void MaskedTensorProxy::operator=(const Tensor& other) {
+    auto selected = tensor_->masked_select(mask_);
+    if (selected.numel() != other.numel()) return;
+
+    if (tensor_->device() == Device::CUDA) {
+        tensor_ops::launch_masked_scatter(const_cast<Tensor*>(tensor_)->ptr<float>(),
+                                         mask_.ptr<unsigned char>(), other.ptr<float>(),
+                                         tensor_->numel(), other.numel(), 0);
+        cudaDeviceSynchronize();
+    } else {
+        float* data = const_cast<Tensor*>(tensor_)->ptr<float>();
+        const unsigned char* mask = mask_.ptr<unsigned char>();
+        const float* src = other.ptr<float>();
+
+        size_t src_idx = 0;
+        for (size_t i = 0; i < tensor_->numel() && src_idx < other.numel(); ++i) {
+            if (mask[i]) data[i] = src[src_idx++];
+        }
+    }
+}
+
+MaskedTensorProxy::operator Tensor() const {
+    return tensor_->masked_select(mask_);
+}
+
+void TensorIndexer::operator=(float value) {
+    if (indices_.size() == 1) {
+        if (indices_[0].dtype() == DataType::Bool) {
+            tensor_->masked_fill_(indices_[0], value);
+        } else {
+            tensor_->scatter_(0, indices_[0], value);
+        }
+    }
+}
+
+void TensorIndexer::operator=(const Tensor& other) {
+    if (indices_.size() == 1) {
+        if (indices_[0].dtype() == DataType::Bool) {
+            MaskedTensorProxy proxy(tensor_, std::move(indices_[0]));
+            proxy = other;
+        } else {
+            tensor_->scatter_(0, indices_[0], other);
+        }
+    }
+}
+
+TensorIndexer::operator Tensor() const {
+    if (indices_.size() == 1) {
+        if (indices_[0].dtype() == DataType::Bool) {
+            return tensor_->masked_select(indices_[0]);
+        } else {
+            return indices_[0].ndim() == 1 ?
+                   tensor_->index_select(0, indices_[0]) :
+                   tensor_->take(indices_[0]);
+        }
+    }
+    return Tensor();
+}
+
+#undef CHECK_CUDA
 
 } // namespace gs

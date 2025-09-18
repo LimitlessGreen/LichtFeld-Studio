@@ -20,182 +20,75 @@
 
 namespace gs {
 
+    // ============= Helper for unary operations =============
+    template<typename Op>
+    static void dispatch_unary(Tensor& t, void(*cuda_fn)(float*, size_t, cudaStream_t), Op cpu_op) {
+        if (t.device() == Device::CUDA) {
+            cuda_fn(t.ptr<float>(), t.numel(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            float* data = t.ptr<float>();
+            for (size_t i = 0; i < t.numel(); ++i) {
+                cpu_op(data[i]);
+            }
+        }
+    }
+
     // ============= Math Operations =============
 
-    Tensor Tensor::abs() const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        auto result = empty(shape_, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(), cudaMemcpyDeviceToDevice));
-            tensor_ops::launch_abs(result.ptr<float>(), numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* src = ptr<float>();
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = std::abs(src[i]);
-            }
-        }
-
-        return result;
+    #define DEFINE_UNARY_OP(name, cuda_fn, cpu_lambda) \
+    Tensor Tensor::name() const { \
+        if (!is_valid()) return Tensor(); \
+        auto result = empty(shape_, device_, dtype_); \
+        CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(), \
+                             device_ == Device::CUDA ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToHost)); \
+        dispatch_unary(result, tensor_ops::cuda_fn, cpu_lambda); \
+        return result; \
     }
 
-    Tensor Tensor::sqrt() const {
-        if (!is_valid()) {
-            return Tensor();
-        }
+    DEFINE_UNARY_OP(abs, launch_abs, [](float& x) { x = std::abs(x); })
+    DEFINE_UNARY_OP(sqrt, launch_sqrt, [](float& x) { x = std::sqrt(std::max(0.0f, x)); })
+    DEFINE_UNARY_OP(exp, launch_exp, [](float& x) { x = std::exp(x); })
+    DEFINE_UNARY_OP(log, launch_log, [](float& x) { x = std::log(std::max(1e-10f, x)); })
+    DEFINE_UNARY_OP(sigmoid, launch_sigmoid, [](float& x) { x = 1.0f / (1.0f + std::exp(-x)); })
+    DEFINE_UNARY_OP(relu, launch_relu, [](float& x) { x = std::max(0.0f, x); })
 
-        auto result = empty(shape_, device_, dtype_);
+    #undef DEFINE_UNARY_OP
 
-        if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(), cudaMemcpyDeviceToDevice));
-            tensor_ops::launch_sqrt(result.ptr<float>(), numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* src = ptr<float>();
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = std::sqrt(std::max(0.0f, src[i])); // Avoid NaN for negative values
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::exp() const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        auto result = empty(shape_, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(), cudaMemcpyDeviceToDevice));
-            tensor_ops::launch_exp(result.ptr<float>(), numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* src = ptr<float>();
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = std::exp(src[i]);
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::log() const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        auto result = empty(shape_, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(), cudaMemcpyDeviceToDevice));
-            tensor_ops::launch_log(result.ptr<float>(), numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* src = ptr<float>();
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = std::log(std::max(1e-10f, src[i])); // Avoid NaN for negative/zero values
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::sigmoid() const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        auto result = empty(shape_, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(), cudaMemcpyDeviceToDevice));
-            tensor_ops::launch_sigmoid(result.ptr<float>(), numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* src = ptr<float>();
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = 1.0f / (1.0f + std::exp(-src[i]));
-            }
-        }
-
-        return result;
-    }
     Tensor Tensor::logit(float eps) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
+        if (!is_valid()) return Tensor();
         auto result = empty(shape_, device_, dtype_);
 
         if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(), cudaMemcpyDeviceToDevice));
             tensor_ops::launch_logit(ptr<float>(), result.ptr<float>(), numel(), eps, 0);
             CHECK_CUDA(cudaDeviceSynchronize());
         } else {
             const float* src = ptr<float>();
             float* dst = result.ptr<float>();
             for (size_t i = 0; i < numel(); ++i) {
-                // Clamp to avoid log(0) or log(inf)
                 float x = std::clamp(src[i], eps, 1.0f - eps);
                 dst[i] = std::log(x / (1.0f - x));
             }
         }
-
-        return result;
-    }
-
-    Tensor Tensor::relu() const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        auto result = empty(shape_, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(), cudaMemcpyDeviceToDevice));
-            tensor_ops::launch_relu(result.ptr<float>(), numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* src = ptr<float>();
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = std::max(0.0f, src[i]);
-            }
-        }
-
         return result;
     }
 
     Tensor Tensor::clamp(float min_val, float max_val) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
+        if (!is_valid()) return Tensor();
         auto result = empty(shape_, device_, dtype_);
 
+        CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(),
+                             device_ == Device::CUDA ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToHost));
+
         if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.ptr<float>(), ptr<float>(), bytes(), cudaMemcpyDeviceToDevice));
             tensor_ops::launch_clamp(result.ptr<float>(), min_val, max_val, numel(), 0);
             CHECK_CUDA(cudaDeviceSynchronize());
         } else {
-            const float* src = ptr<float>();
             float* dst = result.ptr<float>();
             for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = std::clamp(src[i], min_val, max_val);
+                dst[i] = std::clamp(dst[i], min_val, max_val);
             }
         }
-
         return result;
     }
 
@@ -207,68 +100,31 @@ namespace gs {
         return clamp(std::numeric_limits<float>::lowest(), max_val);
     }
 
-    // ============= Normalization =============
-
     Tensor Tensor::normalize(int dim, float eps) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        // For simplicity, normalize over all elements if dim == -1
+        if (!is_valid()) return Tensor();
         float m = mean();
-
-        // Calculate standard deviation
-        float s = std(); // Don't pass eps here, std() will handle it internally
-
-        // If std is too small, use eps to avoid divide by zero
-        if (s < eps) {
-            s = eps;
-        }
-
+        float s = std();
+        if (s < eps) s = eps;
         return (*this - m) / s;
     }
 
     // ============= Comparison Operations =============
-
     bool Tensor::has_nan() const {
-        if (!is_valid() || numel() == 0) {
-            return false;
-        }
-
+        if (!is_valid() || numel() == 0) return false;
         auto values = to_vector();
-        for (float val : values) {
-            if (std::isnan(val)) {
-                return true;
-            }
-        }
-        return false;
+        return std::any_of(values.begin(), values.end(), [](float v) { return std::isnan(v); });
     }
 
     bool Tensor::has_inf() const {
-        if (!is_valid() || numel() == 0) {
-            return false;
-        }
-
+        if (!is_valid() || numel() == 0) return false;
         auto values = to_vector();
-        for (float val : values) {
-            if (std::isinf(val)) {
-                return true;
-            }
-        }
-        return false;
+        return std::any_of(values.begin(), values.end(), [](float v) { return std::isinf(v); });
     }
 
     bool Tensor::all_close(const Tensor& other, float rtol, float atol) const {
-        if (!is_valid() || !other.is_valid()) {
-            return false;
-        }
-
-        if (shape_ != other.shape_) {
-            return false;
-        }
+        if (!is_valid() || !other.is_valid() || shape_ != other.shape_) return false;
 
         if (device_ != other.device_) {
-            // Compare across devices by copying to CPU
             auto cpu_this = this->to(Device::CPU);
             auto cpu_other = other.to(Device::CPU);
             return cpu_this.all_close(cpu_other, rtol, atol);
@@ -280,22 +136,17 @@ namespace gs {
         for (size_t i = 0; i < values1.size(); ++i) {
             float diff = std::abs(values1[i] - values2[i]);
             float tol = atol + rtol * std::abs(values2[i]);
-            if (diff > tol) {
-                return false;
-            }
+            if (diff > tol) return false;
         }
-
         return true;
     }
 
     // ============= Assertions =============
-
     Tensor& Tensor::assert_shape(TensorShape expected, const std::string& msg) {
         if (shape_ != expected) {
             std::string error_msg = msg.empty() ? "Shape assertion failed" : msg;
             throw TensorError(error_msg + ": expected " + expected.str() +
-                                  ", got " + shape_.str(),
-                              this);
+                                  ", got " + shape_.str(), this);
         }
         return *this;
     }

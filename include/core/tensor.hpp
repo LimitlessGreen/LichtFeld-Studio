@@ -16,6 +16,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <concepts>
+#include <type_traits>
 
 namespace gs {
 
@@ -30,10 +32,9 @@ namespace gs {
         Int32 = 2,
         Int64 = 3,
         UInt8 = 4,
-        Bool = 5 // Added for masking
+        Bool = 5
     };
 
-    // Get size in bytes for each data type
     constexpr size_t dtype_size(DataType dtype) {
         switch (dtype) {
         case DataType::Float32: return 4;
@@ -46,7 +47,6 @@ namespace gs {
         }
     }
 
-    // Convert to string for logging
     inline const char* dtype_name(DataType dtype) {
         switch (dtype) {
         case DataType::Float32: return "float32";
@@ -63,38 +63,41 @@ namespace gs {
         return device == Device::CPU ? "cpu" : "cuda";
     }
 
-    // Boundary checking mode for indexing operations
     enum class BoundaryMode : uint8_t {
-        Assert = 0, // Throw on out-of-bounds
-        Clamp = 1,  // Clamp to valid range
-        Wrap = 2    // Wrap around (modulo)
+        Assert = 0,
+        Clamp = 1,
+        Wrap = 2
     };
 
-    // Reduction mode for scatter operations
     enum class ScatterMode : uint8_t {
-        None = 0,     // Direct assignment (last write wins)
-        Add = 1,      // Add to existing value
-        Multiply = 2, // Multiply with existing value
-        Max = 3,      // Take maximum
-        Min = 4       // Take minimum
+        None = 0,
+        Add = 1,
+        Multiply = 2,
+        Max = 3,
+        Min = 4
+    };
+
+    // Binary operation types for dispatch
+    enum class BinaryOp : uint8_t {
+        Add = 0,
+        Sub = 1,
+        Mul = 2,
+        Div = 3,
+        Pow = 4
     };
 
     class TensorShape {
     private:
         std::vector<size_t> dims_;
         size_t total_elements_ = 0;
-        bool initialized_ = false; // Track if shape was explicitly set
+        bool initialized_ = false;
 
     public:
         TensorShape() = default;
-
-        TensorShape(std::initializer_list<size_t> dims) : dims_(dims),
-                                                          initialized_(true) {
+        TensorShape(std::initializer_list<size_t> dims) : dims_(dims), initialized_(true) {
             compute_total();
         }
-
-        explicit TensorShape(const std::vector<size_t>& dims) : dims_(dims),
-                                                                initialized_(true) {
+        explicit TensorShape(const std::vector<size_t>& dims) : dims_(dims), initialized_(true) {
             compute_total();
         }
 
@@ -110,15 +113,9 @@ namespace gs {
         const std::vector<size_t>& dims() const { return dims_; }
         bool is_initialized() const { return initialized_; }
 
-        bool operator==(const TensorShape& other) const {
-            return dims_ == other.dims_;
-        }
+        bool operator==(const TensorShape& other) const { return dims_ == other.dims_; }
+        bool operator!=(const TensorShape& other) const { return !(*this == other); }
 
-        bool operator!=(const TensorShape& other) const {
-            return !(*this == other);
-        }
-
-        // String representation for debugging
         std::string str() const;
 
     private:
@@ -130,35 +127,27 @@ namespace gs {
         }
     };
 
-    // Forward declarations
     class TensorError;
     class TensorIndexer;
     class MaskedTensorProxy;
 
-    // Random number generator management
     class RandomGenerator {
     public:
         static RandomGenerator& instance();
-
         void manual_seed(uint64_t seed);
         uint64_t get_seed() const { return seed_; }
-
-        // Get generator for a specific device
         void* get_generator(Device device);
 
     private:
         RandomGenerator();
         ~RandomGenerator();
-
         uint64_t seed_;
         void* cuda_generator_ = nullptr;
         std::mt19937_64 cpu_generator_;
-
         RandomGenerator(const RandomGenerator&) = delete;
         RandomGenerator& operator=(const RandomGenerator&) = delete;
     };
 
-    // Lightweight tensor - a view over memory
     class Tensor {
     private:
         void* data_ = nullptr;
@@ -166,31 +155,34 @@ namespace gs {
         Device device_ = Device::CPU;
         DataType dtype_ = DataType::Float32;
         bool owns_memory_ = false;
-        bool initialized_ = false; // Track if tensor was properly initialized
+        bool initialized_ = false;
 
-        // For debugging
         mutable size_t id_ = 0;
         static std::atomic<size_t> next_id_;
         static inline bool profiling_enabled_ = false;
 
+        // Concepts for arithmetic operations
+        template<typename T>
+        static constexpr bool is_scalar_v = std::is_arithmetic_v<T>;
+
+        template<typename T>
+        static constexpr bool is_tensor_v = std::is_same_v<std::remove_cvref_t<T>, Tensor>;
+
+        // Unified binary operation implementation
+        template<typename T>
+        Tensor binary_op_impl(const T& other, BinaryOp op) const;
+
+        template<typename T>
+        Tensor& binary_op_inplace_impl(const T& other, BinaryOp op);
+
     public:
         // ============= Constructors & Destructor =============
         Tensor() = default;
-
-        // Create from existing memory (non-owning view)
         Tensor(void* data, TensorShape shape, Device device, DataType dtype);
-
-        // Move constructor
         Tensor(Tensor&& other) noexcept;
-
-        // Move assignment
         Tensor& operator=(Tensor&& other) noexcept;
-
-        // Delete copy (use clone() for explicit copies)
         Tensor(const Tensor&) = delete;
         Tensor& operator=(const Tensor&) = delete;
-
-        // Destructor
         ~Tensor();
 
         // ============= Factory Methods =============
@@ -203,12 +195,10 @@ namespace gs {
         static Tensor full(TensorShape shape, float value, Device device = Device::CUDA,
                            DataType dtype = DataType::Float32);
 
-        // Boolean tensor creation
         static Tensor full_bool(TensorShape shape, bool value, Device device = Device::CUDA);
         static Tensor zeros_bool(TensorShape shape, Device device = Device::CUDA);
         static Tensor ones_bool(TensorShape shape, Device device = Device::CUDA);
 
-        // Random tensors
         static Tensor rand(TensorShape shape, Device device = Device::CUDA,
                            DataType dtype = DataType::Float32);
         static Tensor randn(TensorShape shape, Device device = Device::CUDA,
@@ -224,15 +214,13 @@ namespace gs {
         static Tensor multinomial(const Tensor& weights, int num_samples,
                          bool replacement = false);
 
-        // Create view from raw memory
         static Tensor from_blob(void* data, TensorShape shape, Device device, DataType dtype) {
             return Tensor(data, shape, device, dtype);
         }
 
-        // Boolean tensor element access
         void set_bool(std::initializer_list<size_t> indices, bool value);
         bool get_bool(std::initializer_list<size_t> indices) const;
-        // Create from vector
+
         static Tensor from_vector(const std::vector<float>& data, TensorShape shape,
                                   Device device = Device::CUDA);
         static Tensor from_vector(const std::vector<int>& data, TensorShape shape,
@@ -268,21 +256,16 @@ namespace gs {
         DataType dtype() const { return dtype_; }
         bool owns_memory() const { return owns_memory_; }
 
-        // Empty tensor: has 0 elements
         bool is_empty() const {
-            // Default constructed tensors are considered empty
-            if (!initialized_)
-                return true;
+            if (!initialized_) return true;
             return shape_.elements() == 0;
         }
 
-        // Valid tensor: is initialized (may be empty)
         bool is_valid() const { return initialized_; }
 
         size_t numel() const { return shape_.elements(); }
         size_t bytes() const { return numel() * dtype_size(dtype_); }
 
-        // Shape queries
         size_t ndim() const { return shape_.rank(); }
         size_t size(size_t dim) const { return shape_[dim]; }
 
@@ -291,7 +274,7 @@ namespace gs {
         Tensor contiguous() const;
         Tensor to(Device device) const;
         Tensor to(DataType dtype) const;
-        bool is_contiguous() const { return true; } // Always true for now
+        bool is_contiguous() const { return true; }
 
         // ============= Shape Operations =============
         Tensor reshape(TensorShape new_shape) const;
@@ -301,7 +284,7 @@ namespace gs {
         Tensor unsqueeze(int dim) const;
         Tensor permute(std::vector<int> dims) const;
         Tensor transpose(int dim1 = -2, int dim2 = -1) const;
-        Tensor t() const; // Transpose last two dimensions
+        Tensor t() const;
         Tensor flatten(int start_dim = 0, int end_dim = -1) const;
 
         // ============= Broadcasting Operations =============
@@ -310,39 +293,54 @@ namespace gs {
         bool can_broadcast_to(const TensorShape& target) const;
         TensorShape broadcast_shape(const TensorShape& other) const;
 
-        // ============= Arithmetic Operations =============
-        // All element-wise operations support broadcasting
-        Tensor add(float scalar) const;
-        Tensor sub(float scalar) const;
-        Tensor mul(float scalar) const;
-        Tensor div(float scalar) const;
-        Tensor neg() const;
-        Tensor pow(float exponent) const;
+        // ============= Unified Arithmetic Operations =============
+        // Using template + concepts approach for cleaner interface
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor add(const T& other) const { return binary_op_impl(other, BinaryOp::Add); }
 
-        // Element-wise operations with broadcasting
-        Tensor add(const Tensor& other) const;
-        Tensor sub(const Tensor& other) const;
-        Tensor mul(const Tensor& other) const;
-        Tensor div(const Tensor& other) const;
-        Tensor pow(const Tensor& other) const;
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor sub(const T& other) const { return binary_op_impl(other, BinaryOp::Sub); }
+
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor mul(const T& other) const { return binary_op_impl(other, BinaryOp::Mul); }
+
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor div(const T& other) const { return binary_op_impl(other, BinaryOp::Div); }
+
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor pow(const T& other) const { return binary_op_impl(other, BinaryOp::Pow); }
+
+        Tensor neg() const { return mul(-1.0f); }
+
+        // In-place operations
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor& add_(const T& other) { return binary_op_inplace_impl(other, BinaryOp::Add); }
+
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor& sub_(const T& other) { return binary_op_inplace_impl(other, BinaryOp::Sub); }
+
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor& mul_(const T& other) { return binary_op_inplace_impl(other, BinaryOp::Mul); }
+
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor& div_(const T& other) { return binary_op_inplace_impl(other, BinaryOp::Div); }
 
         // Matrix operations
-        Tensor mm(const Tensor& other) const;     // Matrix multiply
-        Tensor bmm(const Tensor& other) const;    // Batch matrix multiply
-        Tensor matmul(const Tensor& other) const; // General matrix multiply
-        Tensor dot(const Tensor& other) const;    // Dot product for 1D tensors
+        Tensor mm(const Tensor& other) const;
+        Tensor bmm(const Tensor& other) const;
+        Tensor matmul(const Tensor& other) const;
+        Tensor dot(const Tensor& other) const;
 
-        // Concatenation operations
         static Tensor cat(const std::vector<Tensor>& tensors, int dim = 0);
         Tensor cat(const Tensor& other, int dim = 0) const;
 
-        // ============= Comparison Operations (NEW) =============
-        Tensor eq(const Tensor& other) const; // Equal
-        Tensor ne(const Tensor& other) const; // Not equal
-        Tensor lt(const Tensor& other) const; // Less than
-        Tensor le(const Tensor& other) const; // Less or equal
-        Tensor gt(const Tensor& other) const; // Greater than
-        Tensor ge(const Tensor& other) const; // Greater or equal
+        // ============= Comparison Operations =============
+        Tensor eq(const Tensor& other) const;
+        Tensor ne(const Tensor& other) const;
+        Tensor lt(const Tensor& other) const;
+        Tensor le(const Tensor& other) const;
+        Tensor gt(const Tensor& other) const;
+        Tensor ge(const Tensor& other) const;
 
         Tensor eq(float value) const;
         Tensor ne(float value) const;
@@ -351,26 +349,25 @@ namespace gs {
         Tensor gt(float value) const;
         Tensor ge(float value) const;
 
-        // Logical operations for boolean tensors
         Tensor logical_and(const Tensor& other) const;
         Tensor logical_or(const Tensor& other) const;
         Tensor logical_not() const;
         Tensor logical_xor(const Tensor& other) const;
 
-        // ============= Masking Operations (NEW) =============
+        // ============= Masking Operations =============
         Tensor masked_select(const Tensor& mask) const;
         Tensor& masked_fill_(const Tensor& mask, float value);
         Tensor masked_fill(const Tensor& mask, float value) const;
         Tensor where(const Tensor& condition, const Tensor& other) const;
         static Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y);
 
-        // ============= Indexing Operations (NEW) =============
+        // ============= Indexing Operations =============
         Tensor index_select(int dim, const Tensor& indices) const;
         Tensor gather(int dim, const Tensor& indices) const;
-        Tensor take(const Tensor& indices) const; // 1D indexing
+        Tensor take(const Tensor& indices) const;
 
-        Tensor nonzero() const;  // Get indices of non-zero elements
-        std::vector<Tensor> nonzero_split() const;  // Get indices as separate tensors per dimension
+        Tensor nonzero() const;
+        std::vector<Tensor> nonzero_split() const;
 
         Tensor& scatter_(int dim, const Tensor& indices, const Tensor& src,
                          ScatterMode mode = ScatterMode::None);
@@ -379,37 +376,35 @@ namespace gs {
         Tensor& index_fill_(int dim, const Tensor& indices, float value);
         Tensor& index_copy_(int dim, const Tensor& indices, const Tensor& src);
 
-        // Additional indexing operations for densification
         Tensor& index_add_(int dim, const Tensor& indices, const Tensor& src);
         Tensor& index_put_(const Tensor& indices, const Tensor& values);
         Tensor& index_put_(const std::vector<Tensor>& indices, const Tensor& values);
 
-        // Advanced indexing with boundary modes
         Tensor index_select(int dim, const Tensor& indices, BoundaryMode mode) const;
         Tensor gather(int dim, const Tensor& indices, BoundaryMode mode) const;
 
-        // ============= Python-like Indexing (NEW) =============
-        // Indexing proxy for Python-like syntax
         TensorIndexer operator[](const Tensor& indices);
         TensorIndexer operator[](const std::vector<Tensor>& indices);
         MaskedTensorProxy operator[](const Tensor& mask) const;
 
-        // For scalar indexing
         float& at(std::initializer_list<size_t> indices);
         float at(std::initializer_list<size_t> indices) const;
 
-        // Operator overloads
-        Tensor operator+(const Tensor& other) const { return add(other); }
-        Tensor operator+(float scalar) const { return add(scalar); }
-        Tensor operator-(const Tensor& other) const { return sub(other); }
-        Tensor operator-(float scalar) const { return sub(scalar); }
-        Tensor operator*(const Tensor& other) const { return mul(other); }
-        Tensor operator*(float scalar) const { return mul(scalar); }
-        Tensor operator/(const Tensor& other) const { return div(other); }
-        Tensor operator/(float scalar) const { return div(scalar); }
+        // Operator overloads - now use unified implementation
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor operator+(const T& other) const { return add(other); }
+
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor operator-(const T& other) const { return sub(other); }
+
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor operator*(const T& other) const { return mul(other); }
+
+        template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
+        Tensor operator/(const T& other) const { return div(other); }
+
         Tensor operator-() const { return neg(); }
 
-        // Comparison operator overloads
         Tensor operator==(const Tensor& other) const { return eq(other); }
         Tensor operator==(float value) const { return eq(value); }
         Tensor operator!=(const Tensor& other) const { return ne(other); }
@@ -423,36 +418,23 @@ namespace gs {
         Tensor operator>=(const Tensor& other) const { return ge(other); }
         Tensor operator>=(float value) const { return ge(value); }
 
-        // Logical operator overloads (for boolean tensors)
         Tensor operator&&(const Tensor& other) const { return logical_and(other); }
         Tensor operator||(const Tensor& other) const { return logical_or(other); }
         Tensor operator!() const { return logical_not(); }
 
-        // In-place operations (no broadcasting for in-place)
-        Tensor& add_(const Tensor& other);
-        Tensor& add_(float scalar);
-        Tensor& sub_(const Tensor& other);
-        Tensor& sub_(float scalar);
-        Tensor& mul_(const Tensor& other);
-        Tensor& mul_(float scalar);
-        Tensor& div_(const Tensor& other);
-        Tensor& div_(float scalar);
-        Tensor& zero_();                        // Fill with zeros in-place
-        Tensor& fill_(float value);             // Fill tensor with a value in-place
-        Tensor& copy_from(const Tensor& other); // Copy data from another tensor
+        // Other in-place operations
+        Tensor& zero_();
+        Tensor& fill_(float value);
+        Tensor& copy_from(const Tensor& other);
 
-        // In-place random operations
         Tensor& uniform_(float low = 0.0f, float high = 1.0f);
         Tensor& normal_(float mean = 0.0f, float std = 1.0f);
 
-        // Additional utility methods that tests expect:
-        std::expected<Tensor, std::string> try_reshape(TensorShape shape) const; // Safe reshape with error handling
+        std::expected<Tensor, std::string> try_reshape(TensorShape shape) const;
 
-        // Static utility methods:
         static std::vector<Tensor> split_batch(const Tensor& tensor, size_t batch_size);
         static void enable_profiling(bool enable) { profiling_enabled_ = enable; }
 
-        // Functional-style methods:
         template <typename Func>
         Tensor& inplace(Func&& func) {
             func(*this);
@@ -484,10 +466,9 @@ namespace gs {
         float std(float eps = 1e-8f) const;
         float var(float eps = 1e-8f) const;
         float norm(float p = 2.0f) const;
-        float item() const; // Get single value (for scalar tensors)
+        float item() const;
         std::pair<float, float> minmax() const;
 
-        // Count non-zero elements (useful for masks)
         size_t count_nonzero() const;
 
         // ============= Common Deep Learning Operations =============
@@ -497,7 +478,7 @@ namespace gs {
         Tensor exp() const;
         Tensor log() const;
         Tensor sigmoid() const;
-        Tensor logit(float eps = 1e-7f) const;  // Inverse sigmoid: log(x/(1-x))
+        Tensor logit(float eps = 1e-7f) const;
         Tensor relu() const;
         Tensor clamp(float min, float max) const;
         Tensor clamp_min(float min) const;
@@ -513,8 +494,8 @@ namespace gs {
         bool has_nan() const;
         bool has_inf() const;
         bool all_close(const Tensor& other, float rtol = 1e-5f, float atol = 1e-8f) const;
-        bool any() const; // For boolean tensors
-        bool all() const; // For boolean tensors
+        bool any() const;
+        bool all() const;
 
         // ============= Utility Functions =============
         std::string str() const;
@@ -535,9 +516,7 @@ namespace gs {
         friend class MaskedTensorProxy;
     };
 
-    // ============= Indexing Helper Classes (NEW) =============
-
-    // Proxy class for masked tensor assignment
+    // Helper classes remain the same
     class MaskedTensorProxy {
     private:
         const Tensor* tensor_;
@@ -545,18 +524,13 @@ namespace gs {
 
     public:
         MaskedTensorProxy(const Tensor* tensor, Tensor mask)
-            : tensor_(tensor),
-              mask_(std::move(mask)) {}
+            : tensor_(tensor), mask_(std::move(mask)) {}
 
-        // Assignment operators for Python-like syntax
         void operator=(float value);
         void operator=(const Tensor& other);
-
-        // Conversion to tensor for selection
         operator Tensor() const;
     };
 
-    // Indexer for advanced indexing
     class TensorIndexer {
     private:
         Tensor* tensor_;
@@ -564,18 +538,13 @@ namespace gs {
 
     public:
         TensorIndexer(Tensor* tensor, std::vector<Tensor> indices)
-            : tensor_(tensor),
-              indices_(std::move(indices)) {}
+            : tensor_(tensor), indices_(std::move(indices)) {}
 
-        // Assignment for indexed positions
         void operator=(float value);
         void operator=(const Tensor& other);
-
-        // Get indexed values
         operator Tensor() const;
     };
 
-    // ============= TensorBuilder Class =============
     class TensorBuilder {
     private:
         TensorShape shape_;
@@ -593,9 +562,7 @@ namespace gs {
         Tensor build();
     };
 
-    // ============= Tensor Utilities Namespace =============
     namespace tensor {
-        // Creation functions
         inline Tensor empty(TensorShape shape, Device device = Device::CUDA) {
             return Tensor::empty(shape, device);
         }
@@ -612,7 +579,6 @@ namespace gs {
             return Tensor::full(shape, value, device);
         }
 
-        // Random functions
         inline Tensor rand(TensorShape shape, Device device = Device::CUDA) {
             return Tensor::rand(shape, device);
         }
@@ -639,38 +605,31 @@ namespace gs {
             return Tensor::bernoulli(shape, p, device);
         }
 
-        // Set random seed
         inline void manual_seed(uint64_t seed) {
             RandomGenerator::instance().manual_seed(seed);
         }
 
-        // Like operations - declarations only, implemented in tensor_utils.cpp
         Tensor zeros_like(const Tensor& other);
         Tensor ones_like(const Tensor& other);
         Tensor rand_like(const Tensor& other);
         Tensor randn_like(const Tensor& other);
 
-        // Matrix creation helpers
         Tensor eye(size_t n, Device device = Device::CUDA);
         Tensor eye(size_t m, size_t n, Device device = Device::CUDA);
         Tensor diag(const Tensor& diagonal);
 
-        // Range operations
         Tensor arange(float end);
         Tensor arange(float start, float end, float step = 1.0f);
         Tensor linspace(float start, float end, size_t steps);
 
-        // Stack/concatenate operations - using rvalue references for move semantics
         Tensor stack(std::vector<Tensor>&& tensors, int dim = 0);
         Tensor cat(std::vector<Tensor>&& tensors, int dim = 0);
 
-        // Utility functions
         bool check_valid(const Tensor& t, const std::string& name);
         void assert_same_shape(const Tensor& a, const Tensor& b);
         void assert_same_device(const Tensor& a, const Tensor& b);
-    } // namespace tensor
+    }
 
-    // ============= Tensor Error Handling =============
     class TensorError : public std::runtime_error {
     public:
         TensorError(const std::string& msg, const Tensor* t = nullptr);
@@ -680,21 +639,13 @@ namespace gs {
         std::string tensor_info_;
     };
 
-    // ============= Safe Operations Namespace =============
     namespace SafeOps {
         using Tensor = gs::Tensor;
-
-        // Safe division with epsilon to avoid division by zero
         Tensor divide(const Tensor& a, const Tensor& b, float epsilon = 1e-6f);
-
-        // Safe log with clamping to avoid NaN
         Tensor log(const Tensor& input, float epsilon = 1e-6f);
-
-        // Safe sqrt with clamping to avoid NaN
         Tensor sqrt(const Tensor& input, float epsilon = 0.0f);
-    } // namespace SafeOps
+    }
 
-    // ============= Memory Info Class =============
     class MemoryInfo {
     public:
         size_t free_bytes = 0;
@@ -708,18 +659,11 @@ namespace gs {
         void log() const;
     };
 
-    // ============= Functional Operations Namespace =============
     namespace functional {
-        // Map a function over tensor elements
         Tensor map(const Tensor& input, std::function<float(float)> func);
-
-        // Reduce tensor with binary operation
         float reduce(const Tensor& input, float init, std::function<float(float, float)> func);
-
-        // Filter tensor elements based on predicate (returns mask)
         Tensor filter(const Tensor& input, std::function<bool(float)> predicate);
 
-        // Pipe multiple operations
         template <typename... Funcs>
         auto pipe(Funcs... funcs) {
             return [=](const Tensor& input) -> Tensor {
@@ -728,6 +672,6 @@ namespace gs {
                 return result;
             };
         }
-    } // namespace functional
+    }
 
 } // namespace gs
