@@ -219,26 +219,17 @@ namespace gs {
 
     // ============= Deep Learning Operations =============
 
-    Tensor Tensor::normalize(int dim, float eps) const {
-        if (!is_valid()) {
-            return Tensor();
-        }
-
-        // For simplicity, normalize over the entire tensor if dim == -1
+    Tensor normalize(int dim = -1, float eps = 1e-12f) const {
         if (dim == -1) {
-            float m = mean();
-            float s = std();
-
-            // result = (x - mean) / (std + eps)
-            auto result = sub(m);
-            result = result.div(s + eps);
-
-            return result;
+            // Normalize entire tensor
+            auto m = mean();
+            auto s = std();
+            return sub(m).div(s + eps);
         }
-
-        // More complex per-dimension normalization would go here
-        LOG_WARN("Per-dimension normalization not fully implemented");
-        return clone();
+        // Per-dimension would use reduce with axes
+        auto m = mean({dim}, true);
+        auto s = std({dim}, true);
+        return sub(m).div(s.add(eps));
     }
 
     // ============= Validation & Assertions =============

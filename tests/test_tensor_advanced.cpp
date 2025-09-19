@@ -429,11 +429,11 @@ TEST_F(TensorAdvancedTest, StressTestLargeTensors) {
     // Perform operations
     auto sum = large1.add(large2);
     EXPECT_TRUE(sum.is_valid());
-    EXPECT_FLOAT_EQ(sum.mean(), 1.0f);
+    EXPECT_FLOAT_EQ(sum.mean_scalar(), 1.0f);  // Use mean_scalar()
 
     auto product = large1.mul(large2);
     EXPECT_TRUE(product.is_valid());
-    EXPECT_FLOAT_EQ(product.sum(), 0.0f); // All zeros
+    EXPECT_FLOAT_EQ(product.sum_scalar(), 0.0f); // All zeros - use sum_scalar()
 }
 
 TEST_F(TensorAdvancedTest, StressTestManyOperations) {
@@ -516,11 +516,11 @@ TEST_F(TensorAdvancedTest, ZeroDimensionalConsistency) {
     EXPECT_TRUE(sum.is_valid());
     EXPECT_EQ(sum.numel(), 0);
 
-    // Reductions should return 0
-    EXPECT_FLOAT_EQ(empty1.sum(), 0.0f);
-    EXPECT_FLOAT_EQ(empty1.mean(), 0.0f);
-    EXPECT_FLOAT_EQ(empty1.min(), 0.0f);
-    EXPECT_FLOAT_EQ(empty1.max(), 0.0f);
+    // Reductions should return 0 - use scalar versions
+    EXPECT_FLOAT_EQ(empty1.sum_scalar(), 0.0f);
+    EXPECT_FLOAT_EQ(empty1.mean_scalar(), 0.0f);
+    EXPECT_FLOAT_EQ(empty1.min_scalar(), 0.0f);
+    EXPECT_FLOAT_EQ(empty1.max_scalar(), 0.0f);
 
     // Clone should work
     auto cloned = empty1.clone();
@@ -625,10 +625,10 @@ TEST_F(TensorAdvancedTest, LikeOperations) {
     auto zeros = zeros_like(original);
     EXPECT_EQ(zeros.shape(), original.shape());
     EXPECT_EQ(zeros.device(), original.device());
-    EXPECT_FLOAT_EQ(zeros.sum(), 0.0f);
+    EXPECT_FLOAT_EQ(zeros.sum_scalar(), 0.0f);
 
     auto ones = ones_like(original);
     EXPECT_EQ(ones.shape(), original.shape());
     EXPECT_EQ(ones.device(), original.device());
-    EXPECT_FLOAT_EQ(ones.sum(), 60.0f); // 3*4*5 = 60
+    EXPECT_FLOAT_EQ(ones.sum_scalar(), 60.0f); // 3*4*5 = 60
 }

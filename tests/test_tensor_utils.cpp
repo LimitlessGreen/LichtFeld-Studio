@@ -285,10 +285,10 @@ TEST_F(TensorUtilsTest, LikeOperations) {
     auto zeros = zeros_like(original);
     EXPECT_EQ(zeros.shape(), original.shape());
     EXPECT_EQ(zeros.device(), original.device());
-    EXPECT_FLOAT_EQ(zeros.sum(), 0.0f);
+    EXPECT_FLOAT_EQ(zeros.sum_scalar(), 0.0f);  // Use sum_scalar() to get float
 
     auto ones = ones_like(original);
     EXPECT_EQ(ones.shape(), original.shape());
     EXPECT_EQ(ones.device(), original.device());
-    EXPECT_FLOAT_EQ(ones.sum(), 60.0f); // 3*4*5 = 60
+    EXPECT_FLOAT_EQ(ones.sum_scalar(), 60.0f); // 3*4*5 = 60, use sum_scalar()
 }

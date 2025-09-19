@@ -631,17 +631,21 @@ TEST_F(TensorMaskingTest, CountNonzero) {
 
 TEST_F(TensorMaskingTest, AnyAll) {
     auto all_true = Tensor::ones_bool({3, 3}, Device::CUDA);
-    EXPECT_TRUE(all_true.all());
-    EXPECT_TRUE(all_true.any());
+    // Use scalar reduction on bool tensor converted to float
+    auto all_true_float = all_true.to(DataType::Float32);
+    EXPECT_FLOAT_EQ(all_true_float.min_scalar(), 1.0f);  // All true
+    EXPECT_FLOAT_EQ(all_true_float.max_scalar(), 1.0f);  // All true
 
     auto all_false = Tensor::zeros_bool({3, 3}, Device::CUDA);
-    EXPECT_FALSE(all_false.all());
-    EXPECT_FALSE(all_false.any());
+    auto all_false_float = all_false.to(DataType::Float32);
+    EXPECT_FLOAT_EQ(all_false_float.max_scalar(), 0.0f);  // All false
+    EXPECT_FLOAT_EQ(all_false_float.min_scalar(), 0.0f);  // All false
 
     std::vector<bool> mixed_data = {true, false, true};
     auto mixed = Tensor::from_vector(mixed_data, {3}, Device::CUDA);
-    EXPECT_FALSE(mixed.all());
-    EXPECT_TRUE(mixed.any());
+    auto mixed_float = mixed.to(DataType::Float32);
+    EXPECT_FLOAT_EQ(mixed_float.min_scalar(), 0.0f);  // Has false
+    EXPECT_FLOAT_EQ(mixed_float.max_scalar(), 1.0f);  // Has true
 }
 
 // ============= Complex Masking Scenarios =============
@@ -824,7 +828,9 @@ TEST_F(TensorMaskingTest, MultiConditionMasking) {
     auto masked_vals = data.masked_select(complex_mask);
     EXPECT_EQ(masked_vals.numel(), count_before);
     if (masked_vals.numel() > 0) {
-        EXPECT_TRUE(masked_vals.eq(0.0f).all());
+        auto all_zero = masked_vals.eq(0.0f);
+        auto all_zero_float = all_zero.to(DataType::Float32);
+        EXPECT_FLOAT_EQ(all_zero_float.min_scalar(), 1.0f);  // All should be true (all zeros)
     }
 }
 
@@ -977,7 +983,7 @@ TEST_F(TensorMaskingTest, TopKMasking) {
     // Verify all non-zero values are >= threshold (minus small epsilon for float precision)
     auto non_zero_vals = result.masked_select(result.ne(0.0f));
     if (non_zero_vals.numel() > 0) {
-        auto min_val = non_zero_vals.min();
+        auto min_val = non_zero_vals.min_scalar();
         EXPECT_GE(min_val, threshold - 1e-6f);
     }
 }
@@ -1001,7 +1007,10 @@ TEST_F(TensorMaskingTest, GradientClippingMask) {
     gradients = gradients + clipped_values.mul(large_grad_mask.to(DataType::Float32));
 
     // Verify all gradients are within [-clip_value, clip_value]
-    EXPECT_TRUE(gradients.abs().le(clip_value * 1.001f).all());  // Small tolerance
+    auto abs_grads = gradients.abs();
+    auto all_clipped = abs_grads.le(clip_value * 1.001f);  // Small tolerance
+    auto all_clipped_float = all_clipped.to(DataType::Float32);
+    EXPECT_FLOAT_EQ(all_clipped_float.min_scalar(), 1.0f);  // All should be true
 }
 
 // ============= Fixed Structured Dropout Pattern =============
@@ -1132,9 +1141,9 @@ TEST_F(TensorMaskingTest, SparseAttentionPattern) {
 TEST_F(TensorMaskingTest, DynamicValueBasedMasking) {
     auto data = Tensor::randn({100, 100}, Device::CUDA);
 
-    // Compute statistics
-    float mean_val = data.mean();
-    float std_val = data.std();
+    // Compute statistics - use scalar versions
+    float mean_val = data.mean_scalar();
+    float std_val = data.std_scalar();
 
     // Create dynamic mask: keep values within 2 standard deviations
     auto lower_bound = mean_val - 2 * std_val;
@@ -1149,9 +1158,14 @@ TEST_F(TensorMaskingTest, DynamicValueBasedMasking) {
 
     // Verify transformations
     auto outlier_mask = in_range_mask.logical_not();
-    if (outlier_mask.any()) {
+    // Check if any outliers exist
+    auto outlier_count = outlier_mask.to(DataType::Float32).sum_scalar();
+    if (outlier_count > 0) {
         auto outlier_vals = result.masked_select(outlier_mask);
-        EXPECT_TRUE(outlier_vals.ge(-1.0f).logical_and(outlier_vals.le(1.0f)).all());
+        // Check all outlier values are clamped
+        auto all_clamped = outlier_vals.ge(-1.0f).logical_and(outlier_vals.le(1.0f));
+        auto all_clamped_float = all_clamped.to(DataType::Float32);
+        EXPECT_FLOAT_EQ(all_clamped_float.min_scalar(), 1.0f);  // All should be true
     }
 }
 
@@ -1403,9 +1417,10 @@ TEST_F(TensorMaskingTest, BooleanReductionAcrossDimensions) {
     auto data = Tensor::randn({d1, d2, d3}, Device::CUDA);
     auto mask = data.gt(0);
 
-    // Test reduction operations
-    bool has_any_true = mask.any();
-    bool all_true = mask.all();
+    // Test reduction operations using conversion to float
+    auto mask_float = mask.to(DataType::Float32);
+    bool has_any_true = mask_float.max_scalar() > 0.5f;  // Check if max is 1.0
+    bool all_true = mask_float.min_scalar() > 0.5f;      // Check if min is 1.0
 
     // Since it's random data, we expect some true and some false
     EXPECT_TRUE(has_any_true);
@@ -1464,7 +1479,8 @@ TEST_F(TensorMaskingTest, MixedDtypeComparisons) {
     EXPECT_EQ(mask2.dtype(), DataType::Bool);
 
     // All elements should equal themselves
-    EXPECT_TRUE(mask2.all());
+    auto mask2_float = mask2.to(DataType::Float32);
+    EXPECT_FLOAT_EQ(mask2_float.min_scalar(), 1.0f);  // All true
 }
 
 // =============  Special Value Handling =============
@@ -1564,7 +1580,7 @@ TEST_F(TensorMaskingTest, BatchMaskProcessing) {
     // Verify each batch is clamped at its threshold
     for (size_t i = 0; i < batch; ++i) {
         auto batch_data = data.slice(0, i, i+1).squeeze(0);
-        auto max_val = batch_data.max();
+        auto max_val = batch_data.max_scalar();
         EXPECT_LE(max_val, thresholds[i] + 1e-5f);
     }
 }
@@ -1639,10 +1655,10 @@ TEST_F(TensorMaskingTest, IntegrationCompleteWorkflow) {
     for (size_t b = 0; b < batch; ++b) {
         size_t length = seq_len - (b % 10);  // Variable lengths
         for (size_t s = length; s < seq_len; ++s) {
-            cpu_padding.at({b, s}) = 0;
+            cpu_padding.set_bool({b, s}, false);  // Use set_bool for boolean tensors
         }
     }
-    padding = cpu_padding.to(Device::CUDA).to(DataType::Bool);
+    padding = cpu_padding.to(Device::CUDA);
 
     // 4. Combine masks
     auto causal_expanded = causal.unsqueeze(0).expand({batch, seq_len, seq_len});

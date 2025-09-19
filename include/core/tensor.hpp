@@ -19,6 +19,9 @@
 #include <type_traits>
 #include <utility>
 #include <span>
+#include <variant>
+#include <tuple>
+#include <limits>
 
 namespace gs {
 
@@ -64,7 +67,6 @@ namespace gs {
         return device == Device::CPU ? "cpu" : "cuda";
     }
 
-    // Type promotion for mixed dtype operations
     inline DataType promote_types(DataType a, DataType b) {
         if (a == b) return a;
 
@@ -116,37 +118,42 @@ namespace gs {
     };
 
     enum class BinaryOp : uint8_t {
-        // Arithmetic
-        Add = 0,
-        Sub = 1,
-        Mul = 2,
-        Div = 3,
-        Pow = 4,
-        Mod = 5,
+        Add = 0, Sub = 1, Mul = 2, Div = 3, Pow = 4, Mod = 5,
+        Equal = 6, NotEqual = 7, Less = 8, LessEqual = 9, Greater = 10, GreaterEqual = 11,
+        LogicalAnd = 12, LogicalOr = 13, LogicalXor = 14,
+        Maximum = 15, Minimum = 16,
+        BitwiseAnd = 17, BitwiseOr = 18, BitwiseXor = 19, LeftShift = 20, RightShift = 21
+    };
 
-        // Comparison
-        Equal = 6,
-        NotEqual = 7,
-        Less = 8,
-        LessEqual = 9,
-        Greater = 10,
-        GreaterEqual = 11,
+    enum class UnaryOp : uint8_t {
+        Neg = 0, Abs = 1, Sign = 2, Reciprocal = 3,
+        Exp = 4, Exp2 = 5, Log = 6, Log2 = 7, Log10 = 8, Log1p = 9,
+        Sqrt = 10, Rsqrt = 11, Square = 12,
+        Sin = 13, Cos = 14, Tan = 15, Asin = 16, Acos = 17, Atan = 18,
+        Sinh = 19, Cosh = 20, Tanh = 21,
+        Sigmoid = 22, Relu = 23, Gelu = 24, Swish = 25,
+        Floor = 26, Ceil = 27, Round = 28, Trunc = 29,
+        IsNan = 30, IsInf = 31, IsFinite = 32, LogicalNot = 33
+    };
 
-        // Logical
-        LogicalAnd = 12,
-        LogicalOr = 13,
-        LogicalXor = 14,
+    enum class ReduceOp : uint8_t {
+        Sum = 0, Mean = 1, Max = 2, Min = 3, Prod = 4,
+        Any = 5, All = 6, Std = 7, Var = 8,
+        Argmax = 9, Argmin = 10, CountNonzero = 11
+    };
 
-        // Min/Max
-        Maximum = 15,
-        Minimum = 16,
+    enum class TernaryOp : uint8_t {
+        Where = 0, MulAdd = 1, Clamp = 2
+    };
 
-        // Bitwise
-        BitwiseAnd = 17,
-        BitwiseOr = 18,
-        BitwiseXor = 19,
-        LeftShift = 20,
-        RightShift = 21
+    enum class MovementOp : uint8_t {
+        Reshape = 0, Permute = 1, Expand = 2, Pad = 3, Shrink = 4,
+        Flip = 5, Transpose = 6, Squeeze = 7, Unsqueeze = 8, Flatten = 9
+    };
+
+    enum class LoadOp : uint8_t {
+        Empty = 0, Const = 1, Arange = 2, Random = 3, Eye = 4,
+        FromCPU = 5, FromCUDA = 6
     };
 
     class TensorShape {
@@ -191,6 +198,29 @@ namespace gs {
                 total_elements_ *= d;
             }
         }
+    };
+
+    struct MovementArgs {
+        std::variant<
+            std::vector<int>,
+            std::pair<int, int>,
+            std::vector<std::pair<int, int>>,
+            int,
+            std::monostate
+        > args;
+    };
+
+    struct LoadArgs {
+        TensorShape shape;
+        Device device = Device::CUDA;
+        DataType dtype = DataType::Float32;
+        std::variant<
+            std::monostate,
+            float,
+            std::tuple<float, float, float>,
+            std::pair<float, float>,
+            void*
+        > args;
     };
 
     class TensorError;
@@ -257,7 +287,6 @@ namespace gs {
                          const std::vector<size_t>& new_shape) const;
 
     public:
-        // ============= Constructors & Destructor =============
         Tensor() = default;
         Tensor(void* data, TensorShape shape, Device device, DataType dtype);
         Tensor(Tensor&& other) noexcept;
@@ -266,34 +295,44 @@ namespace gs {
         Tensor& operator=(const Tensor&) = delete;
         ~Tensor();
 
-        // ============= Factory Methods =============
+        // Core unified operations
+        static Tensor load(LoadOp op, const LoadArgs& args);
+        Tensor movement(MovementOp op, const MovementArgs& args) const;
+        Tensor unary(UnaryOp op) const;
+        Tensor binary(const Tensor& other, BinaryOp op) const { return binary_op_impl(other, op); }
+        template<typename T> requires is_scalar_v<T>
+        Tensor binary(T scalar, BinaryOp op) const { return binary_op_impl(scalar, op); }
+        Tensor reduce(ReduceOp op, std::span<const int> axes = {}, bool keepdim = false) const;
+        Tensor ternary(const Tensor& b, const Tensor& c, TernaryOp op) const;
+
+        // Factory methods
         static Tensor empty(TensorShape shape, Device device = Device::CUDA,
-                            DataType dtype = DataType::Float32);
+                           DataType dtype = DataType::Float32);
         static Tensor zeros(TensorShape shape, Device device = Device::CUDA,
-                            DataType dtype = DataType::Float32);
+                           DataType dtype = DataType::Float32);
         static Tensor ones(TensorShape shape, Device device = Device::CUDA,
-                           DataType dtype = DataType::Float32);
+                          DataType dtype = DataType::Float32);
         static Tensor full(TensorShape shape, float value, Device device = Device::CUDA,
-                           DataType dtype = DataType::Float32);
+                          DataType dtype = DataType::Float32);
 
         static Tensor full_bool(TensorShape shape, bool value, Device device = Device::CUDA);
         static Tensor zeros_bool(TensorShape shape, Device device = Device::CUDA);
         static Tensor ones_bool(TensorShape shape, Device device = Device::CUDA);
 
         static Tensor rand(TensorShape shape, Device device = Device::CUDA,
-                           DataType dtype = DataType::Float32);
+                          DataType dtype = DataType::Float32);
         static Tensor randn(TensorShape shape, Device device = Device::CUDA,
-                            DataType dtype = DataType::Float32);
+                           DataType dtype = DataType::Float32);
         static Tensor uniform(TensorShape shape, float low = 0.0f, float high = 1.0f,
-                              Device device = Device::CUDA, DataType dtype = DataType::Float32);
-        static Tensor normal(TensorShape shape, float mean = 0.0f, float std = 1.0f,
                              Device device = Device::CUDA, DataType dtype = DataType::Float32);
+        static Tensor normal(TensorShape shape, float mean = 0.0f, float std = 1.0f,
+                            Device device = Device::CUDA, DataType dtype = DataType::Float32);
         static Tensor randint(TensorShape shape, int low, int high,
-                              Device device = Device::CUDA, DataType dtype = DataType::Int32);
+                             Device device = Device::CUDA, DataType dtype = DataType::Int32);
         static Tensor bernoulli(TensorShape shape, float p = 0.5f,
-                                Device device = Device::CUDA, DataType dtype = DataType::Float32);
+                               Device device = Device::CUDA, DataType dtype = DataType::Float32);
         static Tensor multinomial(const Tensor& weights, int num_samples,
-                         bool replacement = false);
+                                 bool replacement = false);
 
         static Tensor from_blob(void* data, TensorShape shape, Device device, DataType dtype) {
             return Tensor(data, shape, device, dtype);
@@ -303,13 +342,13 @@ namespace gs {
         bool get_bool(std::initializer_list<size_t> indices) const;
 
         static Tensor from_vector(const std::vector<float>& data, TensorShape shape,
-                                  Device device = Device::CUDA);
+                                 Device device = Device::CUDA);
         static Tensor from_vector(const std::vector<int>& data, TensorShape shape,
-                                  Device device = Device::CUDA);
+                                 Device device = Device::CUDA);
         static Tensor from_vector(const std::vector<bool>& data, TensorShape shape,
-                                  Device device = Device::CUDA);
+                                 Device device = Device::CUDA);
 
-        // ============= Data Access =============
+        // Data access
         template <typename T>
         T* ptr() {
             if (!data_ && shape_.elements() > 0) {
@@ -331,43 +370,32 @@ namespace gs {
         void* raw_ptr() { return data_; }
         const void* raw_ptr() const { return data_; }
 
-        // ============= Properties =============
+        // Properties
         const TensorShape& shape() const { return shape_; }
         Device device() const { return device_; }
         DataType dtype() const { return dtype_; }
         bool owns_memory() const { return owns_memory_; }
-
-        bool is_empty() const {
-            if (!initialized_) return true;
-            return shape_.elements() == 0;
-        }
-
+        bool is_empty() const { return !initialized_ || shape_.elements() == 0; }
         bool is_valid() const { return initialized_; }
-
         size_t numel() const { return shape_.elements(); }
         size_t bytes() const { return numel() * dtype_size(dtype_); }
-
         size_t ndim() const { return shape_.rank(); }
         size_t size(size_t dim) const { return shape_[dim]; }
 
-        // ============= Memory Operations =============
+        // Memory operations
         Tensor clone() const;
         Tensor contiguous() const;
         Tensor to(Device device) const;
         Tensor to(DataType dtype) const;
         bool is_contiguous() const { return true; }
 
-        // ============= Tinygrad-Style Shape Operations =============
+        // Shape operations (delegate to movement)
         Tensor reshape(std::span<const int> sizes) const;
-        Tensor reshape(std::initializer_list<int> sizes) const {
-            return reshape(std::span<const int>(sizes));
-        }
+        Tensor reshape(std::initializer_list<int> sizes) const { return reshape(std::span<const int>(sizes)); }
         Tensor reshape(TensorShape new_shape) const;
 
         Tensor view(std::span<const int> sizes) const { return reshape(sizes); }
-        Tensor view(std::initializer_list<int> sizes) const {
-            return reshape(std::span<const int>(sizes));
-        }
+        Tensor view(std::initializer_list<int> sizes) const { return reshape(std::span<const int>(sizes)); }
         Tensor view(TensorShape new_shape) const { return reshape(new_shape); }
 
         Tensor squeeze(std::optional<int> dim = std::nullopt) const;
@@ -376,17 +404,13 @@ namespace gs {
         Tensor unsqueeze(int dim) const;
 
         Tensor expand(std::span<const int> sizes) const;
-        Tensor expand(std::initializer_list<int> sizes) const {
-            return expand(std::span<const int>(sizes));
-        }
+        Tensor expand(std::initializer_list<int> sizes) const { return expand(std::span<const int>(sizes)); }
         Tensor expand(const TensorShape& target_shape) const;
 
         Tensor flatten(int start_dim = 0, int end_dim = -1) const;
 
         Tensor permute(std::span<const int> axes) const;
-        Tensor permute(std::initializer_list<int> axes) const {
-            return permute(std::span<const int>(axes));
-        }
+        Tensor permute(std::initializer_list<int> axes) const { return permute(std::span<const int>(axes)); }
 
         Tensor transpose(int dim1 = -2, int dim2 = -1) const;
         Tensor t() const;
@@ -397,37 +421,64 @@ namespace gs {
         }
         Tensor slice(size_t dim, size_t start, size_t end) const;
 
-        // ============= Broadcasting Operations =============
+        // Broadcasting
         Tensor broadcast_to(const TensorShape& target_shape) const;
         bool can_broadcast_to(const TensorShape& target) const;
         TensorShape broadcast_shape(const TensorShape& other) const;
 
-        // ============= Unified Arithmetic Operations =============
+        // Unary operations (delegate to unary())
+        Tensor neg() const { return unary(UnaryOp::Neg); }
+        Tensor abs() const { return unary(UnaryOp::Abs); }
+        Tensor sign() const { return unary(UnaryOp::Sign); }
+        Tensor reciprocal() const { return unary(UnaryOp::Reciprocal); }
+        Tensor exp() const { return unary(UnaryOp::Exp); }
+        Tensor exp2() const { return unary(UnaryOp::Exp2); }
+        Tensor log() const { return unary(UnaryOp::Log); }
+        Tensor log2() const { return unary(UnaryOp::Log2); }
+        Tensor log10() const { return unary(UnaryOp::Log10); }
+        Tensor log1p() const { return unary(UnaryOp::Log1p); }
+        Tensor sqrt() const { return unary(UnaryOp::Sqrt); }
+        Tensor rsqrt() const { return unary(UnaryOp::Rsqrt); }
+        Tensor square() const { return unary(UnaryOp::Square); }
+        Tensor sin() const { return unary(UnaryOp::Sin); }
+        Tensor cos() const { return unary(UnaryOp::Cos); }
+        Tensor tan() const { return unary(UnaryOp::Tan); }
+        Tensor asin() const { return unary(UnaryOp::Asin); }
+        Tensor acos() const { return unary(UnaryOp::Acos); }
+        Tensor atan() const { return unary(UnaryOp::Atan); }
+        Tensor sinh() const { return unary(UnaryOp::Sinh); }
+        Tensor cosh() const { return unary(UnaryOp::Cosh); }
+        Tensor tanh() const { return unary(UnaryOp::Tanh); }
+        Tensor sigmoid() const { return unary(UnaryOp::Sigmoid); }
+        Tensor relu() const { return unary(UnaryOp::Relu); }
+        Tensor gelu() const { return unary(UnaryOp::Gelu); }
+        Tensor swish() const { return unary(UnaryOp::Swish); }
+        Tensor floor() const { return unary(UnaryOp::Floor); }
+        Tensor ceil() const { return unary(UnaryOp::Ceil); }
+        Tensor round() const { return unary(UnaryOp::Round); }
+        Tensor trunc() const { return unary(UnaryOp::Trunc); }
+        Tensor isnan() const { return unary(UnaryOp::IsNan); }
+        Tensor isinf() const { return unary(UnaryOp::IsInf); }
+        Tensor isfinite() const { return unary(UnaryOp::IsFinite); }
+        Tensor logical_not() const { return unary(UnaryOp::LogicalNot); }
+
+        // Binary operations
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor add(const T& other) const { return binary_op_impl(other, BinaryOp::Add); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor sub(const T& other) const { return binary_op_impl(other, BinaryOp::Sub); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor mul(const T& other) const { return binary_op_impl(other, BinaryOp::Mul); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor div(const T& other) const { return binary_op_impl(other, BinaryOp::Div); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor pow(const T& other) const { return binary_op_impl(other, BinaryOp::Pow); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor mod(const T& other) const { return binary_op_impl(other, BinaryOp::Mod); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor maximum(const T& other) const { return binary_op_impl(other, BinaryOp::Maximum); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor minimum(const T& other) const { return binary_op_impl(other, BinaryOp::Minimum); }
-
-        Tensor neg() const { return mul(-1.0f); }
 
         // Comparison operations
         Tensor eq(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Equal); }
@@ -444,22 +495,79 @@ namespace gs {
         Tensor gt(float value) const { return binary_op_impl(value, BinaryOp::Greater); }
         Tensor ge(float value) const { return binary_op_impl(value, BinaryOp::GreaterEqual); }
 
-        // Logical operations for bool tensors
+        // Logical operations
         Tensor logical_and(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LogicalAnd); }
         Tensor logical_or(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LogicalOr); }
         Tensor logical_xor(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LogicalXor); }
-        Tensor logical_not() const;
+
+        // Reduce operations
+        Tensor sum(std::span<const int> axes = {}, bool keepdim = false) const {
+            return reduce(ReduceOp::Sum, axes, keepdim);
+        }
+        Tensor mean(std::span<const int> axes = {}, bool keepdim = false) const {
+            return reduce(ReduceOp::Mean, axes, keepdim);
+        }
+        Tensor max(std::span<const int> axes = {}, bool keepdim = false) const {
+            return reduce(ReduceOp::Max, axes, keepdim);
+        }
+        Tensor min(std::span<const int> axes = {}, bool keepdim = false) const {
+            return reduce(ReduceOp::Min, axes, keepdim);
+        }
+        Tensor prod(std::span<const int> axes = {}, bool keepdim = false) const {
+            return reduce(ReduceOp::Prod, axes, keepdim);
+        }
+        Tensor any(std::span<const int> axes = {}, bool keepdim = false) const {
+            return reduce(ReduceOp::Any, axes, keepdim);
+        }
+        Tensor all(std::span<const int> axes = {}, bool keepdim = false) const {
+            return reduce(ReduceOp::All, axes, keepdim);
+        }
+        Tensor std(std::span<const int> axes = {}, bool keepdim = false) const {
+            return reduce(ReduceOp::Std, axes, keepdim);
+        }
+        Tensor var(std::span<const int> axes = {}, bool keepdim = false) const {
+            return reduce(ReduceOp::Var, axes, keepdim);
+        }
+        Tensor argmax(std::span<const int> axes = {}, bool keepdim = false) const {
+            return reduce(ReduceOp::Argmax, axes, keepdim);
+        }
+        Tensor argmin(std::span<const int> axes = {}, bool keepdim = false) const {
+            return reduce(ReduceOp::Argmin, axes, keepdim);
+        }
+
+        // Scalar reduce operations
+        float sum_scalar() const;
+        float mean_scalar() const;
+        float min_scalar() const;
+        float max_scalar() const;
+        float std_scalar(float eps = 1e-8f) const;
+        float var_scalar(float eps = 1e-8f) const;
+        float norm(float p = 2.0f) const;
+        float item() const;
+        std::pair<float, float> minmax() const;
+        size_t count_nonzero() const;
+
+        // Ternary operations
+        Tensor where(const Tensor& condition, const Tensor& other) const {
+            return ternary(condition, other, TernaryOp::Where);
+        }
+        static Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y);
+
+        Tensor clamp(float min_val, float max_val) const;
+        Tensor clamp_min(float min) const { return clamp(min, std::numeric_limits<float>::max()); }
+        Tensor clamp_max(float max) const { return clamp(std::numeric_limits<float>::lowest(), max); }
+
+        // Special operations
+        Tensor normalize(int dim = -1, float eps = 1e-12f) const;
+        Tensor logit(float eps = 1e-7f) const;
 
         // In-place operations
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor& add_(const T& other) { return binary_op_inplace_impl(other, BinaryOp::Add); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor& sub_(const T& other) { return binary_op_inplace_impl(other, BinaryOp::Sub); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor& mul_(const T& other) { return binary_op_inplace_impl(other, BinaryOp::Mul); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor& div_(const T& other) { return binary_op_inplace_impl(other, BinaryOp::Div); }
 
@@ -472,14 +580,12 @@ namespace gs {
         static Tensor cat(const std::vector<Tensor>& tensors, int dim = 0);
         Tensor cat(const Tensor& other, int dim = 0) const;
 
-        // ============= Masking Operations =============
+        // Masking operations
         Tensor masked_select(const Tensor& mask) const;
         Tensor& masked_fill_(const Tensor& mask, float value);
         Tensor masked_fill(const Tensor& mask, float value) const;
-        Tensor where(const Tensor& condition, const Tensor& other) const;
-        static Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y);
 
-        // ============= Indexing Operations =============
+        // Indexing operations
         Tensor index_select(int dim, const Tensor& indices) const;
         Tensor gather(int dim, const Tensor& indices) const;
         Tensor take(const Tensor& indices) const;
@@ -493,7 +599,6 @@ namespace gs {
                          ScatterMode mode = ScatterMode::None);
         Tensor& index_fill_(int dim, const Tensor& indices, float value);
         Tensor& index_copy_(int dim, const Tensor& indices, const Tensor& src);
-
         Tensor& index_add_(int dim, const Tensor& indices, const Tensor& src);
         Tensor& index_put_(const Tensor& indices, const Tensor& values);
         Tensor& index_put_(const std::vector<Tensor>& indices, const Tensor& values);
@@ -511,16 +616,12 @@ namespace gs {
         // Operator overloads
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor operator+(const T& other) const { return add(other); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor operator-(const T& other) const { return sub(other); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor operator*(const T& other) const { return mul(other); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor operator/(const T& other) const { return div(other); }
-
         template<typename T> requires (is_scalar_v<T> || is_tensor_v<T>)
         Tensor operator%(const T& other) const { return mod(other); }
 
@@ -547,7 +648,6 @@ namespace gs {
         Tensor& zero_();
         Tensor& fill_(float value);
         Tensor& copy_from(const Tensor& other);
-
         Tensor& uniform_(float low = 0.0f, float high = 1.0f);
         Tensor& normal_(float mean = 0.0f, float std = 1.0f);
 
@@ -556,6 +656,7 @@ namespace gs {
         static std::vector<Tensor> split_batch(const Tensor& tensor, size_t batch_size);
         static void enable_profiling(bool enable) { profiling_enabled_ = enable; }
 
+        // Template utility methods
         template <typename Func>
         Tensor& inplace(Func&& func) {
             func(*this);
@@ -579,46 +680,18 @@ namespace gs {
             return result;
         }
 
-        // ============= Reduction Operations =============
-        float sum() const;
-        float mean() const;
-        float min() const;
-        float max() const;
-        float std(float eps = 1e-8f) const;
-        float var(float eps = 1e-8f) const;
-        float norm(float p = 2.0f) const;
-        float item() const;
-        std::pair<float, float> minmax() const;
-
-        size_t count_nonzero() const;
-
-        // ============= Common Deep Learning Operations =============
-        Tensor normalize(int dim = -1, float eps = 1e-12f) const;
-        Tensor abs() const;
-        Tensor sqrt() const;
-        Tensor exp() const;
-        Tensor log() const;
-        Tensor sigmoid() const;
-        Tensor logit(float eps = 1e-7f) const;
-        Tensor relu() const;
-        Tensor clamp(float min, float max) const;
-        Tensor clamp_min(float min) const;
-        Tensor clamp_max(float max) const;
-
-        // ============= Validation & Assertions =============
+        // Validation & assertions
         Tensor& assert_shape(TensorShape expected, const std::string& msg = "");
         Tensor& assert_device(Device expected);
         Tensor& assert_dtype(DataType expected);
         Tensor& assert_finite();
 
-        // ============= Comparison Operations =============
+        // Comparison operations
         bool has_nan() const;
         bool has_inf() const;
         bool all_close(const Tensor& other, float rtol = 1e-5f, float atol = 1e-8f) const;
-        bool any() const;
-        bool all() const;
 
-        // ============= Utility Functions =============
+        // Utility functions
         std::string str() const;
         std::vector<float> to_vector() const;
         std::vector<int> to_vector_int() const;
@@ -637,7 +710,7 @@ namespace gs {
         friend class MaskedTensorProxy;
     };
 
-    // Helper classes remain the same
+    // Helper classes
     class MaskedTensorProxy {
     private:
         const Tensor* tensor_;

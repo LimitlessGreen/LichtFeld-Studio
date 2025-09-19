@@ -18,26 +18,7 @@
 
 namespace gs {
 
-// Logical not is a special case - not a binary operation
-Tensor Tensor::logical_not() const {
-    if (!is_valid() || dtype_ != DataType::Bool) return {};
-
-    auto result = empty(shape_, device_, DataType::Bool);
-
-    if (device_ == Device::CUDA) {
-        tensor_ops::launch_logical_not(ptr<unsigned char>(),
-                                       result.ptr<unsigned char>(), numel(), 0);
-        cudaDeviceSynchronize();
-    } else {
-        std::transform(std::execution::par_unseq,
-                      ptr<unsigned char>(), ptr<unsigned char>() + numel(),
-                      result.ptr<unsigned char>(),
-                      [](unsigned char x) { return !x; });
-    }
-    return result;
-}
-
-// Masking Operations
+// ============= Masking Operations =============
 Tensor Tensor::masked_select(const Tensor& mask) const {
     if (!is_valid() || !mask.is_valid() || mask.dtype() != DataType::Bool ||
         shape_ != mask.shape() || device_ != mask.device()) return {};
@@ -94,10 +75,6 @@ Tensor Tensor::masked_fill(const Tensor& mask, float value) const {
     return result;
 }
 
-Tensor Tensor::where(const Tensor& condition, const Tensor& other) const {
-    return Tensor::where(condition, *this, other);
-}
-
 Tensor Tensor::where(const Tensor& cond, const Tensor& x, const Tensor& y) {
     if (!cond.is_valid() || !x.is_valid() || !y.is_valid() ||
         cond.dtype() != DataType::Bool || x.device() != y.device() ||
@@ -145,7 +122,7 @@ Tensor Tensor::where(const Tensor& cond, const Tensor& x, const Tensor& y) {
     return result;
 }
 
-// Indexing Operations
+// ============= Indexing Operations =============
 Tensor Tensor::index_select(int dim, const Tensor& indices) const {
     return index_select(dim, indices, BoundaryMode::Assert);
 }
@@ -492,14 +469,6 @@ std::vector<Tensor> Tensor::nonzero_split() const {
     std::vector<Tensor> result;
     result.push_back(nonzero());
     return result;
-}
-
-bool Tensor::any() const {
-    return dtype_ == DataType::Bool && count_nonzero() > 0;
-}
-
-bool Tensor::all() const {
-    return dtype_ == DataType::Bool && count_nonzero() == numel();
 }
 
 // Pythonic Indexing

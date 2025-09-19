@@ -99,102 +99,41 @@ namespace gs {
         }
     }
 
-    // ============= Factory Methods =============
+    // ============= Factory Methods (delegate to load) =============
     Tensor Tensor::empty(TensorShape shape, Device device, DataType dtype) {
-        if (!shape.is_initialized()) {
-            LOG_ERROR("Cannot create tensor with uninitialized shape");
-            return Tensor();
-        }
-
-        size_t n_bytes = shape.elements() * dtype_size(dtype);
-        if (n_bytes == 0) {
-            // Valid empty tensor with no memory allocation
-            Tensor t;
-            t.shape_ = shape;
-            t.device_ = device;
-            t.dtype_ = dtype;
-            t.owns_memory_ = false;
-            t.initialized_ = true;
-            t.id_ = next_id_++;
-            return t;
-        }
-
-        void* data = nullptr;
-        if (device == Device::CUDA) {
-            cudaError_t err = cudaMalloc(&data, n_bytes);
-            if (err != cudaSuccess) {
-                LOG_ERROR("Failed to allocate {} bytes on CUDA: {}",
-                          n_bytes, cudaGetErrorString(err));
-                return Tensor();
-            }
-        } else {
-            data = new char[n_bytes];
-            if (!data) {
-                LOG_ERROR("Failed to allocate {} bytes on CPU", n_bytes);
-                return Tensor();
-            }
-        }
-
-        Tensor t;
-        t.data_ = data;
-        t.shape_ = shape;
-        t.device_ = device;
-        t.dtype_ = dtype;
-        t.owns_memory_ = true;
-        t.initialized_ = true;
-        t.id_ = next_id_++;
-
-        if (profiling_enabled_) {
-            LOG_DEBUG("Created tensor #{} (owned): shape={}, device={}, dtype={}, bytes={}",
-                      t.id_, shape.str(), device_name(device), dtype_name(dtype), n_bytes);
-        }
-
-        return t;
+        LoadArgs args;
+        args.shape = shape;
+        args.device = device;
+        args.dtype = dtype;
+        args.args = std::monostate{};
+        return load(LoadOp::Empty, args);
     }
 
     Tensor Tensor::zeros(TensorShape shape, Device device, DataType dtype) {
-        if (dtype != DataType::Float32) {
-            LOG_ERROR("Currently only float32 is supported for zeros");
-            return Tensor();
-        }
-
-        auto t = empty(shape, device, dtype);
-        if (t.is_valid() && t.numel() > 0) {
-            if (device == Device::CUDA) {
-                CHECK_CUDA(cudaMemset(t.data_, 0, t.bytes()));
-            } else {
-                std::memset(t.data_, 0, t.bytes());
-            }
-        }
-
-        return t;
+        LoadArgs args;
+        args.shape = shape;
+        args.device = device;
+        args.dtype = dtype;
+        args.args = 0.0f;
+        return load(LoadOp::Const, args);
     }
 
     Tensor Tensor::ones(TensorShape shape, Device device, DataType dtype) {
-        return full(shape, 1.0f, device, dtype);
+        LoadArgs args;
+        args.shape = shape;
+        args.device = device;
+        args.dtype = dtype;
+        args.args = 1.0f;
+        return load(LoadOp::Const, args);
     }
 
     Tensor Tensor::full(TensorShape shape, float value, Device device, DataType dtype) {
-        if (dtype != DataType::Float32) {
-            LOG_ERROR("Currently only float32 is supported for full");
-            return Tensor();
-        }
-
-        auto t = empty(shape, device, dtype);
-        if (!t.is_valid() || t.numel() == 0) {
-            return t;
-        }
-
-        if (device == Device::CUDA) {
-            // Fill on GPU
-            std::vector<float> temp(t.numel(), value);
-            CHECK_CUDA(cudaMemcpy(t.data_, temp.data(), t.bytes(), cudaMemcpyHostToDevice));
-        } else {
-            float* data = t.ptr<float>();
-            std::fill(data, data + t.numel(), value);
-        }
-
-        return t;
+        LoadArgs args;
+        args.shape = shape;
+        args.device = device;
+        args.dtype = dtype;
+        args.args = value;
+        return load(LoadOp::Const, args);
     }
 
     // ============= Memory Operations =============
@@ -338,6 +277,33 @@ namespace gs {
     TensorShape Tensor::broadcast_shape(const TensorShape& other) const {
         auto result = broadcast::shape(shape_.dims(), other.dims());
         return result.empty() ? TensorShape() : TensorShape(result);
+    }
+
+    // ============= Special operations =============
+    Tensor Tensor::normalize(int dim, float eps) const {
+        if (dim == -1) {
+            // Normalize entire tensor
+            auto m = mean();
+            auto s = std().add(eps);
+            return sub(m).div(s);
+        }
+        // Per-dimension would use reduce with axes
+        std::vector<int> axes = {dim};
+        auto m = mean(axes, true);
+        auto s = std(axes, true).add(eps);
+        return sub(m).div(s);
+    }
+
+    Tensor Tensor::logit(float eps) const {
+        if (!is_valid()) {
+            return Tensor();
+        }
+
+        // logit(x) = log(x / (1 - x))
+        // But we need to clamp x to [eps, 1-eps] first
+        auto x_clamped = clamp(eps, 1.0f - eps);
+        auto one_minus_x = full(shape_, 1.0f, device_, dtype_).sub(x_clamped);
+        return x_clamped.div(one_minus_x).log();
     }
 
     // ============= TensorShape Implementation =============
@@ -607,6 +573,93 @@ namespace gs {
 
         file.close();
         LOG_INFO("Diagnostic dump saved to {}", filename);
+    }
+
+    // ============= Validation & Assertions =============
+    Tensor& Tensor::assert_shape(TensorShape expected, const std::string& msg) {
+        if (shape_ != expected) {
+            std::string error_msg = msg.empty() ?
+                "Shape assertion failed: expected " + expected.str() + " but got " + shape_.str() :
+                msg;
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg, this);
+        }
+        return *this;
+    }
+
+    Tensor& Tensor::assert_device(Device expected) {
+        if (device_ != expected) {
+            std::string error_msg = "Device assertion failed: expected " +
+                std::string(device_name(expected)) + " but got " +
+                std::string(device_name(device_));
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg, this);
+        }
+        return *this;
+    }
+
+    Tensor& Tensor::assert_dtype(DataType expected) {
+        if (dtype_ != expected) {
+            std::string error_msg = "DataType assertion failed: expected " +
+                std::string(dtype_name(expected)) + " but got " +
+                std::string(dtype_name(dtype_));
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg, this);
+        }
+        return *this;
+    }
+
+    Tensor& Tensor::assert_finite() {
+        if (has_nan() || has_inf()) {
+            std::string error_msg = "Tensor contains NaN or Inf values";
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg, this);
+        }
+        return *this;
+    }
+
+    // ============= Comparison Utilities =============
+    bool Tensor::has_nan() const {
+        if (!is_valid() || numel() == 0) {
+            return false;
+        }
+
+        auto values = to_vector();
+        return std::any_of(values.begin(), values.end(),
+                          [](float x) { return std::isnan(x); });
+    }
+
+    bool Tensor::has_inf() const {
+        if (!is_valid() || numel() == 0) {
+            return false;
+        }
+
+        auto values = to_vector();
+        return std::any_of(values.begin(), values.end(),
+                          [](float x) { return std::isinf(x); });
+    }
+
+    bool Tensor::all_close(const Tensor& other, float rtol, float atol) const {
+        if (!is_valid() || !other.is_valid()) {
+            return false;
+        }
+
+        if (shape_ != other.shape_ || device_ != other.device_) {
+            return false;
+        }
+
+        auto a_values = to_vector();
+        auto b_values = other.to_vector();
+
+        for (size_t i = 0; i < a_values.size(); ++i) {
+            float diff = std::abs(a_values[i] - b_values[i]);
+            float tol = atol + rtol * std::abs(b_values[i]);
+            if (diff > tol) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
 #undef CHECK_CUDA

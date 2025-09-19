@@ -268,11 +268,11 @@ TEST_F(TensorStressTest, ReductionStress) {
     cudaMemcpy(tensor.ptr<float>(), data.data(), data.size() * sizeof(float),
                cudaMemcpyHostToDevice);
 
-    // Test reductions
-    float sum = tensor.sum();
-    float mean = tensor.mean();
-    float min_val = tensor.min();
-    float max_val = tensor.max();
+    // Test reductions - use scalar versions
+    float sum = tensor.sum_scalar();
+    float mean = tensor.mean_scalar();
+    float min_val = tensor.min_scalar();
+    float max_val = tensor.max_scalar();
 
     // Expected values
     float expected_sum = (size / 100) * (99 * 100 / 2.0f) + ((size % 100) * ((size % 100) - 1) / 2.0f);
@@ -336,8 +336,8 @@ TEST_F(TensorStressTest, NumericalStability) {
     auto normalized = tensor.normalize();
     EXPECT_FALSE(normalized.has_nan());
     EXPECT_FALSE(normalized.has_inf());
-    EXPECT_NEAR(normalized.mean(), 0.0f, 1e-5f);
-    EXPECT_NEAR(normalized.std(), 1.0f, 1e-5f);
+    EXPECT_NEAR(normalized.mean_scalar(), 0.0f, 1e-5f);
+    EXPECT_NEAR(normalized.std_scalar(), 1.0f, 1e-5f);
 }
 
 TEST_F(TensorStressTest, ConcurrentOperations) {

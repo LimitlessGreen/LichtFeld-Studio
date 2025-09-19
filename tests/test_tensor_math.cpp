@@ -244,12 +244,13 @@ TEST_F(TensorMathTest, Normalize) {
 
     auto normalized = our_tensor.normalize();
 
-    // Check mean is approximately 0
-    EXPECT_NEAR(normalized.mean(), 0.0f, 1e-5f);
+    // Check mean is approximately 0 - use scalar version
+    EXPECT_NEAR(normalized.mean_scalar(), 0.0f, 1e-5f);
 
-    // Check std is approximately 1
-    EXPECT_NEAR(normalized.std(), 1.0f, 1e-5f);
+    // Check std is approximately 1 - use scalar version
+    EXPECT_NEAR(normalized.std_scalar(), 1.0f, 1e-5f);
 }
+
 
 TEST_F(TensorMathTest, RandomDataMathFunctions) {
     // Test with random data for comprehensive coverage

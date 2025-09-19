@@ -8,57 +8,72 @@
 #include <curand_kernel.h>
 #include <vector>
 
-
 namespace gs::tensor_ops {
 
-    // ============= Unified Binary Operations =============
-    // Single dispatch function for ALL binary operations
+    // ============= Unified Operations =============
+    void launch_unary_op(const void* input, void* output,
+                        size_t n, UnaryOp op,
+                        DataType dtype, cudaStream_t stream);
+    
+    void launch_unary_op_inplace(void* data, size_t n,
+                                UnaryOp op, DataType dtype,
+                                cudaStream_t stream);
+
     void launch_binary_op(const void* a, const void* b, void* c,
                          size_t n, BinaryOp op,
                          DataType a_dtype, DataType b_dtype, DataType c_dtype,
                          cudaStream_t stream);
 
-    // Single dispatch for scalar operations
     void launch_binary_scalar(const void* data, float scalar, void* result,
                              size_t n, BinaryOp op,
                              DataType src_dtype, DataType dst_dtype,
                              cudaStream_t stream);
 
-    // In-place versions
     void launch_binary_op_inplace(void* a, const void* b, size_t n,
                                  BinaryOp op, cudaStream_t stream);
 
     void launch_binary_scalar_inplace(void* data, float scalar, size_t n,
                                      BinaryOp op, cudaStream_t stream);
 
-    // ============= Legacy functions (will be refactored later) =============
-    // Type conversion operations
+    void launch_reduce_op(const void* input, void* output,
+                         const size_t* shape, size_t rank,
+                         const int* axes, size_t num_axes,
+                         bool keepdim, ReduceOp op,
+                         DataType dtype, cudaStream_t stream);
+
+    void launch_ternary_op(const void* a, const void* b, const void* c, void* output,
+                          size_t n, TernaryOp op,
+                          DataType dtype, cudaStream_t stream);
+
+    // ============= Movement Operations (NEW!) =============
+    void launch_movement_op(const void* input, void* output,
+                           const size_t* input_shape, const size_t* output_shape,
+                           size_t input_rank, size_t output_rank,
+                           MovementOp op, const void* args,
+                           DataType dtype, cudaStream_t stream);
+
+    // ============= Load Operations (NEW!) =============
+    void launch_load_op(void* output, const size_t* shape, size_t rank,
+                       LoadOp op, const void* args,
+                       DataType dtype, cudaStream_t stream);
+
+    // ============= Essential non-unified ops =============
+    // Type conversions
     void launch_bool_to_float(const unsigned char* src, float* dst, size_t n, cudaStream_t stream);
     void launch_float_to_bool(const float* src, unsigned char* dst, size_t n, cudaStream_t stream);
 
-    // Broadcasting operations
+    // Broadcasting
     void launch_broadcast(const float* src, float* dst,
                           const size_t* src_shape, const size_t* dst_shape,
                           size_t src_rank, size_t dst_rank,
                           size_t dst_elements, cudaStream_t stream);
 
-    // Math functions
-    void launch_abs(float* data, size_t n, cudaStream_t stream);
-    void launch_sqrt(float* data, size_t n, cudaStream_t stream);
-    void launch_exp(float* data, size_t n, cudaStream_t stream);
-    void launch_log(float* data, size_t n, cudaStream_t stream);
-    void launch_sigmoid(float* data, size_t n, cudaStream_t stream);
-    void launch_relu(float* data, size_t n, cudaStream_t stream);
-    void launch_clamp(float* data, float min_val, float max_val, size_t n, cudaStream_t stream);
-    void launch_logit(const float* input, float* output, size_t n, float eps, cudaStream_t stream);
+    void launch_broadcast_bool(const unsigned char* src, unsigned char* dst,
+                               const size_t* src_shape, const size_t* dst_shape,
+                               size_t src_rank, size_t dst_rank,
+                               size_t dst_elements, cudaStream_t stream);
 
-    // Reduction operations
-    void launch_reduce_sum(const float* data, float* result, size_t n, cudaStream_t stream);
-    void launch_reduce_mean(const float* data, float* result, size_t n, cudaStream_t stream);
-    void launch_reduce_min(const float* data, float* result, size_t n, cudaStream_t stream);
-    void launch_reduce_max(const float* data, float* result, size_t n, cudaStream_t stream);
-
-    // Matrix operations
+    // Matrix operations (keep for now, could be unified later)
     void launch_matmul(const float* a, const float* b, float* c,
                        size_t m, size_t n, size_t k,
                        cudaStream_t stream);
@@ -74,7 +89,7 @@ namespace gs::tensor_ops {
     void launch_dot_product(const float* a, const float* b, float* result,
                             size_t n, cudaStream_t stream);
 
-    // Random operations
+    // Random operations (keep for now)
     void launch_uniform(float* data, size_t n, float low, float high,
                         unsigned long long seed, cudaStream_t stream);
 
@@ -96,12 +111,7 @@ namespace gs::tensor_ops {
     void launch_diag(const float* diagonal, float* matrix, size_t n, cudaStream_t stream);
     void launch_extract_diag(const float* matrix, float* diagonal, size_t n, cudaStream_t stream);
 
-    // Concatenation operation
-    void launch_cat(const std::vector<const float*>& inputs, float* output,
-                    const std::vector<size_t>& input_sizes, size_t total_size,
-                    int dim, const size_t* shape, size_t rank, cudaStream_t stream);
-
-    // ============= Masking Operations =============
+    // Keep masking, indexing ops for now
     void launch_masked_select(const float* input, const unsigned char* mask,
                               float* output, size_t n, size_t output_size, cudaStream_t stream);
 
@@ -124,7 +134,7 @@ namespace gs::tensor_ops {
     void launch_count_nonzero_float(const float* data, size_t* count,
                                     size_t n, cudaStream_t stream);
 
-    // ============= Indexing Operations =============
+    // Indexing operations
     void launch_index_select(const float* input, const int* indices, float* output,
                              const size_t* shape, size_t rank, int dim,
                              size_t index_size, int boundary_mode, cudaStream_t stream);
@@ -162,15 +172,5 @@ namespace gs::tensor_ops {
 
     void launch_nonzero_bool(const unsigned char* data, int64_t* indices,
                              size_t n, size_t output_size, cudaStream_t stream);
-
-    // ============= Boolean Broadcasting Operations =============
-    void launch_broadcast_bool(const unsigned char* src, unsigned char* dst,
-                               const size_t* src_shape, const size_t* dst_shape,
-                               size_t src_rank, size_t dst_rank,
-                               size_t dst_elements, cudaStream_t stream);
-
-    // ============= Logical Not Operation =============
-    void launch_logical_not(const unsigned char* a, unsigned char* result,
-                            size_t n, cudaStream_t stream);
 
 } // namespace gs::tensor_ops
