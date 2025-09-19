@@ -99,43 +99,6 @@ namespace gs {
         }
     }
 
-    // ============= Factory Methods (delegate to load) =============
-    Tensor Tensor::empty(TensorShape shape, Device device, DataType dtype) {
-        LoadArgs args;
-        args.shape = shape;
-        args.device = device;
-        args.dtype = dtype;
-        args.args = std::monostate{};
-        return load(LoadOp::Empty, args);
-    }
-
-    Tensor Tensor::zeros(TensorShape shape, Device device, DataType dtype) {
-        LoadArgs args;
-        args.shape = shape;
-        args.device = device;
-        args.dtype = dtype;
-        args.args = 0.0f;
-        return load(LoadOp::Const, args);
-    }
-
-    Tensor Tensor::ones(TensorShape shape, Device device, DataType dtype) {
-        LoadArgs args;
-        args.shape = shape;
-        args.device = device;
-        args.dtype = dtype;
-        args.args = 1.0f;
-        return load(LoadOp::Const, args);
-    }
-
-    Tensor Tensor::full(TensorShape shape, float value, Device device, DataType dtype) {
-        LoadArgs args;
-        args.shape = shape;
-        args.device = device;
-        args.dtype = dtype;
-        args.args = value;
-        return load(LoadOp::Const, args);
-    }
-
     // ============= Memory Operations =============
     Tensor Tensor::clone() const {
         if (!is_valid()) {

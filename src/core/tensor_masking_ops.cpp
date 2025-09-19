@@ -75,53 +75,6 @@ Tensor Tensor::masked_fill(const Tensor& mask, float value) const {
     return result;
 }
 
-Tensor Tensor::where(const Tensor& cond, const Tensor& x, const Tensor& y) {
-    if (!cond.is_valid() || !x.is_valid() || !y.is_valid() ||
-        cond.dtype() != DataType::Bool || x.device() != y.device() ||
-        x.device() != cond.device() || x.dtype() != y.dtype()) return {};
-
-    // Get broadcast shape for all three tensors
-    auto xy_shape = broadcast::shape(x.shape().dims(), y.shape().dims());
-    if (xy_shape.empty()) return {};
-
-    auto final_shape = broadcast::shape(xy_shape, cond.shape().dims());
-    if (final_shape.empty()) return {};
-
-    TensorShape shape(final_shape);
-    auto result = empty(shape, x.device(), x.dtype());
-
-    if (x.device() == Device::CUDA) {
-        tensor_ops::launch_where(cond.ptr<unsigned char>(),
-                               x.ptr<float>(), y.ptr<float>(), result.ptr<float>(),
-                               cond.shape().dims().data(), x.shape().dims().data(),
-                               y.shape().dims().data(), shape.dims().data(),
-                               cond.shape().rank(), x.shape().rank(),
-                               y.shape().rank(), shape.rank(),
-                               shape.elements(), 0);
-        cudaDeviceSynchronize();
-    } else {
-        // Simple CPU implementation using broadcast::index
-        const unsigned char* c_data = cond.ptr<unsigned char>();
-        const float* x_data = x.ptr<float>();
-        const float* y_data = y.ptr<float>();
-        float* r_data = result.ptr<float>();
-
-        auto c_shape = cond.shape().dims();
-        auto x_shape = x.shape().dims();
-        auto y_shape = y.shape().dims();
-        auto r_shape = shape.dims();
-
-        #pragma omp parallel for if(shape.elements() > 1024)
-        for (size_t i = 0; i < shape.elements(); ++i) {
-            size_t c_idx = broadcast::index(i, r_shape, c_shape);
-            size_t x_idx = broadcast::index(i, r_shape, x_shape);
-            size_t y_idx = broadcast::index(i, r_shape, y_shape);
-            r_data[i] = c_data[c_idx] ? x_data[x_idx] : y_data[y_idx];
-        }
-    }
-    return result;
-}
-
 // ============= Indexing Operations =============
 Tensor Tensor::index_select(int dim, const Tensor& indices) const {
     return index_select(dim, indices, BoundaryMode::Assert);
@@ -527,28 +480,6 @@ float Tensor::at(std::initializer_list<size_t> indices) const {
         return value;
     }
     return ptr<float>()[idx];
-}
-
-// Boolean Operations
-Tensor Tensor::full_bool(TensorShape shape, bool value, Device device) {
-    auto t = empty(shape, device, DataType::Bool);
-    if (t.is_valid() && t.numel() > 0) {
-        unsigned char fill = value ? 1 : 0;
-        if (device == Device::CUDA) {
-            cudaMemset(t.data_, fill, t.bytes());
-        } else {
-            std::memset(t.data_, fill, t.bytes());
-        }
-    }
-    return t;
-}
-
-Tensor Tensor::zeros_bool(TensorShape shape, Device device) {
-    return full_bool(shape, false, device);
-}
-
-Tensor Tensor::ones_bool(TensorShape shape, Device device) {
-    return full_bool(shape, true, device);
 }
 
 // From Vector

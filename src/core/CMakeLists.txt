@@ -17,13 +17,12 @@ set(CORE_SOURCES
         tensor_ops.cpp          # Math operations with broadcasting support
         tensor_utils.cpp        # Utility functions
         tensor_matrix_ops.cpp   # Matrix operations (matmul, transpose, etc.)
-	tensor_unified_ops.cpp
-	tensor_movement_ops.cpp
-	tensor_load_ops.cpp
+	    tensor_unified_ops.cpp
+	    tensor_movement_ops.cpp
+	    tensor_load_ops.cpp
         tensor_random_ops.cpp   # Random generation operations
         tensor_broadcast.cpp    # Broadcasting implementation
-	tensor_shape_ops.cpp     # Shape functions
-        tensor_reduction_ops.cpp # Reduction operations
+	    tensor_shape_ops.cpp     # Shape functions
         tensor_masking_ops.cpp  # Masking and indexing operations
         tinyply.cpp
 )
@@ -37,6 +36,7 @@ set(CORE_CUDA_SOURCES
 	tensor_random_ops.cu    # CUDA kernels for random ops
 )
 
+add_compile_definitions(_PSTL_USAGE_WARNINGS=0)
 # Create CUDA library for tensor operations (C++20)
 if(CORE_CUDA_SOURCES)
     add_library(gs_tensor_kernels STATIC ${CORE_CUDA_SOURCES})

@@ -21,26 +21,8 @@
 namespace gs::tensor {
 
     // ============= Creation Utilities =============
-    Tensor eye(size_t n, Device device) {
-        return eye(n, n, device);
-    }
-
-    Tensor eye(size_t m, size_t n, Device device) {
-        auto t = zeros({m, n}, device);
-
-        if (device == Device::CUDA) {
-            tensor_ops::launch_eye(t.ptr<float>(), m, n, 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* data = t.ptr<float>();
-            size_t min_dim = std::min(m, n);
-            for (size_t i = 0; i < min_dim; ++i) {
-                data[i * n + i] = 1.0f;
-            }
-        }
-
-        return t;
-    }
+    // These functions are in the tensor namespace, not Tensor class
+    // They delegate to Tensor static methods
 
     Tensor diag(const Tensor& diagonal) {
         if (diagonal.ndim() != 1) {
@@ -49,7 +31,7 @@ namespace gs::tensor {
         }
 
         size_t n = diagonal.numel();
-        auto result = zeros({n, n}, diagonal.device());
+        auto result = Tensor::zeros({n, n}, diagonal.device());
 
         if (diagonal.device() == Device::CUDA) {
             tensor_ops::launch_diag(diagonal.ptr<float>(), result.ptr<float>(), n, 0);
@@ -65,37 +47,6 @@ namespace gs::tensor {
         return result;
     }
 
-    // ============= Range Operations =============
-    Tensor arange(float end) {
-        return arange(0, end, 1.0f);
-    }
-
-    Tensor arange(float start, float end, float step) {
-        if (step == 0) {
-            LOG_ERROR("Step cannot be zero");
-            return Tensor();
-        }
-
-        if ((end - start) * step < 0) {
-            LOG_ERROR("Invalid range: start={}, end={}, step={}", start, end, step);
-            return Tensor();
-        }
-
-        size_t n = static_cast<size_t>(std::ceil((end - start) / step));
-        auto t = empty({n}, Device::CUDA);
-
-        // For now, generate on CPU and copy
-        std::vector<float> data(n);
-        for (size_t i = 0; i < n; ++i) {
-            data[i] = start + i * step;
-        }
-
-        CHECK_CUDA(cudaMemcpy(t.ptr<float>(), data.data(), n * sizeof(float),
-                              cudaMemcpyHostToDevice));
-
-        return t;
-    }
-
     Tensor linspace(float start, float end, size_t steps) {
         if (steps == 0) {
             LOG_ERROR("Steps must be > 0");
@@ -103,10 +54,10 @@ namespace gs::tensor {
         }
 
         if (steps == 1) {
-            return full({1}, start, Device::CUDA);
+            return Tensor::full({1}, start, Device::CUDA);
         }
 
-        auto t = empty({steps}, Device::CUDA);
+        auto t = Tensor::empty({steps}, Device::CUDA);
 
         // Generate on CPU and copy
         std::vector<float> data(steps);
@@ -163,7 +114,7 @@ namespace gs::tensor {
 
         new_dims.insert(new_dims.begin() + dim, tensors.size());
 
-        // Create result tensor using Tensor::empty (2 args only)
+        // Create result tensor
         auto result = Tensor::empty(TensorShape(new_dims), first_device);
 
         // Copy tensors
@@ -245,7 +196,7 @@ namespace gs::tensor {
         std::vector<size_t> result_dims = first_shape.dims();
         result_dims[0] = total_size_along_dim;
 
-        // Create result tensor using Tensor::empty (2 args only)
+        // Create result tensor
         auto result = Tensor::empty(TensorShape(result_dims), first_device);
 
         // Copy data

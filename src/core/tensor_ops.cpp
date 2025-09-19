@@ -3,275 +3,363 @@
 
 #include "core/tensor_ops.hpp"
 #include "core/tensor.hpp"
-#include "core/tensor_broadcast.hpp"
 #include <cmath>
-#include <cuda_runtime.h>
+#include <cfloat>
+#include <algorithm>
+#include <numeric>
+#include <execution>
 
-#define CHECK_CUDA(call)                              \
-    do {                                              \
-        cudaError_t error = call;                     \
-        if (error != cudaSuccess) {                   \
-            LOG_ERROR("CUDA error at {}:{} - {}: {}", \
-                      __FILE__, __LINE__,             \
-                      cudaGetErrorName(error),        \
-                      cudaGetErrorString(error));     \
-        }                                             \
-    } while (0)
+namespace gs::tensor_ops {
 
-namespace gs {
+// CPU implementation of unified operations
 
-// Broadcasting and type promotion helper implementation
-std::pair<Tensor, Tensor> Tensor::_broadcasted(const Tensor& other, bool match_dtype) const {
-    // Step 1: Get broadcast shape
-    auto result_shape = broadcast::shape(shape_.dims(), other.shape_.dims());
-    if (result_shape.empty()) {
-        LOG_ERROR("Cannot broadcast shapes {} and {}", shape_.str(), other.shape_.str());
-        return {Tensor(), Tensor()};
-    }
+namespace cpu {
 
-    TensorShape out_shape(result_shape);
+// ============= Unary Operations =============
+template<typename T>
+inline T unary_op_impl(T x, UnaryOp op) {
+    switch (op) {
+        case UnaryOp::Neg: return -x;
+        case UnaryOp::Abs: return std::abs(x);
+        case UnaryOp::Sign: return (x > 0) - (x < 0);
+        case UnaryOp::Reciprocal: return T(1) / (x + T(1e-8));
 
-    // Step 2: Determine result dtype if matching
-    DataType result_dtype = dtype_;
-    if (match_dtype && dtype_ != other.dtype_) {
-        result_dtype = promote_types(dtype_, other.dtype_);
-    }
+        case UnaryOp::Exp: return std::exp(x);
+        case UnaryOp::Exp2: return std::exp2(x);
+        case UnaryOp::Log: return std::log(std::max(T(1e-10), x));
+        case UnaryOp::Log2: return std::log2(std::max(T(1e-10), x));
+        case UnaryOp::Log10: return std::log10(std::max(T(1e-10), x));
+        case UnaryOp::Log1p: return std::log1p(x);
 
-    // Step 3: Prepare both tensors (use clone to avoid copy constructor)
-    Tensor a_ready = this->clone();  // Use clone instead of copy
-    Tensor b_ready = other.clone();  // Use clone instead of copy
+        case UnaryOp::Sqrt: return std::sqrt(std::max(T(0), x));
+        case UnaryOp::Rsqrt: return T(1) / std::sqrt(std::max(T(1e-10), x));
+        case UnaryOp::Square: return x * x;
 
-    // Convert dtypes if needed
-    if (match_dtype) {
-        if (a_ready.dtype_ != result_dtype) {
-            a_ready = a_ready.to(result_dtype);
+        case UnaryOp::Sin: return std::sin(x);
+        case UnaryOp::Cos: return std::cos(x);
+        case UnaryOp::Tan: return std::tan(x);
+        case UnaryOp::Asin: return std::asin(std::clamp(x, T(-1), T(1)));
+        case UnaryOp::Acos: return std::acos(std::clamp(x, T(-1), T(1)));
+        case UnaryOp::Atan: return std::atan(x);
+
+        case UnaryOp::Sinh: return std::sinh(x);
+        case UnaryOp::Cosh: return std::cosh(x);
+        case UnaryOp::Tanh: return std::tanh(x);
+
+        case UnaryOp::Sigmoid: return T(1) / (T(1) + std::exp(-x));
+        case UnaryOp::Relu: return std::max(T(0), x);
+        case UnaryOp::Gelu: {
+            T inner = std::sqrt(T(2) / T(M_PI)) * (x + T(0.044715) * x * x * x);
+            return T(0.5) * x * (T(1) + std::tanh(inner));
         }
-        if (b_ready.dtype_ != result_dtype) {
-            b_ready = b_ready.to(result_dtype);
-        }
-    }
+        case UnaryOp::Swish: return x / (T(1) + std::exp(-x));
 
-    // Broadcast shapes if needed
-    if (a_ready.shape_ != out_shape) {
-        a_ready = gs::broadcast_to(a_ready, out_shape);
-    }
-    if (b_ready.shape_ != out_shape) {
-        b_ready = gs::broadcast_to(b_ready, out_shape);
-    }
+        case UnaryOp::Floor: return std::floor(x);
+        case UnaryOp::Ceil: return std::ceil(x);
+        case UnaryOp::Round: return std::round(x);
+        case UnaryOp::Trunc: return std::trunc(x);
 
-    return {std::move(a_ready), std::move(b_ready)};
+        default: return x;
+    }
 }
 
-// Overload for scalar inputs
 template<typename T>
-std::pair<Tensor, Tensor> Tensor::_broadcasted(const T& scalar) const {
-    static_assert(std::is_arithmetic_v<T>, "Scalar must be arithmetic type");
-
-    // Create scalar tensor with same shape and device
-    Tensor scalar_tensor = full(shape_, static_cast<float>(scalar), device_, dtype_);
-    return {this->clone(), std::move(scalar_tensor)};  // Use clone for first element
+void apply_unary_op(const T* input, T* output, size_t n, UnaryOp op) {
+    #pragma omp parallel for if(n > 1024)
+    for (size_t i = 0; i < n; ++i) {
+        output[i] = unary_op_impl(input[i], op);
+    }
 }
 
-// Simplified unified binary operation implementation
 template<typename T>
-Tensor Tensor::binary_op_impl(const T& other, BinaryOp op) const {
-    if (!is_valid()) return Tensor();
+void apply_unary_op_inplace(T* data, size_t n, UnaryOp op) {
+    #pragma omp parallel for if(n > 1024)
+    for (size_t i = 0; i < n; ++i) {
+        data[i] = unary_op_impl(data[i], op);
+    }
+}
 
-    // Special handling for logical operations - require bool tensors
-    if (op >= BinaryOp::LogicalAnd && op <= BinaryOp::LogicalXor) {
-        if constexpr (std::is_same_v<T, Tensor>) {
-            if (dtype_ != DataType::Bool || other.dtype_ != DataType::Bool) {
-                LOG_ERROR("Logical operations require boolean tensors");
-                return Tensor();
-            }
-        } else {
-            LOG_ERROR("Logical operations require tensor operands");
-            return Tensor();
+// ============= Binary Operations =============
+template<typename T>
+inline T binary_op_impl(T a, T b, BinaryOp op) {
+    switch (op) {
+        case BinaryOp::Add: return a + b;
+        case BinaryOp::Sub: return a - b;
+        case BinaryOp::Mul: return a * b;
+        case BinaryOp::Div: return a / (b + T(1e-8));
+        case BinaryOp::Pow: return std::pow(a, b);
+        case BinaryOp::Mod: return std::fmod(a, b);
+        case BinaryOp::Maximum: return std::max(a, b);
+        case BinaryOp::Minimum: return std::min(a, b);
+        default: return T(0);
+    }
+}
+
+template<typename T>
+inline bool comparison_op_impl(T a, T b, BinaryOp op) {
+    switch (op) {
+        case BinaryOp::Equal: return a == b;
+        case BinaryOp::NotEqual: return a != b;
+        case BinaryOp::Less: return a < b;
+        case BinaryOp::LessEqual: return a <= b;
+        case BinaryOp::Greater: return a > b;
+        case BinaryOp::GreaterEqual: return a >= b;
+        default: return false;
+    }
+}
+
+inline bool logical_op_impl(bool a, bool b, BinaryOp op) {
+    switch (op) {
+        case BinaryOp::LogicalAnd: return a && b;
+        case BinaryOp::LogicalOr: return a || b;
+        case BinaryOp::LogicalXor: return a != b;
+        default: return false;
+    }
+}
+
+template<typename T>
+void apply_binary_op(const T* a, const T* b, T* c, size_t n, BinaryOp op) {
+    #pragma omp parallel for if(n > 1024)
+    for (size_t i = 0; i < n; ++i) {
+        c[i] = binary_op_impl(a[i], b[i], op);
+    }
+}
+
+template<typename T>
+void apply_binary_scalar_op(const T* data, T scalar, T* result, size_t n, BinaryOp op) {
+    #pragma omp parallel for if(n > 1024)
+    for (size_t i = 0; i < n; ++i) {
+        result[i] = binary_op_impl(data[i], scalar, op);
+    }
+}
+
+template<typename T>
+void apply_binary_op_inplace(T* a, const T* b, size_t n, BinaryOp op) {
+    #pragma omp parallel for if(n > 1024)
+    for (size_t i = 0; i < n; ++i) {
+        a[i] = binary_op_impl(a[i], b[i], op);
+    }
+}
+
+template<typename T>
+void apply_binary_scalar_op_inplace(T* data, T scalar, size_t n, BinaryOp op) {
+    #pragma omp parallel for if(n > 1024)
+    for (size_t i = 0; i < n; ++i) {
+        data[i] = binary_op_impl(data[i], scalar, op);
+    }
+}
+
+// ============= Reduce Operations =============
+template<typename T, typename ReduceFunc>
+T reduce_op(const T* data, size_t n, T init, ReduceFunc func) {
+    if (n == 0) return init;
+
+    T result = init;
+
+    #pragma omp parallel reduction(+:result) if(n > 1024)
+    {
+        T local_result = init;
+        #pragma omp for nowait
+        for (size_t i = 0; i < n; ++i) {
+            local_result = func(local_result, data[i]);
         }
-    }
-
-    // Step 1: Get broadcasted tensors with matching shapes and dtypes
-    Tensor lhs, rhs;
-    if constexpr (std::is_arithmetic_v<T>) {
-        auto [a, b] = _broadcasted(static_cast<float>(other));
-        lhs = std::move(a);
-        rhs = std::move(b);
-    } else {
-        // For comparison ops, we don't need dtype matching
-        bool match_dtype = !(op >= BinaryOp::Equal && op <= BinaryOp::GreaterEqual);
-        auto [a, b] = _broadcasted(other, match_dtype);
-        lhs = std::move(a);
-        rhs = std::move(b);
-    }
-
-    if (!lhs.is_valid() || !rhs.is_valid()) return Tensor();
-
-    // Step 2: Determine output dtype based on operation
-    DataType output_dtype = lhs.dtype_;
-    if (op >= BinaryOp::Equal && op <= BinaryOp::GreaterEqual) {
-        output_dtype = DataType::Bool;
-    } else if (op >= BinaryOp::LogicalAnd && op <= BinaryOp::LogicalXor) {
-        output_dtype = DataType::Bool;
-    }
-
-    // Step 3: Create result and dispatch
-    Tensor result = empty(lhs.shape_, device_, output_dtype);
-
-    if (device_ == Device::CUDA) {
-        tensor_ops::launch_binary_op(
-            lhs.raw_ptr(), rhs.raw_ptr(), result.raw_ptr(),
-            result.numel(), op,
-            lhs.dtype_, rhs.dtype_, output_dtype, 0);
-        CHECK_CUDA(cudaDeviceSynchronize());
-    } else {
-        // CPU implementation
-        if (output_dtype == DataType::Bool && lhs.dtype_ == DataType::Float32) {
-            // Comparison operations on float tensors
-            const float* a_data = lhs.ptr<float>();
-            const float* b_data = rhs.ptr<float>();
-            unsigned char* r_data = result.ptr<unsigned char>();
-
-            for (size_t i = 0; i < result.numel(); ++i) {
-                bool res = false;
-                switch (op) {
-                    case BinaryOp::Equal: res = (a_data[i] == b_data[i]); break;
-                    case BinaryOp::NotEqual: res = (a_data[i] != b_data[i]); break;
-                    case BinaryOp::Less: res = (a_data[i] < b_data[i]); break;
-                    case BinaryOp::LessEqual: res = (a_data[i] <= b_data[i]); break;
-                    case BinaryOp::Greater: res = (a_data[i] > b_data[i]); break;
-                    case BinaryOp::GreaterEqual: res = (a_data[i] >= b_data[i]); break;
-                    default: break;
-                }
-                r_data[i] = res ? 1 : 0;
-            }
-        } else if (output_dtype == DataType::Bool && lhs.dtype_ == DataType::Bool) {
-            // Logical operations on bool tensors
-            const unsigned char* a_data = lhs.ptr<unsigned char>();
-            const unsigned char* b_data = rhs.ptr<unsigned char>();
-            unsigned char* r_data = result.ptr<unsigned char>();
-
-            for (size_t i = 0; i < result.numel(); ++i) {
-                bool res = false;
-                switch (op) {
-                    case BinaryOp::LogicalAnd: res = (a_data[i] && b_data[i]); break;
-                    case BinaryOp::LogicalOr: res = (a_data[i] || b_data[i]); break;
-                    case BinaryOp::LogicalXor: res = ((a_data[i] != 0) != (b_data[i] != 0)); break;
-                    default: break;
-                }
-                r_data[i] = res ? 1 : 0;
-            }
-        } else {
-            // Arithmetic operations on float tensors
-            const float* a_data = lhs.ptr<float>();
-            const float* b_data = rhs.ptr<float>();
-            float* r_data = result.ptr<float>();
-
-            for (size_t i = 0; i < result.numel(); ++i) {
-                switch (op) {
-                    case BinaryOp::Add: r_data[i] = a_data[i] + b_data[i]; break;
-                    case BinaryOp::Sub: r_data[i] = a_data[i] - b_data[i]; break;
-                    case BinaryOp::Mul: r_data[i] = a_data[i] * b_data[i]; break;
-                    case BinaryOp::Div: r_data[i] = a_data[i] / (b_data[i] + 1e-8f); break;
-                    case BinaryOp::Pow: r_data[i] = std::pow(a_data[i], b_data[i]); break;
-                    case BinaryOp::Mod: r_data[i] = std::fmod(a_data[i], b_data[i]); break;
-                    case BinaryOp::Maximum: r_data[i] = std::max(a_data[i], b_data[i]); break;
-                    case BinaryOp::Minimum: r_data[i] = std::min(a_data[i], b_data[i]); break;
-                    default: break;
-                }
-            }
-        }
+        result = func(result, local_result);
     }
 
     return result;
 }
 
-// In-place version - no broadcasting or type conversion
-template<typename T>
-Tensor& Tensor::binary_op_inplace_impl(const T& other, BinaryOp op) {
-    if (!is_valid() || numel() == 0) return *this;
-
-    // In-place operations don't support type change
-    if (op >= BinaryOp::Equal && op <= BinaryOp::GreaterEqual) {
-        LOG_ERROR("Comparison operations cannot be done in-place");
-        return *this;
-    }
-
-    if constexpr (std::is_arithmetic_v<T>) {
-        float scalar = static_cast<float>(other);
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_binary_scalar_inplace(
-                ptr<float>(), scalar, numel(), op, 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* data = ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                switch (op) {
-                    case BinaryOp::Add: data[i] += scalar; break;
-                    case BinaryOp::Sub: data[i] -= scalar; break;
-                    case BinaryOp::Mul: data[i] *= scalar; break;
-                    case BinaryOp::Div: data[i] /= scalar; break;
-                    case BinaryOp::Pow: data[i] = std::pow(data[i], scalar); break;
-                    case BinaryOp::Mod: data[i] = std::fmod(data[i], scalar); break;
-                    case BinaryOp::Maximum: data[i] = std::max(data[i], scalar); break;
-                    case BinaryOp::Minimum: data[i] = std::min(data[i], scalar); break;
-                    default: break;
-                }
-            }
-        }
-    } else {
-        const Tensor& b = other;
-        if (!b.is_valid() || shape_ != b.shape_ || device_ != b.device_) {
-            LOG_ERROR("Invalid tensors for in-place operation");
-            return *this;
-        }
-
-        // Check dtype compatibility
-        if (dtype_ != b.dtype_) {
-            LOG_ERROR("In-place operations require same dtype");
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_binary_op_inplace(
-                ptr<float>(), b.ptr<float>(), numel(), op, 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            float* a = ptr<float>();
-            const float* b_data = b.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                switch (op) {
-                    case BinaryOp::Add: a[i] += b_data[i]; break;
-                    case BinaryOp::Sub: a[i] -= b_data[i]; break;
-                    case BinaryOp::Mul: a[i] *= b_data[i]; break;
-                    case BinaryOp::Div: a[i] /= (b_data[i] + 1e-8f); break;
-                    case BinaryOp::Pow: a[i] = std::pow(a[i], b_data[i]); break;
-                    case BinaryOp::Mod: a[i] = std::fmod(a[i], b_data[i]); break;
-                    case BinaryOp::Maximum: a[i] = std::max(a[i], b_data[i]); break;
-                    case BinaryOp::Minimum: a[i] = std::min(a[i], b_data[i]); break;
-                    default: break;
-                }
-            }
-        }
-    }
-    return *this;
+float reduce_sum(const float* data, size_t n) {
+    return std::reduce(std::execution::par_unseq, data, data + n, 0.0f);
 }
 
-// Explicit instantiations
-template Tensor Tensor::binary_op_impl<float>(const float&, BinaryOp) const;
-template Tensor Tensor::binary_op_impl<double>(const double&, BinaryOp) const;
-template Tensor Tensor::binary_op_impl<int>(const int&, BinaryOp) const;
-template Tensor Tensor::binary_op_impl<Tensor>(const Tensor&, BinaryOp) const;
+float reduce_mean(const float* data, size_t n) {
+    return n > 0 ? reduce_sum(data, n) / n : 0.0f;
+}
 
-template Tensor& Tensor::binary_op_inplace_impl<float>(const float&, BinaryOp);
-template Tensor& Tensor::binary_op_inplace_impl<double>(const double&, BinaryOp);
-template Tensor& Tensor::binary_op_inplace_impl<int>(const int&, BinaryOp);
-template Tensor& Tensor::binary_op_inplace_impl<Tensor>(const Tensor&, BinaryOp);
+float reduce_max(const float* data, size_t n) {
+    return n > 0 ? *std::max_element(std::execution::par_unseq, data, data + n) : -FLT_MAX;
+}
 
-// Explicit instantiations for _broadcasted
-template std::pair<Tensor, Tensor> Tensor::_broadcasted<float>(const float&) const;
-template std::pair<Tensor, Tensor> Tensor::_broadcasted<double>(const double&) const;
-template std::pair<Tensor, Tensor> Tensor::_broadcasted<int>(const int&) const;
+float reduce_min(const float* data, size_t n) {
+    return n > 0 ? *std::min_element(std::execution::par_unseq, data, data + n) : FLT_MAX;
+}
 
-#undef CHECK_CUDA
+float reduce_prod(const float* data, size_t n) {
+    return std::reduce(std::execution::par_unseq, data, data + n, 1.0f, std::multiplies<float>());
+}
 
-} // namespace gs
+// ============= Ternary Operations =============
+void muladd(const float* a, const float* b, const float* c, float* output, size_t n) {
+    #pragma omp parallel for if(n > 1024)
+    for (size_t i = 0; i < n; ++i) {
+        output[i] = a[i] * b[i] + c[i];
+    }
+}
+
+void clamp(const float* x, float min_val, float max_val, float* output, size_t n) {
+    #pragma omp parallel for if(n > 1024)
+    for (size_t i = 0; i < n; ++i) {
+        output[i] = std::min(std::max(x[i], min_val), max_val);
+    }
+}
+
+void clamp_inplace(float* data, float min_val, float max_val, size_t n) {
+    #pragma omp parallel for if(n > 1024)
+    for (size_t i = 0; i < n; ++i) {
+        data[i] = std::min(std::max(data[i], min_val), max_val);
+    }
+}
+
+} // namespace cpu
+
+// ============= CPU Launch Functions =============
+// These would be called when device == Device::CPU
+
+void launch_unary_op_cpu(const void* input, void* output,
+                        size_t n, UnaryOp op, DataType dtype) {
+    if (dtype == DataType::Float32) {
+        cpu::apply_unary_op(static_cast<const float*>(input),
+                           static_cast<float*>(output), n, op);
+    } else if (dtype == DataType::Bool && op == UnaryOp::LogicalNot) {
+        const unsigned char* src = static_cast<const unsigned char*>(input);
+        unsigned char* dst = static_cast<unsigned char*>(output);
+        #pragma omp parallel for if(n > 1024)
+        for (size_t i = 0; i < n; ++i) {
+            dst[i] = !src[i];
+        }
+    }
+}
+
+void launch_unary_op_inplace_cpu(void* data, size_t n,
+                                 UnaryOp op, DataType dtype) {
+    if (dtype == DataType::Float32) {
+        cpu::apply_unary_op_inplace(static_cast<float*>(data), n, op);
+    }
+}
+
+void launch_binary_op_cpu(const void* a, const void* b, void* c,
+                          size_t n, BinaryOp op,
+                          DataType a_dtype, DataType b_dtype, DataType c_dtype) {
+    if (c_dtype == DataType::Bool && a_dtype == DataType::Float32) {
+        // Comparison operations
+        const float* fa = static_cast<const float*>(a);
+        const float* fb = static_cast<const float*>(b);
+        unsigned char* uc = static_cast<unsigned char*>(c);
+
+        #pragma omp parallel for if(n > 1024)
+        for (size_t i = 0; i < n; ++i) {
+            uc[i] = cpu::comparison_op_impl(fa[i], fb[i], op) ? 1 : 0;
+        }
+    } else if (a_dtype == DataType::Bool && b_dtype == DataType::Bool && c_dtype == DataType::Bool) {
+        // Logical operations
+        const unsigned char* ua = static_cast<const unsigned char*>(a);
+        const unsigned char* ub = static_cast<const unsigned char*>(b);
+        unsigned char* uc = static_cast<unsigned char*>(c);
+
+        #pragma omp parallel for if(n > 1024)
+        for (size_t i = 0; i < n; ++i) {
+            uc[i] = cpu::logical_op_impl(ua[i] != 0, ub[i] != 0, op) ? 1 : 0;
+        }
+    } else if (a_dtype == DataType::Float32 && b_dtype == DataType::Float32 && c_dtype == DataType::Float32) {
+        cpu::apply_binary_op(static_cast<const float*>(a),
+                            static_cast<const float*>(b),
+                            static_cast<float*>(c), n, op);
+    }
+}
+
+void launch_binary_scalar_cpu(const void* data, float scalar, void* result,
+                              size_t n, BinaryOp op,
+                              DataType src_dtype, DataType dst_dtype) {
+    if (dst_dtype == DataType::Bool && src_dtype == DataType::Float32) {
+        const float* fdata = static_cast<const float*>(data);
+        unsigned char* uresult = static_cast<unsigned char*>(result);
+
+        #pragma omp parallel for if(n > 1024)
+        for (size_t i = 0; i < n; ++i) {
+            uresult[i] = cpu::comparison_op_impl(fdata[i], scalar, op) ? 1 : 0;
+        }
+    } else if (src_dtype == DataType::Float32 && dst_dtype == DataType::Float32) {
+        cpu::apply_binary_scalar_op(static_cast<const float*>(data),
+                                    scalar,
+                                    static_cast<float*>(result), n, op);
+    }
+}
+
+void launch_binary_op_inplace_cpu(void* a, const void* b, size_t n, BinaryOp op) {
+    cpu::apply_binary_op_inplace(static_cast<float*>(a),
+                                 static_cast<const float*>(b), n, op);
+}
+
+void launch_binary_scalar_inplace_cpu(void* data, float scalar, size_t n, BinaryOp op) {
+    cpu::apply_binary_scalar_op_inplace(static_cast<float*>(data), scalar, n, op);
+}
+
+void launch_reduce_op_cpu(const void* input, void* output,
+                         const size_t* shape, size_t rank,
+                         const int* axes, size_t num_axes,
+                         bool keepdim, ReduceOp op, DataType dtype) {
+    // Simplified - just handle full reduction for now
+    size_t n = 1;
+    for (size_t i = 0; i < rank; ++i) {
+        n *= shape[i];
+    }
+
+    if (n == 0) return;
+
+    if (dtype == DataType::Float32) {
+        const float* fdata = static_cast<const float*>(input);
+        float* foutput = static_cast<float*>(output);
+
+        float result = 0.0f;
+        switch (op) {
+            case ReduceOp::Sum:
+                result = cpu::reduce_sum(fdata, n);
+                break;
+            case ReduceOp::Mean:
+                result = cpu::reduce_mean(fdata, n);
+                break;
+            case ReduceOp::Max:
+                result = cpu::reduce_max(fdata, n);
+                break;
+            case ReduceOp::Min:
+                result = cpu::reduce_min(fdata, n);
+                break;
+            case ReduceOp::Prod:
+                result = cpu::reduce_prod(fdata, n);
+                break;
+            default:
+                result = 0.0f;
+        }
+
+        *foutput = result;
+    }
+}
+
+void launch_ternary_op_cpu(const void* a, const void* b, const void* c, void* output,
+                          size_t n, TernaryOp op, DataType dtype) {
+    if (dtype == DataType::Float32) {
+        const float* fa = static_cast<const float*>(a);
+        const float* fb = static_cast<const float*>(b);
+        const float* fc = static_cast<const float*>(c);
+        float* foutput = static_cast<float*>(output);
+
+        switch (op) {
+            case TernaryOp::MulAdd:
+                cpu::muladd(fa, fb, fc, foutput, n);
+                break;
+            case TernaryOp::Clamp:
+                // For clamp, b and c should be scalars
+                if (n > 0) {
+                    float min_val = fb[0];
+                    float max_val = fc[0];
+                    cpu::clamp(fa, min_val, max_val, foutput, n);
+                }
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+} // namespace gs::tensor_ops

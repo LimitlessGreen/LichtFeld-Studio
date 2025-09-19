@@ -783,14 +783,4 @@ void launch_nonzero_bool(const unsigned char* data, int64_t* indices,
 
     nonzero_bool_kernel<<<(n + 255) / 256, 256, 0, stream>>>(data, indices, scan_result.get(), n);
 }
-
-__global__ void pow_scalar_kernel(float* d, float e, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) d[idx] = powf(d[idx], e);
-}
-
-void launch_pow_scalar(float* data, float exponent, size_t n, cudaStream_t stream) {
-    pow_scalar_kernel<<<(n + 255) / 256, 256, 0, stream>>>(data, exponent, n);
-}
-
 } // namespace gs::tensor_ops
