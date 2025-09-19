@@ -27,9 +27,8 @@ Tensor Tensor::reshape(TensorShape new_shape) const {
         return {};
     }
 
-    Tensor result(data_, new_shape, device_, dtype_);
-    result.initialized_ = true;
-    return result;
+    // Create a view that shares memory (non-owning)
+    return Tensor(data_, new_shape, device_, dtype_);
 }
 
 Tensor Tensor::t() const {
@@ -138,20 +137,35 @@ Tensor Tensor::expand(const TensorShape& target_shape) const {
         padded_shape.insert(padded_shape.begin(), 1);
     }
 
-    // Check compatibility
+    // Check compatibility and build final shape
+    std::vector<size_t> final_shape(target_shape.rank());
     for (size_t i = 0; i < target_shape.rank(); ++i) {
-        if (padded_shape[i] != 1 && padded_shape[i] != target_shape[i]) {
-            LOG_ERROR("Cannot expand dimension {} from {} to {}",
-                     i, padded_shape[i], target_shape[i]);
-            return {};
+        size_t target_dim = target_shape[i];
+
+        // Handle -1 in target shape (keep original dimension)
+        if (target_dim == static_cast<size_t>(-1)) {
+            if (i < padded_shape.size()) {
+                final_shape[i] = padded_shape[i];
+            } else {
+                LOG_ERROR("Cannot use -1 for new dimension");
+                return {};
+            }
+        } else {
+            // Check if expansion is valid
+            if (padded_shape[i] != 1 && padded_shape[i] != target_dim) {
+                LOG_ERROR("Cannot expand dimension {} from {} to {}",
+                         i, padded_shape[i], target_dim);
+                return {};
+            }
+            final_shape[i] = target_dim;
         }
     }
 
     // First reshape to add 1s if needed
     auto reshaped = reshape(TensorShape(padded_shape));
 
-    // Then broadcast to target shape
-    return reshaped.broadcast_to(target_shape);
+    // Then broadcast to final shape
+    return reshaped.broadcast_to(TensorShape(final_shape));
 }
 
 // Implementation of slice (was inline in header, now moved here)
@@ -198,13 +212,12 @@ Tensor Tensor::slice(std::span<const std::pair<int, int>> ranges) const {
     bool is_contiguous = is_contiguous_slice(starts, ends);
 
     if (is_contiguous) {
-        // Can create a view
+        // Can create a view - calculate the offset into the original data
         size_t offset = calculate_offset(starts);
         void* new_data = static_cast<char*>(data_) + offset * dtype_size(dtype_);
 
-        Tensor result(new_data, TensorShape(new_shape), device_, dtype_);
-        result.initialized_ = true;
-        return result;
+        // Return a view (non-owning tensor)
+        return Tensor(new_data, TensorShape(new_shape), device_, dtype_);
     } else {
         // Need to copy
         return copy_slice(starts, ends, new_shape);
@@ -241,15 +254,12 @@ Tensor Tensor::slice(size_t dim, size_t start, size_t end) const {
 // Helper: check if slice is contiguous
 bool Tensor::is_contiguous_slice(const std::vector<size_t>& starts,
                                  const std::vector<size_t>& ends) const {
-    // A slice is contiguous if we're only slicing the first dimensions
-    // and taking full slices of the remaining dimensions
-    bool found_partial = false;
+    // A slice is contiguous if:
+    // 1. We're only slicing the first dimension
+    // 2. All other dimensions are fully selected (start=0, end=shape[dim])
 
-    for (size_t i = 0; i < shape_.rank(); ++i) {
+    for (size_t i = 1; i < shape_.rank(); ++i) {
         if (starts[i] != 0 || ends[i] != shape_[i]) {
-            found_partial = true;
-        } else if (found_partial) {
-            // Found a full slice after a partial slice - not contiguous
             return false;
         }
     }

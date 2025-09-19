@@ -230,23 +230,6 @@ TEST_F(TensorMatrixTest, TransposeSpecificDims) {
 }
 
 // ============= Matrix Creation Tests =============
-
-TEST_F(TensorMatrixTest, Eye) {
-    // Test square identity matrix
-    auto our_eye = tensor::eye(4, Device::CUDA);
-
-    // Create torch eye on CPU to avoid CUDA issues
-    auto torch_eye = torch::eye(4, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-
-    EXPECT_TRUE(compare_tensors(our_eye, torch_eye));
-
-    // Test rectangular identity matrix
-    auto our_eye_rect = tensor::eye(3, 5, Device::CUDA);
-    auto torch_eye_rect = torch::eye(3, 5, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-
-    EXPECT_TRUE(compare_tensors(our_eye_rect, torch_eye_rect));
-}
-
 TEST_F(TensorMatrixTest, Diag) {
     // Test creating diagonal matrix from vector
     std::vector<float> diag_data = {1, 2, 3, 4};

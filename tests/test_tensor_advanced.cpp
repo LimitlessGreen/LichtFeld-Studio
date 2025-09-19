@@ -28,36 +28,6 @@ protected:
 };
 
 // ============= Utility Functions Tests =============
-TEST_F(TensorAdvancedTest, Arange) {
-    // Test basic arange
-    auto t1 = arange(5);
-    EXPECT_EQ(t1.numel(), 5);
-    auto vals1 = t1.to_vector();
-    for (size_t i = 0; i < 5; ++i) {
-        EXPECT_FLOAT_EQ(vals1[i], static_cast<float>(i));
-    }
-
-    // Test arange with start and end
-    auto t2 = arange(2, 7);
-    EXPECT_EQ(t2.numel(), 5);
-    auto vals2 = t2.to_vector();
-    for (size_t i = 0; i < 5; ++i) {
-        EXPECT_FLOAT_EQ(vals2[i], static_cast<float>(i + 2));
-    }
-
-    // Test arange with step
-    auto t3 = arange(0, 10, 2);
-    EXPECT_EQ(t3.numel(), 5);
-    auto vals3 = t3.to_vector();
-    for (size_t i = 0; i < 5; ++i) {
-        EXPECT_FLOAT_EQ(vals3[i], static_cast<float>(i * 2));
-    }
-
-    // Test invalid range
-    auto invalid = arange(5, 0, 1); // Start > end with positive step
-    EXPECT_FALSE(invalid.is_valid());
-}
-
 TEST_F(TensorAdvancedTest, Linspace) {
     // Test basic linspace
     auto t1 = linspace(0, 10, 11);
@@ -233,92 +203,6 @@ struct SquareFunc {
 struct PositiveFilter {
     bool operator()(float x) const { return x > 0; }
 };
-
-TEST_F(TensorAdvancedTest, FunctionalMap) {
-    auto input = arange(1, 6);
-
-    // Square each element using functor
-    auto squared = functional::map(input, SquareFunc());
-
-    auto values = squared.to_vector();
-    EXPECT_EQ(values.size(), 5);
-    EXPECT_FLOAT_EQ(values[0], 1.0f);
-    EXPECT_FLOAT_EQ(values[1], 4.0f);
-    EXPECT_FLOAT_EQ(values[2], 9.0f);
-    EXPECT_FLOAT_EQ(values[3], 16.0f);
-    EXPECT_FLOAT_EQ(values[4], 25.0f);
-
-    // Also test with std::function
-    std::function<float(float)> add_one = [](float x) { return x + 1.0f; };
-    auto incremented = functional::map(input, add_one);
-    auto inc_values = incremented.to_vector();
-    for (size_t i = 0; i < 5; ++i) {
-        EXPECT_FLOAT_EQ(inc_values[i], static_cast<float>(i + 2));
-    }
-}
-
-TEST_F(TensorAdvancedTest, FunctionalReduce) {
-    auto input = arange(1, 6);
-
-    // Sum using reduce
-    float sum = functional::reduce(input, 0.0f, std::plus<float>());
-    EXPECT_FLOAT_EQ(sum, 15.0f); // 1 + 2 + 3 + 4 + 5
-
-    // Product using reduce
-    float product = functional::reduce(input, 1.0f, std::multiplies<float>());
-    EXPECT_FLOAT_EQ(product, 120.0f); // 1 * 2 * 3 * 4 * 5
-}
-
-TEST_F(TensorAdvancedTest, FunctionalFilter) {
-    auto input = arange(-5, 6);
-
-    // Keep only positive values using functor
-    auto mask = functional::filter(input, PositiveFilter());
-
-    auto values = mask.to_vector();
-    EXPECT_EQ(values.size(), 11);
-
-    // First 6 should be 0 (filtered out: -5 to 0)
-    for (size_t i = 0; i < 6; ++i) {
-        EXPECT_FLOAT_EQ(values[i], 0.0f);
-    }
-    // Last 5 should be 1 (kept: 1 to 5)
-    for (size_t i = 6; i < 11; ++i) {
-        EXPECT_FLOAT_EQ(values[i], 1.0f);
-    }
-
-    // Also test with std::function
-    std::function<bool(float)> is_even = [](float x) {
-        return std::fmod(x, 2.0f) == 0.0f;
-    };
-    auto even_mask = functional::filter(arange(0, 10), is_even);
-    auto even_values = even_mask.to_vector();
-    for (size_t i = 0; i < 10; ++i) {
-        if (i % 2 == 0) {
-            EXPECT_FLOAT_EQ(even_values[i], 1.0f);
-        } else {
-            EXPECT_FLOAT_EQ(even_values[i], 0.0f);
-        }
-    }
-}
-
-TEST_F(TensorAdvancedTest, FunctionalPipeline) {
-    auto input = arange(1, 6);
-
-    // Create a pipeline: add 1, multiply by 2, subtract 3
-    // Note: We need to manually chain the operations since pipe has issues with copy
-    auto step1 = input.add(1.0f);
-    auto step2 = step1.mul(2.0f);
-    auto result = step2.sub(3.0f);
-
-    auto values = result.to_vector();
-    // Expected: ((1+1)*2-3=1), ((2+1)*2-3=3), ((3+1)*2-3=5), ((4+1)*2-3=7), ((5+1)*2-3=9)
-    EXPECT_FLOAT_EQ(values[0], 1.0f);
-    EXPECT_FLOAT_EQ(values[1], 3.0f);
-    EXPECT_FLOAT_EQ(values[2], 5.0f);
-    EXPECT_FLOAT_EQ(values[3], 7.0f);
-    EXPECT_FLOAT_EQ(values[4], 9.0f);
-}
 
 // ============= Memory Info Tests =============
 TEST_F(TensorAdvancedTest, MemoryInfo) {

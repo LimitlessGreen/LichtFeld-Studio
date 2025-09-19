@@ -698,6 +698,20 @@ namespace gs::tensor_ops {
         pow_scalar_kernel<<<(n + 255) / 256, 256, 0, stream>>>(data, exponent, n);
     }
 
+    __global__ void int_to_float_kernel(const int* src, float* dst, size_t n) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            dst[idx] = static_cast<float>(src[idx]);
+        }
+    }
+
+    void launch_int_to_float(const int* src, float* dst, size_t n, cudaStream_t stream) {
+        if (n == 0) return;
+        int block_size = 256;
+        int grid_size = (n + block_size - 1) / block_size;
+        int_to_float_kernel<<<grid_size, block_size, 0, stream>>>(src, dst, n);
+    }
+
     // Legacy reduce operations - delegate to unified
     void launch_reduce_sum(const float* data, float* result, size_t n, cudaStream_t stream) {
         launch_reduce_op(data, result, &n, 1, nullptr, 0, false,
@@ -738,12 +752,33 @@ namespace gs::tensor_ops {
         }
     }
 
+    __global__ void fill_const_kernel(float* data, float value, size_t n) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            data[idx] = value;
+        }
+    }
     // Load operations stub
     void launch_load_op(void* output, const size_t* shape, size_t rank,
-                       LoadOp op, const void* args,
-                       DataType dtype, cudaStream_t stream) {
-        // This would handle various initialization patterns
-        // Implemented in tensor_load_ops.cpp for now
+                   LoadOp op, const void* args,
+                   DataType dtype, cudaStream_t stream) {
+        if (op == LoadOp::Const && dtype == DataType::Float32) {
+            float value = *static_cast<const float*>(args);
+
+            // Calculate total elements
+            size_t n = 1;
+            for (size_t i = 0; i < rank; ++i) {
+                n *= shape[i];
+            }
+
+            if (n > 0) {
+                int block_size = 256;
+                int grid_size = (n + block_size - 1) / block_size;
+                fill_const_kernel<<<grid_size, block_size, 0, stream>>>(
+                    static_cast<float*>(output), value, n);
+            }
+        }
+        // Handle other load operations...
     }
 
 } // namespace gs::tensor_ops

@@ -475,6 +475,27 @@ namespace gs {
         return batches;
     }
 
+float Tensor::item() const {
+    if (!is_valid() || numel() != 1) {
+        LOG_ERROR("item() requires a valid single-element tensor");
+        return 0.0f;
+    }
+
+    if (dtype_ != DataType::Float32) {
+        LOG_ERROR("item() only supports float32 tensors");
+        return 0.0f;
+    }
+
+    float value = 0.0f;
+    if (device_ == Device::CUDA) {
+        CHECK_CUDA(cudaMemcpy(&value, data_, sizeof(float), cudaMemcpyDeviceToHost));
+    } else {
+        value = *static_cast<const float*>(data_);
+    }
+
+    return value;
+}
+
     std::vector<float> Tensor::debug_values(size_t max_values) const {
         std::vector<float> values;
 
@@ -602,28 +623,47 @@ namespace gs {
                           [](float x) { return std::isinf(x); });
     }
 
-    bool Tensor::all_close(const Tensor& other, float rtol, float atol) const {
-        if (!is_valid() || !other.is_valid()) {
-            return false;
-        }
-
-        if (shape_ != other.shape_ || device_ != other.device_) {
-            return false;
-        }
-
-        auto a_values = to_vector();
-        auto b_values = other.to_vector();
-
-        for (size_t i = 0; i < a_values.size(); ++i) {
-            float diff = std::abs(a_values[i] - b_values[i]);
-            float tol = atol + rtol * std::abs(b_values[i]);
-            if (diff > tol) {
-                return false;
-            }
-        }
-
-        return true;
+bool Tensor::all_close(const Tensor& other, float rtol, float atol) const {
+    if (!is_valid() || !other.is_valid()) {
+        return false;
     }
+
+    if (shape_ != other.shape_ || device_ != other.device_ || dtype_ != other.dtype_) {
+        return false;
+    }
+
+    // We need to get the data to CPU for comparison
+    // Use pointers to avoid copying issues
+    const float* a_data = nullptr;
+    const float* b_data = nullptr;
+
+    // Create temporary CPU tensors if needed
+    Tensor a_temp, b_temp;
+
+    if (device_ == Device::CUDA) {
+        a_temp = to(Device::CPU);
+        a_data = a_temp.ptr<float>();
+    } else {
+        a_data = ptr<float>();
+    }
+
+    if (other.device() == Device::CUDA) {
+        b_temp = other.to(Device::CPU);
+        b_data = b_temp.ptr<float>();
+    } else {
+        b_data = other.ptr<float>();
+    }
+
+    for (size_t i = 0; i < numel(); ++i) {
+        float diff = std::abs(a_data[i] - b_data[i]);
+        float tol = atol + rtol * std::abs(b_data[i]);
+        if (diff > tol) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 #undef CHECK_CUDA
 

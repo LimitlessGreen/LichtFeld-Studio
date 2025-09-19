@@ -17,12 +17,11 @@ set(CORE_SOURCES
         tensor_ops.cpp          # Math operations with broadcasting support
         tensor_utils.cpp        # Utility functions
         tensor_matrix_ops.cpp   # Matrix operations (matmul, transpose, etc.)
-	    tensor_unified_ops.cpp
-	    tensor_movement_ops.cpp
-	    tensor_load_ops.cpp
+	tensor_unified_ops.cpp
+	tensor_movement_ops.cpp
         tensor_random_ops.cpp   # Random generation operations
         tensor_broadcast.cpp    # Broadcasting implementation
-	    tensor_shape_ops.cpp     # Shape functions
+	tensor_shape_ops.cpp     # Shape functions
         tensor_masking_ops.cpp  # Masking and indexing operations
         tinyply.cpp
 )

@@ -183,6 +183,8 @@ namespace gs::tensor_ops {
     void launch_clamp(float* data, float min_val, float max_val, size_t n, cudaStream_t stream);
     void launch_logit(const float* input, float* output, size_t n, float eps, cudaStream_t stream);
     void launch_pow_scalar(float* data, float exponent, size_t n, cudaStream_t stream);
+    void launch_int_to_float(const int* src, float* dst, size_t n, cudaStream_t stream);
+
 
     void launch_reduce_sum(const float* data, float* result, size_t n, cudaStream_t stream);
     void launch_reduce_mean(const float* data, float* result, size_t n, cudaStream_t stream);

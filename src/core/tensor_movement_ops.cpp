@@ -47,7 +47,20 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
                     new_shape[infer_dim] = numel() / known_size;
                 }
 
-                return reshape(TensorShape(new_shape));
+                // Check if total elements match
+                size_t total = 1;
+                for (auto d : new_shape) {
+                    total *= d;
+                }
+
+                if (total != numel()) {
+                    LOG_ERROR("View shape {} has {} elements, but tensor has {} elements",
+                              TensorShape(new_shape).str(), total, numel());
+                    return {};
+                }
+
+                // Create a view that shares memory (non-owning)
+                return Tensor(data_, TensorShape(new_shape), device_, dtype_);
             }
             LOG_ERROR("Reshape requires vector<int> args");
             return {};
@@ -115,12 +128,9 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
                         LOG_ERROR("Invalid squeeze dimension");
                         return {};
                     }
-                    if (shape_[resolved] != 1) {
-                        LOG_ERROR("Cannot squeeze dimension {} with size {}", resolved, shape_[resolved]);
-                        return {};
-                    }
+                    // Only squeeze if dimension is 1
                     for (size_t i = 0; i < shape_.rank(); ++i) {
-                        if (i != static_cast<size_t>(resolved)) {
+                        if (i != static_cast<size_t>(resolved) || shape_[i] != 1) {
                             new_shape.push_back(shape_[i]);
                         }
                     }
@@ -128,7 +138,9 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
                 if (new_shape.empty()) {
                     new_shape.push_back(1); // Scalar
                 }
-                return reshape(TensorShape(new_shape));
+
+                // Create a view that shares memory
+                return Tensor(data_, TensorShape(new_shape), device_, dtype_);
             }
             LOG_ERROR("Squeeze requires int dim arg");
             return {};
@@ -154,7 +166,8 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
                     new_shape.push_back(shape_[i]);
                 }
 
-                return reshape(TensorShape(new_shape));
+                // Create a view that shares memory
+                return Tensor(data_, TensorShape(new_shape), device_, dtype_);
             }
             LOG_ERROR("Unsqueeze requires int dim arg");
             return {};
@@ -187,10 +200,11 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
                     new_shape.push_back(shape_[i]);
                 }
 
-                return reshape(TensorShape(new_shape));
+                // Create a view that shares memory
+                return Tensor(data_, TensorShape(new_shape), device_, dtype_);
             }
             // Default flatten (all dimensions)
-            return reshape(TensorShape({numel()}));
+            return Tensor(data_, TensorShape({numel()}), device_, dtype_);
         }
 
         case MovementOp::Slice: {

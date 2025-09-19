@@ -51,14 +51,12 @@ namespace gs::tensor_ops {
         }
     }
 
-    // Random integer generation
     __global__ void randint_kernel(int* data, size_t n, int low, int high,
                                    unsigned long long seed) {
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
         if (idx < n) {
             curandState state;
-            // CRITICAL FIX: Add thread index to seed for different sequence per thread
             curand_init(seed + idx, 0, 0, &state);
 
             // Generate uniform [0, 1) and scale to [low, high)
@@ -66,9 +64,9 @@ namespace gs::tensor_ops {
             int range = high - low;
 
             // Properly scale to integer range [low, high)
-            int result = low + static_cast<int>(floorf(val * range));
+            int result = low + static_cast<int>(val * range);
 
-            // Clamp to ensure we're in bounds (safety check)
+            // Ensure we're within bounds
             if (result >= high) {
                 result = high - 1;
             }

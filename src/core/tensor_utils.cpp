@@ -219,19 +219,19 @@ namespace gs::tensor {
 
     // ============= Like Operations =============
     Tensor zeros_like(const Tensor& other) {
-        return Tensor::zeros(other.shape(), other.device());
+        return Tensor::zeros(other.shape(), other.device(), other.dtype());
     }
 
     Tensor ones_like(const Tensor& other) {
-        return Tensor::ones(other.shape(), other.device());
+        return Tensor::ones(other.shape(), other.device(), other.dtype());
     }
 
     Tensor rand_like(const Tensor& other) {
-        return Tensor::rand(other.shape(), other.device());
+        return Tensor::rand(other.shape(), other.device(), other.dtype());
     }
 
     Tensor randn_like(const Tensor& other) {
-        return Tensor::randn(other.shape(), other.device());
+        return Tensor::randn(other.shape(), other.device(), other.dtype());
     }
 
     // ============= Utility Functions =============
