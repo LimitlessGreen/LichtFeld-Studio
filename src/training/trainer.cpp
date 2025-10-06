@@ -950,6 +950,8 @@ namespace gs::training {
                 {
                     std::unique_lock<std::shared_mutex> lock(render_mutex_);
 
+                    strategy_->post_backward(iter, r_output);
+
                     check_memory("before strategy->step");
 
                     strategy_->step(iter);

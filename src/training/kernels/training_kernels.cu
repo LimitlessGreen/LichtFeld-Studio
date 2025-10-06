@@ -5,8 +5,145 @@
 #include <algorithm>
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
+#include <curand_kernel.h>
 
 namespace gs::training {
+
+    __global__ void generate_normal_noise_kernel(
+        float* noise,
+        int n_elements,
+        unsigned long long seed) {
+
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx >= n_elements)
+            return;
+
+        curandState state;
+        curand_init(seed, idx, 0, &state);
+        noise[idx] = curand_normal(&state);
+    }
+
+    void launch_generate_normal_noise(
+        float* noise_buffer,
+        size_t num_elements,
+        unsigned long long seed,
+        cudaStream_t stream) {
+
+        int block_size = 256;
+        int grid_size = (num_elements + block_size - 1) / block_size;
+
+        generate_normal_noise_kernel<<<grid_size, block_size, 0, stream>>>(
+            noise_buffer, num_elements, seed);
+    }
+
+    __device__ inline void raw_quat_to_rotmat(
+        const float* raw_quat,
+        float* R) {
+
+        float w = raw_quat[0], x = raw_quat[1], y = raw_quat[2], z = raw_quat[3];
+
+        float inv_norm = rsqrtf(x * x + y * y + z * z + w * w);
+        inv_norm = fminf(inv_norm, 1e+12f);
+        x *= inv_norm;
+        y *= inv_norm;
+        z *= inv_norm;
+        w *= inv_norm;
+
+        float x2 = x * x, y2 = y * y, z2 = z * z;
+        float xy = x * y, xz = x * z, yz = y * z;
+        float wx = w * x, wy = w * y, wz = w * z;
+
+        R[0] = 1.f - 2.f * (y2 + z2);
+        R[1] = 2.f * (xy - wz);
+        R[2] = 2.f * (xz + wy);
+
+        R[3] = 2.f * (xy + wz);
+        R[4] = 1.f - 2.f * (x2 + z2);
+        R[5] = 2.f * (yz - wx);
+
+        R[6] = 2.f * (xz - wy);
+        R[7] = 2.f * (yz + wx);
+        R[8] = 1.f - 2.f * (x2 + y2);
+    }
+
+    __global__ void inject_noise_kernel(
+        const float* raw_opacities,
+        const float* raw_scales,
+        const float* raw_quats,
+        const float* noise,
+        float* means,
+        int N,
+        float current_lr) {
+
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx >= N)
+            return;
+
+        int idx_3d = 3 * idx;
+        int idx_4d = 4 * idx;
+
+        float scale_x = raw_scales[idx_3d + 0];
+        float scale_y = raw_scales[idx_3d + 1];
+        float scale_z = raw_scales[idx_3d + 2];
+
+        float s2_x = expf(2.f * scale_x);
+        float s2_y = expf(2.f * scale_y);
+        float s2_z = expf(2.f * scale_z);
+
+        float R[9];
+        raw_quat_to_rotmat(raw_quats + idx_4d, R);
+
+        float S2R[9];
+        S2R[0] = s2_x * R[0]; S2R[1] = s2_x * R[3]; S2R[2] = s2_x * R[6];
+        S2R[3] = s2_y * R[1]; S2R[4] = s2_y * R[4]; S2R[5] = s2_y * R[7];
+        S2R[6] = s2_z * R[2]; S2R[7] = s2_z * R[5]; S2R[8] = s2_z * R[8];
+
+        float cov[9];
+        cov[0] = R[0] * S2R[0] + R[1] * S2R[3] + R[2] * S2R[6];
+        cov[1] = R[0] * S2R[1] + R[1] * S2R[4] + R[2] * S2R[7];
+        cov[2] = R[0] * S2R[2] + R[1] * S2R[5] + R[2] * S2R[8];
+
+        cov[3] = R[3] * S2R[0] + R[4] * S2R[3] + R[5] * S2R[6];
+        cov[4] = R[3] * S2R[1] + R[4] * S2R[4] + R[5] * S2R[7];
+        cov[5] = R[3] * S2R[2] + R[4] * S2R[5] + R[5] * S2R[8];
+
+        cov[6] = R[6] * S2R[0] + R[7] * S2R[3] + R[8] * S2R[6];
+        cov[7] = R[6] * S2R[1] + R[7] * S2R[4] + R[8] * S2R[7];
+        cov[8] = R[6] * S2R[2] + R[7] * S2R[5] + R[8] * S2R[8];
+
+        float noise_x = noise[idx_3d + 0];
+        float noise_y = noise[idx_3d + 1];
+        float noise_z = noise[idx_3d + 2];
+
+        float transformed_x = cov[0] * noise_x + cov[1] * noise_y + cov[2] * noise_z;
+        float transformed_y = cov[3] * noise_x + cov[4] * noise_y + cov[5] * noise_z;
+        float transformed_z = cov[6] * noise_x + cov[7] * noise_y + cov[8] * noise_z;
+
+        float opacity = 1.f / (1.f + expf(-raw_opacities[idx]));
+        float op_sigmoid = 1.f / (1.f + expf(100.f * opacity - 0.5f));
+        float noise_factor = current_lr * op_sigmoid;
+
+        means[idx_3d + 0] += noise_factor * transformed_x;
+        means[idx_3d + 1] += noise_factor * transformed_y;
+        means[idx_3d + 2] += noise_factor * transformed_z;
+    }
+
+    void launch_inject_noise_to_gaussians(
+        float* raw_opacities,
+        float* raw_scales,
+        float* raw_quats,
+        const float* noise,
+        float* means,
+        int N,
+        float current_lr,
+        cudaStream_t stream) {
+
+        int block_size = 256;
+        int grid_size = (N + block_size - 1) / block_size;
+
+        inject_noise_kernel<<<grid_size, block_size, 0, stream>>>(
+            raw_opacities, raw_scales, raw_quats, noise, means, N, current_lr);
+    }
 
     __global__ void background_blend_kernel(
         float* output,

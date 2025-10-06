@@ -9,6 +9,7 @@
 #include "optimizers/scheduler.hpp"
 #include <memory>
 #include <torch/torch.h>
+#include "cuda_memory.hpp"
 
 namespace gs::training {
     class MCMC : public IStrategy {
@@ -62,7 +63,7 @@ namespace gs::training {
 
         // MCMC specific parameters
         const float _noise_lr = 5e5;
-        torch::Tensor noise_buffer_;
+        CUDABuffer noise_buffer_;
         // State variables
         torch::Tensor _binoms;
 

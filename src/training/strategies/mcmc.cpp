@@ -10,6 +10,8 @@
 #include "optimizers/scheduler.hpp"
 #include "rasterization/rasterizer.hpp"
 #include "strategy_utils.hpp"
+#include "training_kernels.cuh"
+#include <chrono>
 #include <iostream>
 #include <random>
 
@@ -276,43 +278,60 @@ namespace gs::training {
             _optimizer->set_lr(old_lrs[i], i);
         }
 
-        noise_buffer_ = torch::empty_like(_splat_data.means());
+        // Reallocate noise buffer for new size
+        noise_buffer_.allocate(_splat_data.size() * 3);
+
         return n_new;
     }
 
     void MCMC::inject_noise() {
-        torch::NoGradGuard no_grad;
-
         // Get current learning rate from optimizer (after scheduler has updated it)
         double current_lr = _optimizer->get_lr(0) * _noise_lr;
 
-        // Generate noise
-        noise_buffer_.normal_(0.0f, 1.0f);
+        int N = _splat_data.size();
+        size_t noise_elements = N * 3; // [N, 3]
 
-        gsplat::add_noise(
-            _splat_data.opacity_raw(),
-            _splat_data.scaling_raw(),
-            _splat_data.rotation_raw(),
-            noise_buffer_,
-            _splat_data.means(),
-            static_cast<float>(current_lr));
+        // Ensure noise buffer is allocated
+        noise_buffer_.allocate(noise_elements);
+
+        // Generate random seed from current time
+        unsigned long long seed = std::chrono::steady_clock::now().time_since_epoch().count();
+
+        // Generate normal distribution noise
+        launch_generate_normal_noise(
+            noise_buffer_.data(),
+            noise_elements,
+            seed,
+            0); // default stream
+
+        // Inject noise to gaussians
+        launch_inject_noise_to_gaussians(
+            _splat_data.opacity_raw_cuda_ptr(),
+            _splat_data.scaling_raw_cuda_ptr(),
+            _splat_data.rotation_raw_cuda_ptr(),
+            noise_buffer_.data(),
+            _splat_data.means_cuda_ptr(),
+            N,
+            static_cast<float>(current_lr),
+            0); // default stream
+
+        cudaDeviceSynchronize(); // Ensure completion
     }
 
     void MCMC::post_backward(int iter, RenderOutput& render_output) {
         // Increment SH degree every 1000 iterations
-        torch::NoGradGuard no_grad;
         if (iter % _params->sh_degree_interval == 0) {
             _splat_data.increment_sh_degree();
         }
 
         // Refine Gaussians
-        if (is_refining(iter)) {
-            // Relocate dead Gaussians
-            relocate_gs();
+        //if (is_refining(iter)) {
+        //    // Relocate dead Gaussians
+        //    relocate_gs();
 
-            // Add new Gaussians
-            add_new_gs();
-        }
+        //    // Add new Gaussians
+        //    add_new_gs();
+        //}
 
         // Inject noise to positions
         inject_noise();
@@ -361,7 +380,9 @@ namespace gs::training {
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
-        noise_buffer_ = torch::empty_like(_splat_data.means());
+
+        // Reallocate noise buffer for new size
+        noise_buffer_.allocate(_splat_data.size() * 3);
     }
 
     void MCMC::initialize(const gs::param::OptimizationParameters& optimParams) {
@@ -379,7 +400,9 @@ namespace gs::training {
         _splat_data.sh0() = _splat_data.sh0().to(dev);
         _splat_data.shN() = _splat_data.shN().to(dev);
         _splat_data._densification_info = torch::empty({0});
-        noise_buffer_ = torch::empty_like(_splat_data.means());
+
+        // Initialize noise buffer
+        noise_buffer_.allocate(_splat_data.size() * 3);
 
         // Pre-allocate gradients (without autograd)
         _splat_data.ensure_grad_allocated();

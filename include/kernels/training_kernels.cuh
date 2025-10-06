@@ -8,6 +8,22 @@
 
 namespace gs::training {
 
+    void launch_generate_normal_noise(
+        float* noise_buffer,
+        size_t num_elements,
+        unsigned long long seed,
+        cudaStream_t stream);
+
+    void launch_inject_noise_to_gaussians(
+        float* raw_opacities,
+        float* raw_scales,
+        float* raw_quats,
+        const float* noise,
+        float* means,
+        int N,
+        float current_lr,
+        cudaStream_t stream);
+
     // Background computation
     void launch_compute_sine_background(
         float* output,
