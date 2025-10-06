@@ -61,6 +61,8 @@ namespace gs::tensor_ops {
     // Type conversions
     void launch_bool_to_float(const unsigned char* src, float* dst, size_t n, cudaStream_t stream);
     void launch_float_to_bool(const float* src, unsigned char* dst, size_t n, cudaStream_t stream);
+    void launch_float_to_int(const float* src, int* dst, size_t n, cudaStream_t stream);
+    void launch_int_to_float(const int* src, float* dst, size_t n, cudaStream_t stream);
 
     // Broadcasting
     void launch_broadcast(const float* src, float* dst,
@@ -172,6 +174,10 @@ namespace gs::tensor_ops {
 
     void launch_nonzero_bool(const unsigned char* data, int64_t* indices,
                              size_t n, size_t output_size, cudaStream_t stream);
+
+    // ============= Cumulative sum operation =============
+    void launch_cumsum(void* data, const size_t* shape, size_t rank,
+                      int dim, DataType dtype, cudaStream_t stream);
 
     // ============= Legacy operations (to be phased out) =============
     void launch_abs(float* data, size_t n, cudaStream_t stream);

@@ -22,6 +22,7 @@
 #include <variant>
 #include <tuple>
 #include <limits>
+#include <array>
 
 namespace gs {
 
@@ -313,6 +314,57 @@ namespace gs {
         Tensor& operator=(const Tensor&) = delete;
         ~Tensor();
 
+        // ============= Multi-dimensional accessor for CPU tensors =============
+        template<typename T, size_t N>
+        class TensorAccessor {
+        private:
+            T* data_;
+            std::array<size_t, N> sizes_;
+            std::array<size_t, N> strides_;
+
+        public:
+            TensorAccessor(T* data, const std::array<size_t, N>& sizes)
+                : data_(data), sizes_(sizes) {
+                // Compute strides (row-major)
+                strides_[N-1] = 1;
+                for (int i = N-2; i >= 0; --i) {
+                    strides_[i] = strides_[i+1] * sizes_[i+1];
+                }
+            }
+
+            template<typename... Indices>
+            T& operator()(Indices... indices) {
+                static_assert(sizeof...(Indices) == N, "Wrong number of indices");
+                std::array<size_t, N> idx_array{static_cast<size_t>(indices)...};
+                size_t offset = 0;
+                for (size_t i = 0; i < N; ++i) {
+                    offset += idx_array[i] * strides_[i];
+                }
+                return data_[offset];
+            }
+
+            const std::array<size_t, N>& sizes() const { return sizes_; }
+        };
+
+        template<typename T, size_t N>
+TensorAccessor<T, N> accessor() {
+            if (device_ != Device::CPU) {
+                LOG_ERROR("accessor() only works on CPU tensors");
+                return TensorAccessor<T, N>(nullptr, std::array<size_t, N>{});
+            }
+            if (shape_.rank() != N) {
+                LOG_ERROR("accessor() dimension mismatch: tensor has {} dims, requested {}",
+                         shape_.rank(), N);
+                return TensorAccessor<T, N>(nullptr, std::array<size_t, N>{});
+            }
+
+            std::array<size_t, N> sizes;
+            for (size_t i = 0; i < N; ++i) {
+                sizes[i] = shape_[i];
+            }
+            return TensorAccessor<T, N>(ptr<T>(), sizes);
+        }
+
         // ============= CORE UNIFIED OPERATIONS =============
         static Tensor load(LoadOp op, const LoadArgs& args);
         Tensor movement(MovementOp op, const MovementArgs& args) const;
@@ -533,6 +585,10 @@ namespace gs {
         Tensor to(Device device) const;
         Tensor to(DataType dtype) const;
         bool is_contiguous() const { return true; }
+
+        // Convenience device conversion
+        Tensor cpu() const { return to(Device::CPU); }
+        Tensor cuda() const { return to(Device::CUDA); }
 
         // ============= SHAPE OPERATIONS =============
         Tensor reshape(std::span<const int> sizes) const {
@@ -756,6 +812,9 @@ namespace gs {
             return reduce(ReduceOp::Argmin, args);
         }
 
+        // Cumulative sum
+        Tensor cumsum(int dim = 0) const;
+
         // Scalar reduce operations
         float sum_scalar() const { return sum().item(); }
         float mean_scalar() const { return mean().item(); }
@@ -767,6 +826,24 @@ namespace gs {
 
         float norm(float p = 2.0f) const;
         float item() const;
+
+        // Template version of item()
+        template<typename T>
+        T item() const {
+            if (!is_valid() || numel() != 1) {
+                LOG_ERROR("item<T>() requires a valid single-element tensor");
+                return T{};
+            }
+
+            T value{};
+            if (device_ == Device::CUDA) {
+                cudaMemcpy(&value, data_, sizeof(T), cudaMemcpyDeviceToHost);
+            } else {
+                value = *static_cast<const T*>(data_);
+            }
+            return value;
+        }
+
         size_t count_nonzero() const;
 
         // ============= TERNARY OPERATIONS =============
@@ -785,6 +862,11 @@ namespace gs {
         Tensor clamp_max(float max) const {
             return clamp(std::numeric_limits<float>::lowest(), max);
         }
+
+        // In-place clamp operations
+        Tensor& clamp_(float min_val, float max_val);
+        Tensor& clamp_min_(float min);
+        Tensor& clamp_max_(float max);
 
         // In-place operations
         Tensor& add_(const Tensor& other) { return binary_op_inplace_impl(other, BinaryOp::Add); }
@@ -878,6 +960,12 @@ namespace gs {
         Tensor operator&&(const Tensor& other) const { return logical_and(other); }
         Tensor operator||(const Tensor& other) const { return logical_or(other); }
         Tensor operator!() const { return logical_not(); }
+
+        // Bitwise NOT for boolean tensors
+        Tensor operator~() const;
+
+        // Bitwise OR for boolean tensors
+        Tensor operator|(const Tensor& other) const;
 
         // Other in-place operations
         Tensor& zero_();
@@ -998,6 +1086,7 @@ namespace gs {
 
         Tensor zeros_like(const Tensor& other);
         Tensor ones_like(const Tensor& other);
+        Tensor ones_like(const Tensor& other, DataType dtype);
         Tensor rand_like(const Tensor& other);
         Tensor randn_like(const Tensor& other);
 

@@ -226,6 +226,11 @@ namespace gs::tensor {
         return Tensor::ones(other.shape(), other.device(), other.dtype());
     }
 
+    // NEW: ones_like with dtype parameter
+    Tensor ones_like(const Tensor& other, DataType dtype) {
+        return Tensor::ones(other.shape(), other.device(), dtype);
+    }
+
     Tensor rand_like(const Tensor& other) {
         return Tensor::rand(other.shape(), other.device(), other.dtype());
     }

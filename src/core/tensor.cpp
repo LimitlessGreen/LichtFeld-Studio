@@ -202,6 +202,52 @@ namespace gs {
             return result;
         }
 
+        // Support Float32 -> Int32 conversion
+        if (dtype_ == DataType::Float32 && dtype == DataType::Int32) {
+            auto result = empty(shape_, device_, DataType::Int32);
+
+            if (numel() == 0) {
+                return result;
+            }
+
+            if (device_ == Device::CUDA) {
+                tensor_ops::launch_float_to_int(ptr<float>(), result.ptr<int>(),
+                                               numel(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                const float* src = ptr<float>();
+                int* dst = result.ptr<int>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = static_cast<int>(src[i]);
+                }
+            }
+
+            return result;
+        }
+
+        // Support Int32 -> Float32 conversion
+        if (dtype_ == DataType::Int32 && dtype == DataType::Float32) {
+            auto result = empty(shape_, device_, DataType::Float32);
+
+            if (numel() == 0) {
+                return result;
+            }
+
+            if (device_ == Device::CUDA) {
+                tensor_ops::launch_int_to_float(ptr<int>(), result.ptr<float>(),
+                                               numel(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                const int* src = ptr<int>();
+                float* dst = result.ptr<float>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = static_cast<float>(src[i]);
+                }
+            }
+
+            return result;
+        }
+
         LOG_ERROR("Type conversion from {} to {} not implemented",
                   dtype_name(dtype_), dtype_name(dtype));
         return Tensor();
@@ -267,6 +313,149 @@ namespace gs {
         auto x_clamped = clamp(eps, 1.0f - eps);
         auto one_minus_x = full(shape_, 1.0f, device_, dtype_).sub(x_clamped);
         return x_clamped.div(one_minus_x).log();
+    }
+
+    // ============= NEW: Bitwise NOT =============
+    Tensor Tensor::operator~() const {
+        if (dtype_ != DataType::Bool) {
+            LOG_ERROR("Bitwise NOT only works on boolean tensors");
+            return Tensor();
+        }
+
+        auto result = empty(shape_, device_, DataType::Bool);
+
+        if (device_ == Device::CUDA) {
+            tensor_ops::launch_unary_op(data_, result.data_, numel(),
+                                       UnaryOp::LogicalNot, dtype_, nullptr);
+            cudaDeviceSynchronize();
+        } else {
+            const unsigned char* src = ptr<unsigned char>();
+            unsigned char* dst = result.ptr<unsigned char>();
+            for (size_t i = 0; i < numel(); ++i) {
+                dst[i] = !src[i];
+            }
+        }
+
+        return result;
+    }
+
+    // ============= NEW: Bitwise OR =============
+    Tensor Tensor::operator|(const Tensor& other) const {
+        if (dtype_ != DataType::Bool || other.dtype() != DataType::Bool) {
+            LOG_ERROR("Bitwise OR only works on boolean tensors");
+            return Tensor();
+        }
+
+        return binary_op_impl(other, BinaryOp::BitwiseOr);
+    }
+
+    // ============= NEW: In-place clamp operations =============
+    Tensor& Tensor::clamp_(float min_val, float max_val) {
+        if (!is_valid() || dtype_ != DataType::Float32) {
+            return *this;
+        }
+
+        if (device_ == Device::CUDA) {
+            // Use ternary clamp operation
+            auto min_t = full({1}, min_val, device_, dtype_);
+            auto max_t = full({1}, max_val, device_, dtype_);
+
+            tensor_ops::launch_ternary_op(data_, min_t.raw_ptr(), max_t.raw_ptr(),
+                                         data_, numel(), TernaryOp::Clamp,
+                                         dtype_, nullptr);
+            cudaDeviceSynchronize();
+        } else {
+            float* data = ptr<float>();
+            for (size_t i = 0; i < numel(); ++i) {
+                data[i] = std::clamp(data[i], min_val, max_val);
+            }
+        }
+
+        return *this;
+    }
+
+    Tensor& Tensor::clamp_min_(float min) {
+        return clamp_(min, std::numeric_limits<float>::max());
+    }
+
+    Tensor& Tensor::clamp_max_(float max) {
+        return clamp_(std::numeric_limits<float>::lowest(), max);
+    }
+
+    // ============= NEW: Cumulative sum =============
+    Tensor Tensor::cumsum(int dim) const {
+        if (!is_valid()) {
+            LOG_ERROR("cumsum on invalid tensor");
+            return Tensor();
+        }
+
+        dim = resolve_dim(dim);
+        if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
+            LOG_ERROR("Invalid dimension for cumsum: {}", dim);
+            return Tensor();
+        }
+
+        auto result = clone();
+
+        if (device_ == Device::CUDA) {
+            // Use CUDA kernel for cumulative sum
+            tensor_ops::launch_cumsum(result.raw_ptr(), shape_.dims().data(),
+                                     shape_.rank(), dim, dtype_, nullptr);
+            cudaDeviceSynchronize();
+        } else {
+            // CPU implementation
+            if (dtype_ == DataType::Float32) {
+                float* data = result.ptr<float>();
+
+                // Calculate stride for the dimension
+                size_t stride = 1;
+                for (size_t i = dim + 1; i < shape_.rank(); ++i) {
+                    stride *= shape_[i];
+                }
+
+                size_t outer_size = 1;
+                for (size_t i = 0; i < static_cast<size_t>(dim); ++i) {
+                    outer_size *= shape_[i];
+                }
+
+                size_t dim_size = shape_[dim];
+
+                // Cumulative sum along dimension
+                for (size_t o = 0; o < outer_size; ++o) {
+                    for (size_t s = 0; s < stride; ++s) {
+                        size_t base = o * dim_size * stride + s;
+                        for (size_t d = 1; d < dim_size; ++d) {
+                            data[base + d * stride] += data[base + (d-1) * stride];
+                        }
+                    }
+                }
+            } else if (dtype_ == DataType::Int32) {
+                int* data = result.ptr<int>();
+
+                size_t stride = 1;
+                for (size_t i = dim + 1; i < shape_.rank(); ++i) {
+                    stride *= shape_[i];
+                }
+
+                size_t outer_size = 1;
+                for (size_t i = 0; i < static_cast<size_t>(dim); ++i) {
+                    outer_size *= shape_[i];
+                }
+
+                size_t dim_size = shape_[dim];
+
+                for (size_t o = 0; o < outer_size; ++o) {
+                    for (size_t s = 0; s < stride; ++s) {
+                        size_t base = o * dim_size * stride + s;
+                        for (size_t d = 1; d < dim_size; ++d) {
+                            data[base + d * stride] += data[base + (d-1) * stride];
+                        }
+                    }
+                }
+            }
+        }
+
+        return result;
     }
 
     // ============= TensorShape Implementation =============
@@ -475,26 +664,26 @@ namespace gs {
         return batches;
     }
 
-float Tensor::item() const {
-    if (!is_valid() || numel() != 1) {
-        LOG_ERROR("item() requires a valid single-element tensor");
-        return 0.0f;
-    }
+    float Tensor::item() const {
+        if (!is_valid() || numel() != 1) {
+            LOG_ERROR("item() requires a valid single-element tensor");
+            return 0.0f;
+        }
 
-    if (dtype_ != DataType::Float32) {
-        LOG_ERROR("item() only supports float32 tensors");
-        return 0.0f;
-    }
+        if (dtype_ != DataType::Float32) {
+            LOG_ERROR("item() only supports float32 tensors");
+            return 0.0f;
+        }
 
-    float value = 0.0f;
-    if (device_ == Device::CUDA) {
-        CHECK_CUDA(cudaMemcpy(&value, data_, sizeof(float), cudaMemcpyDeviceToHost));
-    } else {
-        value = *static_cast<const float*>(data_);
-    }
+        float value = 0.0f;
+        if (device_ == Device::CUDA) {
+            CHECK_CUDA(cudaMemcpy(&value, data_, sizeof(float), cudaMemcpyDeviceToHost));
+        } else {
+            value = *static_cast<const float*>(data_);
+        }
 
-    return value;
-}
+        return value;
+    }
 
     std::vector<float> Tensor::debug_values(size_t max_values) const {
         std::vector<float> values;
@@ -628,12 +817,17 @@ bool Tensor::all_close(const Tensor& other, float rtol, float atol) const {
         return false;
     }
 
-    if (shape_ != other.shape_ || device_ != other.device_ || dtype_ != other.dtype_) {
+    // Check shape and dtype match (but not device - we handle that below)
+    if (shape_ != other.shape_ || dtype_ != other.dtype_) {
         return false;
     }
 
+    // Handle empty tensors
+    if (numel() == 0) {
+        return true;  // Two empty tensors with same shape are considered close
+    }
+
     // We need to get the data to CPU for comparison
-    // Use pointers to avoid copying issues
     const float* a_data = nullptr;
     const float* b_data = nullptr;
 
@@ -654,6 +848,12 @@ bool Tensor::all_close(const Tensor& other, float rtol, float atol) const {
         b_data = other.ptr<float>();
     }
 
+    // Check if pointers are valid
+    if (!a_data || !b_data) {
+        return false;
+    }
+
+    // Compare values with tolerance
     for (size_t i = 0; i < numel(); ++i) {
         float diff = std::abs(a_data[i] - b_data[i]);
         float tol = atol + rtol * std::abs(b_data[i]);

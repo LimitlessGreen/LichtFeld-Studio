@@ -3,7 +3,26 @@
 
 #include "core/tensor_ops.hpp"
 #include "core/cuda_memory_guard.hpp"
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
 #include <cub/cub.cuh>
+#include <cfloat>
+#include <limits>
+
+// Thrust headers
+#include <thrust/device_ptr.h>
+#include <thrust/transform.h>
+#include <thrust/copy.h>
+#include <thrust/count.h>
+#include <thrust/gather.h>
+#include <thrust/scatter.h>
+#include <thrust/scan.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
+#include <thrust/iterator/zip_iterator.h>
+#include <thrust/tuple.h>
+#include <thrust/functional.h>
+#include <thrust/execution_policy.h>
 
 namespace gs::tensor_ops {
 
@@ -35,7 +54,8 @@ __device__ inline size_t compute_broadcast_index(
     return src_idx;
 }
 
-// ============= Comparison Kernels =============
+// ============= Comparison Kernels (with broadcasting) =============
+// These need custom kernels for broadcasting support
 __global__ void compare_eq_kernel(const float* a, const float* b, unsigned char* c,
                                   const size_t* shapes, size_t info, size_t total) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -93,23 +113,69 @@ __global__ void compare_gt_kernel(const float* a, const float* b, unsigned char*
     }
 }
 
-// Scalar comparison kernels
-__global__ void compare_scalar_eq_kernel(const float* a, float val, unsigned char* r, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) r[idx] = (a[idx] == val) ? 1 : 0;
+// ============= Scalar comparison functors =============
+struct CompareScalarEqFunctor {
+    float val;
+    CompareScalarEqFunctor(float v) : val(v) {}
+    __host__ __device__ unsigned char operator()(float x) const {
+        return (x == val) ? 1 : 0;
+    }
+};
+
+struct CompareScalarLtFunctor {
+    float val;
+    CompareScalarLtFunctor(float v) : val(v) {}
+    __host__ __device__ unsigned char operator()(float x) const {
+        return (x < val) ? 1 : 0;
+    }
+};
+
+struct CompareScalarGtFunctor {
+    float val;
+    CompareScalarGtFunctor(float v) : val(v) {}
+    __host__ __device__ unsigned char operator()(float x) const {
+        return (x > val) ? 1 : 0;
+    }
+};
+
+// Scalar comparison kernels using Thrust
+void launch_compare_scalar_eq(const float* a, float val, unsigned char* r, size_t n, cudaStream_t s) {
+    auto a_ptr = thrust::device_pointer_cast(a);
+    auto r_ptr = thrust::device_pointer_cast(r);
+
+    thrust::transform(
+        thrust::cuda::par.on(s),
+        a_ptr, a_ptr + n,
+        r_ptr,
+        CompareScalarEqFunctor(val)
+    );
 }
 
-__global__ void compare_scalar_lt_kernel(const float* a, float val, unsigned char* r, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) r[idx] = (a[idx] < val) ? 1 : 0;
+void launch_compare_scalar_lt(const float* a, float val, unsigned char* r, size_t n, cudaStream_t s) {
+    auto a_ptr = thrust::device_pointer_cast(a);
+    auto r_ptr = thrust::device_pointer_cast(r);
+
+    thrust::transform(
+        thrust::cuda::par.on(s),
+        a_ptr, a_ptr + n,
+        r_ptr,
+        CompareScalarLtFunctor(val)
+    );
 }
 
-__global__ void compare_scalar_gt_kernel(const float* a, float val, unsigned char* r, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) r[idx] = (a[idx] > val) ? 1 : 0;
+void launch_compare_scalar_gt(const float* a, float val, unsigned char* r, size_t n, cudaStream_t s) {
+    auto a_ptr = thrust::device_pointer_cast(a);
+    auto r_ptr = thrust::device_pointer_cast(r);
+
+    thrust::transform(
+        thrust::cuda::par.on(s),
+        a_ptr, a_ptr + n,
+        r_ptr,
+        CompareScalarGtFunctor(val)
+    );
 }
 
-// ============= Logical Operation Kernels =============
+// ============= Logical Operation Kernels (with broadcasting) =============
 __global__ void logical_and_kernel(const unsigned char* a, const unsigned char* b,
                                    unsigned char* c, const size_t* shapes,
                                    size_t info, size_t total) {
@@ -170,12 +236,26 @@ __global__ void logical_xor_kernel(const unsigned char* a, const unsigned char* 
     }
 }
 
-__global__ void logical_not_kernel(const unsigned char* a, unsigned char* r, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) r[idx] = !a[idx];
+// Logical NOT using Thrust
+struct LogicalNotFunctor {
+    __host__ __device__ unsigned char operator()(unsigned char x) const {
+        return !x;
+    }
+};
+
+void launch_logical_not(const unsigned char* a, unsigned char* r, size_t n, cudaStream_t s) {
+    auto a_ptr = thrust::device_pointer_cast(a);
+    auto r_ptr = thrust::device_pointer_cast(r);
+
+    thrust::transform(
+        thrust::cuda::par.on(s),
+        a_ptr, a_ptr + n,
+        r_ptr,
+        LogicalNotFunctor()
+    );
 }
 
-// ============= Launch Functions =============
+// ============= Launch Functions for Comparison/Logical Ops =============
 void launch_compare_eq(const float* a, const float* b, unsigned char* c,
                       const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                       size_t a_rank, size_t b_rank, size_t c_rank,
@@ -239,20 +319,6 @@ void launch_compare_gt(const float* a, const float* b, unsigned char* c,
     compare_gt_kernel<<<blocks, 256, 0, stream>>>(a, b, c, shapes.get(), info, c_elements);
 }
 
-// Scalar comparisons
-void launch_compare_scalar_eq(const float* a, float val, unsigned char* r, size_t n, cudaStream_t s) {
-    compare_scalar_eq_kernel<<<(n + 255) / 256, 256, 0, s>>>(a, val, r, n);
-}
-
-void launch_compare_scalar_lt(const float* a, float val, unsigned char* r, size_t n, cudaStream_t s) {
-    compare_scalar_lt_kernel<<<(n + 255) / 256, 256, 0, s>>>(a, val, r, n);
-}
-
-void launch_compare_scalar_gt(const float* a, float val, unsigned char* r, size_t n, cudaStream_t s) {
-    compare_scalar_gt_kernel<<<(n + 255) / 256, 256, 0, s>>>(a, val, r, n);
-}
-
-// Logical operations
 void launch_logical_and(const unsigned char* a, const unsigned char* b, unsigned char* c,
                        const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                        size_t a_rank, size_t b_rank, size_t c_rank,
@@ -316,51 +382,71 @@ void launch_logical_xor(const unsigned char* a, const unsigned char* b, unsigned
     logical_xor_kernel<<<blocks, 256, 0, stream>>>(a, b, c, shapes.get(), info, c_elements);
 }
 
-void launch_logical_not(const unsigned char* a, unsigned char* r, size_t n, cudaStream_t s) {
-    logical_not_kernel<<<(n + 255) / 256, 256, 0, s>>>(a, r, n);
-}
+// ============= Masking Operations using Thrust =============
 
-// ============= Masking Operations =============
-__global__ void masked_fill_kernel(float* data, const unsigned char* mask, float val, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n && mask[idx]) data[idx] = val;
-}
+// Masked fill using Thrust
+struct MaskedFillFunctor {
+    float val;
+    MaskedFillFunctor(float v) : val(v) {}
+
+    __host__ __device__ float operator()(const thrust::tuple<float, unsigned char>& t) const {
+        return thrust::get<1>(t) ? val : thrust::get<0>(t);
+    }
+};
 
 void launch_masked_fill(float* data, const unsigned char* mask, float val, size_t n, cudaStream_t s) {
-    masked_fill_kernel<<<(n + 255) / 256, 256, 0, s>>>(data, mask, val, n);
+    auto data_ptr = thrust::device_pointer_cast(data);
+    auto mask_ptr = thrust::device_pointer_cast(mask);
+
+    auto begin = thrust::make_zip_iterator(thrust::make_tuple(data_ptr, mask_ptr));
+    auto end = thrust::make_zip_iterator(thrust::make_tuple(data_ptr + n, mask_ptr + n));
+
+    thrust::transform(
+        thrust::cuda::par.on(s),
+        begin, end,
+        data_ptr,
+        MaskedFillFunctor(val)
+    );
 }
 
-__global__ void masked_select_compact_kernel(const float* input, const unsigned char* mask,
-                                            float* output, const int* scan, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n && mask[idx]) {
-        output[scan[idx]] = input[idx];
+// Masked select using Thrust copy_if
+struct ExtractValueFunctor {
+    __host__ __device__ float operator()(const thrust::tuple<float, unsigned char>& t) const {
+        return thrust::get<0>(t);
     }
-}
+};
+
+struct ExtractMaskFunctor {
+    __host__ __device__ bool operator()(const thrust::tuple<float, unsigned char>& t) const {
+        return thrust::get<1>(t) != 0;
+    }
+};
 
 void launch_masked_select(const float* input, const unsigned char* mask,
                          float* output, size_t n, size_t output_size, cudaStream_t stream) {
     if (n == 0 || output_size == 0) return;
 
-    CudaDeviceMemory<int> scan_result(n);
-    if (!scan_result.valid()) return;
+    auto input_ptr = thrust::device_pointer_cast(input);
+    auto mask_ptr = thrust::device_pointer_cast(mask);
+    auto output_ptr = thrust::device_pointer_cast(output);
 
-    size_t temp_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, mask, scan_result.get(), n, stream);
+    auto begin = thrust::make_zip_iterator(thrust::make_tuple(input_ptr, mask_ptr));
+    auto end = thrust::make_zip_iterator(thrust::make_tuple(input_ptr + n, mask_ptr + n));
 
-    CudaDeviceMemory<uint8_t> temp_storage(temp_bytes);
-    if (!temp_storage.valid()) return;
+    auto transform_begin = thrust::make_transform_iterator(begin, ExtractValueFunctor());
+    auto transform_end = thrust::make_transform_iterator(end, ExtractValueFunctor());
+    auto mask_begin = thrust::make_transform_iterator(begin, ExtractMaskFunctor());
 
-    cub::DeviceScan::ExclusiveSum(temp_storage.get(), temp_bytes,
-                                  mask, scan_result.get(), n, stream);
-
-    if (stream != 0) cudaStreamSynchronize(stream);
-
-    int blocks = (n + 255) / 256;
-    masked_select_compact_kernel<<<blocks, 256, 0, stream>>>(
-        input, mask, output, scan_result.get(), n);
+    thrust::copy_if(
+        thrust::cuda::par.on(stream),
+        transform_begin, transform_end,
+        mask_begin,
+        output_ptr,
+        thrust::identity<bool>()
+    );
 }
 
+// Masked scatter using CUB scan (keep existing implementation as it's optimal)
 __global__ void masked_scatter_compact_kernel(float* data, const unsigned char* mask,
                                              const float* src, const int* scan, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -392,7 +478,7 @@ void launch_masked_scatter(float* data, const unsigned char* mask,
         data, mask, src, scan_result.get(), n);
 }
 
-// ============= Where Operation =============
+// ============= Where Operation with Broadcasting =============
 __global__ void where_kernel(const unsigned char* cond, const float* x, const float* y,
                             float* r, const size_t* shapes,
                             size_t cr, size_t xr, size_t yr, size_t rr, size_t n) {
@@ -425,53 +511,46 @@ void launch_where(const unsigned char* cond, const float* x, const float* y, flo
         cond, x, y, r, shapes.get(), cond_rank, x_rank, y_rank, r_rank, total);
 }
 
-// ============= Count Nonzero =============
-template<typename T>
-__global__ void count_nonzero_kernel(const T* data, unsigned long long* cnt, size_t n) {
-    extern __shared__ unsigned long long sdata[];
-
-    unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * blockDim.x + tid;
-
-    sdata[tid] = (i < n && data[i] != T(0)) ? 1 : 0;
-    __syncthreads();
-
-    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) sdata[tid] += sdata[tid + s];
-        __syncthreads();
+// ============= Count Nonzero using Thrust =============
+struct IsNonzeroFloat {
+    __host__ __device__ bool operator()(float x) const {
+        return x != 0.0f;
     }
+};
 
-    if (tid == 0) atomicAdd(cnt, sdata[0]);
-}
-
-template<typename T>
-void count_nonzero_impl(const T* data, size_t* count, size_t n, cudaStream_t stream) {
-    static thread_local CudaDeviceMemory<unsigned long long> d_count(1);
-
-    cudaMemsetAsync(d_count.get(), 0, sizeof(unsigned long long), stream);
-
-    int blocks = (n + 255) / 256;
-    count_nonzero_kernel<T><<<blocks, 256, 256 * sizeof(unsigned long long), stream>>>(
-        data, d_count.get(), n);
-
-    cudaStreamSynchronize(stream);
-
-    unsigned long long h_count;
-    d_count.copy_to_host(&h_count, 1);
-    *count = static_cast<size_t>(h_count);
-}
+struct IsNonzeroBool {
+    __host__ __device__ bool operator()(unsigned char x) const {
+        return x != 0;
+    }
+};
 
 void launch_count_nonzero_bool(const unsigned char* data, size_t* count,
                               size_t n, cudaStream_t stream) {
-    count_nonzero_impl(data, count, n, stream);
+    auto data_ptr = thrust::device_pointer_cast(data);
+
+    // Thrust count_if returns the result directly to host - no need to copy!
+    *count = thrust::count_if(
+        thrust::cuda::par.on(stream),
+        data_ptr, data_ptr + n,
+        IsNonzeroBool()
+    );
 }
 
 void launch_count_nonzero_float(const float* data, size_t* count,
                                size_t n, cudaStream_t stream) {
-    count_nonzero_impl(data, count, n, stream);
+    auto data_ptr = thrust::device_pointer_cast(data);
+
+    // Thrust count_if returns the result directly to host - no need to copy!
+    *count = thrust::count_if(
+        thrust::cuda::par.on(stream),
+        data_ptr, data_ptr + n,
+        IsNonzeroFloat()
+    );
 }
 
 // ============= Index Operations =============
+
+// Index select - keep custom kernel for boundary modes
 __global__ void index_select_kernel(const float* in, const int* idx, float* out,
                                    size_t outer, size_t dim_size, size_t inner,
                                    size_t idx_size, int boundary) {
@@ -505,28 +584,25 @@ void launch_index_select(const float* in, const int* idx, float* out,
         in, idx, out, outer, shape[dim], inner, idx_size, boundary);
 }
 
-// Fixed gather kernel
+// Gather - keep custom kernel for complex indexing
 __global__ void gather_kernel(const float* in, const int* idx, float* out,
                               const size_t* in_shape, const size_t* idx_shape,
                               size_t in_rank, size_t idx_rank, int dim, size_t total, int boundary) {
     size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= total) return;
 
-    // Calculate strides for input tensor
-    size_t in_strides[10];  // Max rank
+    size_t in_strides[10];
     in_strides[in_rank - 1] = 1;
     for (int i = in_rank - 2; i >= 0; --i) {
         in_strides[i] = in_strides[i + 1] * in_shape[i + 1];
     }
 
-    // Calculate strides for output/indices tensor
-    size_t out_strides[10];  // Max rank
+    size_t out_strides[10];
     out_strides[idx_rank - 1] = 1;
     for (int i = idx_rank - 2; i >= 0; --i) {
         out_strides[i] = out_strides[i + 1] * idx_shape[i + 1];
     }
 
-    // Get coordinates in output/indices tensor
     size_t out_coords[10] = {0};
     size_t temp = tid;
     for (size_t d = 0; d < idx_rank; ++d) {
@@ -534,22 +610,17 @@ __global__ void gather_kernel(const float* in, const int* idx, float* out,
         temp %= out_strides[d];
     }
 
-    // Get the gather index
     int gather_idx = idx[tid];
 
-    // Apply boundary mode
-    if (boundary == 1) { // Clamp
+    if (boundary == 1) {
         gather_idx = max(0, min((int)in_shape[dim] - 1, gather_idx));
-    } else if (boundary == 2) { // Wrap
+    } else if (boundary == 2) {
         gather_idx = ((gather_idx % (int)in_shape[dim]) + in_shape[dim]) % in_shape[dim];
-    } else if (gather_idx < 0 || gather_idx >= in_shape[dim]) { // Assert
+    } else if (gather_idx < 0 || gather_idx >= in_shape[dim]) {
         out[tid] = 0;
         return;
     }
 
-    // Build source coordinates
-    // Use output coordinates for all dimensions except dim
-    // For dim, use the gathered index
     size_t src_idx = 0;
     for (size_t d = 0; d < in_rank; ++d) {
         size_t coord;
@@ -561,7 +632,6 @@ __global__ void gather_kernel(const float* in, const int* idx, float* out,
             coord = 0;
         }
 
-        // Bounds check
         if (coord >= in_shape[d]) {
             out[tid] = 0;
             return;
@@ -576,20 +646,13 @@ __global__ void gather_kernel(const float* in, const int* idx, float* out,
 void launch_gather(const float* in, const int* idx, float* out,
                   const size_t* in_shape, const size_t* idx_shape,
                   size_t rank, int dim, size_t total, int boundary, cudaStream_t stream) {
-    // Need to pass both shapes to the kernel
     CudaDeviceMemory<size_t> d_in_shape(10);
     CudaDeviceMemory<size_t> d_idx_shape(10);
 
     size_t h_in_shape[10] = {0};
     size_t h_idx_shape[10] = {0};
 
-    // Calculate idx_rank from total and idx_shape
-    // The total is the number of elements in indices tensor
-    size_t idx_rank = rank; // Default to same rank as input
-
-    // Try to infer idx_rank from the shapes if possible
-    // For the gather operation, indices typically has same rank as input
-    // But we can calculate it from the total elements
+    size_t idx_rank = rank;
     size_t idx_elements = 1;
     for (size_t i = 0; i < rank; ++i) {
         if (idx_shape[i] > 0) {
@@ -600,7 +663,6 @@ void launch_gather(const float* in, const int* idx, float* out,
         }
     }
 
-    // Find actual rank of indices
     idx_rank = 0;
     size_t check_elements = 1;
     for (size_t i = 0; i < 10; ++i) {
@@ -613,9 +675,8 @@ void launch_gather(const float* in, const int* idx, float* out,
         }
     }
 
-    if (idx_rank == 0) idx_rank = 1; // At least 1D
+    if (idx_rank == 0) idx_rank = 1;
 
-    // Copy shapes
     for (size_t i = 0; i < rank; ++i) {
         h_in_shape[i] = in_shape[i];
     }
@@ -629,19 +690,33 @@ void launch_gather(const float* in, const int* idx, float* out,
         rank, idx_rank, dim, total, boundary);
 }
 
-__global__ void take_kernel(const float* in, const int* idx, float* out,
-                           size_t in_size, size_t out_size) {
-    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= out_size) return;
+// Take using Thrust gather
+struct IndexClampFunctor {
+    size_t size;
+    IndexClampFunctor(size_t s) : size(s) {}
 
-    int pos = idx[tid];
-    if (pos < 0) pos += in_size;
-    out[tid] = (pos >= 0 && pos < in_size) ? in[pos] : 0;
-}
+    __host__ __device__ size_t operator()(int idx) const {
+        if (idx < 0) idx += size;
+        if (idx < 0 || idx >= size) return 0;
+        return idx;
+    }
+};
 
 void launch_take(const float* in, const int* idx, float* out,
                 size_t in_size, size_t out_size, cudaStream_t stream) {
-    take_kernel<<<(out_size + 255) / 256, 256, 0, stream>>>(in, idx, out, in_size, out_size);
+    auto in_ptr = thrust::device_pointer_cast(in);
+    auto idx_ptr = thrust::device_pointer_cast(idx);
+    auto out_ptr = thrust::device_pointer_cast(out);
+
+    // Create transform iterator to handle negative indices
+    auto transform_idx = thrust::make_transform_iterator(idx_ptr, IndexClampFunctor(in_size));
+
+    thrust::gather(
+        thrust::cuda::par.on(stream),
+        transform_idx, transform_idx + out_size,
+        in_ptr,
+        out_ptr
+    );
 }
 
 // Scatter operations
@@ -661,9 +736,9 @@ __global__ void scatter_kernel(float* out, const int* idx, const float* in,
 
     size_t dst_idx = outer_idx * dim_sz * inner + scatter_idx * inner + inner_idx;
 
-    if (mode == 1) { // Add
+    if (mode == 1) {
         atomicAdd(&out[dst_idx], in[tid]);
-    } else { // Assign
+    } else {
         out[dst_idx] = in[tid];
     }
 }
@@ -683,14 +758,15 @@ void launch_index_fill(float* data, const int* idx, float val,
                       const size_t* shape, size_t rank, int dim,
                       size_t n_idx, cudaStream_t stream) {
     CudaDeviceMemory<float> val_buffer(n_idx);
-    cudaMemsetAsync(val_buffer.get(), *(int*)&val, n_idx * sizeof(float), stream);
+
+    auto val_ptr = thrust::device_pointer_cast(val_buffer.get());
+    thrust::fill(thrust::cuda::par.on(stream), val_ptr, val_ptr + n_idx, val);
 
     size_t in_shape[10] = {0};
     std::copy(shape, shape + rank, in_shape);
     in_shape[dim] = n_idx;
 
-    launch_scatter(data, idx, val_buffer.get(), shape, in_shape, rank, dim,
-                  n_idx, 0, stream);
+    launch_scatter(data, idx, val_buffer.get(), shape, in_shape, rank, dim, n_idx, 0, stream);
 }
 
 void launch_index_copy(float* dst, const int* idx, const float* src,
@@ -713,74 +789,72 @@ void launch_index_add(float* dst, const int* idx, const float* src,
     launch_scatter(dst, idx, src, shape, in_shape, rank, dim, n_idx, 1, stream);
 }
 
-__global__ void index_put_kernel(float* data, const int* idx, const float* vals,
-                                size_t data_size, size_t idx_size) {
-    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= idx_size) return;
-
-    int pos = idx[tid];
-    if (pos < 0) pos += data_size;
-    if (pos >= 0 && pos < data_size) data[pos] = vals[tid];
-}
-
+// Index put using Thrust scatter
 void launch_index_put(float* data, const int* idx, const float* vals,
                      size_t data_size, size_t idx_size, cudaStream_t stream) {
-    index_put_kernel<<<(idx_size + 255) / 256, 256, 0, stream>>>(
-        data, idx, vals, data_size, idx_size);
+    auto data_ptr = thrust::device_pointer_cast(data);
+    auto idx_ptr = thrust::device_pointer_cast(idx);
+    auto vals_ptr = thrust::device_pointer_cast(vals);
+
+    // Transform indices to handle negative values
+    auto transform_idx = thrust::make_transform_iterator(idx_ptr, IndexClampFunctor(data_size));
+
+    thrust::scatter(
+        thrust::cuda::par.on(stream),
+        vals_ptr, vals_ptr + idx_size,
+        transform_idx,
+        data_ptr
+    );
 }
 
-// Nonzero operations
-__global__ void nonzero_kernel(const float* data, int64_t* indices,
-                              const int* scan, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n && data[idx] != 0.0f) {
-        indices[scan[idx]] = idx;
+// ============= Nonzero Operations using Thrust =============
+
+struct NonzeroFloat {
+    __host__ __device__ bool operator()(float x) const {
+        return x != 0.0f;
     }
-}
+};
 
-__global__ void nonzero_bool_kernel(const unsigned char* data, int64_t* indices,
-                                   const int* scan, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n && data[idx]) {
-        indices[scan[idx]] = idx;
+struct NonzeroBool {
+    __host__ __device__ bool operator()(unsigned char x) const {
+        return x != 0;
     }
-}
-
-__global__ void create_nonzero_mask_kernel(const float* data, unsigned char* mask, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) mask[idx] = (data[idx] != 0.0f) ? 1 : 0;
-}
+};
 
 void launch_nonzero(const float* data, int64_t* indices,
                    size_t n, size_t output_size, cudaStream_t stream) {
     if (n == 0 || output_size == 0) return;
 
-    CudaDeviceMemory<unsigned char> mask(n);
-    create_nonzero_mask_kernel<<<(n + 255) / 256, 256, 0, stream>>>(data, mask.get(), n);
+    auto data_ptr = thrust::device_pointer_cast(data);
+    auto indices_ptr = thrust::device_pointer_cast(indices);
+    auto counting = thrust::counting_iterator<int64_t>(0);
 
-    CudaDeviceMemory<int> scan_result(n);
-    size_t temp_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, mask.get(), scan_result.get(), n, stream);
-
-    CudaDeviceMemory<uint8_t> temp_storage(temp_bytes);
-    cub::DeviceScan::ExclusiveSum(temp_storage.get(), temp_bytes,
-                                  mask.get(), scan_result.get(), n, stream);
-
-    nonzero_kernel<<<(n + 255) / 256, 256, 0, stream>>>(data, indices, scan_result.get(), n);
+    // Copy indices where data is nonzero
+    thrust::copy_if(
+        thrust::cuda::par.on(stream),
+        counting, counting + n,
+        data_ptr,
+        indices_ptr,
+        NonzeroFloat()
+    );
 }
 
 void launch_nonzero_bool(const unsigned char* data, int64_t* indices,
                          size_t n, size_t output_size, cudaStream_t stream) {
     if (n == 0 || output_size == 0) return;
 
-    CudaDeviceMemory<int> scan_result(n);
-    size_t temp_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, data, scan_result.get(), n, stream);
+    auto data_ptr = thrust::device_pointer_cast(data);
+    auto indices_ptr = thrust::device_pointer_cast(indices);
+    auto counting = thrust::counting_iterator<int64_t>(0);
 
-    CudaDeviceMemory<uint8_t> temp_storage(temp_bytes);
-    cub::DeviceScan::ExclusiveSum(temp_storage.get(), temp_bytes,
-                                  data, scan_result.get(), n, stream);
-
-    nonzero_bool_kernel<<<(n + 255) / 256, 256, 0, stream>>>(data, indices, scan_result.get(), n);
+    // Copy indices where data is nonzero
+    thrust::copy_if(
+        thrust::cuda::par.on(stream),
+        counting, counting + n,
+        data_ptr,
+        indices_ptr,
+        NonzeroBool()
+    );
 }
+
 } // namespace gs::tensor_ops
