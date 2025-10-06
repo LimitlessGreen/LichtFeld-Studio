@@ -7,6 +7,7 @@
 #include "core/logger.hpp"
 #include <cuda_runtime.h>
 #include <cstring>
+#include <cmath>
 #include <numeric>
 #include <algorithm>
 
@@ -328,16 +329,43 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
                     cdf[i] = cdf[i-1] + weights_data[i] / sum;
                 }
 
-                // Sample
-                std::random_device rd;
-                std::mt19937 gen(rd());
+                // Use the seeded generator from RandomGenerator
+                auto& gen = *static_cast<std::mt19937_64*>(
+                    RandomGenerator::instance().get_generator(Device::CPU));
                 std::uniform_real_distribution<float> dis(0.0f, 1.0f);
 
                 int* samples = result.ptr<int>();
-                for (size_t i = 0; i < num_samples; ++i) {
-                    float u = dis(gen);
-                    auto it = std::lower_bound(cdf.begin(), cdf.end(), u);
-                    samples[i] = static_cast<int>(std::distance(cdf.begin(), it));
+
+                if (replacement) {
+                    // With replacement: simple sampling
+                    for (size_t i = 0; i < num_samples; ++i) {
+                        float u = dis(gen);
+                        auto it = std::lower_bound(cdf.begin(), cdf.end(), u);
+                        samples[i] = static_cast<int>(std::distance(cdf.begin(), it));
+                    }
+                } else {
+                    // Without replacement: use Gumbel-max trick
+                    // Note: num_samples is already capped to n by Tensor::multinomial
+                    std::vector<std::pair<float, int>> keys(n);
+
+                    // Generate Gumbel keys for each index
+                    for (size_t i = 0; i < n; ++i) {
+                        float u = dis(gen);
+                        // Clamp to avoid log(0)
+                        u = std::clamp(u, 1e-10f, 1.0f - 1e-10f);
+                        float gumbel = -std::log(-std::log(u));
+                        float log_weight = std::log(std::max(weights_data[i], 1e-10f));
+                        keys[i] = {log_weight + gumbel, static_cast<int>(i)};
+                    }
+
+                    // Sort by keys (descending)
+                    std::sort(keys.begin(), keys.end(),
+                             [](const auto& a, const auto& b) { return a.first > b.first; });
+
+                    // Take first num_samples indices (already capped to n)
+                    for (size_t i = 0; i < num_samples; ++i) {
+                        samples[i] = keys[i].second;
+                    }
                 }
             }
             break;
@@ -405,6 +433,12 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
 
 // Static method for multinomial
 Tensor Tensor::multinomial(const Tensor& weights, int num_samples, bool replacement) {
+    if (!replacement && static_cast<size_t>(num_samples) > weights.numel()) {
+        // Without replacement, can't sample more than available items
+        // Cap to the number of weights
+        num_samples = static_cast<int>(weights.numel());
+    }
+
     LoadArgs args;
     args.shape = TensorShape({static_cast<size_t>(num_samples)});
     args.device = weights.device();
@@ -914,6 +948,29 @@ Tensor Tensor::ternary(const Tensor& b, const Tensor& c, TernaryOp op) const {
         return Tensor();
     }
 
+    if (numel() == 0 || b.numel() == 0 || c.numel() == 0) {
+        // If any input is empty, determine the output shape through broadcasting
+        auto shape_ab = this->broadcast_shape(b.shape());
+        if (shape_ab.rank() == 0) {
+            LOG_ERROR("Incompatible shapes for first two tensors in ternary operation with empty tensors");
+            return Tensor();
+        }
+
+        auto shape_abc_vec = broadcast::shape(shape_ab.dims(), c.shape().dims());
+        if (shape_abc_vec.empty()) {
+            LOG_ERROR("Incompatible shapes for ternary operation");
+            return Tensor();
+        }
+
+        // Return empty tensor with the broadcast shape
+        DataType out_dtype = dtype_;
+        if (op == TernaryOp::Where) {
+            out_dtype = promote_types(b.dtype(), c.dtype());
+        }
+
+        return empty(TensorShape(shape_abc_vec), device_, out_dtype);
+    }
+
     // For Where operation, first tensor should be boolean
     if (op == TernaryOp::Where && dtype_ != DataType::Bool) {
         LOG_ERROR("Where operation requires boolean condition tensor");
@@ -928,13 +985,13 @@ Tensor Tensor::ternary(const Tensor& b, const Tensor& c, TernaryOp op) const {
     }
 
     // Now get broadcast shape with third tensor
-    auto temp = Tensor::empty(shape_ab, device_, dtype_);
-    auto shape_abc = temp.broadcast_shape(c.shape());
-
-    if (shape_abc.rank() == 0) {
+    auto shape_abc_vec = broadcast::shape(shape_ab.dims(), c.shape().dims());
+    if (shape_abc_vec.empty()) {
         LOG_ERROR("Incompatible shapes for ternary operation");
         return Tensor();
     }
+
+    TensorShape shape_abc(shape_abc_vec);
 
     // Determine output dtype based on operation
     DataType out_dtype = dtype_;

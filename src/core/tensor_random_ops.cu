@@ -5,6 +5,14 @@
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 
+// Thrust headers for multinomial without replacement
+#include <thrust/device_vector.h>
+#include <thrust/sequence.h>
+#include <thrust/sort.h>
+#include <thrust/copy.h>
+#include <thrust/reduce.h>
+#include <thrust/execution_policy.h>
+
 namespace gs::tensor_ops {
 
     // ============= Random Operations Kernels =============
@@ -78,9 +86,10 @@ namespace gs::tensor_ops {
         }
     }
 
-    __global__ void multinomial_kernel(const float* weights, int* samples,
-                                       unsigned long n, unsigned long num_samples,
-                                       unsigned long long seed) {
+    // Kernel for multinomial sampling with replacement
+    __global__ void multinomial_with_replacement_kernel(const float* weights, int* samples,
+                                                        unsigned long n, unsigned long num_samples,
+                                                        float sum, unsigned long long seed) {
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
         if (idx >= num_samples) return;
@@ -88,21 +97,10 @@ namespace gs::tensor_ops {
         curandState state;
         curand_init(seed + idx, 0, 0, &state);
 
-        // Calculate sum of weights (this could be optimized with parallel reduction)
-        float sum = 0.0f;
-        for (unsigned long i = 0; i < n; ++i) {
-            sum += weights[i];
-        }
-
-        if (sum <= 0) {
-            samples[idx] = 0;
-            return;
-        }
-
-        // Generate random value
+        // Generate random value in [0, sum)
         float u = curand_uniform(&state) * sum;
 
-        // Find the index using linear search (could be optimized with binary search)
+        // Find the index using linear search
         float cumsum = 0.0f;
         for (unsigned long i = 0; i < n; ++i) {
             cumsum += weights[i];
@@ -114,6 +112,29 @@ namespace gs::tensor_ops {
 
         // Fallback (shouldn't happen)
         samples[idx] = n - 1;
+    }
+
+    // Kernel to generate random keys for each index (Gumbel-max trick)
+    __global__ void generate_gumbel_keys_kernel(const float* weights, float* keys,
+                                                unsigned long n, unsigned long long seed) {
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (idx >= n) return;
+
+        curandState state;
+        curand_init(seed + idx, 0, 0, &state);
+
+        // Generate Gumbel noise: -log(-log(uniform))
+        float u = curand_uniform(&state);
+        // Clamp to avoid log(0)
+        u = fmaxf(u, 1e-10f);
+        u = fminf(u, 1.0f - 1e-10f);
+
+        float gumbel = -logf(-logf(u));
+
+        // Add log-weight
+        float log_weight = logf(fmaxf(weights[idx], 1e-10f));
+        keys[idx] = log_weight + gumbel;
     }
 
     // ============= Launch Functions =============
@@ -149,16 +170,68 @@ namespace gs::tensor_ops {
     void launch_multinomial(const float* weights, int* samples,
                              unsigned long n, unsigned long num_samples, bool replacement,
                              unsigned long long seed, cudaStream_t stream) {
-        int block_size = 256;
-        int grid_size = (num_samples + block_size - 1) / block_size;
+        if (n == 0 || num_samples == 0) return;
 
-        if (!replacement && num_samples > 1) {
-            // Without replacement is more complex - would need to track selected indices
-            // For now, just use with replacement
+        // First, compute sum of weights using Thrust
+        auto weights_ptr = thrust::device_pointer_cast(weights);
+        float sum = thrust::reduce(
+            thrust::cuda::par.on(stream),
+            weights_ptr, weights_ptr + n,
+            0.0f,
+            thrust::plus<float>()
+        );
+
+        if (sum <= 0) {
+            // Invalid weights, fill with zeros
+            cudaMemsetAsync(samples, 0, num_samples * sizeof(int), stream);
+            return;
         }
 
-        multinomial_kernel<<<grid_size, block_size, 0, stream>>>(
-            weights, samples, n, num_samples, seed);
+        if (replacement) {
+            // With replacement: simple multinomial sampling
+            int block_size = 256;
+            int grid_size = (num_samples + block_size - 1) / block_size;
+            multinomial_with_replacement_kernel<<<grid_size, block_size, 0, stream>>>(
+                weights, samples, n, num_samples, sum, seed);
+        } else {
+            // Without replacement: use Gumbel-max trick
+            // 1. Generate Gumbel keys for each index
+            // 2. Sort indices by keys (descending)
+            // 3. Take first num_samples indices
+
+            // Allocate temporary storage for keys and indices
+            thrust::device_vector<float> keys(n);
+            thrust::device_vector<int> indices(n);
+
+            // Generate keys
+            int block_size = 256;
+            int grid_size = (n + block_size - 1) / block_size;
+            generate_gumbel_keys_kernel<<<grid_size, block_size, 0, stream>>>(
+                weights, thrust::raw_pointer_cast(keys.data()), n, seed);
+
+            // Initialize indices [0, 1, 2, ..., n-1]
+            thrust::sequence(
+                thrust::cuda::par.on(stream),
+                indices.begin(), indices.end()
+            );
+
+            // Sort indices by keys (descending order)
+            thrust::sort_by_key(
+                thrust::cuda::par.on(stream),
+                keys.begin(), keys.end(),
+                indices.begin(),
+                thrust::greater<float>()
+            );
+
+            // Copy first num_samples indices to output
+            // (num_samples is already capped by Tensor::multinomial for without replacement)
+            thrust::copy_n(
+                thrust::cuda::par.on(stream),
+                indices.begin(),
+                num_samples,
+                thrust::device_pointer_cast(samples)
+            );
+        }
     }
 
 } // namespace gs::tensor_ops

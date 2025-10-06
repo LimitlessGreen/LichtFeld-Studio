@@ -852,13 +852,24 @@ TensorAccessor<T, N> accessor() {
         }
 
         Tensor clamp(float min_val, float max_val) const {
-            auto min_t = full({1}, min_val, device_, dtype_);
-            auto max_t = full({1}, max_val, device_, dtype_);
+            if (!is_valid()) {
+                return Tensor();
+            }
+
+            if (numel() == 0) {
+                // Return empty tensor with same shape
+                return empty(shape_, device_, dtype_);
+            }
+
+            auto min_t = full(shape_, min_val, device_, dtype_);
+            auto max_t = full(shape_, max_val, device_, dtype_);
             return ternary(min_t, max_t, TernaryOp::Clamp);
         }
+
         Tensor clamp_min(float min) const {
             return clamp(min, std::numeric_limits<float>::max());
         }
+
         Tensor clamp_max(float max) const {
             return clamp(std::numeric_limits<float>::lowest(), max);
         }

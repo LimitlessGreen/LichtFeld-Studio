@@ -349,16 +349,20 @@ namespace gs {
         return binary_op_impl(other, BinaryOp::BitwiseOr);
     }
 
-    // ============= NEW: In-place clamp operations =============
     Tensor& Tensor::clamp_(float min_val, float max_val) {
         if (!is_valid() || dtype_ != DataType::Float32) {
             return *this;
         }
 
+        if (numel() == 0) {
+            return *this;  // Early return for empty tensors
+        }
+
         if (device_ == Device::CUDA) {
-            // Use ternary clamp operation
-            auto min_t = full({1}, min_val, device_, dtype_);
-            auto max_t = full({1}, max_val, device_, dtype_);
+            // CRITICAL FIX: Broadcast scalars to full shape before passing to kernel
+            // The CUDA kernel expects arrays of size numel(), not scalars!
+            auto min_t = full(shape_, min_val, device_, dtype_);
+            auto max_t = full(shape_, max_val, device_, dtype_);
 
             tensor_ops::launch_ternary_op(data_, min_t.raw_ptr(), max_t.raw_ptr(),
                                          data_, numel(), TernaryOp::Clamp,

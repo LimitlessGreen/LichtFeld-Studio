@@ -10,6 +10,18 @@ namespace gs {
 Tensor broadcast_to(const Tensor& src, const TensorShape& target) {
     if (src.shape() == target) return src.clone();
 
+    // CRITICAL FIX: Handle empty tensors
+    if (src.numel() == 0 || target.elements() == 0) {
+        // If source is empty or target is empty, check compatibility
+        auto bcast = broadcast::shape(src.shape().dims(), target.dims());
+        if (bcast.empty() || bcast != target.dims()) {
+            LOG_ERROR("Cannot broadcast empty tensor {} to {}", src.shape().str(), target.str());
+            return {};
+        }
+        // Return empty tensor with target shape
+        return Tensor::empty(target, src.device(), src.dtype());
+    }
+
     // Check if valid broadcast
     auto bcast = broadcast::shape(src.shape().dims(), target.dims());
     if (bcast.empty() || bcast != target.dims()) {

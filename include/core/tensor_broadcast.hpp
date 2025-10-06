@@ -22,10 +22,17 @@ inline std::vector<size_t> shape(std::span<const size_t> a, std::span<const size
         size_t dim_a = (i < a.size()) ? a[a.size() - 1 - i] : 1;
         size_t dim_b = (i < b.size()) ? b[b.size() - 1 - i] : 1;
 
-        if (dim_a != dim_b && dim_a != 1 && dim_b != 1) {
-            return {}; // Incompatible
+        // In NumPy, a dimension of 0 can only broadcast with another 0
+        if (dim_a == 0 && dim_b == 0) {
+            result[max_rank - 1 - i] = 0;
+        } else if (dim_a == 0 || dim_b == 0) {
+            // Can't broadcast 0 with non-zero (except matching 0)
+            return {};  // Incompatible
+        } else if (dim_a != dim_b && dim_a != 1 && dim_b != 1) {
+            return {};  // Incompatible
+        } else {
+            result[max_rank - 1 - i] = std::max(dim_a, dim_b);
         }
-        result[max_rank - 1 - i] = std::max(dim_a, dim_b);
     }
     return result;
 }
