@@ -28,13 +28,13 @@ namespace gs {
 
     // ============= Constructors & Destructor =============
     Tensor::Tensor(void* data, TensorShape shape, Device device, DataType dtype)
-        : data_(data),
-          shape_(shape),
-          device_(device),
-          dtype_(dtype),
-          owns_memory_(false),
-          initialized_(true),
-          id_(next_id_++) {
+    : data_(data),
+      data_owner_(nullptr),  // Non-owning view
+      shape_(shape),
+      device_(device),
+      dtype_(dtype),
+      initialized_(true),
+      id_(next_id_++) {
 
         if (profiling_enabled_) {
             LOG_DEBUG("Created tensor #{} (view): shape={}, device={}, dtype={}",
@@ -43,69 +43,54 @@ namespace gs {
     }
 
     Tensor::Tensor(Tensor&& other) noexcept
-        : data_(other.data_),
-          shape_(other.shape_),
-          device_(other.device_),
-          dtype_(other.dtype_),
-          owns_memory_(other.owns_memory_),
-          initialized_(other.initialized_),
-          id_(other.id_) {
+    : data_(other.data_),
+      data_owner_(std::move(other.data_owner_)),
+      shape_(other.shape_),
+      device_(other.device_),
+      dtype_(other.dtype_),
+      initialized_(other.initialized_),
+      is_view_(other.is_view_),
+      id_(other.id_) {
 
         other.data_ = nullptr;
-        other.owns_memory_ = false;
         other.initialized_ = false;
+        other.is_view_ = false;
     }
 
     Tensor& Tensor::operator=(Tensor&& other) noexcept {
         if (this != &other) {
-            // Clean up existing resources
-            if (owns_memory_ && data_) {
-                if (device_ == Device::CUDA) {
-                    cudaFree(data_);
-                } else {
-                    delete[] static_cast<char*>(data_);
-                }
-            }
-
-            // Move from other
+            // Resources are automatically cleaned up by shared_ptr
             data_ = other.data_;
+            data_owner_ = std::move(other.data_owner_);
             shape_ = other.shape_;
             device_ = other.device_;
             dtype_ = other.dtype_;
-            owns_memory_ = other.owns_memory_;
             initialized_ = other.initialized_;
+            is_view_ = other.is_view_;
             id_ = other.id_;
 
             // Reset other
             other.data_ = nullptr;
-            other.owns_memory_ = false;
             other.initialized_ = false;
+            other.is_view_ = false;
         }
         return *this;
     }
 
     Tensor::~Tensor() {
-        if (owns_memory_ && data_) {
-            if (profiling_enabled_) {
-                LOG_DEBUG("Destroying tensor #{}: shape={}, device={}",
-                          id_, shape_.str(), device_name(device_));
-            }
-
-            if (device_ == Device::CUDA) {
-                cudaFree(data_);
-            } else {
-                delete[] static_cast<char*>(data_);
-            }
+        if (data_owner_ && profiling_enabled_) {
+            LOG_DEBUG("Destroying tensor #{}: shape={}, device={}, refcount={}",
+                      id_, shape_.str(), device_name(device_), data_owner_.use_count());
         }
+        // shared_ptr automatically handles deallocation
     }
 
-    // ============= Memory Operations =============
     Tensor Tensor::clone() const {
         if (!is_valid()) {
             return Tensor();
         }
 
-        auto t = empty(shape_, device_, dtype_);
+        Tensor t = empty(shape_, device_, dtype_);
         if (numel() == 0) {
             return t;
         }
@@ -355,18 +340,11 @@ namespace gs {
         }
 
         if (numel() == 0) {
-            return *this;  // Early return for empty tensors
+            return *this;
         }
 
         if (device_ == Device::CUDA) {
-            // CRITICAL FIX: Broadcast scalars to full shape before passing to kernel
-            // The CUDA kernel expects arrays of size numel(), not scalars!
-            auto min_t = full(shape_, min_val, device_, dtype_);
-            auto max_t = full(shape_, max_val, device_, dtype_);
-
-            tensor_ops::launch_ternary_op(data_, min_t.raw_ptr(), max_t.raw_ptr(),
-                                         data_, numel(), TernaryOp::Clamp,
-                                         dtype_, nullptr);
+            tensor_ops::launch_clamp_scalar(ptr<float>(), min_val, max_val, numel(), nullptr);
             cudaDeviceSynchronize();
         } else {
             float* data = ptr<float>();
@@ -385,8 +363,7 @@ namespace gs {
     Tensor& Tensor::clamp_max_(float max) {
         return clamp_(std::numeric_limits<float>::lowest(), max);
     }
-
-    // ============= NEW: Cumulative sum =============
+    // ============= Cumulative sum =============
     Tensor Tensor::cumsum(int dim) const {
         if (!is_valid()) {
             LOG_ERROR("cumsum on invalid tensor");
@@ -491,7 +468,7 @@ namespace gs {
             oss << "shape=" << shape_.str();
             oss << ", device=" << device_name(device_);
             oss << ", dtype=" << dtype_name(dtype_);
-            if (owns_memory_) {
+            if (data_owner_) {
                 oss << ", owned";
             } else {
                 oss << ", view";

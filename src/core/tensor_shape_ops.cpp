@@ -18,29 +18,32 @@ namespace gs {
 
 // These are helper implementations that movement ops use
 
-Tensor Tensor::reshape(TensorShape new_shape) const {
-    if (!is_valid()) return {};
+    Tensor Tensor::reshape(TensorShape new_shape) const {
+        if (!is_valid()) return {};
 
-    if (new_shape.elements() != numel()) {
-        LOG_ERROR("View shape {} has {} elements, but tensor has {} elements",
-                  new_shape.str(), new_shape.elements(), shape_.elements());
-        return {};
+        if (new_shape.elements() != numel()) {
+            LOG_ERROR("View shape {} has {} elements, but tensor has {} elements",
+                      new_shape.str(), new_shape.elements(), shape_.elements());
+            return {};
+        }
+
+        // Create a view that shares memory and ownership
+        Tensor view(data_, new_shape, device_, dtype_);
+        view.data_owner_ = data_owner_;  // Share ownership!
+        view.is_view_ = true;  // Mark as view
+        return view;
     }
 
-    // Create a view that shares memory (non-owning)
-    return Tensor(data_, new_shape, device_, dtype_);
-}
+    Tensor Tensor::t() const {
+        if (!is_valid()) return {};
 
-Tensor Tensor::t() const {
-    if (!is_valid()) return {};
+        if (shape_.rank() <= 1) {
+            return clone(); // 0D and 1D tensors are unchanged
+        }
 
-    if (shape_.rank() <= 1) {
-        return clone(); // 0D and 1D tensors are unchanged
+        // Transpose last two dimensions
+        return transpose(-2, -1);
     }
-
-    // Transpose last two dimensions
-    return transpose(-2, -1);
-}
 
 // Implementation of permute (was inline in header, now moved here)
 Tensor Tensor::permute(std::span<const int> axes) const {
@@ -168,61 +171,63 @@ Tensor Tensor::expand(const TensorShape& target_shape) const {
     return reshaped.broadcast_to(TensorShape(final_shape));
 }
 
-// Implementation of slice (was inline in header, now moved here)
-Tensor Tensor::slice(std::span<const std::pair<int, int>> ranges) const {
-    if (!is_valid()) return {};
+    Tensor Tensor::slice(std::span<const std::pair<int, int>> ranges) const {
+        if (!is_valid()) return {};
 
-    if (ranges.size() > shape_.rank()) {
-        LOG_ERROR("Too many slice ranges for tensor rank");
-        return {};
-    }
+        if (ranges.size() > shape_.rank()) {
+            LOG_ERROR("Too many slice ranges for tensor rank");
+            return {};
+        }
 
-    // Build start and end vectors
-    std::vector<size_t> starts(shape_.rank());
-    std::vector<size_t> ends(shape_.rank());
+        // Build start and end vectors
+        std::vector<size_t> starts(shape_.rank());
+        std::vector<size_t> ends(shape_.rank());
 
-    for (size_t i = 0; i < shape_.rank(); ++i) {
-        if (i < ranges.size()) {
-            int start = ranges[i].first;
-            int end = ranges[i].second;
+        for (size_t i = 0; i < shape_.rank(); ++i) {
+            if (i < ranges.size()) {
+                int start = ranges[i].first;
+                int end = ranges[i].second;
 
-            // Handle negative indices
-            if (start < 0) start = shape_[i] + start;
-            if (end < 0) end = shape_[i] + end;
+                // Handle negative indices
+                if (start < 0) start = shape_[i] + start;
+                if (end < 0) end = shape_[i] + end;
 
-            // Clamp to valid range
-            start = std::max(0, std::min(start, static_cast<int>(shape_[i])));
-            end = std::max(start, std::min(end, static_cast<int>(shape_[i])));
+                // Clamp to valid range
+                start = std::max(0, std::min(start, static_cast<int>(shape_[i])));
+                end = std::max(start, std::min(end, static_cast<int>(shape_[i])));
 
-            starts[i] = start;
-            ends[i] = end;
+                starts[i] = start;
+                ends[i] = end;
+            } else {
+                starts[i] = 0;
+                ends[i] = shape_[i];
+            }
+        }
+
+        // Calculate new shape
+        std::vector<size_t> new_shape;
+        for (size_t i = 0; i < shape_.rank(); ++i) {
+            new_shape.push_back(ends[i] - starts[i]);
+        }
+
+        // Check if slice is contiguous
+        bool is_contiguous = is_contiguous_slice(starts, ends);
+
+        if (is_contiguous) {
+            // Can create a view - calculate the offset into the original data
+            size_t offset = calculate_offset(starts);
+            void* new_data = static_cast<char*>(data_) + offset * dtype_size(dtype_);
+
+            // Return a view (shares ownership)
+            Tensor view(new_data, TensorShape(new_shape), device_, dtype_);
+            view.data_owner_ = data_owner_;  // Share ownership!
+            view.is_view_ = true;  // Mark as view
+            return view;
         } else {
-            starts[i] = 0;
-            ends[i] = shape_[i];
+            // Need to copy
+            return copy_slice(starts, ends, new_shape);
         }
     }
-
-    // Calculate new shape
-    std::vector<size_t> new_shape;
-    for (size_t i = 0; i < shape_.rank(); ++i) {
-        new_shape.push_back(ends[i] - starts[i]);
-    }
-
-    // Check if slice is contiguous
-    bool is_contiguous = is_contiguous_slice(starts, ends);
-
-    if (is_contiguous) {
-        // Can create a view - calculate the offset into the original data
-        size_t offset = calculate_offset(starts);
-        void* new_data = static_cast<char*>(data_) + offset * dtype_size(dtype_);
-
-        // Return a view (non-owning tensor)
-        return Tensor(new_data, TensorShape(new_shape), device_, dtype_);
-    } else {
-        // Need to copy
-        return copy_slice(starts, ends, new_shape);
-    }
-}
 
 Tensor Tensor::slice(size_t dim, size_t start, size_t end) const {
     if (!is_valid()) return {};

@@ -60,7 +60,10 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
                 }
 
                 // Create a view that shares memory (non-owning)
-                return Tensor(data_, TensorShape(new_shape), device_, dtype_);
+                Tensor view(data_, TensorShape(new_shape), device_, dtype_);
+                view.data_owner_ = data_owner_;  // Share ownership!
+                view.is_view_ = true;  // Mark as view
+                return view;
             }
             LOG_ERROR("Reshape requires vector<int> args");
             return {};
@@ -114,33 +117,47 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
         case MovementOp::Squeeze: {
             if (auto* dim = std::get_if<int>(&args.args)) {
                 std::vector<size_t> new_shape;
-                if (*dim == -1) {
-                    // Squeeze all dimensions with size 1
-                    for (size_t i = 0; i < shape_.rank(); ++i) {
+                int resolved = *dim;
+
+                // INT_MIN is the sentinel for "squeeze all dimensions with size 1"
+                bool squeeze_all = (*dim == std::numeric_limits<int>::min());
+
+                if (!squeeze_all) {
+                    // Resolve negative index normally
+                    if (resolved < 0) {
+                        resolved = shape_.rank() + resolved;
+                    }
+
+                    if (resolved < 0 || resolved >= static_cast<int>(shape_.rank())) {
+                        LOG_ERROR("Invalid squeeze dimension: {} for rank {}", *dim, shape_.rank());
+                        return {};
+                    }
+                }
+
+                // Build new shape
+                for (size_t i = 0; i < shape_.rank(); ++i) {
+                    if (squeeze_all) {
+                        // Squeeze all dimensions with size 1
                         if (shape_[i] != 1) {
                             new_shape.push_back(shape_[i]);
                         }
-                    }
-                } else {
-                    // Squeeze specific dimension
-                    int resolved = resolve_dim(*dim);
-                    if (resolved < 0 || resolved >= static_cast<int>(shape_.rank())) {
-                        LOG_ERROR("Invalid squeeze dimension");
-                        return {};
-                    }
-                    // Only squeeze if dimension is 1
-                    for (size_t i = 0; i < shape_.rank(); ++i) {
+                    } else {
+                        // Squeeze specific dimension only if it has size 1
                         if (i != static_cast<size_t>(resolved) || shape_[i] != 1) {
                             new_shape.push_back(shape_[i]);
                         }
                     }
                 }
+
                 if (new_shape.empty()) {
                     new_shape.push_back(1); // Scalar
                 }
 
                 // Create a view that shares memory
-                return Tensor(data_, TensorShape(new_shape), device_, dtype_);
+                Tensor view(data_, TensorShape(new_shape), device_, dtype_);
+                view.data_owner_ = data_owner_;  // Share ownership
+                view.is_view_ = true;  // Mark as view
+                return view;
             }
             LOG_ERROR("Squeeze requires int dim arg");
             return {};
@@ -167,7 +184,10 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
                 }
 
                 // Create a view that shares memory
-                return Tensor(data_, TensorShape(new_shape), device_, dtype_);
+                Tensor view(data_, TensorShape(new_shape), device_, dtype_);
+                view.data_owner_ = data_owner_;  // Share ownership
+                view.is_view_ = true;  // Mark as view
+                return view;
             }
             LOG_ERROR("Unsqueeze requires int dim arg");
             return {};
@@ -183,7 +203,7 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
                     start > end) {
                     LOG_ERROR("Invalid flatten dimensions");
                     return {};
-                }
+                    }
 
                 std::vector<size_t> new_shape;
                 for (int i = 0; i < start; ++i) {
@@ -201,10 +221,16 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
                 }
 
                 // Create a view that shares memory
-                return Tensor(data_, TensorShape(new_shape), device_, dtype_);
+                Tensor view(data_, TensorShape(new_shape), device_, dtype_);
+                view.data_owner_ = data_owner_;  // Share ownership
+                view.is_view_ = true;  // Mark as view
+                return view;
             }
             // Default flatten (all dimensions)
-            return Tensor(data_, TensorShape({numel()}), device_, dtype_);
+            Tensor view(data_, TensorShape({numel()}), device_, dtype_);
+            view.data_owner_ = data_owner_;  // Share ownership
+            view.is_view_ = true;  // Mark as view
+            return view;
         }
 
         case MovementOp::Slice: {

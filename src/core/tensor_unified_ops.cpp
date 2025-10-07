@@ -23,7 +23,6 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
             result.shape_ = args.shape;
             result.device_ = args.device;
             result.dtype_ = args.dtype;
-            result.owns_memory_ = true;
             result.initialized_ = true;
             result.id_ = next_id_++;
 
@@ -33,19 +32,30 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
             }
 
             if (result.device_ == Device::CUDA) {
-                cudaError_t err = cudaMalloc(&result.data_, bytes);
+                void* ptr = nullptr;
+                cudaError_t err = cudaMalloc(&ptr, bytes);
                 if (err != cudaSuccess) {
                     LOG_ERROR("Failed to allocate {} bytes on CUDA: {}", bytes, cudaGetErrorString(err));
                     result.initialized_ = false;
                     return result;
                 }
+                result.data_ = ptr;
+                // Create shared_ptr with CUDA deleter
+                result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+                    if (p) cudaFree(p);
+                });
             } else {
-                result.data_ = std::malloc(bytes);
-                if (!result.data_) {
+                void* ptr = std::malloc(bytes);
+                if (!ptr) {
                     LOG_ERROR("Failed to allocate {} bytes on CPU", bytes);
                     result.initialized_ = false;
                     return result;
                 }
+                result.data_ = ptr;
+                // Create shared_ptr with free deleter
+                result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+                    if (p) std::free(p);
+                });
             }
             break;
         }
@@ -115,7 +125,6 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
             result.shape_ = TensorShape{count};
             result.device_ = args.device;
             result.dtype_ = args.dtype;
-            result.owns_memory_ = true;
             result.initialized_ = true;
             result.id_ = next_id_++;
 
@@ -493,7 +502,7 @@ Tensor Tensor::unary(UnaryOp op, const UnaryArgs& args) const {
     return result;
 }
 
-// Binary operations - NO TEMPLATES!
+    // Binary operations - NO TEMPLATES!
 Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
     if (!is_valid() || !other.is_valid()) {
         LOG_ERROR("Binary operation on invalid tensor");
@@ -502,7 +511,7 @@ Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
 
     // Get broadcast shape
     auto broadcast_shape = this->broadcast_shape(other.shape());
-    if (broadcast_shape.rank() == 0 || broadcast_shape.elements() == 0) {
+    if (broadcast_shape.rank() == 0) {  // CHANGED: removed || broadcast_shape.elements() == 0
         LOG_ERROR("Incompatible shapes for broadcasting: {} vs {}",
                   shape_.str(), other.shape().str());
         return Tensor();
@@ -539,11 +548,12 @@ Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
             cudaDeviceSynchronize();
         } else {
             // CPU implementation for same-shape tensors
-            const float* src_a = static_cast<const float*>(raw_ptr());
-            const float* src_b = static_cast<const float*>(other.raw_ptr());
-
-            if (out_dtype == DataType::Bool) {
+            if (out_dtype == DataType::Bool && dtype_ == DataType::Float32 && other.dtype() == DataType::Float32) {
+                // Comparison operations: float inputs, bool output
+                const float* src_a = static_cast<const float*>(raw_ptr());
+                const float* src_b = static_cast<const float*>(other.raw_ptr());
                 unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
+
                 for (size_t i = 0; i < result.numel(); ++i) {
                     bool res = false;
                     switch (op) {
@@ -553,22 +563,33 @@ Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
                     case BinaryOp::LessEqual: res = (src_a[i] <= src_b[i]); break;
                     case BinaryOp::Greater: res = (src_a[i] > src_b[i]); break;
                     case BinaryOp::GreaterEqual: res = (src_a[i] >= src_b[i]); break;
-                    case BinaryOp::LogicalAnd: res = (src_a[i] != 0) && (src_b[i] != 0); break;
-                    case BinaryOp::LogicalOr: res = (src_a[i] != 0) || (src_b[i] != 0); break;
-                    case BinaryOp::LogicalXor: res = (src_a[i] != 0) != (src_b[i] != 0); break;
-                    case BinaryOp::BitwiseOr: {
-                        // For bool tensors, treat as logical OR
-                        const unsigned char* ba = static_cast<const unsigned char*>(raw_ptr());
-                        const unsigned char* bb = static_cast<const unsigned char*>(other.raw_ptr());
-                        res = (ba[i] != 0) || (bb[i] != 0);
-                        break;
-                    }
                     default: break;
                     }
                     dst[i] = res ? 1 : 0;
                 }
-            } else {
+            } else if (dtype_ == DataType::Bool && other.dtype() == DataType::Bool && out_dtype == DataType::Bool) {
+                // Logical/bitwise operations: bool inputs, bool output
+                const unsigned char* src_a = static_cast<const unsigned char*>(raw_ptr());
+                const unsigned char* src_b = static_cast<const unsigned char*>(other.raw_ptr());
+                unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
+
+                for (size_t i = 0; i < result.numel(); ++i) {
+                    bool res = false;
+                    switch (op) {
+                    case BinaryOp::LogicalAnd: res = (src_a[i] != 0) && (src_b[i] != 0); break;
+                    case BinaryOp::LogicalOr: res = (src_a[i] != 0) || (src_b[i] != 0); break;
+                    case BinaryOp::LogicalXor: res = (src_a[i] != 0) != (src_b[i] != 0); break;
+                    case BinaryOp::BitwiseOr: res = (src_a[i] != 0) || (src_b[i] != 0); break;
+                    default: break;
+                    }
+                    dst[i] = res ? 1 : 0;
+                }
+            } else if (dtype_ == DataType::Float32 && other.dtype() == DataType::Float32 && out_dtype == DataType::Float32) {
+                // Arithmetic operations: float inputs, float output
+                const float* src_a = static_cast<const float*>(raw_ptr());
+                const float* src_b = static_cast<const float*>(other.raw_ptr());
                 float* dst = static_cast<float*>(result.raw_ptr());
+
                 for (size_t i = 0; i < result.numel(); ++i) {
                     switch (op) {
                     case BinaryOp::Add: dst[i] = src_a[i] + src_b[i]; break;
@@ -623,14 +644,14 @@ Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
             cudaDeviceSynchronize();
         } else {
             // CPU implementation with broadcasting
-            const float* src_a = static_cast<const float*>(raw_ptr());
-            const float* src_b = static_cast<const float*>(other.raw_ptr());
-
             auto a_shape = shape_.dims();
             auto b_shape = other.shape().dims();
             auto c_shape = broadcast_shape.dims();
 
-            if (out_dtype == DataType::Bool) {
+            if (out_dtype == DataType::Bool && dtype_ == DataType::Float32 && other.dtype() == DataType::Float32) {
+                // Comparison operations: float inputs, bool output
+                const float* src_a = static_cast<const float*>(raw_ptr());
+                const float* src_b = static_cast<const float*>(other.raw_ptr());
                 unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
 
                 for (size_t i = 0; i < result.numel(); ++i) {
@@ -646,14 +667,35 @@ Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
                     case BinaryOp::LessEqual: res = (src_a[a_idx] <= src_b[b_idx]); break;
                     case BinaryOp::Greater: res = (src_a[a_idx] > src_b[b_idx]); break;
                     case BinaryOp::GreaterEqual: res = (src_a[a_idx] >= src_b[b_idx]); break;
-                    case BinaryOp::LogicalAnd: res = (src_a[a_idx] != 0) && (src_b[b_idx] != 0); break;
-                    case BinaryOp::LogicalOr: res = (src_a[a_idx] != 0) || (src_b[b_idx] != 0); break;
-                    case BinaryOp::LogicalXor: res = (src_a[a_idx] != 0) != (src_b[b_idx] != 0); break;
                     default: break;
                     }
                     dst[i] = res ? 1 : 0;
                 }
-            } else {
+            } else if (dtype_ == DataType::Bool && other.dtype() == DataType::Bool && out_dtype == DataType::Bool) {
+                // Logical/bitwise operations: bool inputs, bool output
+                const unsigned char* src_a = static_cast<const unsigned char*>(raw_ptr());
+                const unsigned char* src_b = static_cast<const unsigned char*>(other.raw_ptr());
+                unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
+
+                for (size_t i = 0; i < result.numel(); ++i) {
+                    // Calculate broadcast indices
+                    size_t a_idx = broadcast::index(i, c_shape, a_shape);
+                    size_t b_idx = broadcast::index(i, c_shape, b_shape);
+
+                    bool res = false;
+                    switch (op) {
+                    case BinaryOp::LogicalAnd: res = (src_a[a_idx] != 0) && (src_b[b_idx] != 0); break;
+                    case BinaryOp::LogicalOr: res = (src_a[a_idx] != 0) || (src_b[b_idx] != 0); break;
+                    case BinaryOp::LogicalXor: res = (src_a[a_idx] != 0) != (src_b[b_idx] != 0); break;
+                    case BinaryOp::BitwiseOr: res = (src_a[a_idx] != 0) || (src_b[b_idx] != 0); break;
+                    default: break;
+                    }
+                    dst[i] = res ? 1 : 0;
+                }
+            } else if (dtype_ == DataType::Float32 && other.dtype() == DataType::Float32 && out_dtype == DataType::Float32) {
+                // Arithmetic operations: float inputs, float output
+                const float* src_a = static_cast<const float*>(raw_ptr());
+                const float* src_b = static_cast<const float*>(other.raw_ptr());
                 float* dst = static_cast<float*>(result.raw_ptr());
 
                 for (size_t i = 0; i < result.numel(); ++i) {

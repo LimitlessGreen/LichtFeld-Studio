@@ -275,11 +275,12 @@ namespace gs {
     class Tensor {
     private:
         void* data_ = nullptr;
+        std::shared_ptr<void> data_owner_;
         TensorShape shape_;
         Device device_ = Device::CPU;
         DataType dtype_ = DataType::Float32;
-        bool owns_memory_ = false;
         bool initialized_ = false;
+        bool is_view_ = false;
 
         mutable size_t id_ = 0;
         static std::atomic<size_t> next_id_;
@@ -347,7 +348,7 @@ namespace gs {
         };
 
         template<typename T, size_t N>
-TensorAccessor<T, N> accessor() {
+        TensorAccessor<T, N> accessor() {
             if (device_ != Device::CPU) {
                 LOG_ERROR("accessor() only works on CPU tensors");
                 return TensorAccessor<T, N>(nullptr, std::array<size_t, N>{});
@@ -571,7 +572,8 @@ TensorAccessor<T, N> accessor() {
         const TensorShape& shape() const { return shape_; }
         Device device() const { return device_; }
         DataType dtype() const { return dtype_; }
-        bool owns_memory() const { return owns_memory_; }
+        bool owns_memory() const { return static_cast<bool>(data_owner_) && !is_view_; }
+        bool is_view() const { return is_view_; }
         bool is_empty() const { return !initialized_ || shape_.elements() == 0; }
         bool is_valid() const { return initialized_; }
         size_t numel() const { return shape_.elements(); }
@@ -607,9 +609,11 @@ TensorAccessor<T, N> accessor() {
 
         Tensor squeeze(std::optional<int> dim = std::nullopt) const {
             MovementArgs args;
-            args.args = dim.value_or(-1);
+            // Use INT_MIN as sentinel for "squeeze all", allowing -1 to be a valid dimension
+            args.args = dim.value_or(std::numeric_limits<int>::min());
             return movement(MovementOp::Squeeze, args);
         }
+
         Tensor squeeze(int dim) const {
             MovementArgs args;
             args.args = dim;

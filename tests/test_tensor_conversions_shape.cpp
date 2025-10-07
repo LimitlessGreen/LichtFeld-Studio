@@ -100,10 +100,10 @@ TEST_F(TensorConversionsShapesTest, ConversionIdempotent) {
 
     // Should create a copy
     EXPECT_EQ(result.dtype(), DataType::Float32);
-    
+
     // Modifying result shouldn't affect original
     result.fill_(42.0f);
-    EXPECT_FLOAT_EQ(t.item(), 1.0f);
+    EXPECT_FLOAT_EQ(t.to_vector()[0], 1.0f);
 }
 
 TEST_F(TensorConversionsShapesTest, Int32ToBoolConversion) {
@@ -124,15 +124,21 @@ TEST_F(TensorConversionsShapesTest, Int32ToBoolConversion) {
 // ============= Shape Edge Cases =============
 
 TEST_F(TensorConversionsShapesTest, SqueezeNegativeDim) {
+    // Test that squeeze with negative dims works correctly
     auto t = Tensor::zeros({2, 1, 3, 1, 4}, Device::CPU);
-    
-    // Squeeze last dimension (index -1)
+
+    // Squeeze last dimension (index -1) - size is 4, should NOT squeeze
     auto result = t.squeeze(-1);
-    EXPECT_EQ(result.shape(), TensorShape({2, 1, 3, 4}));
-    
-    // Squeeze second-to-last dimension (index -2)
+    EXPECT_EQ(result.shape(), TensorShape({2, 1, 3, 1, 4}));  // Unchanged
+
+    // Squeeze second-to-last dimension (index -2) - size is 1, SHOULD squeeze
     auto result2 = t.squeeze(-2);
     EXPECT_EQ(result2.shape(), TensorShape({2, 1, 3, 4}));
+
+    // Test squeezing a dimension with size 1 at negative index
+    auto t2 = Tensor::zeros({2, 1, 3, 1}, Device::CPU);
+    auto result3 = t2.squeeze(-1);  // Last dim has size 1
+    EXPECT_EQ(result3.shape(), TensorShape({2, 1, 3}));
 }
 
 TEST_F(TensorConversionsShapesTest, SqueezeAllOnes) {
@@ -289,9 +295,9 @@ TEST_F(TensorConversionsShapesTest, CloneAllocatesNew) {
 
     // Cloned should have separate memory
     cloned.fill_(42.0f);
-    
-    EXPECT_FLOAT_EQ(t.item(), 1.0f);
-    EXPECT_FLOAT_EQ(cloned.item(), 42.0f);
+
+    EXPECT_FLOAT_EQ(t.to_vector()[0], 1.0f);      // Check first element
+    EXPECT_FLOAT_EQ(cloned.to_vector()[0], 42.0f);  // Check first element
 }
 
 TEST_F(TensorConversionsShapesTest, ClonePreservesProperties) {

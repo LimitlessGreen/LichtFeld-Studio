@@ -21,8 +21,9 @@ protected:
         size_t current_free_mem, current_total;
         cudaMemGetInfo(&current_free_mem, &current_total);
 
-        // Allow some tolerance for CUDA internal allocations
-        size_t tolerance = 1024 * 1024; // 1 MB tolerance
+        // Allow tolerance for CUDA internal allocations and allocator pooling
+        // CUDA allocators often allocate in 2MB chunks to reduce overhead
+        size_t tolerance = 4 * 1024 * 1024; // 4 MB tolerance
         EXPECT_NEAR(current_free_mem, initial_free_mem, tolerance)
             << "Possible memory leak detected";
     }

@@ -22,6 +22,28 @@
 
 namespace gs::tensor_ops {
 
+    struct ClampScalarFunctor {
+        float min_val;
+        float max_val;
+
+        ClampScalarFunctor(float min, float max) : min_val(min), max_val(max) {}
+
+        __device__ float operator()(float x) const {
+            return fmax(min_val, fmin(max_val, x));
+        }
+    };
+
+    void launch_clamp_scalar(float* data, float min_val, float max_val, size_t n, cudaStream_t stream) {
+        if (n == 0) return;
+
+        auto data_ptr = thrust::device_pointer_cast(data);
+        thrust::transform(
+            thrust::cuda::par.on(stream),
+            data_ptr, data_ptr + n,
+            data_ptr,
+            ClampScalarFunctor(min_val, max_val)
+        );
+    }
 // ============= UNARY OPERATION FUNCTORS =============
 
 template<typename T>
