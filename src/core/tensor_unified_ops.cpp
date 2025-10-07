@@ -1201,18 +1201,12 @@ Tensor Tensor::cat(const std::vector<Tensor>& tensors, int dim) {
         return Tensor();
     }
 
-    // For now, only implement dim=0
-    if (resolved_dim != 0) {
-        LOG_ERROR("Concatenation only implemented for dim=0");
-        return Tensor();
-    }
-
     // Check shapes (all dimensions except dim must match)
     const auto& first_shape = tensors[0].shape();
     const auto first_device = tensors[0].device();
     const auto first_dtype = tensors[0].dtype();
 
-    size_t total_size_along_dim = first_shape[0];
+    size_t total_size_along_dim = first_shape[resolved_dim];
 
     for (size_t i = 1; i < tensors.size(); ++i) {
         const auto& shape = tensors[i].shape();
@@ -1222,8 +1216,8 @@ Tensor Tensor::cat(const std::vector<Tensor>& tensors, int dim) {
             return Tensor();
         }
 
-        for (size_t d = 1; d < shape.rank(); ++d) {
-            if (shape[d] != first_shape[d]) {
+        for (size_t d = 0; d < shape.rank(); ++d) {
+            if (d != static_cast<size_t>(resolved_dim) && shape[d] != first_shape[d]) {
                 LOG_ERROR("All dimensions except dim={} must match", dim);
                 return Tensor();
             }
@@ -1239,29 +1233,65 @@ Tensor Tensor::cat(const std::vector<Tensor>& tensors, int dim) {
             return Tensor();
         }
 
-        total_size_along_dim += shape[0];
+        total_size_along_dim += shape[resolved_dim];
     }
 
     // Create result shape
     std::vector<size_t> result_dims = first_shape.dims();
-    result_dims[0] = total_size_along_dim;
+    result_dims[resolved_dim] = total_size_along_dim;
 
     // Create result tensor
     auto result = Tensor::empty(TensorShape(result_dims), first_device, first_dtype);
 
-    // Copy data
-    size_t offset = 0;
-    for (const auto& t : tensors) {
-        size_t bytes = t.bytes();
-        void* dst = static_cast<char*>(result.raw_ptr()) + offset;
+    // Calculate strides for copying
+    size_t outer_size = 1;
+    for (int i = 0; i < resolved_dim; ++i) {
+        outer_size *= first_shape[i];
+    }
 
-        if (first_device == Device::CUDA) {
-            cudaMemcpy(dst, t.raw_ptr(), bytes, cudaMemcpyDeviceToDevice);
-        } else {
-            std::memcpy(dst, t.raw_ptr(), bytes);
+    size_t inner_size = 1;
+    for (size_t i = resolved_dim + 1; i < first_shape.rank(); ++i) {
+        inner_size *= first_shape[i];
+    }
+
+    size_t element_size = dtype_size(first_dtype);
+
+    // Copy data chunk by chunk
+    if (first_device == Device::CUDA) {
+        for (size_t outer = 0; outer < outer_size; ++outer) {
+            size_t result_offset = outer * total_size_along_dim * inner_size;
+
+            for (const auto& t : tensors) {
+                size_t tensor_dim_size = t.shape()[resolved_dim];
+                size_t src_offset = outer * tensor_dim_size * inner_size;
+                size_t copy_size = tensor_dim_size * inner_size * element_size;
+
+                void* dst = static_cast<char*>(result.raw_ptr()) + (result_offset * element_size);
+                const void* src = static_cast<const char*>(t.raw_ptr()) + (src_offset * element_size);
+
+                cudaMemcpy(dst, src, copy_size, cudaMemcpyDeviceToDevice);
+
+                result_offset += tensor_dim_size * inner_size;
+            }
         }
+    } else {
+        // CPU implementation
+        for (size_t outer = 0; outer < outer_size; ++outer) {
+            size_t result_offset = outer * total_size_along_dim * inner_size;
 
-        offset += bytes;
+            for (const auto& t : tensors) {
+                size_t tensor_dim_size = t.shape()[resolved_dim];
+                size_t src_offset = outer * tensor_dim_size * inner_size;
+                size_t copy_size = tensor_dim_size * inner_size * element_size;
+
+                void* dst = static_cast<char*>(result.raw_ptr()) + (result_offset * element_size);
+                const void* src = static_cast<const char*>(t.raw_ptr()) + (src_offset * element_size);
+
+                std::memcpy(dst, src, copy_size);
+
+                result_offset += tensor_dim_size * inner_size;
+            }
+        }
     }
 
     return result;

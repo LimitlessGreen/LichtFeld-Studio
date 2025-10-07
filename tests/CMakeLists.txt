@@ -22,7 +22,7 @@ set(OPTIONAL_TEST_FILES
     test_tensor_basic.cpp
     test_tensor_ops.cpp
     test_tensor_memory.cpp
-    test_tensor_reductions.cpp
+    test_tensor_reduction.cpp
     test_tensor_views.cpp
     test_tensor_math.cpp
     test_tensor_utils.cpp
@@ -38,6 +38,7 @@ set(OPTIONAL_TEST_FILES
     test_tensor_random_advanced.cpp
     test_tensor_indexing_advanced.cpp
     test_tensor_clamping.cpp
+    test_tensor_compat.cpp
     test_tensor_cumsum_convenience.cpp
     test_tensor_conversions_shape.cpp
 )

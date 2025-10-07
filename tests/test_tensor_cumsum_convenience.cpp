@@ -1,14 +1,124 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <gtest/gtest.h>
 #include "core/tensor.hpp"
+#include <gtest/gtest.h>
+#include <torch/torch.h>
+#include <numeric>
 
 using namespace gs;
+
+// ============= Helper Functions =============
+
+namespace {
+
+// Helper for comparing boolean tensors
+void compare_bool_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         const std::string& msg = "") {
+    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+    auto custom_cpu = custom.cpu();
+
+    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+
+    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+            << msg << ": Shape mismatch at dim " << i;
+    }
+
+    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+        << msg << ": Element count mismatch";
+
+    auto custom_vec = custom_cpu.to_vector_bool();
+    auto ref_accessor = ref_cpu.accessor<bool, 1>();
+
+    for (size_t i = 0; i < custom_vec.size(); ++i) {
+        EXPECT_EQ(custom_vec[i], ref_accessor[i])
+            << msg << ": Mismatch at index " << i
+            << " (custom=" << custom_vec[i] << ", ref=" << ref_accessor[i] << ")";
+    }
+}
+
+// Helper for comparing integer tensors
+void compare_int_tensors(const Tensor& custom, const torch::Tensor& reference,
+                        const std::string& msg = "") {
+    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+    auto custom_cpu = custom.cpu();
+
+    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+
+    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+            << msg << ": Shape mismatch at dim " << i;
+    }
+
+    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+        << msg << ": Element count mismatch";
+
+    auto custom_vec = custom_cpu.to_vector_int();
+    auto ref_accessor = ref_cpu.accessor<int, 1>();
+
+    for (size_t i = 0; i < custom_vec.size(); ++i) {
+        EXPECT_EQ(custom_vec[i], ref_accessor[i])
+            << msg << ": Mismatch at index " << i
+            << " (custom=" << custom_vec[i] << ", ref=" << ref_accessor[i] << ")";
+    }
+}
+
+void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                    float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
+    // Handle boolean tensors specially
+    if (reference.dtype() == torch::kBool) {
+        compare_bool_tensors(custom, reference, msg);
+        return;
+    }
+
+    // Handle integer tensors specially
+    if (reference.dtype() == torch::kInt32) {
+        compare_int_tensors(custom, reference, msg);
+        return;
+    }
+
+    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+    auto custom_cpu = custom.cpu();
+
+    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+
+    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+            << msg << ": Shape mismatch at dim " << i;
+    }
+
+    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+        << msg << ": Element count mismatch";
+
+    auto custom_vec = custom_cpu.to_vector();
+    auto ref_accessor = ref_cpu.accessor<float, 1>();
+
+    for (size_t i = 0; i < custom_vec.size(); ++i) {
+        float ref_val = ref_accessor[i];
+        float custom_val = custom_vec[i];
+
+        if (std::isnan(ref_val)) {
+            EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
+        } else if (std::isinf(ref_val)) {
+            EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+        } else {
+            float diff = std::abs(custom_val - ref_val);
+            float threshold = atol + rtol * std::abs(ref_val);
+            EXPECT_LE(diff, threshold)
+                << msg << ": Mismatch at index " << i
+                << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+        }
+    }
+}
+
+} // anonymous namespace
 
 class TensorCumsumConvenienceTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        ASSERT_TRUE(torch::cuda::is_available()) << "CUDA is not available for testing";
+        torch::manual_seed(42);
         tensor::manual_seed(42);
     }
 };
@@ -16,355 +126,485 @@ protected:
 // ============= Cumsum Tests =============
 
 TEST_F(TensorCumsumConvenienceTest, Cumsum1DBasic) {
-    auto t = Tensor::from_vector(std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f, 5.0f}, {5}, Device::CPU);
-    auto result = t.cumsum(0);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
 
-    ASSERT_TRUE(result.is_valid());
-    EXPECT_EQ(result.shape(), TensorShape({5}));
+    auto custom_t = Tensor::from_vector(data, {5}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
 
-    auto values = result.to_vector();
-    EXPECT_FLOAT_EQ(values[0], 1.0f);   // 1
-    EXPECT_FLOAT_EQ(values[1], 3.0f);   // 1+2
-    EXPECT_FLOAT_EQ(values[2], 6.0f);   // 1+2+3
-    EXPECT_FLOAT_EQ(values[3], 10.0f);  // 1+2+3+4
-    EXPECT_FLOAT_EQ(values[4], 15.0f);  // 1+2+3+4+5
+    auto custom_result = custom_t.cumsum(0);
+    auto torch_result = torch_t.cumsum(0);
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "Cumsum1D");
 }
 
 TEST_F(TensorCumsumConvenienceTest, Cumsum1DNegativeValues) {
-    auto t = Tensor::from_vector(std::vector<float>{1.0f, -2.0f, 3.0f, -4.0f, 5.0f}, {5}, Device::CPU);
-    auto result = t.cumsum(0);
+    std::vector<float> data = {1.0f, -2.0f, 3.0f, -4.0f, 5.0f};
 
-    auto values = result.to_vector();
-    EXPECT_FLOAT_EQ(values[0], 1.0f);   // 1
-    EXPECT_FLOAT_EQ(values[1], -1.0f);  // 1-2
-    EXPECT_FLOAT_EQ(values[2], 2.0f);   // 1-2+3
-    EXPECT_FLOAT_EQ(values[3], -2.0f);  // 1-2+3-4
-    EXPECT_FLOAT_EQ(values[4], 3.0f);   // 1-2+3-4+5
+    auto custom_t = Tensor::from_vector(data, {5}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_result = custom_t.cumsum(0);
+    auto torch_result = torch_t.cumsum(0);
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "Cumsum1DNegative");
 }
 
 TEST_F(TensorCumsumConvenienceTest, Cumsum2DDim0) {
-    auto t = Tensor::from_vector(
-        std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f},
-        {2, 3},
-        Device::CPU
-    );
-    auto result = t.cumsum(0);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
 
-    EXPECT_EQ(result.shape(), TensorShape({2, 3}));
+    auto custom_t = Tensor::from_vector(data, {2, 3}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 3});
 
-    auto values = result.to_vector();
-    // First row stays same
-    EXPECT_FLOAT_EQ(values[0], 1.0f);
-    EXPECT_FLOAT_EQ(values[1], 2.0f);
-    EXPECT_FLOAT_EQ(values[2], 3.0f);
-    // Second row is cumsum
-    EXPECT_FLOAT_EQ(values[3], 5.0f);  // 1+4
-    EXPECT_FLOAT_EQ(values[4], 7.0f);  // 2+5
-    EXPECT_FLOAT_EQ(values[5], 9.0f);  // 3+6
+    auto custom_result = custom_t.cumsum(0);
+    auto torch_result = torch_t.cumsum(0);
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "Cumsum2DDim0");
 }
 
 TEST_F(TensorCumsumConvenienceTest, Cumsum2DDim1) {
-    auto t = Tensor::from_vector(
-        std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f},
-        {2, 3},
-        Device::CPU
-    );
-    auto result = t.cumsum(1);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
 
-    EXPECT_EQ(result.shape(), TensorShape({2, 3}));
+    auto custom_t = Tensor::from_vector(data, {2, 3}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 3});
 
-    auto values = result.to_vector();
-    // Row 0
-    EXPECT_FLOAT_EQ(values[0], 1.0f);  // 1
-    EXPECT_FLOAT_EQ(values[1], 3.0f);  // 1+2
-    EXPECT_FLOAT_EQ(values[2], 6.0f);  // 1+2+3
-    // Row 1
-    EXPECT_FLOAT_EQ(values[3], 4.0f);   // 4
-    EXPECT_FLOAT_EQ(values[4], 9.0f);   // 4+5
-    EXPECT_FLOAT_EQ(values[5], 15.0f);  // 4+5+6
+    auto custom_result = custom_t.cumsum(1);
+    auto torch_result = torch_t.cumsum(1);
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "Cumsum2DDim1");
 }
 
 TEST_F(TensorCumsumConvenienceTest, Cumsum3D) {
-    auto t = Tensor::arange(0.0f, 24.0f).reshape({2, 3, 4});
-    
-    // Cumsum along different dimensions
-    auto result0 = t.cumsum(0);  // Along batch
-    auto result1 = t.cumsum(1);  // Along rows
-    auto result2 = t.cumsum(2);  // Along columns
+    std::vector<float> data(24);
+    std::iota(data.begin(), data.end(), 0.0f);
 
-    EXPECT_EQ(result0.shape(), t.shape());
-    EXPECT_EQ(result1.shape(), t.shape());
-    EXPECT_EQ(result2.shape(), t.shape());
+    auto custom_t = Tensor::from_vector(data, {2, 3, 4}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 3, 4});
 
-    // Verify cumsum along last dimension
-    auto values = result2.to_vector();
-    // First row of first matrix: [0,1,2,3] -> [0,1,3,6]
-    EXPECT_FLOAT_EQ(values[0], 0.0f);
-    EXPECT_FLOAT_EQ(values[1], 1.0f);
-    EXPECT_FLOAT_EQ(values[2], 3.0f);
-    EXPECT_FLOAT_EQ(values[3], 6.0f);
-}
+    // Test cumsum along all dimensions
+    for (int dim = 0; dim < 3; ++dim) {
+        auto custom_result = custom_t.cumsum(dim);
+        auto torch_result = torch_t.cumsum(dim);
 
-TEST_F(TensorCumsumConvenienceTest, CumsumNegativeDim) {
-    auto t = Tensor::from_vector(std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f}, {4}, Device::CPU);
-    auto result = t.cumsum(-1);  // Should be same as cumsum(0)
-
-    auto values = result.to_vector();
-    EXPECT_FLOAT_EQ(values[3], 10.0f);  // 1+2+3+4
-}
-
-TEST_F(TensorCumsumConvenienceTest, CumsumCUDA) {
-    auto t = Tensor::from_vector(std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f, 5.0f}, {5}, Device::CUDA);
-    auto result = t.cumsum(0);
-
-    ASSERT_TRUE(result.is_valid());
-    EXPECT_EQ(result.device(), Device::CUDA);
-
-    auto values = result.to_vector();
-    EXPECT_FLOAT_EQ(values[0], 1.0f);
-    EXPECT_FLOAT_EQ(values[4], 15.0f);
-}
-
-TEST_F(TensorCumsumConvenienceTest, CumsumInt32) {
-    auto t = Tensor::from_vector(std::vector<int>{1, 2, 3, 4, 5}, {5}, Device::CPU);
-    auto result = t.cumsum(0);
-
-    EXPECT_EQ(result.dtype(), DataType::Int32);
-    
-    auto values = result.to_vector_int();
-    EXPECT_EQ(values[0], 1);
-    EXPECT_EQ(values[1], 3);
-    EXPECT_EQ(values[2], 6);
-    EXPECT_EQ(values[3], 10);
-    EXPECT_EQ(values[4], 15);
-}
-
-TEST_F(TensorCumsumConvenienceTest, CumsumEmptyTensor) {
-    std::vector<float> empty_data;
-    auto t = Tensor::from_vector(empty_data, {0}, Device::CPU);
-    auto result = t.cumsum(0);
-
-    EXPECT_TRUE(result.is_valid());
-    EXPECT_EQ(result.numel(), 0);
-}
-
-TEST_F(TensorCumsumConvenienceTest, CumsumSingleElement) {
-    auto t = Tensor::from_vector(std::vector<float>{42.0f}, {1}, Device::CPU);
-    auto result = t.cumsum(0);
-
-    EXPECT_FLOAT_EQ(result.item(), 42.0f);
-}
-
-// ============= cpu() / cuda() Tests =============
-
-TEST_F(TensorCumsumConvenienceTest, CpuConversion) {
-    auto t = Tensor::ones({10}, Device::CUDA);
-    auto cpu_t = t.cpu();
-
-    EXPECT_EQ(cpu_t.device(), Device::CPU);
-    EXPECT_EQ(cpu_t.shape(), t.shape());
-    EXPECT_EQ(cpu_t.dtype(), t.dtype());
-
-    auto values = cpu_t.to_vector();
-    for (float v : values) {
-        EXPECT_FLOAT_EQ(v, 1.0f);
+        compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f,
+                       "Cumsum3D_Dim" + std::to_string(dim));
     }
 }
 
-TEST_F(TensorCumsumConvenienceTest, CudaConversion) {
-    auto t = Tensor::ones({10}, Device::CPU);
-    auto cuda_t = t.cuda();
+TEST_F(TensorCumsumConvenienceTest, CumsumNegativeDim) {
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
 
-    EXPECT_EQ(cuda_t.device(), Device::CUDA);
-    EXPECT_EQ(cuda_t.shape(), t.shape());
-    EXPECT_EQ(cuda_t.dtype(), t.dtype());
+    auto custom_t = Tensor::from_vector(data, {4}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_result = custom_t.cumsum(-1);
+    auto torch_result = torch_t.cumsum(-1);
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "CumsumNegativeDim");
+}
+
+TEST_F(TensorCumsumConvenienceTest, CumsumInt32) {
+    std::vector<int> data = {1, 2, 3, 4, 5};
+
+    auto custom_t = Tensor::from_vector(data, {5}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    auto custom_result = custom_t.cumsum(0);
+    auto torch_result = torch_t.cumsum(0);
+
+    EXPECT_EQ(custom_result.dtype(), DataType::Int32);
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "CumsumInt32");
+}
+
+TEST_F(TensorCumsumConvenienceTest, CumsumSingleElement) {
+    std::vector<float> data = {42.0f};
+
+    auto custom_t = Tensor::from_vector(data, {1}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_result = custom_t.cumsum(0);
+    auto torch_result = torch_t.cumsum(0);
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "CumsumSingle");
+}
+
+TEST_F(TensorCumsumConvenienceTest, CumsumLarge) {
+    std::vector<float> data(100);
+    std::iota(data.begin(), data.end(), 1.0f);
+
+    auto custom_t = Tensor::from_vector(data, {100}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_result = custom_t.cumsum(0);
+    auto torch_result = torch_t.cumsum(0);
+
+    compare_tensors(custom_result, torch_result, 1e-4f, 1e-5f, "CumsumLarge");
+}
+
+// ============= Device Transfer Tests =============
+
+TEST_F(TensorCumsumConvenienceTest, CpuToCuda) {
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
+
+    auto custom_cpu = Tensor::from_vector(data, {5}, Device::CPU);
+    auto torch_cpu = torch::tensor(data, torch::TensorOptions().device(torch::kCPU));
+
+    auto custom_cuda = custom_cpu.cuda();
+    auto torch_cuda = torch_cpu.cuda();
+
+    EXPECT_EQ(custom_cuda.device(), Device::CUDA);
+    compare_tensors(custom_cuda, torch_cuda, 1e-6f, 1e-7f, "CpuToCuda");
+}
+
+TEST_F(TensorCumsumConvenienceTest, CudaToCpu) {
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
+
+    auto custom_cuda = Tensor::from_vector(data, {5}, Device::CUDA);
+    auto torch_cuda = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_cpu = custom_cuda.cpu();
+    auto torch_cpu = torch_cuda.cpu();
+
+    EXPECT_EQ(custom_cpu.device(), Device::CPU);
+    compare_tensors(custom_cpu, torch_cpu, 1e-6f, 1e-7f, "CudaToCpu");
 }
 
 TEST_F(TensorCumsumConvenienceTest, CpuIdempotent) {
-    auto t = Tensor::ones({10}, Device::CPU);
-    auto cpu_t = t.cpu();
+    std::vector<float> data = {1.0f, 2.0f, 3.0f};
 
-    // Should create a copy, not return reference
-    EXPECT_EQ(cpu_t.device(), Device::CPU);
-    
-    // Modify copy
-    cpu_t.fill_(42.0f);
-    
-    // Original should be unchanged
-    EXPECT_FLOAT_EQ(t.to_vector()[0], 1.0f);
+    auto custom_t = Tensor::from_vector(data, {3}, Device::CPU);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCPU));
+
+    auto custom_result = custom_t.cpu();
+    auto torch_result = torch_t.cpu();
+
+    EXPECT_EQ(custom_result.device(), Device::CPU);
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "CpuIdempotent");
+
+    // Verify independence (should create a copy)
+    custom_result.fill_(42.0f);
+    EXPECT_FLOAT_EQ(custom_t.to_vector()[0], 1.0f);
 }
 
 TEST_F(TensorCumsumConvenienceTest, CudaIdempotent) {
-    auto t = Tensor::ones({10}, Device::CUDA);
-    auto cuda_t = t.cuda();
+    std::vector<float> data = {1.0f, 2.0f, 3.0f};
 
-    EXPECT_EQ(cuda_t.device(), Device::CUDA);
+    auto custom_t = Tensor::from_vector(data, {3}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_result = custom_t.cuda();
+    auto torch_result = torch_t.cuda();
+
+    EXPECT_EQ(custom_result.device(), Device::CUDA);
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "CudaIdempotent");
 }
 
-TEST_F(TensorCumsumConvenienceTest, CpuCudaRoundtrip) {
-    auto original = Tensor::from_vector(std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f}, {4}, Device::CPU);
-    auto cuda_t = original.cuda();
-    auto back_to_cpu = cuda_t.cpu();
+TEST_F(TensorCumsumConvenienceTest, DeviceRoundtrip) {
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
 
-    auto values = back_to_cpu.to_vector();
-    auto original_values = original.to_vector();
+    auto custom_cpu = Tensor::from_vector(data, {4}, Device::CPU);
+    auto torch_cpu = torch::tensor(data, torch::TensorOptions().device(torch::kCPU));
 
-    EXPECT_EQ(values, original_values);
+    auto custom_result = custom_cpu.cuda().cpu();
+    auto torch_result = torch_cpu.cuda().cpu();
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "DeviceRoundtrip");
 }
 
-// ============= item<T>() Tests =============
+TEST_F(TensorCumsumConvenienceTest, DeviceTransferPreservesShape) {
+    std::vector<float> data(24);
+    std::iota(data.begin(), data.end(), 0.0f);
+
+    auto custom_cpu = Tensor::from_vector(data, {2, 3, 4}, Device::CPU);
+    auto torch_cpu = torch::tensor(data, torch::TensorOptions().device(torch::kCPU)).reshape({2, 3, 4});
+
+    auto custom_cuda = custom_cpu.cuda();
+    auto torch_cuda = torch_cpu.cuda();
+
+    EXPECT_EQ(custom_cuda.ndim(), torch_cuda.dim());
+    for (size_t i = 0; i < custom_cuda.ndim(); ++i) {
+        EXPECT_EQ(custom_cuda.shape()[i], static_cast<size_t>(torch_cuda.size(i)));
+    }
+}
+
+// ============= item() Tests =============
 
 TEST_F(TensorCumsumConvenienceTest, ItemFloat) {
-    auto t = Tensor::from_vector(std::vector<float>{42.5f}, {1}, Device::CPU);
-    float value = t.item<float>();
+    std::vector<float> data = {42.5f};
 
-    EXPECT_FLOAT_EQ(value, 42.5f);
+    auto custom_t = Tensor::from_vector(data, {1}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    float custom_value = custom_t.item<float>();
+    float torch_value = torch_t.item<float>();
+
+    EXPECT_FLOAT_EQ(custom_value, torch_value);
 }
 
 TEST_F(TensorCumsumConvenienceTest, ItemInt) {
-    auto t = Tensor::from_vector(std::vector<int>{42}, {1}, Device::CPU);
-    int value = t.item<int>();
+    std::vector<int> data = {42};
 
-    EXPECT_EQ(value, 42);
+    auto custom_t = Tensor::from_vector(data, {1}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    int custom_value = custom_t.item<int>();
+    int torch_value = torch_t.item<int>();
+
+    EXPECT_EQ(custom_value, torch_value);
 }
 
 TEST_F(TensorCumsumConvenienceTest, ItemBool) {
     std::vector<bool> data = {true};
-    auto t = Tensor::from_vector(data, {1}, Device::CPU);
-    unsigned char value = t.item<unsigned char>();
 
-    EXPECT_EQ(value, 1);
+    auto custom_t = Tensor::from_vector(data, {1}, Device::CUDA);
+    auto torch_t = torch::tensor({1}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
+
+    unsigned char custom_value = custom_t.item<unsigned char>();
+    bool torch_value = torch_t.item<bool>();
+
+    EXPECT_EQ(custom_value, torch_value ? 1 : 0);
 }
 
-TEST_F(TensorCumsumConvenienceTest, ItemCUDA) {
-    auto t = Tensor::from_vector(std::vector<float>{3.14f}, {1}, Device::CUDA);
-    float value = t.item<float>();
+TEST_F(TensorCumsumConvenienceTest, ItemNegative) {
+    std::vector<float> data = {-3.14f};
 
-    EXPECT_NEAR(value, 3.14f, 1e-6f);
-}
+    auto custom_t = Tensor::from_vector(data, {1}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
 
-TEST_F(TensorCumsumConvenienceTest, ItemMultiElement) {
-    auto t = Tensor::from_vector(std::vector<float>{1.0f, 2.0f, 3.0f}, {3}, Device::CPU);
-    
-    // item<T>() on multi-element tensor should fail or return first element
-    // Behavior is implementation-dependent
-    // The test just verifies it doesn't crash
-    float value = t.item<float>();
-    
-    // Should either be 0 (error) or first element
-    EXPECT_TRUE(value == 0.0f || value == 1.0f);
+    float custom_value = custom_t.item<float>();
+    float torch_value = torch_t.item<float>();
+
+    EXPECT_FLOAT_EQ(custom_value, torch_value);
 }
 
 TEST_F(TensorCumsumConvenienceTest, ItemAfterReduction) {
-    auto t = Tensor::from_vector(std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f, 5.0f}, {5}, Device::CPU);
-    auto sum = t.sum();
-    
-    EXPECT_EQ(sum.numel(), 1);
-    
-    float value = sum.item<float>();
-    EXPECT_FLOAT_EQ(value, 15.0f);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
+
+    auto custom_t = Tensor::from_vector(data, {5}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_sum = custom_t.sum();
+    auto torch_sum = torch_t.sum();
+
+    float custom_value = custom_sum.item<float>();
+    float torch_value = torch_sum.item<float>();
+
+    EXPECT_FLOAT_EQ(custom_value, torch_value);
 }
 
-TEST_F(TensorCumsumConvenienceTest, ItemZeroDimensional) {
-    // Create scalar tensor
-    auto t = Tensor::from_vector(std::vector<float>{7.5f}, {1}, Device::CPU);
-    float value = t.item<float>();
+TEST_F(TensorCumsumConvenienceTest, ItemLargeValue) {
+    std::vector<float> data = {1e6f};
 
-    EXPECT_FLOAT_EQ(value, 7.5f);
+    auto custom_t = Tensor::from_vector(data, {1}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    float custom_value = custom_t.item<float>();
+    float torch_value = torch_t.item<float>();
+
+    EXPECT_FLOAT_EQ(custom_value, torch_value);
 }
 
-// ============= Convenience Method Chaining =============
+TEST_F(TensorCumsumConvenienceTest, ItemSmallValue) {
+    std::vector<float> data = {1e-6f};
 
-TEST_F(TensorCumsumConvenienceTest, ChainedOperations) {
-    auto t = Tensor::ones({10}, Device::CPU)
-                .cuda()
-                .mul(2.0f)
-                .cpu();
+    auto custom_t = Tensor::from_vector(data, {1}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
 
-    EXPECT_EQ(t.device(), Device::CPU);
-    auto values = t.to_vector();
-    for (float v : values) {
-        EXPECT_FLOAT_EQ(v, 2.0f);
-    }
-}
+    float custom_value = custom_t.item<float>();
+    float torch_value = torch_t.item<float>();
 
-TEST_F(TensorCumsumConvenienceTest, CumsumThenItem) {
-    auto t = Tensor::from_vector(std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f, 5.0f}, {5}, Device::CPU);
-    auto cumsum_result = t.cumsum(0);
-    auto last = cumsum_result.slice(0, 4, 5);
-    
-    float value = last.item<float>();
-    EXPECT_FLOAT_EQ(value, 15.0f);
-}
-
-// ============= Cumsum Integration Tests =============
-
-TEST_F(TensorCumsumConvenienceTest, CumsumWithArithmetic) {
-    auto t = Tensor::from_vector(std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f}, {4}, Device::CPU);
-    auto result = t.cumsum(0).mul(2.0f);
-
-    auto values = result.to_vector();
-    EXPECT_FLOAT_EQ(values[0], 2.0f);   // 1*2
-    EXPECT_FLOAT_EQ(values[1], 6.0f);   // 3*2
-    EXPECT_FLOAT_EQ(values[2], 12.0f);  // 6*2
-    EXPECT_FLOAT_EQ(values[3], 20.0f);  // 10*2
-}
-
-TEST_F(TensorCumsumConvenienceTest, CumsumNormalization) {
-    auto t = Tensor::from_vector(std::vector<float>{1.0f, 1.0f, 1.0f, 1.0f}, {4}, Device::CPU);
-    auto cumsum = t.cumsum(0);
-    auto normalized = cumsum.div(4.0f);  // Divide by total
-
-    auto values = normalized.to_vector();
-    EXPECT_FLOAT_EQ(values[0], 0.25f);  // 1/4
-    EXPECT_FLOAT_EQ(values[1], 0.50f);  // 2/4
-    EXPECT_FLOAT_EQ(values[2], 0.75f);  // 3/4
-    EXPECT_FLOAT_EQ(values[3], 1.00f);  // 4/4
+    EXPECT_NEAR(custom_value, torch_value, 1e-9f);
 }
 
 // ============= ones_like with dtype Tests =============
 
-TEST_F(TensorCumsumConvenienceTest, OnesLikeWithDtype) {
-    auto t = Tensor::zeros({3, 4}, Device::CPU, DataType::Float32);
-    auto ones = tensor::ones_like(t, DataType::Int32);
+TEST_F(TensorCumsumConvenienceTest, OnesLikeFloat32ToInt32) {
+    std::vector<float> data(12, 0.0f);
 
-    EXPECT_EQ(ones.dtype(), DataType::Int32);
-    EXPECT_EQ(ones.shape(), t.shape());
-    EXPECT_EQ(ones.device(), t.device());
+    auto custom_t = Tensor::from_vector(data, {3, 4}, Device::CUDA);
+    auto torch_t = torch::zeros({3, 4}, torch::TensorOptions().device(torch::kCUDA));
 
-    auto values = ones.to_vector_int();
-    for (int v : values) {
-        EXPECT_EQ(v, 1);
-    }
+    auto custom_ones = tensor::ones_like(custom_t, DataType::Int32);
+    auto torch_ones = torch::ones_like(torch_t, torch::TensorOptions().dtype(torch::kInt32));
+
+    EXPECT_EQ(custom_ones.dtype(), DataType::Int32);
+    compare_tensors(custom_ones, torch_ones, 1e-6f, 1e-7f, "OnesLikeInt32");
 }
 
-TEST_F(TensorCumsumConvenienceTest, OnesLikeDifferentDtypes) {
-    auto float_t = Tensor::zeros({5}, Device::CPU, DataType::Float32);
-    
-    auto int_ones = tensor::ones_like(float_t, DataType::Int32);
-    auto bool_ones = tensor::ones_like(float_t, DataType::Bool);
-    
-    EXPECT_EQ(int_ones.dtype(), DataType::Int32);
-    EXPECT_EQ(bool_ones.dtype(), DataType::Bool);
-    
-    // Verify values
-    auto int_values = int_ones.to_vector_int();
-    auto bool_values = bool_ones.to_vector_bool();
-    
-    std::vector<bool> expected_bool(5, true);
-    EXPECT_EQ(int_values.size(), 5);
-    EXPECT_EQ(bool_values.size(), 5);
-    
-    for (size_t i = 0; i < 5; ++i) {
-        EXPECT_EQ(int_values[i], 1);
-        EXPECT_EQ(bool_values[i], expected_bool[i]);
-    }
+TEST_F(TensorCumsumConvenienceTest, OnesLikeFloat32ToBool) {
+    std::vector<float> data(5, 0.0f);
+
+    auto custom_t = Tensor::from_vector(data, {5}, Device::CUDA);
+    auto torch_t = torch::zeros({5}, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_ones = tensor::ones_like(custom_t, DataType::Bool);
+    auto torch_ones = torch::ones_like(torch_t, torch::TensorOptions().dtype(torch::kBool));
+
+    EXPECT_EQ(custom_ones.dtype(), DataType::Bool);
+    compare_tensors(custom_ones, torch_ones, 1e-6f, 1e-7f, "OnesLikeBool");
 }
 
 TEST_F(TensorCumsumConvenienceTest, OnesLikePreservesDevice) {
-    auto cuda_t = Tensor::zeros({10}, Device::CUDA);
-    auto ones = tensor::ones_like(cuda_t, DataType::Int32);
+    auto custom_cuda = Tensor::zeros({10}, Device::CUDA);
+    auto torch_cuda = torch::zeros({10}, torch::TensorOptions().device(torch::kCUDA));
 
-    EXPECT_EQ(ones.device(), Device::CUDA);
-    EXPECT_EQ(ones.dtype(), DataType::Int32);
+    auto custom_ones = tensor::ones_like(custom_cuda, DataType::Int32);
+    auto torch_ones = torch::ones_like(torch_cuda, torch::TensorOptions().dtype(torch::kInt32));
+
+    EXPECT_EQ(custom_ones.device(), Device::CUDA);
+    EXPECT_EQ(custom_ones.dtype(), DataType::Int32);
+    compare_tensors(custom_ones, torch_ones, 1e-6f, 1e-7f, "OnesLikeDevice");
+}
+
+TEST_F(TensorCumsumConvenienceTest, OnesLikePreservesShape) {
+    std::vector<float> data(120, 0.0f);
+
+    auto custom_t = Tensor::from_vector(data, {2, 3, 4, 5}, Device::CUDA);
+    auto torch_t = torch::zeros({2, 3, 4, 5}, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_ones = tensor::ones_like(custom_t, DataType::Float32);
+    auto torch_ones = torch::ones_like(torch_t);
+
+    EXPECT_EQ(custom_ones.ndim(), torch_ones.dim());
+    for (size_t i = 0; i < custom_ones.ndim(); ++i) {
+        EXPECT_EQ(custom_ones.shape()[i], static_cast<size_t>(torch_ones.size(i)));
+    }
+
+    compare_tensors(custom_ones, torch_ones, 1e-6f, 1e-7f, "OnesLikeShape");
+}
+
+// ============= Integration Tests =============
+
+TEST_F(TensorCumsumConvenienceTest, CumsumWithArithmetic) {
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
+
+    auto custom_t = Tensor::from_vector(data, {4}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_result = custom_t.cumsum(0).mul(2.0f);
+    auto torch_result = torch_t.cumsum(0) * 2.0f;
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "CumsumArithmetic");
+}
+
+TEST_F(TensorCumsumConvenienceTest, CumsumNormalization) {
+    std::vector<float> data = {1.0f, 1.0f, 1.0f, 1.0f};
+
+    auto custom_t = Tensor::from_vector(data, {4}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_result = custom_t.cumsum(0).div(4.0f);
+    auto torch_result = torch_t.cumsum(0) / 4.0f;
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "CumsumNormalize");
+}
+
+TEST_F(TensorCumsumConvenienceTest, ChainedOperations) {
+    std::vector<float> data(10, 1.0f);
+
+    auto custom_cpu = Tensor::from_vector(data, {10}, Device::CPU);
+    auto torch_cpu = torch::tensor(data, torch::TensorOptions().device(torch::kCPU));
+
+    auto custom_result = custom_cpu.cuda().mul(2.0f).cpu();
+    auto torch_result = torch_cpu.cuda() * 2.0f;
+    torch_result = torch_result.cpu();
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "ChainedOps");
+}
+
+TEST_F(TensorCumsumConvenienceTest, CumsumThenSlice) {
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
+
+    auto custom_t = Tensor::from_vector(data, {5}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_cumsum = custom_t.cumsum(0);
+    auto torch_cumsum = torch_t.cumsum(0);
+
+    auto custom_slice = custom_cumsum.slice(0, 2, 4);
+    auto torch_slice = torch_cumsum.slice(0, 2, 4);
+
+    compare_tensors(custom_slice, torch_slice, 1e-6f, 1e-7f, "CumsumSlice");
+}
+
+TEST_F(TensorCumsumConvenienceTest, ComplexChain) {
+    std::vector<float> data(20);
+    std::iota(data.begin(), data.end(), 1.0f);
+
+    auto custom_t = Tensor::from_vector(data, {20}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_result = custom_t.reshape({4, 5})
+                                  .cumsum(1)
+                                  .t()
+                                  .cumsum(0)
+                                  .flatten();
+
+    auto torch_result = torch_t.reshape({4, 5})
+                                .cumsum(1)
+                                .t()
+                                .cumsum(0)
+                                .flatten();
+
+    compare_tensors(custom_result, torch_result, 1e-5f, 1e-6f, "ComplexChain");
+}
+
+// ============= Edge Cases =============
+
+TEST_F(TensorCumsumConvenienceTest, CumsumZeros) {
+    auto custom_t = Tensor::zeros({10}, Device::CUDA);
+    auto torch_t = torch::zeros({10}, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_result = custom_t.cumsum(0);
+    auto torch_result = torch_t.cumsum(0);
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "CumsumZeros");
+}
+
+TEST_F(TensorCumsumConvenienceTest, CumsumOnes) {
+    auto custom_t = Tensor::ones({8}, Device::CUDA);
+    auto torch_t = torch::ones({8}, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_result = custom_t.cumsum(0);
+    auto torch_result = torch_t.cumsum(0);
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "CumsumOnes");
+}
+
+TEST_F(TensorCumsumConvenienceTest, CumsumAlternating) {
+    std::vector<float> data = {1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f};
+
+    auto custom_t = Tensor::from_vector(data, {6}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
+
+    auto custom_result = custom_t.cumsum(0);
+    auto torch_result = torch_t.cumsum(0);
+
+    compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "CumsumAlternating");
+}
+
+TEST_F(TensorCumsumConvenienceTest, CumsumMultiDimensional) {
+    std::vector<float> data(60);
+    std::iota(data.begin(), data.end(), 0.0f);
+
+    auto custom_t = Tensor::from_vector(data, {3, 4, 5}, Device::CUDA);
+    auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({3, 4, 5});
+
+    // Test on middle dimension
+    auto custom_result = custom_t.cumsum(1);
+    auto torch_result = torch_t.cumsum(1);
+
+    compare_tensors(custom_result, torch_result, 1e-5f, 1e-6f, "CumsumMultiDim");
+}
+
+TEST_F(TensorCumsumConvenienceTest, DeviceTransferDifferentDtypes) {
+    std::vector<int> data = {1, 2, 3, 4, 5};
+
+    auto custom_cpu = Tensor::from_vector(data, {5}, Device::CPU);
+    auto torch_cpu = torch::tensor(data, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
+
+    auto custom_cuda = custom_cpu.cuda();
+    auto torch_cuda = torch_cpu.cuda();
+
+    EXPECT_EQ(custom_cuda.dtype(), DataType::Int32);
+    compare_tensors(custom_cuda, torch_cuda, 1e-6f, 1e-7f, "DeviceTransferInt");
 }

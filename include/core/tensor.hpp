@@ -262,11 +262,14 @@ namespace gs {
         uint64_t get_seed() const { return seed_; }
         void* get_generator(Device device);
 
+        void* get_impl() { return impl_; }
+        const void* get_impl() const { return impl_; }
+
     private:
         RandomGenerator();
         ~RandomGenerator();
         uint64_t seed_;
-        void* cuda_generator_ = nullptr;
+        void* impl_ = nullptr;
         std::mt19937_64 cpu_generator_;
         RandomGenerator(const RandomGenerator&) = delete;
         RandomGenerator& operator=(const RandomGenerator&) = delete;
@@ -328,8 +331,11 @@ namespace gs {
                 : data_(data), sizes_(sizes) {
                 // Compute strides (row-major)
                 strides_[N-1] = 1;
-                for (int i = N-2; i >= 0; --i) {
-                    strides_[i] = strides_[i+1] * sizes_[i+1];
+                // Use constexpr if to avoid underflow when N=1
+                if constexpr (N > 1) {
+                    for (size_t i = N-1; i > 0; --i) {  // ✅ No underflow
+                        strides_[i-1] = strides_[i] * sizes_[i];
+                    }
                 }
             }
 
