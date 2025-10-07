@@ -107,7 +107,7 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
             break;
         }
 
-        case LoadOp::Arange: {
+   case LoadOp::Arange: {
             auto [start, end, step] = std::get<std::tuple<float, float, float>>(args.args);
 
             if (step == 0) {
@@ -183,12 +183,12 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
             if (result.device_ == Device::CUDA) {
                 if (result.dtype_ == DataType::Float32) {
                     tensor_ops::launch_uniform(result.ptr<float>(), result.numel(), low, high,
-                                             RandomGenerator::instance().get_seed(), 0);
+                                             RandomGenerator::instance().get_next_cuda_seed(), 0);
                     cudaDeviceSynchronize();
                 } else if (result.dtype_ == DataType::Int32) {
                     tensor_ops::launch_randint(result.ptr<int>(), result.numel(),
                                               static_cast<int>(low), static_cast<int>(high),
-                                              RandomGenerator::instance().get_seed(), 0);
+                                              RandomGenerator::instance().get_next_cuda_seed(), 0);
                     cudaDeviceSynchronize();
                 }
             } else {
@@ -220,7 +220,7 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
 
             if (result.device_ == Device::CUDA) {
                 tensor_ops::launch_normal(result.ptr<float>(), result.numel(), mean, std,
-                                        RandomGenerator::instance().get_seed(), 0);
+                                        RandomGenerator::instance().get_next_cuda_seed(), 0);
                 cudaDeviceSynchronize();
             } else {
                 auto& gen = *static_cast<std::mt19937_64*>(
@@ -233,6 +233,7 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
             }
             break;
         }
+
         case LoadOp::Randint: {
             auto [low, high] = std::get<std::pair<int, int>>(args.args);
             result = load(LoadOp::Empty, args);
@@ -241,7 +242,7 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
             if (result.device_ == Device::CUDA) {
                 if (result.dtype_ == DataType::Int32) {
                     tensor_ops::launch_randint(result.ptr<int>(), result.numel(), low, high,
-                                              RandomGenerator::instance().get_seed(), 0);
+                                              RandomGenerator::instance().get_next_cuda_seed(), 0);
                     cudaDeviceSynchronize();
                 } else if (result.dtype_ == DataType::Float32) {
                     // Generate ints in a temporary buffer, then convert to float
@@ -249,7 +250,7 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
                     cudaMalloc(&temp_buffer, result.numel() * sizeof(int));
 
                     tensor_ops::launch_randint(temp_buffer, result.numel(), low, high,
-                                              RandomGenerator::instance().get_seed(), 0);
+                                              RandomGenerator::instance().get_next_cuda_seed(), 0);
 
                     // Convert int to float using a kernel
                     tensor_ops::launch_int_to_float(temp_buffer, result.ptr<float>(),
@@ -286,7 +287,7 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
 
             if (result.device_ == Device::CUDA) {
                 tensor_ops::launch_bernoulli(result.ptr<float>(), result.numel(), p,
-                                            RandomGenerator::instance().get_seed(), 0);
+                                            RandomGenerator::instance().get_next_cuda_seed(), 0);
                 cudaDeviceSynchronize();
             } else {
                 auto& gen = *static_cast<std::mt19937_64*>(
@@ -318,7 +319,7 @@ Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
             if (weights->device() == Device::CUDA) {
                 tensor_ops::launch_multinomial(weights->ptr<float>(), result.ptr<int>(),
                                               n, num_samples, replacement,
-                                              RandomGenerator::instance().get_seed(), 0);
+                                              RandomGenerator::instance().get_next_cuda_seed(), 0);
                 cudaDeviceSynchronize();
             } else {
                 // CPU implementation
@@ -511,7 +512,7 @@ Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
 
     // Get broadcast shape
     auto broadcast_shape = this->broadcast_shape(other.shape());
-    if (broadcast_shape.rank() == 0) {  // CHANGED: removed || broadcast_shape.elements() == 0
+    if (broadcast_shape.rank() == 0) {
         LOG_ERROR("Incompatible shapes for broadcasting: {} vs {}",
                   shape_.str(), other.shape().str());
         return Tensor();
@@ -595,10 +596,7 @@ Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
                     case BinaryOp::Add: dst[i] = src_a[i] + src_b[i]; break;
                     case BinaryOp::Sub: dst[i] = src_a[i] - src_b[i]; break;
                     case BinaryOp::Mul: dst[i] = src_a[i] * src_b[i]; break;
-                    case BinaryOp::Div:
-                        dst[i] = src_a[i] / (std::abs(src_b[i]) < 1e-7f ?
-                                             (src_b[i] < 0 ? -1e-7f : 1e-7f) : src_b[i]);
-                        break;
+                    case BinaryOp::Div: dst[i] = src_a[i] / src_b[i]; break;
                     case BinaryOp::Pow: dst[i] = std::pow(src_a[i], src_b[i]); break;
                     case BinaryOp::Maximum: dst[i] = std::max(src_a[i], src_b[i]); break;
                     case BinaryOp::Minimum: dst[i] = std::min(src_a[i], src_b[i]); break;
@@ -707,10 +705,7 @@ Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
                     case BinaryOp::Add: dst[i] = src_a[a_idx] + src_b[b_idx]; break;
                     case BinaryOp::Sub: dst[i] = src_a[a_idx] - src_b[b_idx]; break;
                     case BinaryOp::Mul: dst[i] = src_a[a_idx] * src_b[b_idx]; break;
-                    case BinaryOp::Div:
-                        dst[i] = src_a[a_idx] / (std::abs(src_b[b_idx]) < 1e-7f ?
-                                                 (src_b[b_idx] < 0 ? -1e-7f : 1e-7f) : src_b[b_idx]);
-                        break;
+                    case BinaryOp::Div: dst[i] = src_a[a_idx] / src_b[b_idx]; break;
                     case BinaryOp::Pow: dst[i] = std::pow(src_a[a_idx], src_b[b_idx]); break;
                     case BinaryOp::Maximum: dst[i] = std::max(src_a[a_idx], src_b[b_idx]); break;
                     case BinaryOp::Minimum: dst[i] = std::min(src_a[a_idx], src_b[b_idx]); break;
@@ -772,10 +767,7 @@ Tensor Tensor::binary_op_scalar(float scalar, BinaryOp op) const {
                 case BinaryOp::Add: dst[i] = src[i] + scalar; break;
                 case BinaryOp::Sub: dst[i] = src[i] - scalar; break;
                 case BinaryOp::Mul: dst[i] = src[i] * scalar; break;
-                case BinaryOp::Div:
-                    dst[i] = src[i] / (std::abs(scalar) < 1e-7f ?
-                                      (scalar < 0 ? -1e-7f : 1e-7f) : scalar);
-                    break;
+                case BinaryOp::Div: dst[i] = src[i] / scalar; break;
                 case BinaryOp::Pow: dst[i] = std::pow(src[i], scalar); break;
                 case BinaryOp::Maximum: dst[i] = std::max(src[i], scalar); break;
                 case BinaryOp::Minimum: dst[i] = std::min(src[i], scalar); break;
@@ -818,10 +810,7 @@ Tensor& Tensor::binary_op_inplace_impl(const Tensor& other, BinaryOp op) {
             case BinaryOp::Add: dst[i] += src[i]; break;
             case BinaryOp::Sub: dst[i] -= src[i]; break;
             case BinaryOp::Mul: dst[i] *= src[i]; break;
-            case BinaryOp::Div:
-                dst[i] /= (std::abs(src[i]) < 1e-7f ?
-                          (src[i] < 0 ? -1e-7f : 1e-7f) : src[i]);
-                break;
+            case BinaryOp::Div: dst[i] /= src[i]; break;
             default: break;
             }
         }
@@ -854,10 +843,7 @@ Tensor& Tensor::binary_op_inplace_scalar(float scalar, BinaryOp op) {
             case BinaryOp::Add: dst[i] += scalar; break;
             case BinaryOp::Sub: dst[i] -= scalar; break;
             case BinaryOp::Mul: dst[i] *= scalar; break;
-            case BinaryOp::Div:
-                dst[i] /= (std::abs(scalar) < 1e-7f ?
-                          (scalar < 0 ? -1e-7f : 1e-7f) : scalar);
-                break;
+            case BinaryOp::Div: dst[i] /= scalar; break;
             default: break;
             }
         }
@@ -898,13 +884,12 @@ Tensor& Tensor::binary_op_inplace_scalar(float scalar, BinaryOp op) {
         }
     }
 
-    // Handle empty axes (reduce all) - existing code
+        // Handle empty axes (reduce all)
     std::vector<int> axes = args.axes;
     if (axes.empty()) {
         axes.resize(shape_.rank());
         std::iota(axes.begin(), axes.end(), 0);
     }
-
 
     // Calculate output shape
     std::vector<size_t> out_shape;
@@ -913,10 +898,6 @@ Tensor& Tensor::binary_op_inplace_scalar(float scalar, BinaryOp op) {
         if (!is_reduced || args.keepdim) {
             out_shape.push_back(is_reduced ? 1 : shape_[i]);
         }
-    }
-
-    if (out_shape.empty()) {
-        out_shape.push_back(1);  // Scalar result
     }
 
     // Determine output dtype
@@ -929,6 +910,58 @@ Tensor& Tensor::binary_op_inplace_scalar(float scalar, BinaryOp op) {
 
     auto result = Tensor::empty(TensorShape(out_shape), device_, out_dtype);
 
+    // CRITICAL FIX: Handle empty tensors - return identity values
+    if (numel() == 0) {
+        // For empty tensors, return the identity value for the operation
+        float identity_value = 0.0f;
+        switch (op) {
+            case ReduceOp::Sum:
+            case ReduceOp::Mean:
+                identity_value = 0.0f;
+                break;
+            case ReduceOp::Prod:
+                identity_value = 1.0f;
+                break;
+            case ReduceOp::Max:
+                identity_value = -std::numeric_limits<float>::infinity();
+                break;
+            case ReduceOp::Min:
+                identity_value = std::numeric_limits<float>::infinity();
+                break;
+            case ReduceOp::Any:
+                identity_value = 0.0f; // False
+                break;
+            case ReduceOp::All:
+                identity_value = 1.0f; // True
+                break;
+            default:
+                identity_value = 0.0f;
+                break;
+        }
+
+        // Fill result with identity value
+        if (device_ == Device::CUDA) {
+            if (out_dtype == DataType::Float32) {
+                std::vector<float> temp(result.numel(), identity_value);
+                cudaMemcpy(result.raw_ptr(), temp.data(),
+                          result.bytes(), cudaMemcpyHostToDevice);
+            } else if (out_dtype == DataType::Bool) {
+                unsigned char bool_val = (identity_value != 0.0f) ? 1 : 0;
+                cudaMemset(result.raw_ptr(), bool_val, result.bytes());
+            }
+        } else {
+            if (out_dtype == DataType::Float32) {
+                float* ptr = static_cast<float*>(result.raw_ptr());
+                std::fill_n(ptr, result.numel(), identity_value);
+            } else if (out_dtype == DataType::Bool) {
+                unsigned char* ptr = static_cast<unsigned char*>(result.raw_ptr());
+                std::fill_n(ptr, result.numel(), identity_value != 0.0f ? 1 : 0);
+            }
+        }
+        return result;
+    }
+
+    // Rest of the existing reduce implementation for non-empty tensors
     if (device_ == Device::CUDA) {
         tensor_ops::launch_reduce_op(
             raw_ptr(), result.raw_ptr(),
@@ -1115,7 +1148,12 @@ Tensor Tensor::ternary(const Tensor& b, const Tensor& c, TernaryOp op) const {
             float* dst = static_cast<float*>(result.raw_ptr());
 
             for (size_t i = 0; i < result.numel(); ++i) {
-                dst[i] = std::max(min_vals[i], std::min(max_vals[i], src[i]));
+                // Preserve NaN values (PyTorch behavior)
+                if (std::isnan(src[i])) {
+                    dst[i] = src[i];
+                } else {
+                    dst[i] = std::max(min_vals[i], std::min(max_vals[i], src[i]));
+                }
             }
         }
     }
@@ -1137,6 +1175,9 @@ float Tensor::norm(float p) const {
     } else if (p == 1.0f) {
         // L1 norm: sum(|x|)
         return this->abs().sum_scalar();
+    } else if (std::isinf(p)) {
+        // Infinity norm: max(|x|)
+        return this->abs().max_scalar();
     } else {
         // Lp norm: (sum(|x|^p))^(1/p)
         auto abs_vals = this->abs();
@@ -1145,7 +1186,6 @@ float Tensor::norm(float p) const {
         return std::pow(sum, 1.0f / p);
     }
 }
-
 
 // Broadcasting helper
 std::pair<Tensor, Tensor> Tensor::_broadcasted(const Tensor& other, bool match_dtype) const {

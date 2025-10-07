@@ -204,13 +204,16 @@ namespace gs {
 
     private:
         void compute_total() {
-            total_elements_ = dims_.empty() ? 0 : 1;
-            for (auto d : dims_) {
-                total_elements_ *= d;
+            if (dims_.empty()) {
+                total_elements_ = 1;  // Scalar has 1 element
+            } else {
+                total_elements_ = 1;
+                for (auto d : dims_) {
+                    total_elements_ *= d;
+                }
             }
         }
     };
-
     struct MovementArgs {
         std::variant<
             std::monostate,
@@ -261,6 +264,9 @@ namespace gs {
         void manual_seed(uint64_t seed);
         uint64_t get_seed() const { return seed_; }
         void* get_generator(Device device);
+
+        // ADD THIS NEW METHOD:
+        uint64_t get_next_cuda_seed();
 
         void* get_impl() { return impl_; }
         const void* get_impl() const { return impl_; }

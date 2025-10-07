@@ -86,7 +86,7 @@ inline T binary_op_impl(T a, T b, BinaryOp op) {
         case BinaryOp::Add: return a + b;
         case BinaryOp::Sub: return a - b;
         case BinaryOp::Mul: return a * b;
-        case BinaryOp::Div: return a / (b + T(1e-8));
+        case BinaryOp::Div: return a / b;
         case BinaryOp::Pow: return std::pow(a, b);
         case BinaryOp::Mod: return std::fmod(a, b);
         case BinaryOp::Maximum: return std::max(a, b);
@@ -198,16 +198,23 @@ void muladd(const float* a, const float* b, const float* c, float* output, size_
 }
 
 void clamp(const float* x, float min_val, float max_val, float* output, size_t n) {
-    #pragma omp parallel for if(n > 1024)
+#pragma omp parallel for if(n > 1024)
     for (size_t i = 0; i < n; ++i) {
-        output[i] = std::min(std::max(x[i], min_val), max_val);
+        // Preserve NaN values (PyTorch behavior)
+        if (std::isnan(x[i])) {
+            output[i] = x[i];
+        } else {
+            output[i] = std::min(std::max(x[i], min_val), max_val);
+        }
     }
 }
 
 void clamp_inplace(float* data, float min_val, float max_val, size_t n) {
-    #pragma omp parallel for if(n > 1024)
+#pragma omp parallel for if(n > 1024)
     for (size_t i = 0; i < n; ++i) {
-        data[i] = std::min(std::max(data[i], min_val), max_val);
+        if (!std::isnan(data[i])) {
+            data[i] = std::min(std::max(data[i], min_val), max_val);
+        }
     }
 }
 

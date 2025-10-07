@@ -88,6 +88,13 @@ namespace gs {
         }
     }
 
+    uint64_t RandomGenerator::get_next_cuda_seed() {
+        auto* impl = static_cast<RandomGeneratorImpl*>(impl_);
+        uint64_t base_seed = impl->seed_;
+        uint64_t counter = impl->call_counter_.fetch_add(1);
+        return base_seed + counter * 1000000ULL;
+    }
+
     void* RandomGenerator::get_generator(Device device) {
         auto* impl = static_cast<RandomGeneratorImpl*>(impl_);
         if (device == Device::CUDA) {
@@ -95,16 +102,6 @@ namespace gs {
         } else {
             return &impl->cpu_generator_;
         }
-    }
-
-    // Helper to get next seed for CUDA (with state advancement)
-    static uint64_t get_next_cuda_seed() {
-        auto* impl = static_cast<RandomGeneratorImpl*>(
-            RandomGenerator::instance().get_impl());
-        uint64_t base_seed = impl->seed_;
-        uint64_t counter = impl->call_counter_.fetch_add(1);
-        // Combine base seed and counter to get unique seed for each call
-        return base_seed + counter * 1000000ULL; // Large multiplier to avoid overlap
     }
 
     // ============= In-place Random Operations =============
@@ -123,7 +120,7 @@ namespace gs {
 
         if (device_ == Device::CUDA) {
             // Use kernel-based generation with advancing seed
-            uint64_t seed = get_next_cuda_seed();
+            uint64_t seed = RandomGenerator::instance().get_next_cuda_seed();
             tensor_ops::launch_uniform(ptr<float>(), n, low, high, seed, 0);
             CHECK_CUDA(cudaDeviceSynchronize());
         } else {
@@ -155,7 +152,7 @@ namespace gs {
 
         if (device_ == Device::CUDA) {
             // Use kernel-based generation with advancing seed
-            uint64_t seed = get_next_cuda_seed();
+            uint64_t seed = RandomGenerator::instance().get_next_cuda_seed();
             tensor_ops::launch_normal(ptr<float>(), n, mean, std, seed, 0);
             CHECK_CUDA(cudaDeviceSynchronize());
         } else {

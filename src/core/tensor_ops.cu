@@ -11,6 +11,7 @@
 
 // Thrust headers
 #include <thrust/device_ptr.h>
+#include <thrust/device_vector.h>
 #include <thrust/transform.h>
 #include <thrust/reduce.h>
 #include <thrust/fill.h>
@@ -18,6 +19,7 @@
 #include <thrust/functional.h>
 #include <thrust/execution_policy.h>
 #include <thrust/iterator/zip_iterator.h>
+#include <thrust/iterator/constant_iterator.h>
 #include <thrust/tuple.h>
 
 namespace gs::tensor_ops {
@@ -29,7 +31,20 @@ namespace gs::tensor_ops {
         ClampScalarFunctor(float min, float max) : min_val(min), max_val(max) {}
 
         __device__ float operator()(float x) const {
+            // Preserve NaN values (PyTorch behavior)
+            if (isnan(x)) return x;
             return fmax(min_val, fmin(max_val, x));
+        }
+    };
+
+    struct ClampScalarIntFunctor {
+        int min_val;
+        int max_val;
+
+        ClampScalarIntFunctor(int min, int max) : min_val(min), max_val(max) {}
+
+        __device__ int operator()(int x) const {
+            return max(min_val, min(max_val, x));
         }
     };
 
@@ -37,12 +52,44 @@ namespace gs::tensor_ops {
         if (n == 0) return;
 
         auto data_ptr = thrust::device_pointer_cast(data);
-        thrust::transform(
-            thrust::cuda::par.on(stream),
-            data_ptr, data_ptr + n,
-            data_ptr,
-            ClampScalarFunctor(min_val, max_val)
-        );
+
+        if (stream) {
+            thrust::transform(
+                thrust::cuda::par.on(stream),
+                data_ptr, data_ptr + n,
+                data_ptr,
+                ClampScalarFunctor(min_val, max_val)
+            );
+        } else {
+            thrust::transform(
+                thrust::cuda::par,
+                data_ptr, data_ptr + n,
+                data_ptr,
+                ClampScalarFunctor(min_val, max_val)
+            );
+        }
+    }
+
+    void launch_clamp_scalar_int(int* data, int min_val, int max_val, size_t n, cudaStream_t stream) {
+        if (n == 0) return;
+
+        auto data_ptr = thrust::device_pointer_cast(data);
+
+        if (stream) {
+            thrust::transform(
+                thrust::cuda::par.on(stream),
+                data_ptr, data_ptr + n,
+                data_ptr,
+                ClampScalarIntFunctor(min_val, max_val)
+            );
+        } else {
+            thrust::transform(
+                thrust::cuda::par,
+                data_ptr, data_ptr + n,
+                data_ptr,
+                ClampScalarIntFunctor(min_val, max_val)
+            );
+        }
     }
 // ============= UNARY OPERATION FUNCTORS =============
 
@@ -149,7 +196,7 @@ struct BinaryOpFunctor {
             case BinaryOp::Add: return a + b;
             case BinaryOp::Sub: return a - b;
             case BinaryOp::Mul: return a * b;
-            case BinaryOp::Div: return a / (b + T(1e-8));
+            case BinaryOp::Div: return a / b;
             case BinaryOp::Pow: return pow(a, b);
             case BinaryOp::Mod: return fmod(a, b);
             case BinaryOp::Maximum: return fmax(a, b);
@@ -245,8 +292,8 @@ void launch_binary_op(const void* a, const void* b, void* c, size_t n, BinaryOp 
     }
 }
 
-template<typename T>
-struct BinaryScalarOpFunctor {
+    template<typename T>
+    struct BinaryScalarOpFunctor {
     T scalar;
     BinaryOp op;
 
@@ -257,7 +304,7 @@ struct BinaryScalarOpFunctor {
             case BinaryOp::Add: return a + scalar;
             case BinaryOp::Sub: return a - scalar;
             case BinaryOp::Mul: return a * scalar;
-            case BinaryOp::Div: return a / (scalar + T(1e-8));
+            case BinaryOp::Div: return a / scalar;
             case BinaryOp::Pow: return pow(a, scalar);
             case BinaryOp::Mod: return fmod(a, scalar);
             case BinaryOp::Maximum: return fmax(a, scalar);
@@ -372,74 +419,272 @@ struct ReduceProdFunctor {
     }
 };
 
+// ============= Multi-Axis Reduction Kernel =============
+
+template<typename ReduceFunc>
+__global__ void reduce_axis_kernel(const float* input, float* output,
+                                   const size_t* input_shape,
+                                   const bool* is_reduced_dim,
+                                   size_t input_rank,
+                                   size_t output_elements,
+                                   ReduceFunc reduce_func,
+                                   float init_val) {
+    size_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_elements) return;
+
+    // Calculate input strides
+    size_t input_strides[10];
+    input_strides[input_rank - 1] = 1;
+    for (int i = input_rank - 2; i >= 0; --i) {
+        input_strides[i] = input_strides[i + 1] * input_shape[i + 1];
+    }
+
+    // Calculate output strides (for non-reduced dimensions only)
+    size_t output_strides[10];
+    size_t out_rank = 0;
+    size_t out_shape[10];
+
+    for (size_t i = 0; i < input_rank; ++i) {
+        if (!is_reduced_dim[i]) {
+            out_shape[out_rank] = input_shape[i];
+            out_rank++;
+        }
+    }
+
+    if (out_rank > 0) {
+        output_strides[out_rank - 1] = 1;
+        for (int i = out_rank - 2; i >= 0; --i) {
+            output_strides[i] = output_strides[i + 1] * out_shape[i + 1];
+        }
+    }
+
+    // Convert output linear index to coordinates in the output (non-reduced) space
+    size_t out_coords[10] = {0};
+    size_t temp = out_idx;
+    for (size_t i = 0; i < out_rank; ++i) {
+        out_coords[i] = temp / output_strides[i];
+        temp %= output_strides[i];
+    }
+
+    // Map output coords back to input coords
+    size_t base_input_coords[10];
+    size_t out_coord_idx = 0;
+    for (size_t i = 0; i < input_rank; ++i) {
+        if (!is_reduced_dim[i]) {
+            base_input_coords[i] = out_coords[out_coord_idx++];
+        } else {
+            base_input_coords[i] = 0;
+        }
+    }
+
+    // Calculate how many elements we need to reduce
+    size_t reduce_count = 1;
+    size_t reduced_dims[10];
+    size_t num_reduced = 0;
+
+    for (size_t i = 0; i < input_rank; ++i) {
+        if (is_reduced_dim[i]) {
+            reduced_dims[num_reduced++] = i;
+            reduce_count *= input_shape[i];
+        }
+    }
+
+    // Perform reduction
+    float result = init_val;
+
+    // Iterate through all combinations of reduced dimensions
+    for (size_t r = 0; r < reduce_count; ++r) {
+        // Compute coordinates in the reduced dimensions
+        size_t temp_r = r;
+        size_t full_input_coords[10];
+
+        // Copy base coordinates
+        for (size_t i = 0; i < input_rank; ++i) {
+            full_input_coords[i] = base_input_coords[i];
+        }
+
+        // Fill in reduced dimensions - work backwards for row-major order
+        for (int rd_idx = num_reduced - 1; rd_idx >= 0; --rd_idx) {
+            size_t dim = reduced_dims[rd_idx];
+            full_input_coords[dim] = temp_r % input_shape[dim];
+            temp_r /= input_shape[dim];
+        }
+
+        // Calculate linear input index
+        size_t in_idx = 0;
+        for (size_t i = 0; i < input_rank; ++i) {
+            in_idx += full_input_coords[i] * input_strides[i];
+        }
+
+        result = reduce_func(result, input[in_idx]);
+    }
+
+    output[out_idx] = result;
+}
+
+struct ReduceSum {
+    __device__ float operator()(float a, float b) const { return a + b; }
+};
+
+struct ReduceMax {
+    __device__ float operator()(float a, float b) const { return fmax(a, b); }
+};
+
+struct ReduceMin {
+    __device__ float operator()(float a, float b) const { return fmin(a, b); }
+};
+
+struct ReduceProd {
+    __device__ float operator()(float a, float b) const { return a * b; }
+};
+
 void launch_reduce_op(const void* input, void* output, const size_t* shape, size_t rank,
                       const int* axes, size_t num_axes, bool keepdim, ReduceOp op,
                       DataType dtype, cudaStream_t stream) {
+    if (dtype != DataType::Float32) return;
+
+    // Calculate total input elements
     size_t n = 1;
     for (size_t i = 0; i < rank; ++i) {
         n *= shape[i];
     }
-
-    if (n == 0 || dtype != DataType::Float32) return;
+    if (n == 0) return;
 
     auto input_ptr = thrust::device_pointer_cast(static_cast<const float*>(input));
     auto output_ptr = thrust::device_pointer_cast(static_cast<float*>(output));
 
-    float result = 0.0f;
+    // If no axes specified or all axes, do full reduction to scalar
+    if (num_axes == 0 || num_axes == rank) {
+        float result = 0.0f;
+
+        switch (op) {
+            case ReduceOp::Sum:
+                result = thrust::reduce(thrust::cuda::par.on(stream),
+                                       input_ptr, input_ptr + n,
+                                       0.0f, ReduceSumFunctor());
+                break;
+            case ReduceOp::Mean:
+                result = thrust::reduce(thrust::cuda::par.on(stream),
+                                       input_ptr, input_ptr + n,
+                                       0.0f, ReduceSumFunctor()) / static_cast<float>(n);
+                break;
+            case ReduceOp::Max:
+                result = thrust::reduce(thrust::cuda::par.on(stream),
+                                       input_ptr, input_ptr + n,
+                                       std::numeric_limits<float>::lowest(),
+                                       ReduceMaxFunctor());
+                break;
+            case ReduceOp::Min:
+                result = thrust::reduce(thrust::cuda::par.on(stream),
+                                       input_ptr, input_ptr + n,
+                                       std::numeric_limits<float>::max(),
+                                       ReduceMinFunctor());
+                break;
+            case ReduceOp::Prod:
+                result = thrust::reduce(thrust::cuda::par.on(stream),
+                                       input_ptr, input_ptr + n,
+                                       1.0f, ReduceProdFunctor());
+                break;
+            default:
+                result = 0.0f;
+        }
+
+        cudaMemcpyAsync(output, &result, sizeof(float), cudaMemcpyHostToDevice, stream);
+        return;
+    }
+
+    // For axis-specific reductions, use custom kernel
+
+    // Build mask of which dimensions are reduced
+    thrust::device_vector<bool> d_is_reduced(rank, false);
+    for (size_t i = 0; i < num_axes; ++i) {
+        d_is_reduced[axes[i]] = true;
+    }
+
+    // Calculate output shape and size
+    size_t output_elements = 1;
+    for (size_t i = 0; i < rank; ++i) {
+        if (!d_is_reduced[i] || keepdim) {
+            output_elements *= (d_is_reduced[i] ? 1 : shape[i]);
+        }
+    }
+
+    // Copy input shape to device
+    thrust::device_vector<size_t> d_input_shape(shape, shape + rank);
+
+    // Launch kernel
+    int blocks = (output_elements + 255) / 256;
 
     switch (op) {
         case ReduceOp::Sum:
-            result = thrust::reduce(
-                thrust::cuda::par.on(stream),
-                input_ptr, input_ptr + n,
-                0.0f,
-                ReduceSumFunctor()
-            );
+            reduce_axis_kernel<<<blocks, 256, 0, stream>>>(
+                static_cast<const float*>(input),
+                static_cast<float*>(output),
+                thrust::raw_pointer_cast(d_input_shape.data()),
+                thrust::raw_pointer_cast(d_is_reduced.data()),
+                rank, output_elements,
+                ReduceSum(), 0.0f);
             break;
 
-        case ReduceOp::Mean:
-            result = thrust::reduce(
-                thrust::cuda::par.on(stream),
-                input_ptr, input_ptr + n,
-                0.0f,
-                ReduceSumFunctor()
-            ) / static_cast<float>(n);
+        case ReduceOp::Mean: {
+            // First sum
+            reduce_axis_kernel<<<blocks, 256, 0, stream>>>(
+                static_cast<const float*>(input),
+                static_cast<float*>(output),
+                thrust::raw_pointer_cast(d_input_shape.data()),
+                thrust::raw_pointer_cast(d_is_reduced.data()),
+                rank, output_elements,
+                ReduceSum(), 0.0f);
+
+            // Calculate number of reduced elements
+            size_t reduce_count = 1;
+            for (size_t i = 0; i < num_axes; ++i) {
+                reduce_count *= shape[axes[i]];
+            }
+            float scale = 1.0f / reduce_count;
+
+            // Scale by 1/N
+            thrust::transform(thrust::cuda::par.on(stream),
+                            output_ptr, output_ptr + output_elements,
+                            thrust::make_constant_iterator(scale),
+                            output_ptr,
+                            thrust::multiplies<float>());
             break;
+        }
 
         case ReduceOp::Max:
-            result = thrust::reduce(
-                thrust::cuda::par.on(stream),
-                input_ptr, input_ptr + n,
-                std::numeric_limits<float>::lowest(),
-                ReduceMaxFunctor()
-            );
+            reduce_axis_kernel<<<blocks, 256, 0, stream>>>(
+                static_cast<const float*>(input),
+                static_cast<float*>(output),
+                thrust::raw_pointer_cast(d_input_shape.data()),
+                thrust::raw_pointer_cast(d_is_reduced.data()),
+                rank, output_elements,
+                ReduceMax(), std::numeric_limits<float>::lowest());
             break;
 
         case ReduceOp::Min:
-            result = thrust::reduce(
-                thrust::cuda::par.on(stream),
-                input_ptr, input_ptr + n,
-                std::numeric_limits<float>::max(),
-                ReduceMinFunctor()
-            );
+            reduce_axis_kernel<<<blocks, 256, 0, stream>>>(
+                static_cast<const float*>(input),
+                static_cast<float*>(output),
+                thrust::raw_pointer_cast(d_input_shape.data()),
+                thrust::raw_pointer_cast(d_is_reduced.data()),
+                rank, output_elements,
+                ReduceMin(), std::numeric_limits<float>::max());
             break;
 
         case ReduceOp::Prod:
-            result = thrust::reduce(
-                thrust::cuda::par.on(stream),
-                input_ptr, input_ptr + n,
-                1.0f,
-                ReduceProdFunctor()
-            );
+            reduce_axis_kernel<<<blocks, 256, 0, stream>>>(
+                static_cast<const float*>(input),
+                static_cast<float*>(output),
+                thrust::raw_pointer_cast(d_input_shape.data()),
+                thrust::raw_pointer_cast(d_is_reduced.data()),
+                rank, output_elements,
+                ReduceProd(), 1.0f);
             break;
 
         default:
-            result = 0.0f;
             break;
     }
-
-    // Write result back
-    cudaMemcpyAsync(output, &result, sizeof(float), cudaMemcpyHostToDevice, stream);
 }
 
 // ============= TERNARY OPERATION FUNCTORS =============
@@ -453,6 +698,8 @@ struct WhereFunctor {
 struct ClampFunctor {
     __device__ float operator()(const thrust::tuple<float, float, float>& t) const {
         float val = thrust::get<0>(t);
+        // Preserve NaN values (PyTorch behavior)
+        if (isnan(val)) return val;
         float min_val = thrust::get<1>(t);
         float max_val = thrust::get<2>(t);
         return fmax(min_val, fmin(max_val, val));
@@ -591,17 +838,20 @@ void launch_load_op(void* output, const size_t* shape, size_t rank, LoadOp op,
 // ============= CUMULATIVE SUM KERNEL =============
 
 template<typename T>
-__global__ void cumsum_strided_kernel(T* data, size_t stride, size_t outer_size, size_t dim_size) {
-    size_t o = blockIdx.x;
-    size_t s = threadIdx.x;
+__global__ void cumsum_layer_kernel(T* data, size_t total, size_t dim_stride,
+                                    size_t dim_size, size_t current_layer) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
 
-    if (o >= outer_size || s >= stride) return;
+    // Get the coordinate along the cumsum dimension
+    size_t coord_along_dim = (idx / dim_stride) % dim_size;
 
-    size_t base = o * dim_size * stride + s;
+    // Only process elements at the current layer
+    if (coord_along_dim != current_layer) return;
 
-    for (size_t d = 1; d < dim_size; ++d) {
-        data[base + d * stride] += data[base + (d-1) * stride];
-    }
+    // Add previous element along the cumsum dimension
+    size_t prev_idx = idx - dim_stride;
+    data[idx] += data[prev_idx];
 }
 
 void launch_cumsum(void* data, const size_t* shape, size_t rank,
@@ -610,22 +860,15 @@ void launch_cumsum(void* data, const size_t* shape, size_t rank,
         return;
     }
 
-    size_t stride = 1;
-    for (size_t i = dim + 1; i < rank; ++i) {
-        stride *= shape[i];
+    // Calculate total elements
+    size_t total = 1;
+    for (size_t i = 0; i < rank; ++i) {
+        total *= shape[i];
     }
+    if (total == 0) return;
 
-    size_t outer_size = 1;
-    for (size_t i = 0; i < static_cast<size_t>(dim); ++i) {
-        outer_size *= shape[i];
-    }
-
-    size_t dim_size = shape[dim];
-
-    // For simple 1D case or when stride == 1, use Thrust directly
-    if (rank == 1 || (dim == static_cast<int>(rank) - 1)) {
-        size_t total = outer_size * dim_size;
-
+    // For 1D tensors, use Thrust's inclusive_scan (efficient and correct)
+    if (rank == 1) {
         if (dtype == DataType::Float32) {
             auto data_ptr = thrust::device_pointer_cast(static_cast<float*>(data));
             thrust::inclusive_scan(
@@ -644,16 +887,65 @@ void launch_cumsum(void* data, const size_t* shape, size_t rank,
         return;
     }
 
-    // For complex multi-dimensional case, use custom kernel
-    dim3 grid(outer_size);
-    dim3 block(min(stride, size_t(256)));
+    // For multi-dimensional, calculate stride (row-major indexing)
+    std::vector<size_t> strides(rank);
+    strides[rank - 1] = 1;
+    for (int i = static_cast<int>(rank) - 2; i >= 0; --i) {
+        strides[i] = strides[i + 1] * shape[i + 1];
+    }
+    size_t dim_stride = strides[dim];
+    size_t dim_size = shape[dim];
 
-    if (dtype == DataType::Float32) {
-        cumsum_strided_kernel<float><<<grid, block, 0, stream>>>(
-            static_cast<float*>(data), stride, outer_size, dim_size);
-    } else if (dtype == DataType::Int32) {
-        cumsum_strided_kernel<int><<<grid, block, 0, stream>>>(
-            static_cast<int*>(data), stride, outer_size, dim_size);
+    // Special case: if cumsum is along the last dimension, we can use segmented scan
+    if (dim == static_cast<int>(rank) - 1) {
+        // Each row is independent, so we can use Thrust on flattened data
+        if (dtype == DataType::Float32) {
+            auto data_ptr = thrust::device_pointer_cast(static_cast<float*>(data));
+
+            // Process each segment (row)
+            size_t num_segments = total / dim_size;
+            for (size_t seg = 0; seg < num_segments; ++seg) {
+                auto seg_begin = data_ptr + seg * dim_size;
+                auto seg_end = seg_begin + dim_size;
+                thrust::inclusive_scan(
+                    thrust::cuda::par.on(stream),
+                    seg_begin, seg_end, seg_begin
+                );
+            }
+        } else if (dtype == DataType::Int32) {
+            auto data_ptr = thrust::device_pointer_cast(static_cast<int*>(data));
+            size_t num_segments = total / dim_size;
+            for (size_t seg = 0; seg < num_segments; ++seg) {
+                auto seg_begin = data_ptr + seg * dim_size;
+                auto seg_end = seg_begin + dim_size;
+                thrust::inclusive_scan(
+                    thrust::cuda::par.on(stream),
+                    seg_begin, seg_end, seg_begin
+                );
+            }
+        }
+        return;
+    }
+
+    // General case: process layer by layer along the cumsum dimension
+    // This must be sequential to get correct cumulative results
+    int blocks = (total + 255) / 256;
+
+    for (size_t layer = 1; layer < dim_size; ++layer) {
+        if (dtype == DataType::Float32) {
+            cumsum_layer_kernel<float><<<blocks, 256, 0, stream>>>(
+                static_cast<float*>(data), total, dim_stride, dim_size, layer);
+        } else if (dtype == DataType::Int32) {
+            cumsum_layer_kernel<int><<<blocks, 256, 0, stream>>>(
+                static_cast<int*>(data), total, dim_stride, dim_size, layer);
+        }
+
+        // CRITICAL: Must synchronize between layers for correctness
+        if (stream) {
+            cudaStreamSynchronize(stream);
+        } else {
+            cudaDeviceSynchronize();
+        }
     }
 }
 
@@ -713,6 +1005,8 @@ struct ClampLegacyFunctor {
     ClampLegacyFunctor(float min_, float max_) : min_val(min_), max_val(max_) {}
 
     __device__ float operator()(float x) const {
+        // Preserve NaN values (PyTorch behavior)
+        if (isnan(x)) return x;
         return fmaxf(min_val, fminf(max_val, x));
     }
 };

@@ -4,6 +4,7 @@
 #include "core/tensor.hpp"
 #include <algorithm>
 #include <chrono>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
@@ -69,17 +70,32 @@ protected:
         // Force synchronization
         cudaDeviceSynchronize();
 
-        // Check for memory leaks
+        // Clear PyTorch CUDA cache
+        if (torch::cuda::is_available()) {
+            c10::cuda::CUDACachingAllocator::emptyCache();
+        }
+
+        // Give the system a moment to actually free memory
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+        // Check for memory leaks with reasonable tolerance
         size_t current_free_mem, current_total;
         cudaMemGetInfo(&current_free_mem, &current_total);
 
-        // Allow 20MB tolerance for CUDA internal allocations
-        size_t tolerance = 20 * 1024 * 1024;
+        // Allow 100MB tolerance for CUDA internal allocations and caching
+        // Both our allocator and PyTorch's allocator cache freed memory
+        size_t tolerance = 100 * 1024 * 1024;
+
+        long long leaked = static_cast<long long>(initial_free_mem_) -
+                          static_cast<long long>(current_free_mem);
+
         EXPECT_NEAR(static_cast<long long>(current_free_mem),
                     static_cast<long long>(initial_free_mem_),
                     static_cast<long long>(tolerance))
-            << "Possible memory leak detected in stress test";
+            << "Possible memory leak detected: "
+            << leaked / (1024 * 1024) << " MB not freed";
     }
+
 
     size_t initial_free_mem_;
     size_t total_mem_;

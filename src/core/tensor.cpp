@@ -335,21 +335,38 @@ namespace gs {
     }
 
     Tensor& Tensor::clamp_(float min_val, float max_val) {
-        if (!is_valid() || dtype_ != DataType::Float32) {
-            return *this;
-        }
-
-        if (numel() == 0) {
+        if (!is_valid() || numel() == 0) {
             return *this;
         }
 
         if (device_ == Device::CUDA) {
-            tensor_ops::launch_clamp_scalar(ptr<float>(), min_val, max_val, numel(), nullptr);
-            cudaDeviceSynchronize();
+            if (dtype_ == DataType::Float32) {
+                // Use default stream (0) instead of nullptr
+                tensor_ops::launch_clamp_scalar(ptr<float>(), min_val, max_val, numel(), 0);
+                cudaDeviceSynchronize();
+            } else if (dtype_ == DataType::Int32) {
+                tensor_ops::launch_clamp_scalar_int(ptr<int>(),
+                                                    static_cast<int>(min_val),
+                                                    static_cast<int>(max_val),
+                                                    numel(), 0);
+                cudaDeviceSynchronize();
+            }
         } else {
-            float* data = ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                data[i] = std::clamp(data[i], min_val, max_val);
+            if (dtype_ == DataType::Float32) {
+                float* data = ptr<float>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    // Preserve NaN (PyTorch behavior)
+                    if (!std::isnan(data[i])) {
+                        data[i] = std::clamp(data[i], min_val, max_val);
+                    }
+                }
+            } else if (dtype_ == DataType::Int32) {
+                int* data = ptr<int>();
+                int min_int = static_cast<int>(min_val);
+                int max_int = static_cast<int>(max_val);
+                for (size_t i = 0; i < numel(); ++i) {
+                    data[i] = std::clamp(data[i], min_int, max_int);
+                }
             }
         }
 
@@ -364,80 +381,75 @@ namespace gs {
         return clamp_(std::numeric_limits<float>::lowest(), max);
     }
     // ============= Cumulative sum =============
-    Tensor Tensor::cumsum(int dim) const {
-        if (!is_valid()) {
-            LOG_ERROR("cumsum on invalid tensor");
-            return Tensor();
-        }
+Tensor Tensor::cumsum(int dim) const {
+    if (!is_valid()) {
+        LOG_ERROR("cumsum on invalid tensor");
+        return Tensor();
+    }
 
-        dim = resolve_dim(dim);
-        if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
-            LOG_ERROR("Invalid dimension for cumsum: {}", dim);
-            return Tensor();
-        }
+    dim = resolve_dim(dim);
+    if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
+        LOG_ERROR("Invalid dimension for cumsum: {}", dim);
+        return Tensor();
+    }
 
-        auto result = clone();
+    auto result = clone();
 
-        if (device_ == Device::CUDA) {
-            // Use CUDA kernel for cumulative sum
-            tensor_ops::launch_cumsum(result.raw_ptr(), shape_.dims().data(),
-                                     shape_.rank(), dim, dtype_, nullptr);
-            cudaDeviceSynchronize();
-        } else {
-            // CPU implementation
-            if (dtype_ == DataType::Float32) {
-                float* data = result.ptr<float>();
+    if (device_ == Device::CUDA) {
+        // Use CUDA kernel for cumulative sum
+        tensor_ops::launch_cumsum(result.raw_ptr(), shape_.dims().data(),
+                                 shape_.rank(), dim, dtype_, nullptr);
+        cudaDeviceSynchronize();
+    } else {
+        // CPU implementation - iterate through all elements in row-major order
+        if (dtype_ == DataType::Float32) {
+            float* data = result.ptr<float>();
 
-                // Calculate stride for the dimension
-                size_t stride = 1;
-                for (size_t i = dim + 1; i < shape_.rank(); ++i) {
-                    stride *= shape_[i];
-                }
+            // Calculate strides for all dimensions (row-major)
+            std::vector<size_t> strides(shape_.rank());
+            strides.back() = 1;
+            for (int i = static_cast<int>(shape_.rank()) - 2; i >= 0; --i) {
+                strides[i] = strides[i + 1] * shape_[i + 1];
+            }
 
-                size_t outer_size = 1;
-                for (size_t i = 0; i < static_cast<size_t>(dim); ++i) {
-                    outer_size *= shape_[i];
-                }
+            size_t dim_stride = strides[dim];
+            size_t dim_size = shape_[dim];
+            size_t total = numel();
 
-                size_t dim_size = shape_[dim];
+            // Process each element: if not first along cumsum dim, add previous
+            for (size_t idx = 0; idx < total; ++idx) {
+                // Get coordinate along the cumsum dimension
+                size_t coord_along_dim = (idx / dim_stride) % dim_size;
 
-                // Cumulative sum along dimension
-                for (size_t o = 0; o < outer_size; ++o) {
-                    for (size_t s = 0; s < stride; ++s) {
-                        size_t base = o * dim_size * stride + s;
-                        for (size_t d = 1; d < dim_size; ++d) {
-                            data[base + d * stride] += data[base + (d-1) * stride];
-                        }
-                    }
-                }
-            } else if (dtype_ == DataType::Int32) {
-                int* data = result.ptr<int>();
+                // Skip first elements (they stay as-is)
+                if (coord_along_dim == 0) continue;
 
-                size_t stride = 1;
-                for (size_t i = dim + 1; i < shape_.rank(); ++i) {
-                    stride *= shape_[i];
-                }
+                // Add the previous element along the cumsum dimension
+                data[idx] += data[idx - dim_stride];
+            }
+        } else if (dtype_ == DataType::Int32) {
+            int* data = result.ptr<int>();
 
-                size_t outer_size = 1;
-                for (size_t i = 0; i < static_cast<size_t>(dim); ++i) {
-                    outer_size *= shape_[i];
-                }
+            std::vector<size_t> strides(shape_.rank());
+            strides.back() = 1;
+            for (int i = static_cast<int>(shape_.rank()) - 2; i >= 0; --i) {
+                strides[i] = strides[i + 1] * shape_[i + 1];
+            }
 
-                size_t dim_size = shape_[dim];
+            size_t dim_stride = strides[dim];
+            size_t dim_size = shape_[dim];
+            size_t total = numel();
 
-                for (size_t o = 0; o < outer_size; ++o) {
-                    for (size_t s = 0; s < stride; ++s) {
-                        size_t base = o * dim_size * stride + s;
-                        for (size_t d = 1; d < dim_size; ++d) {
-                            data[base + d * stride] += data[base + (d-1) * stride];
-                        }
-                    }
-                }
+            for (size_t idx = 0; idx < total; ++idx) {
+                size_t coord_along_dim = (idx / dim_stride) % dim_size;
+                if (coord_along_dim == 0) continue;
+                data[idx] += data[idx - dim_stride];
             }
         }
-
-        return result;
     }
+
+    return result;
+}
 
     // ============= TensorShape Implementation =============
     std::string TensorShape::str() const {

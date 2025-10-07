@@ -21,6 +21,15 @@ namespace gs {
     Tensor Tensor::reshape(TensorShape new_shape) const {
         if (!is_valid()) return {};
 
+        // Special case: reshaping to scalar (empty shape with 1 element)
+        if (new_shape.rank() == 0 && numel() == 1) {
+            // Create a view that shares memory and ownership
+            Tensor view(data_, new_shape, device_, dtype_);
+            view.data_owner_ = data_owner_;  // Share ownership!
+            view.is_view_ = true;  // Mark as view
+            return view;
+        }
+
         if (new_shape.elements() != numel()) {
             LOG_ERROR("View shape {} has {} elements, but tensor has {} elements",
                       new_shape.str(), new_shape.elements(), shape_.elements());

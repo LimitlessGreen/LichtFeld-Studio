@@ -131,13 +131,52 @@ void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
     }
 }
 
+// Helper to check CUDA availability
+bool is_cuda_available() {
+    int device_count = 0;
+    cudaError_t err = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        return false;
+    }
+
+    // Try to initialize device 0
+    err = cudaSetDevice(0);
+    if (err != cudaSuccess) {
+        return false;
+    }
+
+    // Try to allocate and free memory to verify device works
+    void* test_ptr = nullptr;
+    err = cudaMalloc(&test_ptr, 1024);
+    if (err != cudaSuccess) {
+        return false;
+    }
+    cudaFree(test_ptr);
+
+    // Synchronize to catch any lingering errors
+    err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        return false;
+    }
+
+    return true;
+}
 } // anonymous namespace
 
 class TensorClampTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Clear any previous CUDA errors
+        cudaGetLastError();
+
         tensor::manual_seed(42);
         torch::manual_seed(42);
+
+        // Initialize CUDA device if available
+        if (torch::cuda::is_available()) {
+            // Use the correct PyTorch API
+            cudaSetDevice(0);
+        }
     }
 };
 
@@ -225,6 +264,10 @@ TEST_F(TensorClampTest, ClampMaxInPlace) {
 // ============= CUDA Tests =============
 
 TEST_F(TensorClampTest, ClampCUDA) {
+    if (!is_cuda_available()) {
+        GTEST_SKIP() << "CUDA not available, skipping test";
+    }
+
     std::vector<float> data = {-5.0f, -2.0f, 0.0f, 2.0f, 5.0f};
 
     auto t_custom = Tensor::from_vector(data, {5}, Device::CUDA);
@@ -240,6 +283,10 @@ TEST_F(TensorClampTest, ClampCUDA) {
 }
 
 TEST_F(TensorClampTest, ClampInPlaceCUDA) {
+    if (!is_cuda_available()) {
+        GTEST_SKIP() << "CUDA not available, skipping test";
+    }
+
     std::vector<float> data = {-5.0f, -2.0f, 0.0f, 2.0f, 5.0f};
 
     auto t_custom = Tensor::from_vector(data, {5}, Device::CUDA);
@@ -252,6 +299,10 @@ TEST_F(TensorClampTest, ClampInPlaceCUDA) {
 }
 
 TEST_F(TensorClampTest, ClampMinCUDA) {
+    if (!is_cuda_available()) {
+        GTEST_SKIP() << "CUDA not available, skipping test";
+    }
+
     std::vector<float> data = {-5.0f, 0.0f, 5.0f};
 
     auto t_custom = Tensor::from_vector(data, {3}, Device::CUDA);
@@ -264,6 +315,10 @@ TEST_F(TensorClampTest, ClampMinCUDA) {
 }
 
 TEST_F(TensorClampTest, ClampMaxCUDA) {
+    if (!is_cuda_available()) {
+        GTEST_SKIP() << "CUDA not available, skipping test";
+    }
+
     std::vector<float> data = {-5.0f, 0.0f, 5.0f};
 
     auto t_custom = Tensor::from_vector(data, {3}, Device::CUDA);
@@ -477,6 +532,10 @@ TEST_F(TensorClampTest, ClampGradient) {
 // ============= Performance Test =============
 
 TEST_F(TensorClampTest, ClampLargeScale) {
+    if (!is_cuda_available()) {
+        GTEST_SKIP() << "CUDA not available, skipping test";
+    }
+
     // Generate same random data for both
     std::vector<float> data;
     std::mt19937 gen(42);

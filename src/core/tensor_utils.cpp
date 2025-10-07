@@ -250,15 +250,17 @@ namespace gs::tensor {
 
     void assert_same_shape(const Tensor& a, const Tensor& b) {
         if (a.shape() != b.shape()) {
-            LOG_ERROR("Shape mismatch: {} vs {}", a.shape().str(), b.shape().str());
-            throw std::runtime_error("Shape mismatch");
+            std::string error_msg = "Shape mismatch: " + a.shape().str() + " vs " + b.shape().str();
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg);
         }
     }
 
     void assert_same_device(const Tensor& a, const Tensor& b) {
         if (a.device() != b.device()) {
-            LOG_ERROR("Device mismatch");
-            throw std::runtime_error("Device mismatch");
+            std::string error_msg = "Device mismatch";
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg);
         }
     }
 
@@ -270,8 +272,8 @@ namespace gs::tensor {
 namespace gs {
 
     SafeOps::Tensor SafeOps::divide(const Tensor& a, const Tensor& b, float epsilon) {
-        // Safe division: add epsilon to denominator to avoid division by zero
-        auto safe_b = b.abs().add(epsilon);
+        // Safe division: a / (b + epsilon) to avoid division by zero
+        auto safe_b = b.add(epsilon);
         return a.div(safe_b);
     }
 

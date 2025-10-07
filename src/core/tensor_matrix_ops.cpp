@@ -232,7 +232,7 @@ namespace gs {
 
         // Handle different dimension cases
         if (shape_.rank() == 1 && other.shape_.rank() == 1) {
-            // Vector dot product
+            // Vector dot product - returns scalar
             if (shape_[0] != other.shape_[0]) {
                 LOG_ERROR("Vector dimensions don't match for dot product");
                 return Tensor();
@@ -276,6 +276,46 @@ namespace gs {
                 return Tensor();
             }
             return bmm(other);
+        } else if (shape_.rank() == 2 && other.shape_.rank() == 3) {
+            // 2D @ 3D: broadcast 2D to match batch dimension
+            // (M, K) @ (B, K, N) -> (B, M, N)
+            if (shape_[1] != other.shape_[1]) {
+                LOG_ERROR("Dimension mismatch for 2D @ 3D matmul: {}x{} @ {}x{}x{}",
+                          shape_[0], shape_[1], other.shape_[0], other.shape_[1], other.shape_[2]);
+                return Tensor();
+            }
+
+            size_t batch_size = other.shape_[0];
+            size_t M = shape_[0];
+            size_t K = shape_[1];
+            size_t N = other.shape_[2];
+
+            // Expand 2D tensor to 3D by adding batch dimension
+            auto expanded_a = unsqueeze(0).expand({static_cast<int>(batch_size),
+                                                   static_cast<int>(M),
+                                                   static_cast<int>(K)});
+            return expanded_a.bmm(other);
+
+        } else if (shape_.rank() == 3 && other.shape_.rank() == 2) {
+            // 3D @ 2D: broadcast 2D to match batch dimension
+            // (B, M, K) @ (K, N) -> (B, M, N)
+            if (shape_[2] != other.shape_[0]) {
+                LOG_ERROR("Dimension mismatch for 3D @ 2D matmul: {}x{}x{} @ {}x{}",
+                          shape_[0], shape_[1], shape_[2], other.shape_[0], other.shape_[1]);
+                return Tensor();
+            }
+
+            size_t batch_size = shape_[0];
+            size_t M = shape_[1];
+            size_t K = shape_[2];
+            size_t N = other.shape_[1];
+
+            // Expand 2D tensor to 3D by adding batch dimension
+            auto expanded_b = other.unsqueeze(0).expand({static_cast<int>(batch_size),
+                                                         static_cast<int>(K),
+                                                         static_cast<int>(N)});
+            return bmm(expanded_b);
+
         } else {
             LOG_ERROR("MatMul not implemented for {}D @ {}D", shape_.rank(), other.shape_.rank());
             return Tensor();
@@ -291,7 +331,6 @@ namespace gs {
             const float beta = 0.0f;
 
             // Create temporary reshaped views for matrix multiplication
-            // Use the new shape_ops API!
             Tensor a_2d, b_2d;
 
             if (shape_.rank() == 1) {
@@ -378,7 +417,8 @@ namespace gs {
             return Tensor();
         }
 
-        // Result is a scalar
+        // Result is a scalar - we need a tensor with 1 element but rank 0
+        // Create as shape {1} first, then reshape to scalar
         auto result = empty({1}, device_, dtype_);
 
         if (device_ == Device::CUDA) {
@@ -404,7 +444,8 @@ namespace gs {
             *result.ptr<float>() = sum;
         }
 
-        return result;
+        // Reshape to scalar (rank 0) - this creates a view with shape [] but 1 element
+        return result.reshape({});
     }
 
 
