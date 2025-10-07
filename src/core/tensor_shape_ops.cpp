@@ -17,19 +17,12 @@
 
 namespace gs {
 
-    // These are helper implementations that movement ops use
-
     Tensor Tensor::reshape(TensorShape new_shape) const {
         if (!is_valid())
             return {};
 
-        // Special case: reshaping to scalar (empty shape with 1 element)
         if (new_shape.rank() == 0 && numel() == 1) {
-            // Create a view that shares memory and ownership
-            Tensor view(data_, new_shape, device_, dtype_);
-            view.data_owner_ = data_owner_; // Share ownership!
-            view.is_view_ = true;           // Mark as view
-            return view;
+            return create_view(new_shape);
         }
 
         if (new_shape.elements() != numel()) {
@@ -38,11 +31,7 @@ namespace gs {
             return {};
         }
 
-        // Create a view that shares memory and ownership
-        Tensor view(data_, new_shape, device_, dtype_);
-        view.data_owner_ = data_owner_; // Share ownership!
-        view.is_view_ = true;           // Mark as view
-        return view;
+        return create_view(new_shape);
     }
 
     Tensor Tensor::t() const {
@@ -50,14 +39,12 @@ namespace gs {
             return {};
 
         if (shape_.rank() <= 1) {
-            return clone(); // 0D and 1D tensors are unchanged
+            return clone();
         }
 
-        // Transpose last two dimensions
         return transpose(-2, -1);
     }
 
-    // Implementation of permute (was inline in header, now moved here)
     Tensor Tensor::permute(std::span<const int> axes) const {
         if (!is_valid())
             return {};
@@ -67,7 +54,6 @@ namespace gs {
             return {};
         }
 
-        // Validate and resolve axes
         std::vector<int> resolved_axes;
         std::vector<bool> used(shape_.rank(), false);
 
@@ -85,7 +71,6 @@ namespace gs {
             resolved_axes.push_back(resolved);
         }
 
-        // Create new shape
         std::vector<size_t> new_dims(shape_.rank());
         for (size_t i = 0; i < shape_.rank(); ++i) {
             new_dims[i] = shape_[resolved_axes[i]];
@@ -94,30 +79,17 @@ namespace gs {
         auto result = empty(TensorShape(new_dims), device_, dtype_);
 
         if (device_ == Device::CUDA) {
-            // For now, do permutation on CPU
             auto cpu_copy = to(Device::CPU);
             auto cpu_result = cpu_copy.permute(axes);
             return cpu_result.to(Device::CUDA);
         } else {
-            // CPU implementation
             const float* src = ptr<float>();
             float* dst = result.ptr<float>();
 
-            // Calculate strides for source and destination
-            std::vector<size_t> src_strides(shape_.rank());
-            std::vector<size_t> dst_strides(shape_.rank());
+            auto src_strides = shape_.strides();
+            auto dst_strides = result.shape().strides();
 
-            src_strides.back() = 1;
-            dst_strides.back() = 1;
-
-            for (int i = shape_.rank() - 2; i >= 0; --i) {
-                src_strides[i] = src_strides[i + 1] * shape_[i + 1];
-                dst_strides[i] = dst_strides[i + 1] * new_dims[i + 1];
-            }
-
-            // Perform permutation
             for (size_t dst_idx = 0; dst_idx < result.numel(); ++dst_idx) {
-                // Convert destination index to coordinates
                 std::vector<size_t> dst_coords(shape_.rank());
                 size_t temp = dst_idx;
                 for (size_t i = 0; i < shape_.rank(); ++i) {
@@ -125,7 +97,6 @@ namespace gs {
                     temp %= dst_strides[i];
                 }
 
-                // Map to source coordinates using permutation
                 size_t src_idx = 0;
                 for (size_t i = 0; i < shape_.rank(); ++i) {
                     src_idx += dst_coords[i] * src_strides[resolved_axes[i]];
@@ -142,24 +113,20 @@ namespace gs {
         if (!is_valid())
             return {};
 
-        // Check if expansion is valid
         if (target_shape.rank() < shape_.rank()) {
             LOG_ERROR("Cannot expand to fewer dimensions");
             return {};
         }
 
-        // Prepend 1s to match rank if needed
         std::vector<size_t> padded_shape = shape_.dims();
         while (padded_shape.size() < target_shape.rank()) {
             padded_shape.insert(padded_shape.begin(), 1);
         }
 
-        // Check compatibility and build final shape
         std::vector<size_t> final_shape(target_shape.rank());
         for (size_t i = 0; i < target_shape.rank(); ++i) {
             size_t target_dim = target_shape[i];
 
-            // Handle -1 in target shape (keep original dimension)
             if (target_dim == static_cast<size_t>(-1)) {
                 if (i < padded_shape.size()) {
                     final_shape[i] = padded_shape[i];
@@ -168,7 +135,6 @@ namespace gs {
                     return {};
                 }
             } else {
-                // Check if expansion is valid
                 if (padded_shape[i] != 1 && padded_shape[i] != target_dim) {
                     LOG_ERROR("Cannot expand dimension {} from {} to {}",
                               i, padded_shape[i], target_dim);
@@ -178,10 +144,7 @@ namespace gs {
             }
         }
 
-        // First reshape to add 1s if needed
         auto reshaped = reshape(TensorShape(padded_shape));
-
-        // Then broadcast to final shape
         return reshaped.broadcast_to(TensorShape(final_shape));
     }
 
@@ -194,7 +157,6 @@ namespace gs {
             return {};
         }
 
-        // Build start and end vectors
         std::vector<size_t> starts(shape_.rank());
         std::vector<size_t> ends(shape_.rank());
 
@@ -203,13 +165,11 @@ namespace gs {
                 int start = ranges[i].first;
                 int end = ranges[i].second;
 
-                // Handle negative indices
                 if (start < 0)
                     start = shape_[i] + start;
                 if (end < 0)
                     end = shape_[i] + end;
 
-                // Clamp to valid range
                 start = std::max(0, std::min(start, static_cast<int>(shape_[i])));
                 end = std::max(start, std::min(end, static_cast<int>(shape_[i])));
 
@@ -221,27 +181,22 @@ namespace gs {
             }
         }
 
-        // Calculate new shape
         std::vector<size_t> new_shape;
         for (size_t i = 0; i < shape_.rank(); ++i) {
             new_shape.push_back(ends[i] - starts[i]);
         }
 
-        // Check if slice is contiguous
         bool is_contiguous = is_contiguous_slice(starts, ends);
 
         if (is_contiguous) {
-            // Can create a view - calculate the offset into the original data
             size_t offset = calculate_offset(starts);
             void* new_data = static_cast<char*>(data_) + offset * dtype_size(dtype_);
 
-            // Return a view (shares ownership)
             Tensor view(new_data, TensorShape(new_shape), device_, dtype_);
-            view.data_owner_ = data_owner_; // Share ownership!
-            view.is_view_ = true;           // Mark as view
+            view.data_owner_ = data_owner_;
+            view.is_view_ = true;
             return view;
         } else {
-            // Need to copy
             return copy_slice(starts, ends, new_shape);
         }
     }
@@ -261,7 +216,6 @@ namespace gs {
             return {};
         }
 
-        // Build ranges for all dimensions
         std::vector<std::pair<int, int>> ranges;
         for (size_t i = 0; i < shape_.rank(); ++i) {
             if (i == dim) {
@@ -274,13 +228,8 @@ namespace gs {
         return slice(ranges);
     }
 
-    // Helper: check if slice is contiguous
     bool Tensor::is_contiguous_slice(const std::vector<size_t>& starts,
                                      const std::vector<size_t>& ends) const {
-        // A slice is contiguous if:
-        // 1. We're only slicing the first dimension
-        // 2. All other dimensions are fully selected (start=0, end=shape[dim])
-
         for (size_t i = 1; i < shape_.rank(); ++i) {
             if (starts[i] != 0 || ends[i] != shape_[i]) {
                 return false;
@@ -290,53 +239,44 @@ namespace gs {
         return true;
     }
 
-    // Helper: calculate linear offset
     size_t Tensor::calculate_offset(const std::vector<size_t>& indices) const {
-        size_t offset = 0;
-        size_t stride = 1;
+        auto strides = shape_.strides();
 
-        for (int i = static_cast<int>(shape_.rank()) - 1; i >= 0; --i) {
-            offset += indices[i] * stride;
-            stride *= shape_[i];
+        size_t offset = 0;
+        for (size_t i = 0; i < indices.size(); ++i) {
+            offset += indices[i] * strides[i];
         }
 
         return offset;
     }
 
-    // Helper: copy non-contiguous slice
     Tensor Tensor::copy_slice(const std::vector<size_t>& starts,
                               const std::vector<size_t>& ends,
                               const std::vector<size_t>& new_shape) const {
         auto result = empty(TensorShape(new_shape), device_, dtype_);
 
         if (device_ == Device::CUDA) {
-            // For now, do slicing on CPU
             auto cpu_copy = to(Device::CPU);
             auto cpu_result = cpu_copy.copy_slice(starts, ends, new_shape);
             return cpu_result.to(Device::CUDA);
         } else {
-            // CPU implementation
             const float* src = ptr<float>();
             float* dst = result.ptr<float>();
 
-            // Calculate total elements in slice
             size_t total = 1;
             for (size_t s : new_shape) {
                 total *= s;
             }
 
-            // Iterate through slice
             std::vector<size_t> indices(shape_.rank());
             for (size_t i = 0; i < shape_.rank(); ++i) {
                 indices[i] = starts[i];
             }
 
             for (size_t dst_idx = 0; dst_idx < total; ++dst_idx) {
-                // Calculate source index
                 size_t src_idx = calculate_offset(indices);
                 dst[dst_idx] = src[src_idx];
 
-                // Increment indices
                 for (int d = static_cast<int>(shape_.rank()) - 1; d >= 0; --d) {
                     indices[d]++;
                     if (indices[d] < ends[d]) {
@@ -350,7 +290,6 @@ namespace gs {
         return result;
     }
 
-    // Helper: resolve dimensions
     std::vector<size_t> Tensor::resolve_dims(std::span<const int> dims) const {
         std::vector<size_t> resolved;
         resolved.reserve(dims.size());

@@ -149,6 +149,7 @@ TEST_F(TensorMaskingTest, ComparisonEqual) {
 
     auto a_custom = Tensor::from_vector(a_data, {5}, Device::CUDA);
     auto b_custom = Tensor::from_vector(b_data, {5}, Device::CUDA);
+    auto t = Tensor::zeros({1,2});
 
     auto a_torch = torch::tensor(a_data, torch::kCUDA);
     auto b_torch = torch::tensor(b_data, torch::kCUDA);

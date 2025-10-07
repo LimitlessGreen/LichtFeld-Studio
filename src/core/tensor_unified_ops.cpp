@@ -446,8 +446,7 @@ namespace gs {
     }
 
     Tensor Tensor::unary(UnaryOp op, const UnaryArgs& args) const {
-        if (!is_valid()) {
-            LOG_ERROR("Unary operation on invalid tensor");
+        if (!validate_unary_op()) {
             return Tensor();
         }
 
@@ -478,8 +477,7 @@ namespace gs {
 
     // Binary operations - NO TEMPLATES!
     Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
-        if (!is_valid() || !other.is_valid()) {
-            LOG_ERROR("Binary operation on invalid tensor");
+        if (!validate_binary_op(other, false, true)) {
             return Tensor();
         }
 
@@ -617,8 +615,7 @@ namespace gs {
     }
 
     Tensor Tensor::binary_op_scalar(float scalar, BinaryOp op) const {
-        if (!is_valid()) {
-            LOG_ERROR("Binary operation on invalid tensor");
+        if (!validate_unary_op()) {
             return Tensor();
         }
 
@@ -657,13 +654,7 @@ namespace gs {
     }
 
     Tensor& Tensor::binary_op_inplace_impl(const Tensor& other, BinaryOp op) {
-        if (!is_valid() || !other.is_valid()) {
-            LOG_ERROR("In-place binary operation on invalid tensor");
-            return *this;
-        }
-
-        if (shape_ != other.shape()) {
-            LOG_ERROR("In-place operations require same shapes");
+        if (!validate_binary_op(other, true)) {
             return *this;
         }
 
@@ -689,8 +680,7 @@ namespace gs {
     }
 
     Tensor& Tensor::binary_op_inplace_scalar(float scalar, BinaryOp op) {
-        if (!is_valid()) {
-            LOG_ERROR("In-place binary operation on invalid tensor");
+        if (!validate_unary_op()) {
             return *this;
         }
 
@@ -715,8 +705,7 @@ namespace gs {
     }
 
     Tensor Tensor::reduce(ReduceOp op, const ReduceArgs& args) const {
-        if (!is_valid()) {
-            LOG_ERROR("Reduce operation on invalid tensor");
+        if (!validate_unary_op()) {
             return Tensor();
         }
 
@@ -863,8 +852,7 @@ namespace gs {
     // ============= TERNARY OPERATIONS =============
 
     Tensor Tensor::ternary(const Tensor& b, const Tensor& c, TernaryOp op) const {
-        if (!is_valid() || !b.is_valid() || !c.is_valid()) {
-            LOG_ERROR("Ternary operation on invalid tensor");
+        if (!validate_ternary_op(b, c)) {
             return Tensor();
         }
 

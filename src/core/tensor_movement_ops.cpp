@@ -9,6 +9,40 @@
 
 namespace gs {
 
+    // ============= Helper: Infer dimension size =============
+    static std::vector<size_t> infer_shape(const std::vector<int>& shape, size_t total_elements) {
+        std::vector<size_t> result;
+        int infer_dim = -1;
+        size_t known_size = 1;
+
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (shape[i] == -1) {
+                if (infer_dim != -1) {
+                    LOG_ERROR("Only one dimension can be inferred");
+                    return {};
+                }
+                infer_dim = i;
+                result.push_back(1); // Placeholder
+            } else if (shape[i] < 0) {
+                LOG_ERROR("Invalid reshape dimension: {}", shape[i]);
+                return {};
+            } else {
+                result.push_back(shape[i]);
+                known_size *= shape[i];
+            }
+        }
+
+        if (infer_dim != -1) {
+            if (total_elements % known_size != 0) {
+                LOG_ERROR("Cannot infer dimension for reshape");
+                return {};
+            }
+            result[infer_dim] = total_elements / known_size;
+        }
+
+        return result;
+    }
+
     // ============= Unified Movement Operation =============
     Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
         if (!is_valid())
@@ -17,42 +51,13 @@ namespace gs {
         switch (op) {
         case MovementOp::Reshape: {
             if (auto* vec = std::get_if<std::vector<int>>(&args.args)) {
-                // Convert to size_t and handle -1
-                std::vector<size_t> new_shape;
-                int infer_dim = -1;
-                size_t known_size = 1;
+                auto new_shape = infer_shape(*vec, numel());
+                if (new_shape.empty())
+                    return {};
 
-                for (size_t i = 0; i < vec->size(); ++i) {
-                    if ((*vec)[i] == -1) {
-                        if (infer_dim != -1) {
-                            LOG_ERROR("Only one dimension can be inferred");
-                            return {};
-                        }
-                        infer_dim = i;
-                        new_shape.push_back(1); // Placeholder
-                    } else if ((*vec)[i] < 0) {
-                        LOG_ERROR("Invalid reshape dimension: {}", (*vec)[i]);
-                        return {};
-                    } else {
-                        new_shape.push_back((*vec)[i]);
-                        known_size *= (*vec)[i];
-                    }
-                }
-
-                // Infer dimension if needed
-                if (infer_dim != -1) {
-                    if (numel() % known_size != 0) {
-                        LOG_ERROR("Cannot infer dimension for reshape");
-                        return {};
-                    }
-                    new_shape[infer_dim] = numel() / known_size;
-                }
-
-                // Check if total elements match
                 size_t total = 1;
-                for (auto d : new_shape) {
+                for (auto d : new_shape)
                     total *= d;
-                }
 
                 if (total != numel()) {
                     LOG_ERROR("View shape {} has {} elements, but tensor has {} elements",
@@ -60,11 +65,7 @@ namespace gs {
                     return {};
                 }
 
-                // Create a view that shares memory (non-owning)
-                Tensor view(data_, TensorShape(new_shape), device_, dtype_);
-                view.data_owner_ = data_owner_; // Share ownership!
-                view.is_view_ = true;           // Mark as view
-                return view;
+                return create_view(TensorShape(new_shape));
             }
             LOG_ERROR("Reshape requires vector<int> args");
             return {};
@@ -101,16 +102,12 @@ namespace gs {
                     return {};
                 }
 
-                // Create permutation
                 std::vector<int> perm(shape_.rank());
-                for (size_t i = 0; i < shape_.rank(); ++i) {
-                    perm[i] = i;
-                }
+                std::iota(perm.begin(), perm.end(), 0);
                 std::swap(perm[dim1], perm[dim2]);
 
                 return permute(perm);
             }
-            // Default transpose (swap last two dimensions)
             if (shape_.rank() < 2)
                 return clone();
             return transpose(-2, -1);
@@ -119,47 +116,32 @@ namespace gs {
         case MovementOp::Squeeze: {
             if (auto* dim = std::get_if<int>(&args.args)) {
                 std::vector<size_t> new_shape;
-                int resolved = *dim;
-
-                // INT_MIN is the sentinel for "squeeze all dimensions with size 1"
                 bool squeeze_all = (*dim == std::numeric_limits<int>::min());
 
                 if (!squeeze_all) {
-                    // Resolve negative index normally
-                    if (resolved < 0) {
-                        resolved = shape_.rank() + resolved;
-                    }
-
+                    int resolved = resolve_dim(*dim);
                     if (resolved < 0 || resolved >= static_cast<int>(shape_.rank())) {
                         LOG_ERROR("Invalid squeeze dimension: {} for rank {}", *dim, shape_.rank());
                         return {};
                     }
-                }
 
-                // Build new shape
-                for (size_t i = 0; i < shape_.rank(); ++i) {
-                    if (squeeze_all) {
-                        // Squeeze all dimensions with size 1
-                        if (shape_[i] != 1) {
+                    for (size_t i = 0; i < shape_.rank(); ++i) {
+                        if (i != static_cast<size_t>(resolved) || shape_[i] != 1) {
                             new_shape.push_back(shape_[i]);
                         }
-                    } else {
-                        // Squeeze specific dimension only if it has size 1
-                        if (i != static_cast<size_t>(resolved) || shape_[i] != 1) {
+                    }
+                } else {
+                    for (size_t i = 0; i < shape_.rank(); ++i) {
+                        if (shape_[i] != 1) {
                             new_shape.push_back(shape_[i]);
                         }
                     }
                 }
 
-                if (new_shape.empty()) {
-                    new_shape.push_back(1); // Scalar
-                }
+                if (new_shape.empty())
+                    new_shape.push_back(1);
 
-                // Create a view that shares memory
-                Tensor view(data_, TensorShape(new_shape), device_, dtype_);
-                view.data_owner_ = data_owner_; // Share ownership
-                view.is_view_ = true;           // Mark as view
-                return view;
+                return create_view(TensorShape(new_shape));
             }
             LOG_ERROR("Squeeze requires int dim arg");
             return {};
@@ -168,11 +150,12 @@ namespace gs {
         case MovementOp::Unsqueeze: {
             if (auto* dim = std::get_if<int>(&args.args)) {
                 int resolved = *dim;
+                // For unsqueeze, negative dims are relative to NEW rank (after adding dimension)
                 if (resolved < 0) {
-                    resolved = shape_.rank() + resolved + 1;
+                    resolved = static_cast<int>(shape_.rank()) + resolved + 1;
                 }
                 if (resolved < 0 || resolved > static_cast<int>(shape_.rank())) {
-                    LOG_ERROR("Invalid unsqueeze dimension");
+                    LOG_ERROR("Invalid unsqueeze dimension: {} for rank {}", *dim, shape_.rank());
                     return {};
                 }
 
@@ -185,11 +168,7 @@ namespace gs {
                     new_shape.push_back(shape_[i]);
                 }
 
-                // Create a view that shares memory
-                Tensor view(data_, TensorShape(new_shape), device_, dtype_);
-                view.data_owner_ = data_owner_; // Share ownership
-                view.is_view_ = true;           // Mark as view
-                return view;
+                return create_view(TensorShape(new_shape));
             }
             LOG_ERROR("Unsqueeze requires int dim arg");
             return {};
@@ -222,17 +201,9 @@ namespace gs {
                     new_shape.push_back(shape_[i]);
                 }
 
-                // Create a view that shares memory
-                Tensor view(data_, TensorShape(new_shape), device_, dtype_);
-                view.data_owner_ = data_owner_; // Share ownership
-                view.is_view_ = true;           // Mark as view
-                return view;
+                return create_view(TensorShape(new_shape));
             }
-            // Default flatten (all dimensions)
-            Tensor view(data_, TensorShape({numel()}), device_, dtype_);
-            view.data_owner_ = data_owner_; // Share ownership
-            view.is_view_ = true;           // Mark as view
-            return view;
+            return create_view(TensorShape({numel()}));
         }
 
         case MovementOp::Slice: {
@@ -253,7 +224,6 @@ namespace gs {
                     return {};
                 }
 
-                // Check all dimensions match except cat dimension
                 for (size_t i = 0; i < shape_.rank(); ++i) {
                     if (i != static_cast<size_t>(dim) && shape_[i] != other.shape()[i]) {
                         LOG_ERROR("Dimension {} size mismatch for concatenation", i);
@@ -261,7 +231,6 @@ namespace gs {
                     }
                 }
 
-                // For now, only implement dim=0 concatenation
                 if (dim != 0) {
                     LOG_ERROR("Concatenation only implemented for dim=0");
                     return {};
@@ -272,8 +241,6 @@ namespace gs {
 
                 auto result = empty(TensorShape(result_dims), device_, dtype_);
 
-                // Copy data
-                size_t bytes_per_row = numel() / shape_[0] * dtype_size(dtype_);
                 size_t self_bytes = bytes();
                 size_t other_bytes = other.bytes();
 
@@ -307,26 +274,14 @@ namespace gs {
 
                 auto result = zeros(TensorShape(new_shape), device_, dtype_);
 
-                // Copy original data to padded tensor
                 if (device_ == Device::CPU && dtype_ == DataType::Float32) {
                     const float* src = ptr<float>();
                     float* dst = result.ptr<float>();
 
-                    // Calculate strides
-                    std::vector<size_t> src_strides(shape_.rank());
-                    std::vector<size_t> dst_strides(shape_.rank());
+                    auto src_strides = shape_.strides();
+                    auto dst_strides = result.shape().strides();
 
-                    src_strides.back() = 1;
-                    dst_strides.back() = 1;
-
-                    for (int i = shape_.rank() - 2; i >= 0; --i) {
-                        src_strides[i] = src_strides[i + 1] * shape_[i + 1];
-                        dst_strides[i] = dst_strides[i + 1] * new_shape[i + 1];
-                    }
-
-                    // Copy data
                     for (size_t i = 0; i < numel(); ++i) {
-                        // Convert linear index to coordinates
                         std::vector<size_t> coords(shape_.rank());
                         size_t temp = i;
                         for (size_t d = 0; d < shape_.rank(); ++d) {
@@ -334,7 +289,6 @@ namespace gs {
                             temp %= src_strides[d];
                         }
 
-                        // Add padding offset
                         size_t dst_idx = 0;
                         for (size_t d = 0; d < shape_.rank(); ++d) {
                             dst_idx += (coords[d] + pad_before[d]) * dst_strides[d];
@@ -364,7 +318,6 @@ namespace gs {
                         if (axis < 0 || axis >= static_cast<int>(shape_.rank()))
                             continue;
 
-                        // Calculate stride for this axis
                         size_t stride = 1;
                         for (size_t i = axis + 1; i < shape_.rank(); ++i) {
                             stride *= shape_[i];
@@ -375,12 +328,10 @@ namespace gs {
                             outer_size *= shape_[i];
                         }
 
-                        // Flip along axis
                         for (size_t o = 0; o < outer_size; ++o) {
                             for (size_t i = 0; i < shape_[axis] / 2; ++i) {
                                 size_t j = shape_[axis] - 1 - i;
 
-                                // Swap elements
                                 for (size_t inner = 0; inner < stride; ++inner) {
                                     size_t idx1 = o * shape_[axis] * stride + i * stride + inner;
                                     size_t idx2 = o * shape_[axis] * stride + j * stride + inner;

@@ -394,12 +394,7 @@ namespace gs {
             if (dtype_ == DataType::Float32) {
                 float* data = result.ptr<float>();
 
-                std::vector<size_t> strides(shape_.rank());
-                strides.back() = 1;
-                for (int i = static_cast<int>(shape_.rank()) - 2; i >= 0; --i) {
-                    strides[i] = strides[i + 1] * shape_[i + 1];
-                }
-
+                auto strides = shape_.strides();
                 size_t dim_stride = strides[dim];
                 size_t dim_size = shape_[dim];
                 size_t total = numel();
@@ -415,12 +410,7 @@ namespace gs {
             } else if (dtype_ == DataType::Int32) {
                 int* data = result.ptr<int>();
 
-                std::vector<size_t> strides(shape_.rank());
-                strides.back() = 1;
-                for (int i = static_cast<int>(shape_.rank()) - 2; i >= 0; --i) {
-                    strides[i] = strides[i + 1] * shape_[i + 1];
-                }
-
+                auto strides = shape_.strides();
                 size_t dim_stride = strides[dim];
                 size_t dim_size = shape_[dim];
                 size_t total = numel();

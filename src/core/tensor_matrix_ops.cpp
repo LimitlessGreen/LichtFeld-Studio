@@ -232,7 +232,7 @@ namespace gs {
 
         // Handle different dimension cases
         if (shape_.rank() == 1 && other.shape_.rank() == 1) {
-            // Vector dot product - returns scalar
+            // Vector dot product - returns scalar (rank 0)
             if (shape_[0] != other.shape_[0]) {
                 LOG_ERROR("Vector dimensions don't match for dot product");
                 return Tensor();
@@ -417,12 +417,10 @@ namespace gs {
             return Tensor();
         }
 
-        // Result is a scalar - we need a tensor with 1 element but rank 0
-        // Create as shape {1} first, then reshape to scalar
+        // Create result with shape {1} first
         auto result = empty({1}, device_, dtype_);
 
         if (device_ == Device::CUDA) {
-            // Use cuBLAS dot product
             cublasHandle_t handle = get_cublas_handle();
 
             CHECK_CUBLAS(cublasSdot(
@@ -432,7 +430,6 @@ namespace gs {
                 other.ptr<float>(), 1,
                 result.ptr<float>()));
         } else {
-            // CPU implementation
             const float* a_data = ptr<float>();
             const float* b_data = other.ptr<float>();
             float sum = 0.0f;
@@ -444,8 +441,12 @@ namespace gs {
             *result.ptr<float>() = sum;
         }
 
-        // Reshape to scalar (rank 0) - this creates a view with shape [] but 1 element
-        return result.reshape({});
+        // Convert to scalar (rank-0) by creating a view with empty shape
+        // This shares memory with the rank-1 result
+        Tensor scalar(result.raw_ptr(), TensorShape(std::vector<size_t>{}), device_, dtype_);
+        scalar.data_owner_ = result.data_owner_;
+        scalar.is_view_ = true;
+        return scalar;
     }
 
 #undef CHECK_CUDA

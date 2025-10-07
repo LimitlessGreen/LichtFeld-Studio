@@ -377,6 +377,18 @@ namespace gs {
         const std::vector<size_t>& dims() const { return dims_; }
         bool is_initialized() const { return initialized_; }
 
+        // Calculate strides for row-major layout
+        std::vector<size_t> strides() const {
+            if (dims_.empty()) return {};
+
+            std::vector<size_t> result(dims_.size());
+            result.back() = 1;
+            for (int i = static_cast<int>(dims_.size()) - 2; i >= 0; --i) {
+                result[i] = result[i + 1] * dims_[i + 1];
+            }
+            return result;
+        }
+
         bool operator==(const TensorShape& other) const { return dims_ == other.dims_; }
         bool operator!=(const TensorShape& other) const { return !(*this == other); }
 
@@ -484,6 +496,56 @@ namespace gs {
             return dim < 0 ? static_cast<int>(shape_.rank()) + dim : dim;
         }
 
+        // Validation helpers
+        bool validate_binary_op(const Tensor& other, bool require_same_shape = false, bool require_same_device = false) const {
+            if (!is_valid() || !other.is_valid()) {
+                LOG_ERROR("Operation on invalid tensor");
+                return false;
+            }
+            if (require_same_device && device_ != other.device()) {
+                LOG_ERROR("Tensors must be on same device");
+                return false;
+            }
+            if (require_same_shape && shape_ != other.shape()) {
+                LOG_ERROR("Shape mismatch: {} vs {}", shape_.str(), other.shape_.str());
+                return false;
+            }
+            return true;
+        }
+
+        bool validate_unary_op() const {
+            if (!is_valid()) {
+                LOG_ERROR("Unary operation on invalid tensor");
+                return false;
+            }
+            return true;
+        }
+
+        bool validate_ternary_op(const Tensor& b, const Tensor& c) const {
+            if (!is_valid() || !b.is_valid() || !c.is_valid()) {
+                LOG_ERROR("Ternary operation on invalid tensor");
+                return false;
+            }
+            if (device_ != b.device() || device_ != c.device()) {
+                LOG_ERROR("All tensors must be on same device");
+                return false;
+            }
+            return true;
+        }
+
+        // Helper to ensure tensor is on same device
+        Tensor ensure_same_device(const Tensor& other) const {
+            return (other.device() == device_) ? other.clone() : other.to(device_);
+        }
+
+        // Helper to create view with shared ownership
+        Tensor create_view(const TensorShape& new_shape) const {
+            Tensor view(data_, new_shape, device_, dtype_);
+            view.data_owner_ = data_owner_;
+            view.is_view_ = true;
+            return view;
+        }
+
         std::vector<size_t> resolve_dims(std::span<const int> dims) const;
         bool is_contiguous_slice(const std::vector<size_t>& starts,
                                  const std::vector<size_t>& ends) const;
@@ -491,6 +553,33 @@ namespace gs {
         Tensor copy_slice(const std::vector<size_t>& starts,
                           const std::vector<size_t>& ends,
                           const std::vector<size_t>& new_shape) const;
+
+        // Unified template for binary operations
+        template<typename T>
+        Tensor binary_op(const T& rhs, BinaryOp op) const {
+            if constexpr (std::is_same_v<T, Tensor>) {
+                return binary_op_impl(rhs, op);
+            } else if constexpr (std::is_arithmetic_v<T>) {
+                return binary_op_scalar(static_cast<float>(rhs), op);
+            } else {
+                static_assert(std::is_same_v<T, Tensor> || std::is_arithmetic_v<T>,
+                             "Binary operations only support Tensor or arithmetic types");
+                return Tensor();
+            }
+        }
+
+        template<typename T>
+        Tensor& binary_op_inplace(const T& rhs, BinaryOp op) {
+            if constexpr (std::is_same_v<T, Tensor>) {
+                return binary_op_inplace_impl(rhs, op);
+            } else if constexpr (std::is_arithmetic_v<T>) {
+                return binary_op_inplace_scalar(static_cast<float>(rhs), op);
+            } else {
+                static_assert(std::is_same_v<T, Tensor> || std::is_arithmetic_v<T>,
+                             "Binary operations only support Tensor or arithmetic types");
+                return *this;
+            }
+        }
 
     public:
         Tensor() = default;
@@ -939,40 +1028,53 @@ namespace gs {
         Tensor normalize(int dim = -1, float eps = 1e-12f) const;
         Tensor logit(float eps = 1e-7f) const;
 
-        // ============= BINARY OPERATIONS =============
-        Tensor add(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Add); }
-        Tensor add(float scalar) const { return binary_op_scalar(scalar, BinaryOp::Add); }
-        Tensor sub(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Sub); }
-        Tensor sub(float scalar) const { return binary_op_scalar(scalar, BinaryOp::Sub); }
-        Tensor mul(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Mul); }
-        Tensor mul(float scalar) const { return binary_op_scalar(scalar, BinaryOp::Mul); }
-        Tensor div(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Div); }
-        Tensor div(float scalar) const { return binary_op_scalar(scalar, BinaryOp::Div); }
-        Tensor pow(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Pow); }
-        Tensor pow(float scalar) const { return binary_op_scalar(scalar, BinaryOp::Pow); }
-        Tensor mod(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Mod); }
-        Tensor mod(float scalar) const { return binary_op_scalar(scalar, BinaryOp::Mod); }
-        Tensor maximum(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Maximum); }
-        Tensor maximum(float scalar) const { return binary_op_scalar(scalar, BinaryOp::Maximum); }
-        Tensor minimum(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Minimum); }
-        Tensor minimum(float scalar) const { return binary_op_scalar(scalar, BinaryOp::Minimum); }
+        // ============= BINARY OPERATIONS (Template-based) =============
+
+        // Arithmetic operations
+        template<typename T>
+        Tensor add(const T& other) const { return binary_op(other, BinaryOp::Add); }
+
+        template<typename T>
+        Tensor sub(const T& other) const { return binary_op(other, BinaryOp::Sub); }
+
+        template<typename T>
+        Tensor mul(const T& other) const { return binary_op(other, BinaryOp::Mul); }
+
+        template<typename T>
+        Tensor div(const T& other) const { return binary_op(other, BinaryOp::Div); }
+
+        template<typename T>
+        Tensor pow(const T& other) const { return binary_op(other, BinaryOp::Pow); }
+
+        template<typename T>
+        Tensor mod(const T& other) const { return binary_op(other, BinaryOp::Mod); }
+
+        template<typename T>
+        Tensor maximum(const T& other) const { return binary_op(other, BinaryOp::Maximum); }
+
+        template<typename T>
+        Tensor minimum(const T& other) const { return binary_op(other, BinaryOp::Minimum); }
 
         // Comparison operations
-        Tensor eq(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Equal); }
-        Tensor ne(const Tensor& other) const { return binary_op_impl(other, BinaryOp::NotEqual); }
-        Tensor lt(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Less); }
-        Tensor le(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LessEqual); }
-        Tensor gt(const Tensor& other) const { return binary_op_impl(other, BinaryOp::Greater); }
-        Tensor ge(const Tensor& other) const { return binary_op_impl(other, BinaryOp::GreaterEqual); }
+        template<typename T>
+        Tensor eq(const T& other) const { return binary_op(other, BinaryOp::Equal); }
 
-        Tensor eq(float value) const { return binary_op_scalar(value, BinaryOp::Equal); }
-        Tensor ne(float value) const { return binary_op_scalar(value, BinaryOp::NotEqual); }
-        Tensor lt(float value) const { return binary_op_scalar(value, BinaryOp::Less); }
-        Tensor le(float value) const { return binary_op_scalar(value, BinaryOp::LessEqual); }
-        Tensor gt(float value) const { return binary_op_scalar(value, BinaryOp::Greater); }
-        Tensor ge(float value) const { return binary_op_scalar(value, BinaryOp::GreaterEqual); }
+        template<typename T>
+        Tensor ne(const T& other) const { return binary_op(other, BinaryOp::NotEqual); }
 
-        // Logical operations
+        template<typename T>
+        Tensor lt(const T& other) const { return binary_op(other, BinaryOp::Less); }
+
+        template<typename T>
+        Tensor le(const T& other) const { return binary_op(other, BinaryOp::LessEqual); }
+
+        template<typename T>
+        Tensor gt(const T& other) const { return binary_op(other, BinaryOp::Greater); }
+
+        template<typename T>
+        Tensor ge(const T& other) const { return binary_op(other, BinaryOp::GreaterEqual); }
+
+        // Logical operations (Tensor only)
         Tensor logical_and(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LogicalAnd); }
         Tensor logical_or(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LogicalOr); }
         Tensor logical_xor(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LogicalXor); }
@@ -1109,14 +1211,17 @@ namespace gs {
         Tensor& clamp_max_(float max);
 
         // In-place operations
-        Tensor& add_(const Tensor& other) { return binary_op_inplace_impl(other, BinaryOp::Add); }
-        Tensor& add_(float scalar) { return binary_op_inplace_scalar(scalar, BinaryOp::Add); }
-        Tensor& sub_(const Tensor& other) { return binary_op_inplace_impl(other, BinaryOp::Sub); }
-        Tensor& sub_(float scalar) { return binary_op_inplace_scalar(scalar, BinaryOp::Sub); }
-        Tensor& mul_(const Tensor& other) { return binary_op_inplace_impl(other, BinaryOp::Mul); }
-        Tensor& mul_(float scalar) { return binary_op_inplace_scalar(scalar, BinaryOp::Mul); }
-        Tensor& div_(const Tensor& other) { return binary_op_inplace_impl(other, BinaryOp::Div); }
-        Tensor& div_(float scalar) { return binary_op_inplace_scalar(scalar, BinaryOp::Div); }
+        template<typename T>
+        Tensor& add_(const T& other) { return binary_op_inplace(other, BinaryOp::Add); }
+
+        template<typename T>
+        Tensor& sub_(const T& other) { return binary_op_inplace(other, BinaryOp::Sub); }
+
+        template<typename T>
+        Tensor& mul_(const T& other) { return binary_op_inplace(other, BinaryOp::Mul); }
+
+        template<typename T>
+        Tensor& div_(const T& other) { return binary_op_inplace(other, BinaryOp::Div); }
 
         // Matrix operations
         Tensor mm(const Tensor& other) const;
@@ -1157,50 +1262,56 @@ namespace gs {
         float& at(std::initializer_list<size_t> indices);
         float at(std::initializer_list<size_t> indices) const;
 
-        // Operator overloads
-        Tensor operator+(const Tensor& other) const { return add(other); }
-        Tensor operator+(float scalar) const { return add(scalar); }
-        Tensor operator+(int scalar) const { return add(static_cast<float>(scalar)); }
-        Tensor operator+(double scalar) const { return add(static_cast<float>(scalar)); }
+        // ============= OPERATOR OVERLOADS (Template-based) =============
 
-        Tensor operator-(const Tensor& other) const { return sub(other); }
-        Tensor operator-(float scalar) const { return sub(scalar); }
-        Tensor operator-(int scalar) const { return sub(static_cast<float>(scalar)); }
-        Tensor operator-(double scalar) const { return sub(static_cast<float>(scalar)); }
+        // Addition
+        template<typename T>
+        Tensor operator+(const T& other) const { return add(other); }
 
-        Tensor operator*(const Tensor& other) const { return mul(other); }
-        Tensor operator*(float scalar) const { return mul(scalar); }
-        Tensor operator*(int scalar) const { return mul(static_cast<float>(scalar)); }
-        Tensor operator*(double scalar) const { return mul(static_cast<float>(scalar)); }
+        // Subtraction
+        template<typename T>
+        Tensor operator-(const T& other) const { return sub(other); }
 
-        Tensor operator/(const Tensor& other) const { return div(other); }
-        Tensor operator/(float scalar) const { return div(scalar); }
-        Tensor operator/(int scalar) const { return div(static_cast<float>(scalar)); }
-        Tensor operator/(double scalar) const { return div(static_cast<float>(scalar)); }
+        // Multiplication
+        template<typename T>
+        Tensor operator*(const T& other) const { return mul(other); }
 
-        Tensor operator%(const Tensor& other) const { return mod(other); }
-        Tensor operator%(float scalar) const { return mod(scalar); }
-        Tensor operator%(int scalar) const { return mod(static_cast<float>(scalar)); }
+        // Division
+        template<typename T>
+        Tensor operator/(const T& other) const { return div(other); }
 
+        // Modulo
+        template<typename T>
+        Tensor operator%(const T& other) const { return mod(other); }
+
+        // Negation
         Tensor operator-() const { return neg(); }
 
-        Tensor operator==(const Tensor& other) const { return eq(other); }
-        Tensor operator==(float value) const { return eq(value); }
-        Tensor operator!=(const Tensor& other) const { return ne(other); }
-        Tensor operator!=(float value) const { return ne(value); }
-        Tensor operator<(const Tensor& other) const { return lt(other); }
-        Tensor operator<(float value) const { return lt(value); }
-        Tensor operator<=(const Tensor& other) const { return le(other); }
-        Tensor operator<=(float value) const { return le(value); }
-        Tensor operator>(const Tensor& other) const { return gt(other); }
-        Tensor operator>(float value) const { return gt(value); }
-        Tensor operator>=(const Tensor& other) const { return ge(other); }
-        Tensor operator>=(float value) const { return ge(value); }
+        // Comparison operators
+        template<typename T>
+        Tensor operator==(const T& other) const { return eq(other); }
 
+        template<typename T>
+        Tensor operator!=(const T& other) const { return ne(other); }
+
+        template<typename T>
+        Tensor operator<(const T& other) const { return lt(other); }
+
+        template<typename T>
+        Tensor operator<=(const T& other) const { return le(other); }
+
+        template<typename T>
+        Tensor operator>(const T& other) const { return gt(other); }
+
+        template<typename T>
+        Tensor operator>=(const T& other) const { return ge(other); }
+
+        // Logical operators (Tensor only)
         Tensor operator&&(const Tensor& other) const { return logical_and(other); }
         Tensor operator||(const Tensor& other) const { return logical_or(other); }
         Tensor operator!() const { return logical_not(); }
 
+        // Bitwise operators
         Tensor operator~() const;
         Tensor operator|(const Tensor& other) const;
 
@@ -1349,4 +1460,4 @@ namespace gs {
         }
     } // namespace functional
 
-} // namespace gs
+}
