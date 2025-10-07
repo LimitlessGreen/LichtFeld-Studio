@@ -3,13 +3,13 @@
 
 #include "core/tensor.hpp"
 #include <algorithm>
-#include <chrono>
 #include <c10/cuda/CUDACachingAllocator.h>
+#include <chrono>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <random>
 #include <thread>
+#include <torch/torch.h>
 
 using namespace gs;
 using namespace gs::tensor;
@@ -18,38 +18,38 @@ using namespace gs::tensor;
 
 namespace {
 
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
-    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
-    auto custom_cpu = custom.cpu();
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
+        auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+        auto custom_cpu = custom.cpu();
 
-    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+        ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
 
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
 
-    auto custom_vec = custom_cpu.to_vector();
-    auto ref_accessor = ref_cpu.accessor<float, 1>();
+        auto custom_vec = custom_cpu.to_vector();
+        auto ref_accessor = ref_cpu.accessor<float, 1>();
 
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        float ref_val = ref_accessor[i];
-        float custom_val = custom_vec[i];
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            float ref_val = ref_accessor[i];
+            float custom_val = custom_vec[i];
 
-        if (std::isnan(ref_val)) {
-            EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
-        } else if (std::isinf(ref_val)) {
-            EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
-        } else {
-            float diff = std::abs(custom_val - ref_val);
-            float threshold = atol + rtol * std::abs(ref_val);
-            EXPECT_LE(diff, threshold)
-                << msg << ": Mismatch at index " << i
-                << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            if (std::isnan(ref_val)) {
+                EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
+            } else if (std::isinf(ref_val)) {
+                EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+            } else {
+                float diff = std::abs(custom_val - ref_val);
+                float threshold = atol + rtol * std::abs(ref_val);
+                EXPECT_LE(diff, threshold)
+                    << msg << ": Mismatch at index " << i
+                    << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            }
         }
     }
-}
 
 } // anonymous namespace
 
@@ -87,7 +87,7 @@ protected:
         size_t tolerance = 100 * 1024 * 1024;
 
         long long leaked = static_cast<long long>(initial_free_mem_) -
-                          static_cast<long long>(current_free_mem);
+                           static_cast<long long>(current_free_mem);
 
         EXPECT_NEAR(static_cast<long long>(current_free_mem),
                     static_cast<long long>(initial_free_mem_),
@@ -95,7 +95,6 @@ protected:
             << "Possible memory leak detected: "
             << leaked / (1024 * 1024) << " MB not freed";
     }
-
 
     size_t initial_free_mem_;
     size_t total_mem_;
@@ -206,18 +205,22 @@ TEST_F(TensorStressTest, LargeMatrixOperations) {
     std::vector<float> data_a(dim * dim);
     std::vector<float> data_b(dim * dim);
 
-    for (auto& val : data_a) val = dist_(gen_);
-    for (auto& val : data_b) val = dist_(gen_);
+    for (auto& val : data_a)
+        val = dist_(gen_);
+    for (auto& val : data_b)
+        val = dist_(gen_);
 
     auto custom_a = Tensor::from_vector(data_a, {dim, dim}, Device::CUDA);
     auto custom_b = Tensor::from_vector(data_b, {dim, dim}, Device::CUDA);
 
     auto torch_a = torch::from_blob(data_a.data(), {static_cast<long>(dim), static_cast<long>(dim)},
                                     torch::TensorOptions().dtype(torch::kFloat32))
-                   .clone().to(torch::kCUDA);
+                       .clone()
+                       .to(torch::kCUDA);
     auto torch_b = torch::from_blob(data_b.data(), {static_cast<long>(dim), static_cast<long>(dim)},
                                     torch::TensorOptions().dtype(torch::kFloat32))
-                   .clone().to(torch::kCUDA);
+                       .clone()
+                       .to(torch::kCUDA);
 
     // Perform operations
     auto start = std::chrono::high_resolution_clock::now();
@@ -263,14 +266,14 @@ TEST_F(TensorStressTest, ManySmallTensors) {
     for (int i = 0; i < num_tensors; ++i) {
         custom_tensors.emplace_back(Tensor::full({10}, static_cast<float>(i), Device::CUDA));
         torch_tensors.push_back(torch::full({10}, static_cast<float>(i),
-                                           torch::TensorOptions().device(torch::kCUDA)));
+                                            torch::TensorOptions().device(torch::kCUDA)));
     }
 
     // Verify all tensors
     for (int i = 0; i < num_tensors; ++i) {
         EXPECT_TRUE(custom_tensors[i].is_valid());
         compare_tensors(custom_tensors[i], torch_tensors[i], 1e-6f, 1e-7f,
-                       "SmallTensor" + std::to_string(i));
+                        "SmallTensor" + std::to_string(i));
     }
 
     // Perform operation on all
@@ -282,7 +285,7 @@ TEST_F(TensorStressTest, ManySmallTensors) {
     // Verify again
     for (int i = 0; i < num_tensors; ++i) {
         compare_tensors(custom_tensors[i], torch_tensors[i], 1e-6f, 1e-7f,
-                       "SmallTensorAfterAdd" + std::to_string(i));
+                        "SmallTensorAfterAdd" + std::to_string(i));
     }
 }
 
@@ -298,9 +301,14 @@ TEST_F(TensorStressTest, ViewStress) {
 
     // Create many different views
     std::vector<std::vector<int64_t>> shapes = {
-        {576}, {4, 144}, {8, 72}, {16, 36},
-        {2, 12, 24}, {3, 8, 24}, {4, 6, 24}, {2, 2, 144}
-    };
+        {576},
+        {4, 144},
+        {8, 72},
+        {16, 36},
+        {2, 12, 24},
+        {3, 8, 24},
+        {4, 6, 24},
+        {2, 2, 144}};
 
     for (const auto& shape : shapes) {
         custom_views.emplace_back(custom_original.view(std::vector<int>(shape.begin(), shape.end())));
@@ -314,7 +322,7 @@ TEST_F(TensorStressTest, ViewStress) {
     // All views should see the change
     for (size_t i = 0; i < custom_views.size(); ++i) {
         compare_tensors(custom_views[i], torch_views[i], 1e-6f, 1e-7f,
-                       "View" + std::to_string(i));
+                        "View" + std::to_string(i));
     }
 
     // Create views of views
@@ -338,9 +346,10 @@ TEST_F(TensorStressTest, SliceStress) {
 
     auto custom_tensor = Tensor::from_vector(data, {size, size}, Device::CUDA);
     auto torch_tensor = torch::from_blob(data.data(),
-                                        {static_cast<long>(size), static_cast<long>(size)},
-                                        torch::TensorOptions().dtype(torch::kFloat32))
-                       .clone().to(torch::kCUDA);
+                                         {static_cast<long>(size), static_cast<long>(size)},
+                                         torch::TensorOptions().dtype(torch::kFloat32))
+                            .clone()
+                            .to(torch::kCUDA);
 
     // Create many overlapping slices
     std::vector<Tensor> custom_slices;
@@ -358,7 +367,7 @@ TEST_F(TensorStressTest, SliceStress) {
         EXPECT_EQ(custom_slices[i].shape()[1], static_cast<size_t>(torch_slices[i].size(1)));
 
         compare_tensors(custom_slices[i], torch_slices[i], 1e-6f, 1e-7f,
-                       "Slice" + std::to_string(i));
+                        "Slice" + std::to_string(i));
     }
 }
 
@@ -375,8 +384,9 @@ TEST_F(TensorStressTest, ReductionStress) {
 
     auto custom_tensor = Tensor::from_vector(data, {size}, Device::CUDA);
     auto torch_tensor = torch::from_blob(data.data(), {static_cast<long>(size)},
-                                        torch::TensorOptions().dtype(torch::kFloat32))
-                       .clone().to(torch::kCUDA);
+                                         torch::TensorOptions().dtype(torch::kFloat32))
+                            .clone()
+                            .to(torch::kCUDA);
 
     // Test reductions
     auto custom_sum = custom_tensor.sum();
@@ -403,7 +413,8 @@ TEST_F(TensorStressTest, MultiDimensionalReductions) {
     auto data = custom_t.to_vector();
     auto torch_t = torch::from_blob(data.data(), {10, 20, 30},
                                     torch::TensorOptions().dtype(torch::kFloat32))
-                   .clone().to(torch::kCUDA);
+                       .clone()
+                       .to(torch::kCUDA);
 
     // Test reductions along different dimensions
     auto custom_sum0 = custom_t.sum(std::vector<int>{0});
@@ -430,7 +441,7 @@ TEST_F(TensorStressTest, MixedDeviceStress) {
         // Create on CPU
         auto custom_cpu = Tensor::full({size}, static_cast<float>(i), Device::CPU);
         auto torch_cpu = torch::full({static_cast<long>(size)}, static_cast<float>(i),
-                                    torch::TensorOptions().device(torch::kCPU));
+                                     torch::TensorOptions().device(torch::kCPU));
 
         // Transfer to CUDA
         auto custom_cuda = custom_cpu.to(Device::CUDA);
@@ -446,7 +457,7 @@ TEST_F(TensorStressTest, MixedDeviceStress) {
 
         // Verify
         compare_tensors(custom_cpu_result, torch_cpu_result, 1e-6f, 1e-7f,
-                       "MixedDevice" + std::to_string(i));
+                        "MixedDevice" + std::to_string(i));
     }
 }
 
@@ -461,8 +472,9 @@ TEST_F(TensorStressTest, NumericalStability) {
 
     auto custom_tensor = Tensor::from_vector(data, {1000}, Device::CUDA);
     auto torch_tensor = torch::from_blob(data.data(), {1000},
-                                        torch::TensorOptions().dtype(torch::kFloat32))
-                       .clone().to(torch::kCUDA);
+                                         torch::TensorOptions().dtype(torch::kFloat32))
+                            .clone()
+                            .to(torch::kCUDA);
 
     // Test log-exp roundtrip
     auto custom_log = custom_tensor.log();
@@ -496,7 +508,8 @@ TEST_F(TensorStressTest, NormalizationStability) {
     auto data = custom_t.to_vector();
     auto torch_t = torch::from_blob(data.data(), {1000},
                                     torch::TensorOptions().dtype(torch::kFloat32))
-                   .clone().to(torch::kCUDA);
+                       .clone()
+                       .to(torch::kCUDA);
 
     auto custom_normalized = custom_t.normalize();
 
@@ -526,7 +539,7 @@ TEST_F(TensorStressTest, ConcurrentOperations) {
         threads.emplace_back([&custom_results, &torch_results, t, ops_per_thread]() {
             auto custom_tensor = Tensor::full({50, 50}, static_cast<float>(t), Device::CUDA);
             auto torch_tensor = torch::full({50, 50}, static_cast<float>(t),
-                                           torch::TensorOptions().device(torch::kCUDA));
+                                            torch::TensorOptions().device(torch::kCUDA));
 
             for (int i = 0; i < ops_per_thread; ++i) {
                 custom_tensor = custom_tensor.add(0.1f).mul(1.01f).sub(0.05f);
@@ -549,7 +562,7 @@ TEST_F(TensorStressTest, ConcurrentOperations) {
         EXPECT_FALSE(custom_results[t].has_inf());
 
         compare_tensors(custom_results[t], torch_results[t], 1e-3f, 1e-4f,
-                       "Concurrent" + std::to_string(t));
+                        "Concurrent" + std::to_string(t));
     }
 }
 
@@ -594,7 +607,8 @@ TEST_F(TensorStressTest, ChainedReductions) {
     auto data = custom_t.to_vector();
     auto torch_t = torch::from_blob(data.data(), {100, 100, 10},
                                     torch::TensorOptions().dtype(torch::kFloat32))
-                   .clone().to(torch::kCUDA);
+                       .clone()
+                       .to(torch::kCUDA);
 
     // Chain multiple reductions
     auto custom_sum0 = custom_t.sum(std::vector<int>{0});

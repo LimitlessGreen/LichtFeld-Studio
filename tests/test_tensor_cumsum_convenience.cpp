@@ -3,8 +3,8 @@
 
 #include "core/tensor.hpp"
 #include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <numeric>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -12,121 +12,121 @@ using namespace gs;
 
 namespace {
 
-// Helper for comparing integer tensors (handles both int32 and int64)
-void compare_int_tensors(const Tensor& custom, const torch::Tensor& reference,
-                        const std::string& msg = "") {
-    auto ref_cpu = reference.to(torch::kCPU).contiguous();
-    auto custom_cpu = custom.cpu();
+    // Helper for comparing integer tensors (handles both int32 and int64)
+    void compare_int_tensors(const Tensor& custom, const torch::Tensor& reference,
+                             const std::string& msg = "") {
+        auto ref_cpu = reference.to(torch::kCPU).contiguous();
+        auto custom_cpu = custom.cpu();
 
-    ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
+        ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
 
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
-
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
-
-    auto custom_vec = custom_cpu.to_vector_int();
-
-    // Handle both Int32 and Int64 from PyTorch
-    if (ref_cpu.dtype() == torch::kInt32) {
-        auto ref_data = ref_cpu.data_ptr<int32_t>();
-        for (size_t i = 0; i < custom_vec.size(); ++i) {
-            EXPECT_EQ(custom_vec[i], static_cast<int>(ref_data[i]))
-                << msg << ": Mismatch at index " << i
-                << " (custom=" << custom_vec[i] << ", ref=" << ref_data[i] << ")";
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
         }
-    } else if (ref_cpu.dtype() == torch::kInt64 || ref_cpu.dtype() == torch::kLong) {
-        auto ref_data = ref_cpu.data_ptr<int64_t>();
-        for (size_t i = 0; i < custom_vec.size(); ++i) {
-            EXPECT_EQ(custom_vec[i], static_cast<int>(ref_data[i]))
-                << msg << ": Mismatch at index " << i
-                << " (custom=" << custom_vec[i] << ", ref=" << ref_data[i] << ")";
-        }
-    } else {
-        FAIL() << msg << ": Unexpected integer dtype in PyTorch tensor";
-    }
-}
 
-// Helper for comparing boolean tensors
-void compare_bool_tensors(const Tensor& custom, const torch::Tensor& reference,
-                         const std::string& msg = "") {
-    auto ref_cpu = reference.to(torch::kCPU).contiguous();
-    auto custom_cpu = custom.cpu();
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
 
-    ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
+        auto custom_vec = custom_cpu.to_vector_int();
 
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
-
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
-
-    auto custom_vec = custom_cpu.to_vector_bool();
-    auto ref_data = ref_cpu.data_ptr<bool>();
-
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        EXPECT_EQ(custom_vec[i], ref_data[i])
-            << msg << ": Mismatch at index " << i
-            << " (custom=" << custom_vec[i] << ", ref=" << ref_data[i] << ")";
-    }
-}
-
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
-    // Handle boolean tensors specially
-    if (reference.dtype() == torch::kBool) {
-        compare_bool_tensors(custom, reference, msg);
-        return;
-    }
-
-    // Handle integer tensors specially (Int32, Int64, Long)
-    if (reference.dtype() == torch::kInt32 ||
-        reference.dtype() == torch::kInt64 ||
-        reference.dtype() == torch::kInt ||
-        reference.dtype() == torch::kLong) {
-        compare_int_tensors(custom, reference, msg);
-        return;
-    }
-
-    // Handle float tensors
-    auto ref_cpu = reference.to(torch::kCPU).contiguous();
-    auto custom_cpu = custom.cpu();
-
-    ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
-
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
-
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
-
-    auto custom_vec = custom_cpu.to_vector();
-    auto ref_data = ref_cpu.data_ptr<float>();
-
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        float ref_val = ref_data[i];
-        float custom_val = custom_vec[i];
-
-        if (std::isnan(ref_val)) {
-            EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
-        } else if (std::isinf(ref_val)) {
-            EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+        // Handle both Int32 and Int64 from PyTorch
+        if (ref_cpu.dtype() == torch::kInt32) {
+            auto ref_data = ref_cpu.data_ptr<int32_t>();
+            for (size_t i = 0; i < custom_vec.size(); ++i) {
+                EXPECT_EQ(custom_vec[i], static_cast<int>(ref_data[i]))
+                    << msg << ": Mismatch at index " << i
+                    << " (custom=" << custom_vec[i] << ", ref=" << ref_data[i] << ")";
+            }
+        } else if (ref_cpu.dtype() == torch::kInt64 || ref_cpu.dtype() == torch::kLong) {
+            auto ref_data = ref_cpu.data_ptr<int64_t>();
+            for (size_t i = 0; i < custom_vec.size(); ++i) {
+                EXPECT_EQ(custom_vec[i], static_cast<int>(ref_data[i]))
+                    << msg << ": Mismatch at index " << i
+                    << " (custom=" << custom_vec[i] << ", ref=" << ref_data[i] << ")";
+            }
         } else {
-            float diff = std::abs(custom_val - ref_val);
-            float threshold = atol + rtol * std::abs(ref_val);
-            EXPECT_LE(diff, threshold)
-                << msg << ": Mismatch at index " << i
-                << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            FAIL() << msg << ": Unexpected integer dtype in PyTorch tensor";
         }
     }
-}
+
+    // Helper for comparing boolean tensors
+    void compare_bool_tensors(const Tensor& custom, const torch::Tensor& reference,
+                              const std::string& msg = "") {
+        auto ref_cpu = reference.to(torch::kCPU).contiguous();
+        auto custom_cpu = custom.cpu();
+
+        ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
+
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
+
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
+
+        auto custom_vec = custom_cpu.to_vector_bool();
+        auto ref_data = ref_cpu.data_ptr<bool>();
+
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            EXPECT_EQ(custom_vec[i], ref_data[i])
+                << msg << ": Mismatch at index " << i
+                << " (custom=" << custom_vec[i] << ", ref=" << ref_data[i] << ")";
+        }
+    }
+
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
+        // Handle boolean tensors specially
+        if (reference.dtype() == torch::kBool) {
+            compare_bool_tensors(custom, reference, msg);
+            return;
+        }
+
+        // Handle integer tensors specially (Int32, Int64, Long)
+        if (reference.dtype() == torch::kInt32 ||
+            reference.dtype() == torch::kInt64 ||
+            reference.dtype() == torch::kInt ||
+            reference.dtype() == torch::kLong) {
+            compare_int_tensors(custom, reference, msg);
+            return;
+        }
+
+        // Handle float tensors
+        auto ref_cpu = reference.to(torch::kCPU).contiguous();
+        auto custom_cpu = custom.cpu();
+
+        ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
+
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
+
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
+
+        auto custom_vec = custom_cpu.to_vector();
+        auto ref_data = ref_cpu.data_ptr<float>();
+
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            float ref_val = ref_data[i];
+            float custom_val = custom_vec[i];
+
+            if (std::isnan(ref_val)) {
+                EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
+            } else if (std::isinf(ref_val)) {
+                EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+            } else {
+                float diff = std::abs(custom_val - ref_val);
+                float threshold = atol + rtol * std::abs(ref_val);
+                EXPECT_LE(diff, threshold)
+                    << msg << ": Mismatch at index " << i
+                    << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            }
+        }
+    }
 
 } // anonymous namespace
 
@@ -202,7 +202,7 @@ TEST_F(TensorCumsumConvenienceTest, Cumsum3D) {
         auto torch_result = torch_t.cumsum(dim);
 
         compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f,
-                       "Cumsum3D_Dim" + std::to_string(dim));
+                        "Cumsum3D_Dim" + std::to_string(dim));
     }
 }
 
@@ -225,7 +225,7 @@ TEST_F(TensorCumsumConvenienceTest, CumsumInt32) {
     auto torch_t = torch::tensor(data, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
     auto custom_result = custom_t.cumsum(0);
-    auto torch_result = torch_t.cumsum(0);  // This returns Int64 in PyTorch
+    auto torch_result = torch_t.cumsum(0); // This returns Int64 in PyTorch
 
     // Verify our result is Int32
     EXPECT_EQ(custom_result.dtype(), DataType::Int32);
@@ -556,16 +556,16 @@ TEST_F(TensorCumsumConvenienceTest, ComplexChain) {
     auto torch_t = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
 
     auto custom_result = custom_t.reshape({4, 5})
-                                  .cumsum(1)
-                                  .t()
-                                  .cumsum(0)
-                                  .flatten();
+                             .cumsum(1)
+                             .t()
+                             .cumsum(0)
+                             .flatten();
 
     auto torch_result = torch_t.reshape({4, 5})
-                                .cumsum(1)
-                                .t()
-                                .cumsum(0)
-                                .flatten();
+                            .cumsum(1)
+                            .t()
+                            .cumsum(0)
+                            .flatten();
 
     compare_tensors(custom_result, torch_result, 1e-5f, 1e-6f, "ComplexChain");
 }

@@ -2,11 +2,11 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <torch/torch.h>
-#include <c10/cuda/CUDACachingAllocator.h>
 
 using namespace gs;
 
@@ -14,38 +14,38 @@ using namespace gs;
 
 namespace {
 
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
-    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
-    auto custom_cpu = custom.cpu();
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
+        auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+        auto custom_cpu = custom.cpu();
 
-    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+        ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
 
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
 
-    auto custom_vec = custom_cpu.to_vector();
-    auto ref_accessor = ref_cpu.accessor<float, 1>();
+        auto custom_vec = custom_cpu.to_vector();
+        auto ref_accessor = ref_cpu.accessor<float, 1>();
 
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        float ref_val = ref_accessor[i];
-        float custom_val = custom_vec[i];
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            float ref_val = ref_accessor[i];
+            float custom_val = custom_vec[i];
 
-        if (std::isnan(ref_val)) {
-            EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
-        } else if (std::isinf(ref_val)) {
-            EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
-        } else {
-            float diff = std::abs(custom_val - ref_val);
-            float threshold = atol + rtol * std::abs(ref_val);
-            EXPECT_LE(diff, threshold)
-                << msg << ": Mismatch at index " << i
-                << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            if (std::isnan(ref_val)) {
+                EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
+            } else if (std::isinf(ref_val)) {
+                EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+            } else {
+                float diff = std::abs(custom_val - ref_val);
+                float threshold = atol + rtol * std::abs(ref_val);
+                EXPECT_LE(diff, threshold)
+                    << msg << ": Mismatch at index " << i
+                    << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            }
         }
     }
-}
 
 } // anonymous namespace
 
@@ -79,7 +79,7 @@ protected:
                     static_cast<long long>(initial_free_mem),
                     static_cast<long long>(tolerance))
             << "Possible memory leak detected. Difference: "
-            << (static_cast<long long>(initial_free_mem) - static_cast<long long>(current_free_mem)) / (1024*1024)
+            << (static_cast<long long>(initial_free_mem) - static_cast<long long>(current_free_mem)) / (1024 * 1024)
             << " MB";
     }
 
@@ -277,8 +277,9 @@ TEST_F(TensorMemoryTest, DeviceTransferRoundtrip) {
     auto custom_data = custom_original.to_vector(); // Save original data
 
     auto torch_original = torch::from_blob(custom_data.data(), {10, 10},
-                                          torch::TensorOptions().dtype(torch::kFloat32))
-                         .clone().to(torch::kCUDA);
+                                           torch::TensorOptions().dtype(torch::kFloat32))
+                              .clone()
+                              .to(torch::kCUDA);
 
     // Roundtrip: CUDA -> CPU -> CUDA
     auto custom_result = custom_original.cpu().cuda();
@@ -510,7 +511,7 @@ TEST_F(TensorMemoryTest, StressTestManyAllocations) {
     for (int i = 0; i < 100; ++i) {
         custom_tensors.emplace_back(Tensor::zeros({10, 10}, Device::CUDA));
         torch_tensors.push_back(torch::zeros({10, 10},
-                                            torch::TensorOptions().device(torch::kCUDA)));
+                                             torch::TensorOptions().device(torch::kCUDA)));
     }
 
     // All should be valid
@@ -599,8 +600,9 @@ TEST_F(TensorMemoryTest, CloneIndependence) {
     auto custom_data = custom_original.to_vector();
 
     auto torch_original = torch::from_blob(custom_data.data(), {50},
-                                          torch::TensorOptions().dtype(torch::kFloat32))
-                         .clone().to(torch::kCUDA);
+                                           torch::TensorOptions().dtype(torch::kFloat32))
+                              .clone()
+                              .to(torch::kCUDA);
 
     auto custom_clone = custom_original.clone();
     auto torch_clone = torch_original.clone();

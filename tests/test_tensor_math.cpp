@@ -4,8 +4,8 @@
 #include "core/tensor.hpp"
 #include <cmath>
 #include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <random>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -13,90 +13,90 @@ using namespace gs;
 
 namespace {
 
-torch::Tensor to_torch(const Tensor& t) {
-    auto options = torch::TensorOptions()
-        .dtype([&]() {
-            switch (t.dtype()) {
-                case DataType::Float32: return torch::kFloat32;
-                case DataType::Float16: return torch::kFloat16;
-                case DataType::Int32: return torch::kInt32;
-                case DataType::Int64: return torch::kInt64;
-                case DataType::UInt8: return torch::kUInt8;
-                case DataType::Bool: return torch::kBool;
-                default: return torch::kFloat32;
-            }
-        }())
-        .device(t.device() == Device::CPU ? torch::kCPU : torch::kCUDA);
+    torch::Tensor to_torch(const Tensor& t) {
+        auto options = torch::TensorOptions()
+                           .dtype([&]() {
+                               switch (t.dtype()) {
+                               case DataType::Float32: return torch::kFloat32;
+                               case DataType::Float16: return torch::kFloat16;
+                               case DataType::Int32: return torch::kInt32;
+                               case DataType::Int64: return torch::kInt64;
+                               case DataType::UInt8: return torch::kUInt8;
+                               case DataType::Bool: return torch::kBool;
+                               default: return torch::kFloat32;
+                               }
+                           }())
+                           .device(t.device() == Device::CPU ? torch::kCPU : torch::kCUDA);
 
-    std::vector<int64_t> shape;
-    for (size_t i = 0; i < t.ndim(); ++i) {
-        shape.push_back(static_cast<int64_t>(t.size(i)));
-    }
+        std::vector<int64_t> shape;
+        for (size_t i = 0; i < t.ndim(); ++i) {
+            shape.push_back(static_cast<int64_t>(t.size(i)));
+        }
 
-    torch::Tensor result = torch::empty(shape, options);
+        torch::Tensor result = torch::empty(shape, options);
 
-    if (t.device() == Device::CPU) {
-        std::memcpy(result.data_ptr(), t.raw_ptr(), t.bytes());
-    } else {
-        cudaMemcpy(result.data_ptr(), t.raw_ptr(), t.bytes(), cudaMemcpyDeviceToDevice);
-    }
-
-    return result;
-}
-
-// Helper to create PyTorch tensor from vector data
-torch::Tensor create_torch_tensor(const std::vector<float>& data,
-                                   const std::vector<int64_t>& shape,
-                                   torch::Device device = torch::kCUDA) {
-    // CRITICAL: Create on CPU first with proper cloning
-    auto cpu_tensor = torch::from_blob(
-        const_cast<float*>(data.data()),
-        shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(data.size())} : shape,
-        torch::TensorOptions().dtype(torch::kFloat32)
-    ).clone();  // Clone to own the memory
-
-    // Now move to target device
-    return cpu_tensor.to(device);
-}
-
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
-    // FIX: Properly move to CPU, flatten, and ensure contiguous memory
-    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
-    auto custom_cpu = custom.cpu();
-
-    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
-
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
-
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
-
-    auto custom_vec = custom_cpu.to_vector();
-    
-    // FIX: Use flattened accessor to handle multi-dimensional tensors
-    auto ref_accessor = ref_cpu.accessor<float, 1>();
-    
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        float ref_val = ref_accessor[i];
-        float custom_val = custom_vec[i];
-        
-        if (std::isnan(ref_val)) {
-            EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
-        } else if (std::isinf(ref_val)) {
-            EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+        if (t.device() == Device::CPU) {
+            std::memcpy(result.data_ptr(), t.raw_ptr(), t.bytes());
         } else {
-            float diff = std::abs(custom_val - ref_val);
-            float threshold = atol + rtol * std::abs(ref_val);
-            EXPECT_LE(diff, threshold)
-                << msg << ": Mismatch at index " << i
-                << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            cudaMemcpy(result.data_ptr(), t.raw_ptr(), t.bytes(), cudaMemcpyDeviceToDevice);
+        }
+
+        return result;
+    }
+
+    // Helper to create PyTorch tensor from vector data
+    torch::Tensor create_torch_tensor(const std::vector<float>& data,
+                                      const std::vector<int64_t>& shape,
+                                      torch::Device device = torch::kCUDA) {
+        // CRITICAL: Create on CPU first with proper cloning
+        auto cpu_tensor = torch::from_blob(
+                              const_cast<float*>(data.data()),
+                              shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(data.size())} : shape,
+                              torch::TensorOptions().dtype(torch::kFloat32))
+                              .clone(); // Clone to own the memory
+
+        // Now move to target device
+        return cpu_tensor.to(device);
+    }
+
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
+        // FIX: Properly move to CPU, flatten, and ensure contiguous memory
+        auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+        auto custom_cpu = custom.cpu();
+
+        ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
+
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
+
+        auto custom_vec = custom_cpu.to_vector();
+
+        // FIX: Use flattened accessor to handle multi-dimensional tensors
+        auto ref_accessor = ref_cpu.accessor<float, 1>();
+
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            float ref_val = ref_accessor[i];
+            float custom_val = custom_vec[i];
+
+            if (std::isnan(ref_val)) {
+                EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
+            } else if (std::isinf(ref_val)) {
+                EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+            } else {
+                float diff = std::abs(custom_val - ref_val);
+                float threshold = atol + rtol * std::abs(ref_val);
+                EXPECT_LE(diff, threshold)
+                    << msg << ": Mismatch at index " << i
+                    << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            }
         }
     }
-}
 
 } // anonymous namespace
 
@@ -171,12 +171,12 @@ TEST_F(TensorMathTest, SqrtNegativeHandling) {
         LOG_INFO("  Our design: Clamps negative inputs to 0 (prevents NaN propagation)");
         LOG_INFO("  PyTorch: Produces NaN");
         LOG_INFO("  Rationale: Numerical stability - avoiding NaN contamination in gradients");
-        
+
         // Verify our safe behavior
         EXPECT_EQ(custom_vals[0], 0.0f) << "sqrt(-1) should clamp to 0";
         EXPECT_FLOAT_EQ(custom_vals[1], 2.0f) << "sqrt(4) = 2";
         EXPECT_EQ(custom_vals[2], 0.0f) << "sqrt(-9) should clamp to 0";
-        
+
         // Verify PyTorch produces NaN
         EXPECT_TRUE(std::isnan(torch_accessor[0]));
         EXPECT_TRUE(std::isnan(torch_accessor[2]));
@@ -250,12 +250,12 @@ TEST_F(TensorMathTest, LogNegativeHandling) {
         LOG_INFO("  Our design: Clamps to log(epsilon) (prevents Inf/NaN propagation)");
         LOG_INFO("  PyTorch: log(0)=-inf, log(negative)=NaN");
         LOG_INFO("  Rationale: Numerical stability - avoiding Inf/NaN contamination");
-        
+
         // Verify our safe behavior (finite values)
         EXPECT_TRUE(std::isfinite(custom_vals[0])) << "log(0) should be finite";
         EXPECT_TRUE(std::isfinite(custom_vals[1])) << "log(-1) should be finite";
         EXPECT_FLOAT_EQ(custom_vals[2], 0.0f) << "log(1) = 0";
-        
+
         // Verify PyTorch produces inf/nan
         EXPECT_TRUE(std::isinf(torch_accessor[0]) && torch_accessor[0] < 0) << "PyTorch log(0) should be -inf";
         EXPECT_TRUE(std::isnan(torch_accessor[1])) << "PyTorch log(-1) should be NaN";
@@ -332,7 +332,7 @@ TEST_F(TensorMathTest, ReLUAllPositive) {
 // ============= Trigonometric Tests =============
 
 TEST_F(TensorMathTest, Sin) {
-    std::vector<float> data = {0.0f, M_PI/6, M_PI/4, M_PI/2, M_PI};
+    std::vector<float> data = {0.0f, M_PI / 6, M_PI / 4, M_PI / 2, M_PI};
 
     auto tensor_custom = Tensor::from_vector(data, {5}, Device::CUDA);
     auto tensor_torch = create_torch_tensor(data, {5});
@@ -344,7 +344,7 @@ TEST_F(TensorMathTest, Sin) {
 }
 
 TEST_F(TensorMathTest, Cos) {
-    std::vector<float> data = {0.0f, M_PI/6, M_PI/4, M_PI/2, M_PI};
+    std::vector<float> data = {0.0f, M_PI / 6, M_PI / 4, M_PI / 2, M_PI};
 
     auto tensor_custom = Tensor::from_vector(data, {5}, Device::CUDA);
     auto tensor_torch = create_torch_tensor(data, {5});
@@ -356,7 +356,7 @@ TEST_F(TensorMathTest, Cos) {
 }
 
 TEST_F(TensorMathTest, Tan) {
-    std::vector<float> data = {0.0f, M_PI/6, M_PI/4, M_PI/3};
+    std::vector<float> data = {0.0f, M_PI / 6, M_PI / 4, M_PI / 3};
 
     auto tensor_custom = Tensor::from_vector(data, {4}, Device::CUDA);
     auto tensor_torch = create_torch_tensor(data, {4});

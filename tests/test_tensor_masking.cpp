@@ -3,8 +3,8 @@
 
 #include "core/tensor.hpp"
 #include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <random>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -12,42 +12,42 @@ using namespace gs;
 
 namespace {
 
-torch::Tensor to_torch(const Tensor& t) {
-    auto options = torch::TensorOptions()
-        .dtype([&]() {
-            switch (t.dtype()) {
-                case DataType::Float32: return torch::kFloat32;
-                case DataType::Float16: return torch::kFloat16;
-                case DataType::Int32: return torch::kInt32;
-                case DataType::Int64: return torch::kInt64;
-                case DataType::UInt8: return torch::kUInt8;
-                case DataType::Bool: return torch::kBool;
-                default: return torch::kFloat32;
-            }
-        }())
-        .device(t.device() == Device::CPU ? torch::kCPU : torch::kCUDA);
+    torch::Tensor to_torch(const Tensor& t) {
+        auto options = torch::TensorOptions()
+                           .dtype([&]() {
+                               switch (t.dtype()) {
+                               case DataType::Float32: return torch::kFloat32;
+                               case DataType::Float16: return torch::kFloat16;
+                               case DataType::Int32: return torch::kInt32;
+                               case DataType::Int64: return torch::kInt64;
+                               case DataType::UInt8: return torch::kUInt8;
+                               case DataType::Bool: return torch::kBool;
+                               default: return torch::kFloat32;
+                               }
+                           }())
+                           .device(t.device() == Device::CPU ? torch::kCPU : torch::kCUDA);
 
-    std::vector<int64_t> shape;
-    for (size_t i = 0; i < t.ndim(); ++i) {
-        shape.push_back(static_cast<int64_t>(t.size(i)));
+        std::vector<int64_t> shape;
+        for (size_t i = 0; i < t.ndim(); ++i) {
+            shape.push_back(static_cast<int64_t>(t.size(i)));
+        }
+
+        torch::Tensor result = torch::empty(shape, options);
+
+        if (t.device() == Device::CPU) {
+            std::memcpy(result.data_ptr(), t.raw_ptr(), t.bytes());
+        } else {
+            cudaMemcpy(result.data_ptr(), t.raw_ptr(), t.bytes(), cudaMemcpyDeviceToDevice);
+        }
+
+        return result;
     }
 
-    torch::Tensor result = torch::empty(shape, options);
+    Tensor from_torch(const torch::Tensor& t, Device device = Device::CPU) {
+        auto t_cont = t.contiguous();
 
-    if (t.device() == Device::CPU) {
-        std::memcpy(result.data_ptr(), t.raw_ptr(), t.bytes());
-    } else {
-        cudaMemcpy(result.data_ptr(), t.raw_ptr(), t.bytes(), cudaMemcpyDeviceToDevice);
-    }
-
-    return result;
-}
-
-Tensor from_torch(const torch::Tensor& t, Device device = Device::CPU) {
-    auto t_cont = t.contiguous();
-
-    DataType dtype;
-    switch (t_cont.scalar_type()) {
+        DataType dtype;
+        switch (t_cont.scalar_type()) {
         case torch::kFloat32: dtype = DataType::Float32; break;
         case torch::kFloat16: dtype = DataType::Float16; break;
         case torch::kInt32: dtype = DataType::Int32; break;
@@ -55,81 +55,81 @@ Tensor from_torch(const torch::Tensor& t, Device device = Device::CPU) {
         case torch::kUInt8: dtype = DataType::UInt8; break;
         case torch::kBool: dtype = DataType::Bool; break;
         default: dtype = DataType::Float32; break;
-    }
+        }
 
-    std::vector<size_t> shape;
-    for (int64_t i = 0; i < t_cont.dim(); ++i) {
-        shape.push_back(static_cast<size_t>(t_cont.size(i)));
-    }
+        std::vector<size_t> shape;
+        for (int64_t i = 0; i < t_cont.dim(); ++i) {
+            shape.push_back(static_cast<size_t>(t_cont.size(i)));
+        }
 
-    Tensor result = Tensor::empty(TensorShape(shape), device, dtype);
+        Tensor result = Tensor::empty(TensorShape(shape), device, dtype);
 
-    if (device == Device::CPU) {
-        std::memcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes());
-    } else {
-        if (t_cont.is_cpu()) {
-            cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyHostToDevice);
+        if (device == Device::CPU) {
+            std::memcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes());
         } else {
-            cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyDeviceToDevice);
+            if (t_cont.is_cpu()) {
+                cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyHostToDevice);
+            } else {
+                cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyDeviceToDevice);
+            }
         }
+
+        return result;
     }
 
-    return result;
-}
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
+        auto ref_cpu = reference.cpu();
+        auto custom_cpu = custom.cpu();
 
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
-    auto ref_cpu = reference.cpu();
-    auto custom_cpu = custom.cpu();
+        ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
 
-    ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
-
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
-
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
-
-    if (custom_cpu.dtype() == DataType::Bool || ref_cpu.scalar_type() == torch::kBool) {
-        auto custom_vec = custom_cpu.to_vector_bool();
-        auto ref_ptr = ref_cpu.data_ptr<bool>();
-        for (size_t i = 0; i < custom_vec.size(); ++i) {
-            EXPECT_EQ(custom_vec[i], ref_ptr[i]) << msg << ": Mismatch at index " << i;
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
         }
-    } else if (custom_cpu.dtype() == DataType::Int32 || custom_cpu.dtype() == DataType::Int64) {
-        auto custom_vec = custom_cpu.to_vector_int();
-        if (ref_cpu.scalar_type() == torch::kInt32) {
-            auto ref_ptr = ref_cpu.data_ptr<int32_t>();
+
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
+
+        if (custom_cpu.dtype() == DataType::Bool || ref_cpu.scalar_type() == torch::kBool) {
+            auto custom_vec = custom_cpu.to_vector_bool();
+            auto ref_ptr = ref_cpu.data_ptr<bool>();
             for (size_t i = 0; i < custom_vec.size(); ++i) {
                 EXPECT_EQ(custom_vec[i], ref_ptr[i]) << msg << ": Mismatch at index " << i;
             }
-        } else if (ref_cpu.scalar_type() == torch::kInt64) {
-            auto ref_ptr = ref_cpu.data_ptr<int64_t>();
-            for (size_t i = 0; i < custom_vec.size(); ++i) {
-                EXPECT_EQ(custom_vec[i], static_cast<int>(ref_ptr[i]))
-                    << msg << ": Mismatch at index " << i;
+        } else if (custom_cpu.dtype() == DataType::Int32 || custom_cpu.dtype() == DataType::Int64) {
+            auto custom_vec = custom_cpu.to_vector_int();
+            if (ref_cpu.scalar_type() == torch::kInt32) {
+                auto ref_ptr = ref_cpu.data_ptr<int32_t>();
+                for (size_t i = 0; i < custom_vec.size(); ++i) {
+                    EXPECT_EQ(custom_vec[i], ref_ptr[i]) << msg << ": Mismatch at index " << i;
+                }
+            } else if (ref_cpu.scalar_type() == torch::kInt64) {
+                auto ref_ptr = ref_cpu.data_ptr<int64_t>();
+                for (size_t i = 0; i < custom_vec.size(); ++i) {
+                    EXPECT_EQ(custom_vec[i], static_cast<int>(ref_ptr[i]))
+                        << msg << ": Mismatch at index " << i;
+                }
             }
-        }
-    } else {
-        auto custom_vec = custom_cpu.to_vector();
-        auto ref_ptr = ref_cpu.data_ptr<float>();
-        for (size_t i = 0; i < custom_vec.size(); ++i) {
-            if (std::isnan(ref_ptr[i])) {
-                EXPECT_TRUE(std::isnan(custom_vec[i])) << msg << ": Expected NaN at index " << i;
-            } else if (std::isinf(ref_ptr[i])) {
-                EXPECT_TRUE(std::isinf(custom_vec[i])) << msg << ": Expected Inf at index " << i;
-            } else {
-                float diff = std::abs(custom_vec[i] - ref_ptr[i]);
-                float threshold = atol + rtol * std::abs(ref_ptr[i]);
-                EXPECT_LE(diff, threshold)
-                    << msg << ": Mismatch at index " << i
-                    << " (custom=" << custom_vec[i] << ", ref=" << ref_ptr[i] << ")";
+        } else {
+            auto custom_vec = custom_cpu.to_vector();
+            auto ref_ptr = ref_cpu.data_ptr<float>();
+            for (size_t i = 0; i < custom_vec.size(); ++i) {
+                if (std::isnan(ref_ptr[i])) {
+                    EXPECT_TRUE(std::isnan(custom_vec[i])) << msg << ": Expected NaN at index " << i;
+                } else if (std::isinf(ref_ptr[i])) {
+                    EXPECT_TRUE(std::isinf(custom_vec[i])) << msg << ": Expected Inf at index " << i;
+                } else {
+                    float diff = std::abs(custom_vec[i] - ref_ptr[i]);
+                    float threshold = atol + rtol * std::abs(ref_ptr[i]);
+                    EXPECT_LE(diff, threshold)
+                        << msg << ": Mismatch at index " << i
+                        << " (custom=" << custom_vec[i] << ", ref=" << ref_ptr[i] << ")";
+                }
             }
         }
     }
-}
 
 } // anonymous namespace
 
@@ -412,7 +412,8 @@ TEST_F(TensorMaskingTest, IndexSelectWithBoundaryWrap) {
     std::vector<int64_t> wrapped_indices;
     for (int idx : indices_data) {
         int wrapped = idx % 4;
-        if (wrapped < 0) wrapped += 4;
+        if (wrapped < 0)
+            wrapped += 4;
         wrapped_indices.push_back(wrapped);
     }
     auto indices_torch = torch::tensor(wrapped_indices, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
@@ -616,7 +617,7 @@ TEST_F(TensorMaskingTest, RegressionBooleanTensorExpansion) {
         mask_data_torch.push_back(b ? 1 : 0);
     }
     auto mask_2d_torch = torch::tensor(mask_data_torch, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA))
-                              .reshape({static_cast<int64_t>(seq_len), static_cast<int64_t>(seq_len)});
+                             .reshape({static_cast<int64_t>(seq_len), static_cast<int64_t>(seq_len)});
 
     auto mask_3d_custom = mask_2d_custom.unsqueeze(0);
     auto mask_3d_torch = mask_2d_torch.unsqueeze(0);
@@ -776,7 +777,7 @@ TEST_F(TensorMaskingTest, SimpleCausalMask) {
         mask_data_torch.push_back(b ? 1 : 0);
     }
     auto mask_torch = torch::tensor(mask_data_torch, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA))
-                           .reshape({static_cast<int64_t>(seq_len), static_cast<int64_t>(seq_len)});
+                          .reshape({static_cast<int64_t>(seq_len), static_cast<int64_t>(seq_len)});
 
     auto scores_custom = Tensor::ones({seq_len, seq_len}, Device::CUDA);
     auto scores_torch = torch::ones({static_cast<int64_t>(seq_len), static_cast<int64_t>(seq_len)}, torch::kCUDA);
@@ -840,8 +841,7 @@ TEST_F(TensorMaskingTest, SpecialValueMasking) {
         0.0f, 1.0f, -1.0f,
         std::numeric_limits<float>::infinity(),
         -std::numeric_limits<float>::infinity(),
-        std::numeric_limits<float>::quiet_NaN()
-    };
+        std::numeric_limits<float>::quiet_NaN()};
 
     auto tensor_custom = Tensor::from_vector(data, {6}, Device::CUDA);
     auto tensor_torch = torch::tensor(data, torch::kCUDA);
@@ -979,7 +979,7 @@ TEST_F(TensorMaskingTest, PaddingMaskCreation) {
 TEST_F(TensorMaskingTest, MultiConditionMasking) {
     std::vector<float> data;
     for (int i = 0; i < 100; ++i) {
-        data.push_back(static_cast<float>(i) / 100.0f - 0.5f);  // Range [-0.5, 0.49]
+        data.push_back(static_cast<float>(i) / 100.0f - 0.5f); // Range [-0.5, 0.49]
     }
 
     auto tensor_custom = Tensor::from_vector(data, {100}, Device::CUDA);
@@ -1024,7 +1024,7 @@ TEST_F(TensorMaskingTest, DiagonalMasking) {
         mask_data_torch.push_back(b ? 1 : 0);
     }
     auto diag_mask_torch = torch::tensor(mask_data_torch, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA))
-                                .reshape({static_cast<int64_t>(size), static_cast<int64_t>(size)});
+                               .reshape({static_cast<int64_t>(size), static_cast<int64_t>(size)});
 
     // Apply to create identity matrix
     auto data_custom = Tensor::zeros({size, size}, Device::CUDA);
@@ -1066,7 +1066,7 @@ TEST_F(TensorMaskingTest, BlockSparsePattern) {
         mask_data_torch.push_back(b ? 1 : 0);
     }
     auto checkerboard_torch = torch::tensor(mask_data_torch, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA))
-                                   .reshape({static_cast<int64_t>(size), static_cast<int64_t>(size)});
+                                  .reshape({static_cast<int64_t>(size), static_cast<int64_t>(size)});
 
     // Apply sparsity
     auto data_custom = Tensor::ones({size, size}, Device::CUDA);
@@ -1083,7 +1083,7 @@ TEST_F(TensorMaskingTest, BlockSparsePattern) {
 TEST_F(TensorMaskingTest, GradientClippingMask) {
     std::vector<float> grad_data;
     for (int i = 0; i < 100; ++i) {
-        grad_data.push_back(static_cast<float>(i) / 10.0f - 5.0f);  // Range [-5, 4.9]
+        grad_data.push_back(static_cast<float>(i) / 10.0f - 5.0f); // Range [-5, 4.9]
     }
 
     auto gradients_custom = Tensor::from_vector(grad_data, {100}, Device::CUDA);
@@ -1108,12 +1108,14 @@ TEST_F(TensorMaskingTest, StructuredDropout) {
     auto data_custom = Tensor::ones({batch_size, seq_len, hidden_dim}, Device::CUDA);
     auto data_torch = torch::ones({static_cast<int64_t>(batch_size),
                                    static_cast<int64_t>(seq_len),
-                                   static_cast<int64_t>(hidden_dim)}, torch::kCUDA);
+                                   static_cast<int64_t>(hidden_dim)},
+                                  torch::kCUDA);
 
     // Create deterministic dropout mask (drop specific tokens)
     auto token_mask_custom = Tensor::ones({batch_size, seq_len, 1}, Device::CUDA);
     auto token_mask_torch = torch::ones({static_cast<int64_t>(batch_size),
-                                        static_cast<int64_t>(seq_len), 1}, torch::kCUDA);
+                                         static_cast<int64_t>(seq_len), 1},
+                                        torch::kCUDA);
 
     auto cpu_mask_custom = token_mask_custom.to(Device::CPU);
     auto cpu_mask_torch = token_mask_torch.cpu();
@@ -1167,7 +1169,7 @@ TEST_F(TensorMaskingTest, SparseAttentionPattern) {
         local_mask_torch_data.push_back(b ? 1 : 0);
     }
     auto local_mask_torch = torch::tensor(local_mask_torch_data, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA))
-                                 .reshape({static_cast<int64_t>(seq_len), static_cast<int64_t>(seq_len)});
+                                .reshape({static_cast<int64_t>(seq_len), static_cast<int64_t>(seq_len)});
 
     compare_tensors(local_mask_custom, local_mask_torch, 1e-5f, 1e-7f, "SparseAttention");
 }
@@ -1308,15 +1310,14 @@ TEST_F(TensorMaskingTest, BatchMaskProcessing) {
     }
 
     auto tensor_custom = Tensor::from_vector(data, {batch, features}, Device::CUDA);
-    auto tensor_torch = torch::tensor(data, torch::kCUDA).reshape({static_cast<int64_t>(batch),
-                                                                    static_cast<int64_t>(features)});
+    auto tensor_torch = torch::tensor(data, torch::kCUDA).reshape({static_cast<int64_t>(batch), static_cast<int64_t>(features)});
 
     // Create different threshold per batch
     std::vector<float> thresholds = {-1.0f, -0.5f, 0.0f, 0.5f};
 
     for (size_t i = 0; i < batch; ++i) {
-        auto batch_custom = tensor_custom.slice(0, i, i+1).squeeze(0);
-        auto batch_torch = tensor_torch.slice(0, i, i+1).squeeze(0);
+        auto batch_custom = tensor_custom.slice(0, i, i + 1).squeeze(0);
+        auto batch_torch = tensor_torch.slice(0, i, i + 1).squeeze(0);
 
         auto mask_custom = batch_custom.gt(thresholds[i]);
         auto mask_torch = batch_torch.gt(thresholds[i]);
@@ -1325,7 +1326,7 @@ TEST_F(TensorMaskingTest, BatchMaskProcessing) {
         batch_torch.masked_fill_(mask_torch, thresholds[i]);
 
         compare_tensors(batch_custom, batch_torch, 1e-5f, 1e-7f,
-                       "BatchProcessing_" + std::to_string(i));
+                        "BatchProcessing_" + std::to_string(i));
     }
 }
 
@@ -1481,7 +1482,8 @@ TEST_F(TensorMaskingTest, ImageRegionMasking) {
     auto images_torch = torch::ones({static_cast<int64_t>(batch_size),
                                      static_cast<int64_t>(channels),
                                      static_cast<int64_t>(height),
-                                     static_cast<int64_t>(width)}, torch::kCUDA);
+                                     static_cast<int64_t>(width)},
+                                    torch::kCUDA);
 
     // Create mask for a rectangular region (5,5) to (10,10)
     std::vector<bool> mask_data(height * width, false);
@@ -1500,18 +1502,18 @@ TEST_F(TensorMaskingTest, ImageRegionMasking) {
         mask_torch_data.push_back(b ? 1 : 0);
     }
     auto mask_torch = torch::tensor(mask_torch_data, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA))
-                           .reshape({static_cast<int64_t>(height), static_cast<int64_t>(width)});
+                          .reshape({static_cast<int64_t>(height), static_cast<int64_t>(width)});
 
     // Apply mask to first batch, all channels
     for (size_t c = 0; c < channels; ++c) {
-        auto channel_custom = images_custom.slice(0, 0, 1).squeeze(0).slice(0, c, c+1).squeeze(0);
+        auto channel_custom = images_custom.slice(0, 0, 1).squeeze(0).slice(0, c, c + 1).squeeze(0);
         auto channel_torch = images_torch[0][c];
 
         channel_custom.masked_fill_(mask_custom, 0.0f);
         channel_torch.masked_fill_(mask_torch, 0.0f);
 
         compare_tensors(channel_custom, channel_torch, 1e-5f, 1e-7f,
-                       "ImageRegion_channel" + std::to_string(c));
+                        "ImageRegion_channel" + std::to_string(c));
     }
 }
 
@@ -1558,7 +1560,7 @@ TEST_F(TensorMaskingTest, BooleanExpansionMultipleDims) {
 
     std::vector<uint8_t> data_torch = {1};
     auto bool_torch = torch::tensor(data_torch, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA))
-                           .reshape({1, 1});
+                          .reshape({1, 1});
 
     auto expanded_custom = bool_custom.expand({5, 4});
     auto expanded_torch = bool_torch.expand({5, 4});
@@ -1573,7 +1575,7 @@ TEST_F(TensorMaskingTest, BooleanExpansionComplex) {
 
     std::vector<uint8_t> data_torch = {1, 0, 1, 0};
     auto bool_2d_torch = torch::tensor(data_torch, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA))
-                              .reshape({2, 2});
+                             .reshape({2, 2});
 
     // Expand along new dimension
     auto expanded_custom = bool_2d_custom.unsqueeze(0).unsqueeze(-1).expand({3, 2, 2, 4});
@@ -1743,7 +1745,8 @@ TEST_F(TensorMaskingTest, CompoundMaskingOperations) {
     auto scores_custom = Tensor::ones({batch, seq_len, seq_len}, Device::CUDA);
     auto scores_torch = torch::ones({static_cast<int64_t>(batch),
                                      static_cast<int64_t>(seq_len),
-                                     static_cast<int64_t>(seq_len)}, torch::kCUDA);
+                                     static_cast<int64_t>(seq_len)},
+                                    torch::kCUDA);
 
     // Create causal mask for each batch
     std::vector<bool> causal_data(seq_len * seq_len);
@@ -1760,7 +1763,7 @@ TEST_F(TensorMaskingTest, CompoundMaskingOperations) {
         causal_torch_data.push_back(b ? 1 : 0);
     }
     auto causal_torch = torch::tensor(causal_torch_data, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA))
-                             .reshape({static_cast<int64_t>(seq_len), static_cast<int64_t>(seq_len)});
+                            .reshape({static_cast<int64_t>(seq_len), static_cast<int64_t>(seq_len)});
 
     // Apply to each batch
     for (size_t b = 0; b < batch; ++b) {
@@ -1771,7 +1774,7 @@ TEST_F(TensorMaskingTest, CompoundMaskingOperations) {
         batch_scores_torch.masked_fill_(causal_torch.logical_not(), -1e9f);
 
         compare_tensors(batch_scores_custom, batch_scores_torch, 1e-5f, 1e-7f,
-                       "CompoundBatch" + std::to_string(b));
+                        "CompoundBatch" + std::to_string(b));
     }
 }
 
@@ -1786,9 +1789,7 @@ TEST_F(TensorMaskingTest, AdvancedBooleanIndexing) {
     }
 
     auto tensor_custom = Tensor::from_vector(data, {d0, d1, d2}, Device::CUDA);
-    auto tensor_torch = torch::tensor(data, torch::kCUDA).reshape({static_cast<int64_t>(d0),
-                                                                    static_cast<int64_t>(d1),
-                                                                    static_cast<int64_t>(d2)});
+    auto tensor_torch = torch::tensor(data, torch::kCUDA).reshape({static_cast<int64_t>(d0), static_cast<int64_t>(d1), static_cast<int64_t>(d2)});
 
     // Create boolean mask for middle dimension
     std::vector<bool> mask_data = {false, true, true, false};
@@ -1821,9 +1822,7 @@ TEST_F(TensorMaskingTest, IntegrationCompleteWorkflow) {
     }
 
     auto inputs_custom = Tensor::from_vector(input_data, {batch, seq_len, hidden}, Device::CUDA);
-    auto inputs_torch = torch::tensor(input_data, torch::kCUDA).reshape({static_cast<int64_t>(batch),
-                                                                          static_cast<int64_t>(seq_len),
-                                                                          static_cast<int64_t>(hidden)});
+    auto inputs_torch = torch::tensor(input_data, torch::kCUDA).reshape({static_cast<int64_t>(batch), static_cast<int64_t>(seq_len), static_cast<int64_t>(hidden)});
 
     // 2. Create causal mask
     std::vector<float> range(seq_len);
@@ -1836,13 +1835,13 @@ TEST_F(TensorMaskingTest, IntegrationCompleteWorkflow) {
 
     auto causal_custom = range_custom.reshape({seq_len, 1}).ge(range_custom.reshape({1, seq_len}));
     auto causal_torch = range_torch.reshape({static_cast<int64_t>(seq_len), 1})
-                                   .ge(range_torch.reshape({1, static_cast<int64_t>(seq_len)}));
+                            .ge(range_torch.reshape({1, static_cast<int64_t>(seq_len)}));
 
     compare_tensors(causal_custom, causal_torch, 1e-5f, 1e-7f, "IntegrationCausalMask");
 
     // 3. Create padding mask (same for all batches in this test)
     std::vector<bool> padding_data(seq_len, true);
-    padding_data[seq_len - 1] = false;  // Last token is padding
+    padding_data[seq_len - 1] = false; // Last token is padding
 
     auto padding_1d_custom = Tensor::from_vector(padding_data, {seq_len}, Device::CUDA);
 
@@ -1855,7 +1854,7 @@ TEST_F(TensorMaskingTest, IntegrationCompleteWorkflow) {
     // 4. Combine masks
     auto padding_2d_custom = padding_1d_custom.unsqueeze(0).expand({seq_len, seq_len});
     auto padding_2d_torch = padding_1d_torch.unsqueeze(0).expand({static_cast<int64_t>(seq_len),
-                                                                   static_cast<int64_t>(seq_len)});
+                                                                  static_cast<int64_t>(seq_len)});
 
     auto combined_custom = causal_custom.logical_and(padding_2d_custom);
     auto combined_torch = causal_torch.logical_and(padding_2d_torch);

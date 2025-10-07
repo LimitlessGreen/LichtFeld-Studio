@@ -2,11 +2,11 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
-#include <gtest/gtest.h>
-#include <torch/torch.h>
-#include <random>
 #include <chrono>
+#include <gtest/gtest.h>
 #include <numeric>
+#include <random>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -14,73 +14,73 @@ using namespace gs;
 
 namespace {
 
-// Helper for comparing boolean tensors
-void compare_bool_tensors(const Tensor& custom, const torch::Tensor& reference,
-                         const std::string& msg = "") {
-    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
-    auto custom_cpu = custom.cpu();
+    // Helper for comparing boolean tensors
+    void compare_bool_tensors(const Tensor& custom, const torch::Tensor& reference,
+                              const std::string& msg = "") {
+        auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+        auto custom_cpu = custom.cpu();
 
-    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+        ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
 
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
 
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
 
-    auto custom_vec = custom_cpu.to_vector_bool();
-    auto ref_accessor = ref_cpu.accessor<bool, 1>();
+        auto custom_vec = custom_cpu.to_vector_bool();
+        auto ref_accessor = ref_cpu.accessor<bool, 1>();
 
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        EXPECT_EQ(custom_vec[i], ref_accessor[i])
-            << msg << ": Mismatch at index " << i
-            << " (custom=" << custom_vec[i] << ", ref=" << ref_accessor[i] << ")";
-    }
-}
-
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
-    // Handle boolean tensors specially
-    if (reference.dtype() == torch::kBool) {
-        compare_bool_tensors(custom, reference, msg);
-        return;
-    }
-
-    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
-    auto custom_cpu = custom.cpu();
-
-    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
-
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
-
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
-
-    auto custom_vec = custom_cpu.to_vector();
-    auto ref_accessor = ref_cpu.accessor<float, 1>();
-
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        float ref_val = ref_accessor[i];
-        float custom_val = custom_vec[i];
-
-        if (std::isnan(ref_val)) {
-            EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
-        } else if (std::isinf(ref_val)) {
-            EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
-        } else {
-            float diff = std::abs(custom_val - ref_val);
-            float threshold = atol + rtol * std::abs(ref_val);
-            EXPECT_LE(diff, threshold)
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            EXPECT_EQ(custom_vec[i], ref_accessor[i])
                 << msg << ": Mismatch at index " << i
-                << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+                << " (custom=" << custom_vec[i] << ", ref=" << ref_accessor[i] << ")";
         }
     }
-}
+
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
+        // Handle boolean tensors specially
+        if (reference.dtype() == torch::kBool) {
+            compare_bool_tensors(custom, reference, msg);
+            return;
+        }
+
+        auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+        auto custom_cpu = custom.cpu();
+
+        ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
+
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
+
+        auto custom_vec = custom_cpu.to_vector();
+        auto ref_accessor = ref_cpu.accessor<float, 1>();
+
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            float ref_val = ref_accessor[i];
+            float custom_val = custom_vec[i];
+
+            if (std::isnan(ref_val)) {
+                EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
+            } else if (std::isinf(ref_val)) {
+                EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+            } else {
+                float diff = std::abs(custom_val - ref_val);
+                float threshold = atol + rtol * std::abs(ref_val);
+                EXPECT_LE(diff, threshold)
+                    << msg << ": Mismatch at index " << i
+                    << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            }
+        }
+    }
 
 } // anonymous namespace
 
@@ -102,11 +102,16 @@ protected:
 TEST_F(TensorTorchCompatTest, ComplexExpression1) {
     // Test: (a + b) * c - d / e
     std::vector<float> data_a(12), data_b(12), data_c(12), data_d(12), data_e(12);
-    for (auto& val : data_a) val = dist(gen);
-    for (auto& val : data_b) val = dist(gen);
-    for (auto& val : data_c) val = dist(gen);
-    for (auto& val : data_d) val = dist(gen);
-    for (auto& val : data_e) val = std::abs(dist(gen)) + 1.0f; // Avoid division by zero
+    for (auto& val : data_a)
+        val = dist(gen);
+    for (auto& val : data_b)
+        val = dist(gen);
+    for (auto& val : data_c)
+        val = dist(gen);
+    for (auto& val : data_d)
+        val = dist(gen);
+    for (auto& val : data_e)
+        val = std::abs(dist(gen)) + 1.0f; // Avoid division by zero
 
     auto custom_a = Tensor::from_vector(data_a, {3, 4}, Device::CUDA);
     auto custom_b = Tensor::from_vector(data_b, {3, 4}, Device::CUDA);
@@ -129,9 +134,12 @@ TEST_F(TensorTorchCompatTest, ComplexExpression1) {
 TEST_F(TensorTorchCompatTest, ComplexExpression2) {
     // Test: sigmoid(a * 2 + b) * relu(c - 1)
     std::vector<float> data_a(25), data_b(25), data_c(25);
-    for (auto& val : data_a) val = dist(gen);
-    for (auto& val : data_b) val = dist(gen);
-    for (auto& val : data_c) val = dist(gen);
+    for (auto& val : data_a)
+        val = dist(gen);
+    for (auto& val : data_b)
+        val = dist(gen);
+    for (auto& val : data_c)
+        val = dist(gen);
 
     auto custom_a = Tensor::from_vector(data_a, {5, 5}, Device::CUDA);
     auto custom_b = Tensor::from_vector(data_b, {5, 5}, Device::CUDA);
@@ -150,9 +158,12 @@ TEST_F(TensorTorchCompatTest, ComplexExpression2) {
 TEST_F(TensorTorchCompatTest, ComplexExpression3) {
     // Test: exp(log(abs(a) + 1)) + sqrt(b^2 + c^2)
     std::vector<float> data_a(24), data_b(24), data_c(24);
-    for (auto& val : data_a) val = dist(gen);
-    for (auto& val : data_b) val = dist(gen);
-    for (auto& val : data_c) val = dist(gen);
+    for (auto& val : data_a)
+        val = dist(gen);
+    for (auto& val : data_b)
+        val = dist(gen);
+    for (auto& val : data_c)
+        val = dist(gen);
 
     auto custom_a = Tensor::from_vector(data_a, {4, 6}, Device::CUDA);
     auto custom_b = Tensor::from_vector(data_b, {4, 6}, Device::CUDA);
@@ -173,7 +184,8 @@ TEST_F(TensorTorchCompatTest, ComplexExpression3) {
 
 TEST_F(TensorTorchCompatTest, ViewAndCompute) {
     std::vector<float> data(24);
-    for (auto& val : data) val = dist(gen);
+    for (auto& val : data)
+        val = dist(gen);
 
     auto custom_tensor = Tensor::from_vector(data, {2, 3, 4}, Device::CUDA);
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 3, 4});
@@ -190,7 +202,8 @@ TEST_F(TensorTorchCompatTest, ViewAndCompute) {
 
 TEST_F(TensorTorchCompatTest, SliceAndCompute) {
     std::vector<float> data(80);
-    for (auto& val : data) val = dist(gen);
+    for (auto& val : data)
+        val = dist(gen);
 
     auto custom_tensor = Tensor::from_vector(data, {10, 8}, Device::CUDA);
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({10, 8});
@@ -208,7 +221,8 @@ TEST_F(TensorTorchCompatTest, SliceAndCompute) {
 
 TEST_F(TensorTorchCompatTest, ReductionConsistency) {
     std::vector<float> data(63);
-    for (auto& val : data) val = dist(gen);
+    for (auto& val : data)
+        val = dist(gen);
 
     auto custom_tensor = Tensor::from_vector(data, {7, 9}, Device::CUDA);
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({7, 9});
@@ -232,7 +246,8 @@ TEST_F(TensorTorchCompatTest, ReductionConsistency) {
 
 TEST_F(TensorTorchCompatTest, InPlaceOperations) {
     std::vector<float> data(16);
-    for (auto& val : data) val = dist(gen);
+    for (auto& val : data)
+        val = dist(gen);
 
     auto custom_tensor = Tensor::from_vector(data, {4, 4}, Device::CUDA);
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({4, 4});
@@ -248,7 +263,8 @@ TEST_F(TensorTorchCompatTest, InPlaceOperations) {
 
     // Tensor in-place
     std::vector<float> other_data(16);
-    for (auto& val : other_data) val = dist(gen);
+    for (auto& val : other_data)
+        val = dist(gen);
 
     auto custom_other = Tensor::from_vector(other_data, {4, 4}, Device::CUDA);
     auto torch_other = torch::tensor(other_data, torch::TensorOptions().device(torch::kCUDA)).reshape({4, 4});
@@ -262,7 +278,8 @@ TEST_F(TensorTorchCompatTest, InPlaceOperations) {
 
 TEST_F(TensorTorchCompatTest, BatchProcessing) {
     std::vector<float> data(2048);
-    for (auto& val : data) val = dist(gen);
+    for (auto& val : data)
+        val = dist(gen);
 
     auto custom_batch = Tensor::from_vector(data, {32, 64}, Device::CUDA);
     auto torch_batch = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({32, 64});
@@ -287,8 +304,10 @@ TEST_F(TensorTorchCompatTest, BatchProcessing) {
 
 TEST_F(TensorTorchCompatTest, GradientSimulation) {
     std::vector<float> params_data(100), grads_data(100);
-    for (auto& val : params_data) val = dist(gen);
-    for (auto& val : grads_data) val = dist(gen);
+    for (auto& val : params_data)
+        val = dist(gen);
+    for (auto& val : grads_data)
+        val = dist(gen);
 
     auto custom_params = Tensor::from_vector(params_data, {100}, Device::CUDA);
     auto custom_grads = Tensor::from_vector(grads_data, {100}, Device::CUDA);
@@ -329,7 +348,8 @@ TEST_F(TensorTorchCompatTest, StressTest) {
         size_t dim2 = 10 + (gen() % 20);
 
         std::vector<float> data(dim1 * dim2);
-        for (auto& val : data) val = dist(gen);
+        for (auto& val : data)
+            val = dist(gen);
 
         auto custom_tensor = Tensor::from_vector(data, {dim1, dim2}, Device::CUDA);
         auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA))
@@ -369,7 +389,7 @@ TEST_F(TensorTorchCompatTest, StressTest) {
         }
 
         compare_tensors(custom_tensor, torch_tensor, 1e-3f, 1e-4f,
-                       "StressTest_Iter" + std::to_string(iter));
+                        "StressTest_Iter" + std::to_string(iter));
     }
 }
 
@@ -377,7 +397,8 @@ TEST_F(TensorTorchCompatTest, StressTest) {
 
 TEST_F(TensorTorchCompatTest, LargeScaleOperations) {
     std::vector<float> data(128 * 256);
-    for (auto& val : data) val = dist(gen);
+    for (auto& val : data)
+        val = dist(gen);
 
     auto custom_large = Tensor::from_vector(data, {128, 256}, Device::CUDA);
     auto torch_large = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({128, 256});
@@ -423,7 +444,8 @@ TEST_F(TensorTorchCompatTest, EdgeCasesCompat) {
 TEST_F(TensorTorchCompatTest, MultiDimensionalOps) {
     // Test with 3D tensors
     std::vector<float> data_3d(4 * 5 * 6);
-    for (auto& val : data_3d) val = dist(gen);
+    for (auto& val : data_3d)
+        val = dist(gen);
 
     auto custom_3d = Tensor::from_vector(data_3d, {4, 5, 6}, Device::CUDA);
     auto torch_3d = torch::tensor(data_3d, torch::TensorOptions().device(torch::kCUDA)).reshape({4, 5, 6});
@@ -435,7 +457,8 @@ TEST_F(TensorTorchCompatTest, MultiDimensionalOps) {
 
     // Test with 4D tensors
     std::vector<float> data_4d(2 * 3 * 4 * 5);
-    for (auto& val : data_4d) val = dist(gen);
+    for (auto& val : data_4d)
+        val = dist(gen);
 
     auto custom_4d = Tensor::from_vector(data_4d, {2, 3, 4, 5}, Device::CUDA);
     auto torch_4d = torch::tensor(data_4d, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 3, 4, 5});
@@ -450,7 +473,8 @@ TEST_F(TensorTorchCompatTest, MultiDimensionalOps) {
 
 TEST_F(TensorTorchCompatTest, ConsistencyAcrossDevices) {
     std::vector<float> data(100);
-    for (auto& val : data) val = dist(gen);
+    for (auto& val : data)
+        val = dist(gen);
 
     // Create CPU tensor
     auto custom_cpu = Tensor::from_vector(data, {10, 10}, Device::CPU);
@@ -471,7 +495,8 @@ TEST_F(TensorTorchCompatTest, ConsistencyAcrossDevices) {
 
 TEST_F(TensorTorchCompatTest, ChainedComplexOperations) {
     std::vector<float> data(64);
-    for (auto& val : data) val = dist(gen);
+    for (auto& val : data)
+        val = dist(gen);
 
     auto custom_tensor = Tensor::from_vector(data, {8, 8}, Device::CUDA);
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({8, 8});
@@ -509,7 +534,8 @@ TEST_F(TensorTorchCompatTest, ChainedComplexOperations) {
 TEST_F(TensorTorchCompatTest, NumericalStability) {
     // Division by small but not extreme numbers
     std::vector<float> numerator_data(25);
-    for (auto& val : numerator_data) val = dist(gen);
+    for (auto& val : numerator_data)
+        val = dist(gen);
 
     auto custom_numerator = Tensor::from_vector(numerator_data, {5, 5}, Device::CUDA);
     auto torch_numerator = torch::tensor(numerator_data, torch::TensorOptions().device(torch::kCUDA)).reshape({5, 5});
@@ -531,7 +557,8 @@ TEST_F(TensorTorchCompatTest, PerformanceComparison) {
     const size_t size = 256;
 
     std::vector<float> data(size * size);
-    for (auto& val : data) val = dist(gen);
+    for (auto& val : data)
+        val = dist(gen);
 
     auto custom_large = Tensor::from_vector(data, {size, size}, Device::CUDA);
     auto torch_large = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({size, size});
@@ -561,7 +588,8 @@ TEST_F(TensorTorchCompatTest, PerformanceComparison) {
 
 TEST_F(TensorTorchCompatTest, MixedArithmeticAndActivation) {
     std::vector<float> data(100);
-    for (auto& val : data) val = dist(gen);
+    for (auto& val : data)
+        val = dist(gen);
 
     auto custom_tensor = Tensor::from_vector(data, {10, 10}, Device::CUDA);
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({10, 10});
@@ -575,8 +603,10 @@ TEST_F(TensorTorchCompatTest, MixedArithmeticAndActivation) {
 
 TEST_F(TensorTorchCompatTest, NestedExpressions) {
     std::vector<float> data_x(50), data_y(50);
-    for (auto& val : data_x) val = dist(gen);
-    for (auto& val : data_y) val = dist(gen);
+    for (auto& val : data_x)
+        val = dist(gen);
+    for (auto& val : data_y)
+        val = dist(gen);
 
     auto custom_x = Tensor::from_vector(data_x, {5, 10}, Device::CUDA);
     auto custom_y = Tensor::from_vector(data_y, {5, 10}, Device::CUDA);

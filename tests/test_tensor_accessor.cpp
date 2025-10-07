@@ -11,46 +11,46 @@ using namespace gs;
 
 namespace {
 
-// Helper to create PyTorch tensor from vector data (CPU only for accessor tests)
-torch::Tensor create_torch_tensor(const std::vector<float>& data,
-                                   const std::vector<int64_t>& shape) {
-    auto cpu_tensor = torch::from_blob(
-        const_cast<float*>(data.data()),
-        shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(data.size())} : shape,
-        torch::TensorOptions().dtype(torch::kFloat32)
-    ).clone();  // Clone to own the memory
+    // Helper to create PyTorch tensor from vector data (CPU only for accessor tests)
+    torch::Tensor create_torch_tensor(const std::vector<float>& data,
+                                      const std::vector<int64_t>& shape) {
+        auto cpu_tensor = torch::from_blob(
+                              const_cast<float*>(data.data()),
+                              shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(data.size())} : shape,
+                              torch::TensorOptions().dtype(torch::kFloat32))
+                              .clone(); // Clone to own the memory
 
-    return cpu_tensor;  // Keep on CPU for accessor
-}
-
-// Helper to create PyTorch int tensor
-torch::Tensor create_torch_int_tensor(const std::vector<int>& data,
-                                       const std::vector<int64_t>& shape) {
-    auto cpu_tensor = torch::from_blob(
-        const_cast<int*>(data.data()),
-        shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(data.size())} : shape,
-        torch::TensorOptions().dtype(torch::kInt32)
-    ).clone();
-
-    return cpu_tensor;
-}
-
-// Helper to create PyTorch bool tensor
-torch::Tensor create_torch_bool_tensor(const std::vector<bool>& data,
-                                        const std::vector<int64_t>& shape) {
-    std::vector<uint8_t> uint8_data(data.size());
-    for (size_t i = 0; i < data.size(); ++i) {
-        uint8_data[i] = data[i] ? 1 : 0;
+        return cpu_tensor; // Keep on CPU for accessor
     }
 
-    auto cpu_tensor = torch::from_blob(
-        uint8_data.data(),
-        shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(data.size())} : shape,
-        torch::TensorOptions().dtype(torch::kBool)
-    ).clone();
+    // Helper to create PyTorch int tensor
+    torch::Tensor create_torch_int_tensor(const std::vector<int>& data,
+                                          const std::vector<int64_t>& shape) {
+        auto cpu_tensor = torch::from_blob(
+                              const_cast<int*>(data.data()),
+                              shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(data.size())} : shape,
+                              torch::TensorOptions().dtype(torch::kInt32))
+                              .clone();
 
-    return cpu_tensor;
-}
+        return cpu_tensor;
+    }
+
+    // Helper to create PyTorch bool tensor
+    torch::Tensor create_torch_bool_tensor(const std::vector<bool>& data,
+                                           const std::vector<int64_t>& shape) {
+        std::vector<uint8_t> uint8_data(data.size());
+        for (size_t i = 0; i < data.size(); ++i) {
+            uint8_data[i] = data[i] ? 1 : 0;
+        }
+
+        auto cpu_tensor = torch::from_blob(
+                              uint8_data.data(),
+                              shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(data.size())} : shape,
+                              torch::TensorOptions().dtype(torch::kBool))
+                              .clone();
+
+        return cpu_tensor;
+    }
 
 } // anonymous namespace
 
@@ -397,16 +397,16 @@ TEST_F(TensorAccessorTest, FillBinomialCoefficients) {
         acc_torch[i][i] = 1.0f;
 
         for (size_t j = 1; j < i; ++j) {
-            float val = acc_torch[i-1][j-1] + acc_torch[i-1][j];
+            float val = acc_torch[i - 1][j - 1] + acc_torch[i - 1][j];
             acc_custom(i, j) = val;
             acc_torch[i][j] = val;
         }
     }
 
     // Verify known values match between implementations
-    EXPECT_FLOAT_EQ(acc_custom(4, 2), acc_torch[4][2]);  // C(4,2) = 6
-    EXPECT_FLOAT_EQ(acc_custom(5, 2), acc_torch[5][2]);  // C(5,2) = 10
-    EXPECT_FLOAT_EQ(acc_custom(6, 3), acc_torch[6][3]);  // C(6,3) = 20
+    EXPECT_FLOAT_EQ(acc_custom(4, 2), acc_torch[4][2]); // C(4,2) = 6
+    EXPECT_FLOAT_EQ(acc_custom(5, 2), acc_torch[5][2]); // C(5,2) = 10
+    EXPECT_FLOAT_EQ(acc_custom(6, 3), acc_torch[6][3]); // C(6,3) = 20
 
     // Verify actual values
     EXPECT_FLOAT_EQ(acc_custom(4, 2), 6.0f);
@@ -503,7 +503,7 @@ TEST_F(TensorAccessorTest, AccessorLifetime) {
     auto values_custom = t_custom.to_vector();
     auto torch_acc = t_torch.accessor<float, 2>();
 
-    EXPECT_FLOAT_EQ(values_custom[4], torch_acc[1][1]);  // Position (1,1) in row-major
+    EXPECT_FLOAT_EQ(values_custom[4], torch_acc[1][1]); // Position (1,1) in row-major
     EXPECT_FLOAT_EQ(values_custom[4], 42.0f);
 }
 
@@ -627,7 +627,7 @@ TEST_F(TensorAccessorTest, BatchImageProcessing) {
     for (size_t b = 0; b < batch; ++b) {
         for (size_t h = 0; h < height; ++h) {
             for (size_t w = 0; w < width; ++w) {
-                acc_custom(b, 0, h, w) += 1.0f;  // Red channel
+                acc_custom(b, 0, h, w) += 1.0f; // Red channel
                 acc_torch[b][0][h][w] += 1.0f;
             }
         }

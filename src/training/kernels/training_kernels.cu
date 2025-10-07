@@ -94,9 +94,15 @@ namespace gs::training {
         raw_quat_to_rotmat(raw_quats + idx_4d, R);
 
         float S2R[9];
-        S2R[0] = s2_x * R[0]; S2R[1] = s2_x * R[3]; S2R[2] = s2_x * R[6];
-        S2R[3] = s2_y * R[1]; S2R[4] = s2_y * R[4]; S2R[5] = s2_y * R[7];
-        S2R[6] = s2_z * R[2]; S2R[7] = s2_z * R[5]; S2R[8] = s2_z * R[8];
+        S2R[0] = s2_x * R[0];
+        S2R[1] = s2_x * R[3];
+        S2R[2] = s2_x * R[6];
+        S2R[3] = s2_y * R[1];
+        S2R[4] = s2_y * R[4];
+        S2R[5] = s2_y * R[7];
+        S2R[6] = s2_z * R[2];
+        S2R[7] = s2_z * R[5];
+        S2R[8] = s2_z * R[8];
 
         float cov[9];
         cov[0] = R[0] * S2R[0] + R[1] * S2R[3] + R[2] * S2R[6];

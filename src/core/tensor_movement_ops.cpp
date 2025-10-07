@@ -2,18 +2,19 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
-#include "core/tensor_ops.hpp"
 #include "core/tensor_broadcast.hpp"
+#include "core/tensor_ops.hpp"
 #include <algorithm>
 #include <numeric>
 
 namespace gs {
 
-// ============= Unified Movement Operation =============
-Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
-    if (!is_valid()) return {};
+    // ============= Unified Movement Operation =============
+    Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
+        if (!is_valid())
+            return {};
 
-    switch (op) {
+        switch (op) {
         case MovementOp::Reshape: {
             if (auto* vec = std::get_if<std::vector<int>>(&args.args)) {
                 // Convert to size_t and handle -1
@@ -61,8 +62,8 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
 
                 // Create a view that shares memory (non-owning)
                 Tensor view(data_, TensorShape(new_shape), device_, dtype_);
-                view.data_owner_ = data_owner_;  // Share ownership!
-                view.is_view_ = true;  // Mark as view
+                view.data_owner_ = data_owner_; // Share ownership!
+                view.is_view_ = true;           // Mark as view
                 return view;
             }
             LOG_ERROR("Reshape requires vector<int> args");
@@ -110,7 +111,8 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
                 return permute(perm);
             }
             // Default transpose (swap last two dimensions)
-            if (shape_.rank() < 2) return clone();
+            if (shape_.rank() < 2)
+                return clone();
             return transpose(-2, -1);
         }
 
@@ -155,8 +157,8 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
 
                 // Create a view that shares memory
                 Tensor view(data_, TensorShape(new_shape), device_, dtype_);
-                view.data_owner_ = data_owner_;  // Share ownership
-                view.is_view_ = true;  // Mark as view
+                view.data_owner_ = data_owner_; // Share ownership
+                view.is_view_ = true;           // Mark as view
                 return view;
             }
             LOG_ERROR("Squeeze requires int dim arg");
@@ -185,8 +187,8 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
 
                 // Create a view that shares memory
                 Tensor view(data_, TensorShape(new_shape), device_, dtype_);
-                view.data_owner_ = data_owner_;  // Share ownership
-                view.is_view_ = true;  // Mark as view
+                view.data_owner_ = data_owner_; // Share ownership
+                view.is_view_ = true;           // Mark as view
                 return view;
             }
             LOG_ERROR("Unsqueeze requires int dim arg");
@@ -203,7 +205,7 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
                     start > end) {
                     LOG_ERROR("Invalid flatten dimensions");
                     return {};
-                    }
+                }
 
                 std::vector<size_t> new_shape;
                 for (int i = 0; i < start; ++i) {
@@ -222,14 +224,14 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
 
                 // Create a view that shares memory
                 Tensor view(data_, TensorShape(new_shape), device_, dtype_);
-                view.data_owner_ = data_owner_;  // Share ownership
-                view.is_view_ = true;  // Mark as view
+                view.data_owner_ = data_owner_; // Share ownership
+                view.is_view_ = true;           // Mark as view
                 return view;
             }
             // Default flatten (all dimensions)
             Tensor view(data_, TensorShape({numel()}), device_, dtype_);
-            view.data_owner_ = data_owner_;  // Share ownership
-            view.is_view_ = true;  // Mark as view
+            view.data_owner_ = data_owner_; // Share ownership
+            view.is_view_ = true;           // Mark as view
             return view;
         }
 
@@ -278,11 +280,11 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
                 if (device_ == Device::CUDA) {
                     cudaMemcpy(result.raw_ptr(), raw_ptr(), self_bytes, cudaMemcpyDeviceToDevice);
                     cudaMemcpy(static_cast<char*>(result.raw_ptr()) + self_bytes,
-                              other.raw_ptr(), other_bytes, cudaMemcpyDeviceToDevice);
+                               other.raw_ptr(), other_bytes, cudaMemcpyDeviceToDevice);
                 } else {
                     std::memcpy(result.raw_ptr(), raw_ptr(), self_bytes);
                     std::memcpy(static_cast<char*>(result.raw_ptr()) + self_bytes,
-                               other.raw_ptr(), other_bytes);
+                                other.raw_ptr(), other_bytes);
                 }
 
                 return result;
@@ -359,7 +361,8 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
 
                     for (int axis : *vec) {
                         axis = resolve_dim(axis);
-                        if (axis < 0 || axis >= static_cast<int>(shape_.rank())) continue;
+                        if (axis < 0 || axis >= static_cast<int>(shape_.rank()))
+                            continue;
 
                         // Calculate stride for this axis
                         size_t stride = 1;
@@ -399,7 +402,7 @@ Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
         default:
             LOG_ERROR("Unknown movement operation");
             return {};
+        }
     }
-}
 
 } // namespace gs

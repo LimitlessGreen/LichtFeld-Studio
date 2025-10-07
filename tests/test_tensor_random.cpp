@@ -2,10 +2,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
-#include <gtest/gtest.h>
-#include <torch/torch.h>
-#include <numeric>
 #include <cmath>
+#include <gtest/gtest.h>
+#include <numeric>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -13,133 +13,134 @@ using namespace gs;
 
 namespace {
 
-// Helper for comparing boolean tensors - ONLY for deterministic operations
-void compare_bool_tensors(const Tensor& custom, const torch::Tensor& reference,
-                         const std::string& msg = "") {
-    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
-    auto custom_cpu = custom.cpu();
+    // Helper for comparing boolean tensors - ONLY for deterministic operations
+    void compare_bool_tensors(const Tensor& custom, const torch::Tensor& reference,
+                              const std::string& msg = "") {
+        auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+        auto custom_cpu = custom.cpu();
 
-    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+        ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
 
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
 
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
 
-    auto custom_vec = custom_cpu.to_vector_bool();
-    auto ref_accessor = ref_cpu.accessor<bool, 1>();
+        auto custom_vec = custom_cpu.to_vector_bool();
+        auto ref_accessor = ref_cpu.accessor<bool, 1>();
 
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        EXPECT_EQ(custom_vec[i], ref_accessor[i])
-            << msg << ": Mismatch at index " << i
-            << " (custom=" << custom_vec[i] << ", ref=" << ref_accessor[i] << ")";
-    }
-}
-
-// Helper for comparing integer tensors - ONLY for deterministic operations
-void compare_int_tensors(const Tensor& custom, const torch::Tensor& reference,
-                        const std::string& msg = "") {
-    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
-    auto custom_cpu = custom.cpu();
-
-    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
-
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
-
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
-
-    auto custom_vec = custom_cpu.to_vector_int();
-    auto ref_accessor = ref_cpu.accessor<int, 1>();
-
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        EXPECT_EQ(custom_vec[i], ref_accessor[i])
-            << msg << ": Mismatch at index " << i
-            << " (custom=" << custom_vec[i] << ", ref=" << ref_accessor[i] << ")";
-    }
-}
-
-// ONLY use for deterministic operations, NOT for random generation!
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
-    if (reference.dtype() == torch::kBool) {
-        compare_bool_tensors(custom, reference, msg);
-        return;
-    }
-
-    if (reference.dtype() == torch::kInt32) {
-        compare_int_tensors(custom, reference, msg);
-        return;
-    }
-
-    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
-    auto custom_cpu = custom.cpu();
-
-    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
-
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
-
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
-
-    auto custom_vec = custom_cpu.to_vector();
-    auto ref_accessor = ref_cpu.accessor<float, 1>();
-
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        float ref_val = ref_accessor[i];
-        float custom_val = custom_vec[i];
-
-        if (std::isnan(ref_val)) {
-            EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
-        } else if (std::isinf(ref_val)) {
-            EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
-        } else {
-            float diff = std::abs(custom_val - ref_val);
-            float threshold = atol + rtol * std::abs(ref_val);
-            EXPECT_LE(diff, threshold)
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            EXPECT_EQ(custom_vec[i], ref_accessor[i])
                 << msg << ": Mismatch at index " << i
-                << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+                << " (custom=" << custom_vec[i] << ", ref=" << ref_accessor[i] << ")";
         }
     }
-}
 
-// Helper to check if values are in expected range
-bool check_range(const Tensor& tensor, float min, float max) {
-    auto values = tensor.to_vector();
-    for (float val : values) {
-        if (val < min || val > max) {
-            return false;
+    // Helper for comparing integer tensors - ONLY for deterministic operations
+    void compare_int_tensors(const Tensor& custom, const torch::Tensor& reference,
+                             const std::string& msg = "") {
+        auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+        auto custom_cpu = custom.cpu();
+
+        ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
+
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
+
+        auto custom_vec = custom_cpu.to_vector_int();
+        auto ref_accessor = ref_cpu.accessor<int, 1>();
+
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            EXPECT_EQ(custom_vec[i], ref_accessor[i])
+                << msg << ": Mismatch at index " << i
+                << " (custom=" << custom_vec[i] << ", ref=" << ref_accessor[i] << ")";
         }
     }
-    return true;
-}
 
-// Helper to compute mean and std
-std::pair<float, float> compute_stats(const Tensor& tensor) {
-    auto values = tensor.to_vector();
-    if (values.empty()) return {0.0f, 0.0f};
+    // ONLY use for deterministic operations, NOT for random generation!
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
+        if (reference.dtype() == torch::kBool) {
+            compare_bool_tensors(custom, reference, msg);
+            return;
+        }
 
-    float sum = std::accumulate(values.begin(), values.end(), 0.0f);
-    float mean = sum / values.size();
+        if (reference.dtype() == torch::kInt32) {
+            compare_int_tensors(custom, reference, msg);
+            return;
+        }
 
-    float sq_sum = 0.0f;
-    for (float val : values) {
-        float diff = val - mean;
-        sq_sum += diff * diff;
+        auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+        auto custom_cpu = custom.cpu();
+
+        ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
+
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
+
+        auto custom_vec = custom_cpu.to_vector();
+        auto ref_accessor = ref_cpu.accessor<float, 1>();
+
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            float ref_val = ref_accessor[i];
+            float custom_val = custom_vec[i];
+
+            if (std::isnan(ref_val)) {
+                EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
+            } else if (std::isinf(ref_val)) {
+                EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+            } else {
+                float diff = std::abs(custom_val - ref_val);
+                float threshold = atol + rtol * std::abs(ref_val);
+                EXPECT_LE(diff, threshold)
+                    << msg << ": Mismatch at index " << i
+                    << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            }
+        }
     }
-    float std = std::sqrt(sq_sum / values.size());
 
-    return {mean, std};
-}
+    // Helper to check if values are in expected range
+    bool check_range(const Tensor& tensor, float min, float max) {
+        auto values = tensor.to_vector();
+        for (float val : values) {
+            if (val < min || val > max) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Helper to compute mean and std
+    std::pair<float, float> compute_stats(const Tensor& tensor) {
+        auto values = tensor.to_vector();
+        if (values.empty())
+            return {0.0f, 0.0f};
+
+        float sum = std::accumulate(values.begin(), values.end(), 0.0f);
+        float mean = sum / values.size();
+
+        float sq_sum = 0.0f;
+        for (float val : values) {
+            float diff = val - mean;
+            sq_sum += diff * diff;
+        }
+        float std = std::sqrt(sq_sum / values.size());
+
+        return {mean, std};
+    }
 
 } // anonymous namespace
 
@@ -540,18 +541,18 @@ TEST_F(TensorRandomTest, CPUCUDASameSeedSameResults) {
     // Both should have similar distribution properties (but not identical values)
     // Use larger sample for more stable statistics
     tensor::manual_seed(999);
-    auto cpu_large = Tensor::randn({1000}, Device::CPU);  // Increased from 100 to 1000
+    auto cpu_large = Tensor::randn({1000}, Device::CPU); // Increased from 100 to 1000
 
     tensor::manual_seed(999);
-    auto cuda_large = Tensor::randn({1000}, Device::CUDA);  // Increased from 100 to 1000
+    auto cuda_large = Tensor::randn({1000}, Device::CUDA); // Increased from 100 to 1000
 
     auto [cpu_mean, cpu_std] = compute_stats(cpu_large);
     auto [cuda_mean, cuda_std] = compute_stats(cuda_large);
 
     // With 1000 samples, standard error is ~0.032, so tolerance of 0.1 is ~3 std errors
-    EXPECT_NEAR(cpu_mean, 0.0f, 0.1f);   // More reasonable tolerance
+    EXPECT_NEAR(cpu_mean, 0.0f, 0.1f); // More reasonable tolerance
     EXPECT_NEAR(cpu_std, 1.0f, 0.1f);
-    EXPECT_NEAR(cuda_mean, 0.0f, 0.1f);  // More reasonable tolerance
+    EXPECT_NEAR(cuda_mean, 0.0f, 0.1f); // More reasonable tolerance
     EXPECT_NEAR(cuda_std, 1.0f, 0.1f);
 }
 
@@ -579,8 +580,7 @@ TEST_F(TensorRandomTest, VariousShapes) {
         {5, 5},
         {2, 3, 4},
         {1, 1, 100},
-        {2, 3, 4, 5}
-    };
+        {2, 3, 4, 5}};
 
     for (const auto& shape : shapes) {
         auto t = Tensor::randn(TensorShape(shape), Device::CUDA);

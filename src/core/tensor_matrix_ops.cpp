@@ -448,7 +448,6 @@ namespace gs {
         return result.reshape({});
     }
 
-
 #undef CHECK_CUDA
 #undef CHECK_CUBLAS
 

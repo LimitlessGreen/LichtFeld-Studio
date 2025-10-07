@@ -325,7 +325,7 @@ namespace gs::training {
         }
 
         // Refine Gaussians
-        //if (is_refining(iter)) {
+        // if (is_refining(iter)) {
         //    // Relocate dead Gaussians
         //    relocate_gs();
 

@@ -4,25 +4,25 @@
 #pragma once
 
 #include "core/logger.hpp"
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <cuda_runtime.h>
-#include <optional>
 #include <functional>
 #include <initializer_list>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <random>
+#include <span>
 #include <sstream>
 #include <string>
-#include <vector>
-#include <concepts>
+#include <tuple>
 #include <type_traits>
 #include <utility>
-#include <span>
 #include <variant>
-#include <tuple>
-#include <limits>
-#include <array>
+#include <vector>
 
 namespace gs {
 
@@ -75,16 +75,21 @@ namespace gs {
     }
 
     inline DataType promote_types(DataType a, DataType b) {
-        if (a == b) return a;
+        if (a == b)
+            return a;
 
         if (a == DataType::Bool) {
-            if (b == DataType::Float32 || b == DataType::Float16) return b;
-            if (b == DataType::Int32 || b == DataType::Int64) return b;
+            if (b == DataType::Float32 || b == DataType::Float16)
+                return b;
+            if (b == DataType::Int32 || b == DataType::Int64)
+                return b;
             return DataType::Float32;
         }
         if (b == DataType::Bool) {
-            if (a == DataType::Float32 || a == DataType::Float16) return a;
-            if (a == DataType::Int32 || a == DataType::Int64) return a;
+            if (a == DataType::Float32 || a == DataType::Float16)
+                return a;
+            if (a == DataType::Int32 || a == DataType::Int64)
+                return a;
             return DataType::Float32;
         }
 
@@ -125,46 +130,119 @@ namespace gs {
     };
 
     enum class BinaryOp : uint8_t {
-        Add = 0, Sub = 1, Mul = 2, Div = 3, Pow = 4, Mod = 5,
-        Equal = 6, NotEqual = 7, Less = 8, LessEqual = 9, Greater = 10, GreaterEqual = 11,
-        LogicalAnd = 12, LogicalOr = 13, LogicalXor = 14,
-        Maximum = 15, Minimum = 16,
-        BitwiseAnd = 17, BitwiseOr = 18, BitwiseXor = 19, LeftShift = 20, RightShift = 21
+        Add = 0,
+        Sub = 1,
+        Mul = 2,
+        Div = 3,
+        Pow = 4,
+        Mod = 5,
+        Equal = 6,
+        NotEqual = 7,
+        Less = 8,
+        LessEqual = 9,
+        Greater = 10,
+        GreaterEqual = 11,
+        LogicalAnd = 12,
+        LogicalOr = 13,
+        LogicalXor = 14,
+        Maximum = 15,
+        Minimum = 16,
+        BitwiseAnd = 17,
+        BitwiseOr = 18,
+        BitwiseXor = 19,
+        LeftShift = 20,
+        RightShift = 21
     };
 
     enum class UnaryOp : uint8_t {
-        Neg = 0, Abs = 1, Sign = 2, Reciprocal = 3,
-        Exp = 4, Exp2 = 5, Log = 6, Log2 = 7, Log10 = 8, Log1p = 9,
-        Sqrt = 10, Rsqrt = 11, Square = 12,
-        Sin = 13, Cos = 14, Tan = 15, Asin = 16, Acos = 17, Atan = 18,
-        Sinh = 19, Cosh = 20, Tanh = 21,
-        Sigmoid = 22, Relu = 23, Gelu = 24, Swish = 25,
-        Floor = 26, Ceil = 27, Round = 28, Trunc = 29,
-        IsNan = 30, IsInf = 31, IsFinite = 32, LogicalNot = 33,
-        Normalize = 34, Logit = 35
+        Neg = 0,
+        Abs = 1,
+        Sign = 2,
+        Reciprocal = 3,
+        Exp = 4,
+        Exp2 = 5,
+        Log = 6,
+        Log2 = 7,
+        Log10 = 8,
+        Log1p = 9,
+        Sqrt = 10,
+        Rsqrt = 11,
+        Square = 12,
+        Sin = 13,
+        Cos = 14,
+        Tan = 15,
+        Asin = 16,
+        Acos = 17,
+        Atan = 18,
+        Sinh = 19,
+        Cosh = 20,
+        Tanh = 21,
+        Sigmoid = 22,
+        Relu = 23,
+        Gelu = 24,
+        Swish = 25,
+        Floor = 26,
+        Ceil = 27,
+        Round = 28,
+        Trunc = 29,
+        IsNan = 30,
+        IsInf = 31,
+        IsFinite = 32,
+        LogicalNot = 33,
+        Normalize = 34,
+        Logit = 35
     };
 
     enum class ReduceOp : uint8_t {
-        Sum = 0, Mean = 1, Max = 2, Min = 3, Prod = 4,
-        Any = 5, All = 6, Std = 7, Var = 8,
-        Argmax = 9, Argmin = 10, CountNonzero = 11,
+        Sum = 0,
+        Mean = 1,
+        Max = 2,
+        Min = 3,
+        Prod = 4,
+        Any = 5,
+        All = 6,
+        Std = 7,
+        Var = 8,
+        Argmax = 9,
+        Argmin = 10,
+        CountNonzero = 11,
         Norm = 12
     };
 
     enum class TernaryOp : uint8_t {
-        Where = 0, MulAdd = 1, Clamp = 2
+        Where = 0,
+        MulAdd = 1,
+        Clamp = 2
     };
 
     enum class MovementOp : uint8_t {
-        Reshape = 0, Permute = 1, Expand = 2, Pad = 3, Shrink = 4,
-        Flip = 5, Transpose = 6, Squeeze = 7, Unsqueeze = 8, Flatten = 9,
-        Cat = 10, Stack = 11, Slice = 12
+        Reshape = 0,
+        Permute = 1,
+        Expand = 2,
+        Pad = 3,
+        Shrink = 4,
+        Flip = 5,
+        Transpose = 6,
+        Squeeze = 7,
+        Unsqueeze = 8,
+        Flatten = 9,
+        Cat = 10,
+        Stack = 11,
+        Slice = 12
     };
 
     enum class LoadOp : uint8_t {
-        Empty = 0, Const = 1, Arange = 2, Random = 3, Eye = 4,
-        FromCPU = 5, FromCUDA = 6, Normal = 7, Randint = 8,
-        Bernoulli = 9, Multinomial = 10
+        Empty = 0,
+        Const = 1,
+        Arange = 2,
+        Random = 3,
+        Eye = 4,
+        FromCPU = 5,
+        FromCUDA = 6,
+        Normal = 7,
+        Randint = 8,
+        Bernoulli = 9,
+        Multinomial = 10
     };
 
     class TensorShape {
@@ -175,13 +253,16 @@ namespace gs {
 
     public:
         TensorShape() = default;
-        TensorShape(std::initializer_list<size_t> dims) : dims_(dims), initialized_(true) {
+        TensorShape(std::initializer_list<size_t> dims) : dims_(dims),
+                                                          initialized_(true) {
             compute_total();
         }
-        explicit TensorShape(const std::vector<size_t>& dims) : dims_(dims), initialized_(true) {
+        explicit TensorShape(const std::vector<size_t>& dims) : dims_(dims),
+                                                                initialized_(true) {
             compute_total();
         }
-        explicit TensorShape(std::span<const size_t> dims) : dims_(dims.begin(), dims.end()), initialized_(true) {
+        explicit TensorShape(std::span<const size_t> dims) : dims_(dims.begin(), dims.end()),
+                                                             initialized_(true) {
             compute_total();
         }
 
@@ -205,7 +286,7 @@ namespace gs {
     private:
         void compute_total() {
             if (dims_.empty()) {
-                total_elements_ = 1;  // Scalar has 1 element
+                total_elements_ = 1; // Scalar has 1 element
             } else {
                 total_elements_ = 1;
                 for (auto d : dims_) {
@@ -222,8 +303,8 @@ namespace gs {
             std::vector<std::pair<int, int>>,
             int,
             void*,
-            std::pair<void*, int>
-        > args;
+            std::pair<void*, int>>
+            args;
     };
 
     struct LoadArgs {
@@ -237,16 +318,16 @@ namespace gs {
             std::pair<float, float>,
             std::pair<int, int>,
             void*,
-            std::pair<void*, bool>
-        > args;
+            std::pair<void*, bool>>
+            args;
     };
 
     struct UnaryArgs {
         std::variant<
             std::monostate,
             float,
-            int
-        > args;
+            int>
+            args;
     };
 
     struct ReduceArgs {
@@ -254,8 +335,8 @@ namespace gs {
         bool keepdim = false;
         std::variant<
             std::monostate,
-            float
-        > args;
+            float>
+            args;
     };
 
     class RandomGenerator {
@@ -312,8 +393,8 @@ namespace gs {
                                  const std::vector<size_t>& ends) const;
         size_t calculate_offset(const std::vector<size_t>& indices) const;
         Tensor copy_slice(const std::vector<size_t>& starts,
-                         const std::vector<size_t>& ends,
-                         const std::vector<size_t>& new_shape) const;
+                          const std::vector<size_t>& ends,
+                          const std::vector<size_t>& new_shape) const;
 
     public:
         Tensor() = default;
@@ -325,7 +406,7 @@ namespace gs {
         ~Tensor();
 
         // ============= Multi-dimensional accessor for CPU tensors =============
-        template<typename T, size_t N>
+        template <typename T, size_t N>
         class TensorAccessor {
         private:
             T* data_;
@@ -334,18 +415,19 @@ namespace gs {
 
         public:
             TensorAccessor(T* data, const std::array<size_t, N>& sizes)
-                : data_(data), sizes_(sizes) {
+                : data_(data),
+                  sizes_(sizes) {
                 // Compute strides (row-major)
-                strides_[N-1] = 1;
+                strides_[N - 1] = 1;
                 // Use constexpr if to avoid underflow when N=1
                 if constexpr (N > 1) {
-                    for (size_t i = N-1; i > 0; --i) {  // ✅ No underflow
-                        strides_[i-1] = strides_[i] * sizes_[i];
+                    for (size_t i = N - 1; i > 0; --i) { // ✅ No underflow
+                        strides_[i - 1] = strides_[i] * sizes_[i];
                     }
                 }
             }
 
-            template<typename... Indices>
+            template <typename... Indices>
             T& operator()(Indices... indices) {
                 static_assert(sizeof...(Indices) == N, "Wrong number of indices");
                 std::array<size_t, N> idx_array{static_cast<size_t>(indices)...};
@@ -359,7 +441,7 @@ namespace gs {
             const std::array<size_t, N>& sizes() const { return sizes_; }
         };
 
-        template<typename T, size_t N>
+        template <typename T, size_t N>
         TensorAccessor<T, N> accessor() {
             if (device_ != Device::CPU) {
                 LOG_ERROR("accessor() only works on CPU tensors");
@@ -367,7 +449,7 @@ namespace gs {
             }
             if (shape_.rank() != N) {
                 LOG_ERROR("accessor() dimension mismatch: tensor has {} dims, requested {}",
-                         shape_.rank(), N);
+                          shape_.rank(), N);
                 return TensorAccessor<T, N>(nullptr, std::array<size_t, N>{});
             }
 
@@ -389,7 +471,7 @@ namespace gs {
 
         // ============= FACTORY METHODS =============
         static Tensor empty(TensorShape shape, Device device = Device::CUDA,
-                           DataType dtype = DataType::Float32) {
+                            DataType dtype = DataType::Float32) {
             LoadArgs args;
             args.shape = shape;
             args.device = device;
@@ -399,7 +481,7 @@ namespace gs {
         }
 
         static Tensor zeros(TensorShape shape, Device device = Device::CUDA,
-                           DataType dtype = DataType::Float32) {
+                            DataType dtype = DataType::Float32) {
             LoadArgs args;
             args.shape = shape;
             args.device = device;
@@ -409,7 +491,7 @@ namespace gs {
         }
 
         static Tensor ones(TensorShape shape, Device device = Device::CUDA,
-                          DataType dtype = DataType::Float32) {
+                           DataType dtype = DataType::Float32) {
             LoadArgs args;
             args.shape = shape;
             args.device = device;
@@ -419,7 +501,7 @@ namespace gs {
         }
 
         static Tensor full(TensorShape shape, float value, Device device = Device::CUDA,
-                          DataType dtype = DataType::Float32) {
+                           DataType dtype = DataType::Float32) {
             LoadArgs args;
             args.shape = shape;
             args.device = device;
@@ -446,7 +528,7 @@ namespace gs {
         }
 
         static Tensor rand(TensorShape shape, Device device = Device::CUDA,
-                          DataType dtype = DataType::Float32) {
+                           DataType dtype = DataType::Float32) {
             LoadArgs args;
             args.shape = shape;
             args.device = device;
@@ -456,7 +538,7 @@ namespace gs {
         }
 
         static Tensor randn(TensorShape shape, Device device = Device::CUDA,
-                           DataType dtype = DataType::Float32) {
+                            DataType dtype = DataType::Float32) {
             LoadArgs args;
             args.shape = shape;
             args.device = device;
@@ -466,7 +548,7 @@ namespace gs {
         }
 
         static Tensor uniform(TensorShape shape, float low = 0.0f, float high = 1.0f,
-                             Device device = Device::CUDA, DataType dtype = DataType::Float32) {
+                              Device device = Device::CUDA, DataType dtype = DataType::Float32) {
             LoadArgs args;
             args.shape = shape;
             args.device = device;
@@ -476,7 +558,7 @@ namespace gs {
         }
 
         static Tensor normal(TensorShape shape, float mean = 0.0f, float std = 1.0f,
-                            Device device = Device::CUDA, DataType dtype = DataType::Float32) {
+                             Device device = Device::CUDA, DataType dtype = DataType::Float32) {
             LoadArgs args;
             args.shape = shape;
             args.device = device;
@@ -486,7 +568,7 @@ namespace gs {
         }
 
         static Tensor randint(TensorShape shape, int low, int high,
-                             Device device = Device::CUDA, DataType dtype = DataType::Int32) {
+                              Device device = Device::CUDA, DataType dtype = DataType::Int32) {
             LoadArgs args;
             args.shape = shape;
             args.device = device;
@@ -496,7 +578,7 @@ namespace gs {
         }
 
         static Tensor bernoulli(TensorShape shape, float p = 0.5f,
-                               Device device = Device::CUDA, DataType dtype = DataType::Float32) {
+                                Device device = Device::CUDA, DataType dtype = DataType::Float32) {
             LoadArgs args;
             args.shape = shape;
             args.device = device;
@@ -506,7 +588,7 @@ namespace gs {
         }
 
         static Tensor multinomial(const Tensor& weights, int num_samples,
-                                 bool replacement = false);
+                                  bool replacement = false);
 
         static Tensor arange(float end) {
             LoadArgs args;
@@ -552,11 +634,11 @@ namespace gs {
         bool get_bool(std::initializer_list<size_t> indices) const;
 
         static Tensor from_vector(const std::vector<float>& data, TensorShape shape,
-                                 Device device = Device::CUDA);
+                                  Device device = Device::CUDA);
         static Tensor from_vector(const std::vector<int>& data, TensorShape shape,
-                                 Device device = Device::CUDA);
+                                  Device device = Device::CUDA);
         static Tensor from_vector(const std::vector<bool>& data, TensorShape shape,
-                                 Device device = Device::CUDA);
+                                  Device device = Device::CUDA);
 
         // Data access
         template <typename T>
@@ -844,7 +926,7 @@ namespace gs {
         float item() const;
 
         // Template version of item()
-        template<typename T>
+        template <typename T>
         T item() const {
             if (!is_valid() || numel() != 1) {
                 LOG_ERROR("item<T>() requires a valid single-element tensor");
@@ -1068,7 +1150,8 @@ namespace gs {
 
     public:
         MaskedTensorProxy(const Tensor* tensor, Tensor mask)
-            : tensor_(tensor), mask_(std::move(mask)) {}
+            : tensor_(tensor),
+              mask_(std::move(mask)) {}
 
         void operator=(float value);
         void operator=(const Tensor& other);
@@ -1082,7 +1165,8 @@ namespace gs {
 
     public:
         TensorIndexer(Tensor* tensor, std::vector<Tensor> indices)
-            : tensor_(tensor), indices_(std::move(indices)) {}
+            : tensor_(tensor),
+              indices_(std::move(indices)) {}
 
         void operator=(float value);
         void operator=(const Tensor& other);
@@ -1126,7 +1210,7 @@ namespace gs {
         bool check_valid(const Tensor& t, const std::string& name);
         void assert_same_shape(const Tensor& a, const Tensor& b);
         void assert_same_device(const Tensor& a, const Tensor& b);
-    }
+    } // namespace tensor
 
     class TensorError : public std::runtime_error {
     public:
@@ -1142,7 +1226,7 @@ namespace gs {
         Tensor divide(const Tensor& a, const Tensor& b, float epsilon = 1e-6f);
         Tensor log(const Tensor& input, float epsilon = 1e-6f);
         Tensor sqrt(const Tensor& input, float epsilon = 0.0f);
-    }
+    } // namespace SafeOps
 
     class MemoryInfo {
     public:
@@ -1170,6 +1254,6 @@ namespace gs {
                 return result;
             };
         }
-    }
+    } // namespace functional
 
 } // namespace gs

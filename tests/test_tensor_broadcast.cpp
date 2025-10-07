@@ -4,8 +4,8 @@
 #include "core/tensor.hpp"
 #include "core/tensor_broadcast.hpp"
 #include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <random>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -13,92 +13,93 @@ using namespace gs;
 
 namespace {
 
-// Helper to create PyTorch tensor from vector data
-torch::Tensor create_torch_tensor(const std::vector<float>& data,
-                                   const std::vector<int64_t>& shape,
-                                   torch::Device device = torch::kCUDA) {
-    // Create on CPU first with proper cloning
-    auto cpu_tensor = torch::from_blob(
-        const_cast<float*>(data.data()),
-        shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(data.size())} : shape,
-        torch::TensorOptions().dtype(torch::kFloat32)
-    ).clone();  // Clone to own the memory
+    // Helper to create PyTorch tensor from vector data
+    torch::Tensor create_torch_tensor(const std::vector<float>& data,
+                                      const std::vector<int64_t>& shape,
+                                      torch::Device device = torch::kCUDA) {
+        // Create on CPU first with proper cloning
+        auto cpu_tensor = torch::from_blob(
+                              const_cast<float*>(data.data()),
+                              shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(data.size())} : shape,
+                              torch::TensorOptions().dtype(torch::kFloat32))
+                              .clone(); // Clone to own the memory
 
-    // Now move to target device
-    return cpu_tensor.to(device);
-}
-
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
-    // Flatten and move to CPU for comparison
-    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
-    auto custom_cpu = custom.cpu();
-
-    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
-
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
+        // Now move to target device
+        return cpu_tensor.to(device);
     }
 
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
+        // Flatten and move to CPU for comparison
+        auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+        auto custom_cpu = custom.cpu();
 
-    auto custom_vec = custom_cpu.to_vector();
-    auto ref_accessor = ref_cpu.accessor<float, 1>();
+        ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
 
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        float ref_val = ref_accessor[i];
-        float custom_val = custom_vec[i];
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
 
-        if (std::isnan(ref_val)) {
-            EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
-        } else if (std::isinf(ref_val)) {
-            EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
+
+        auto custom_vec = custom_cpu.to_vector();
+        auto ref_accessor = ref_cpu.accessor<float, 1>();
+
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            float ref_val = ref_accessor[i];
+            float custom_val = custom_vec[i];
+
+            if (std::isnan(ref_val)) {
+                EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
+            } else if (std::isinf(ref_val)) {
+                EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+            } else {
+                float diff = std::abs(custom_val - ref_val);
+                float threshold = atol + rtol * std::abs(ref_val);
+                EXPECT_LE(diff, threshold)
+                    << msg << ": Mismatch at index " << i
+                    << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            }
+        }
+    }
+
+    // Helper to create a tensor with sequential values
+    Tensor create_sequential_tensor(TensorShape shape, Device device = Device::CUDA) {
+        auto tensor = Tensor::empty(shape, device);
+        size_t n = tensor.numel();
+
+        if (device == Device::CUDA) {
+            std::vector<float> data(n);
+            for (size_t i = 0; i < n; ++i) {
+                data[i] = static_cast<float>(i);
+            }
+            cudaMemcpy(tensor.ptr<float>(), data.data(), n * sizeof(float), cudaMemcpyHostToDevice);
         } else {
-            float diff = std::abs(custom_val - ref_val);
-            float threshold = atol + rtol * std::abs(ref_val);
-            EXPECT_LE(diff, threshold)
-                << msg << ": Mismatch at index " << i
-                << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            float* data = tensor.ptr<float>();
+            for (size_t i = 0; i < n; ++i) {
+                data[i] = static_cast<float>(i);
+            }
         }
+
+        return tensor;
     }
-}
 
-// Helper to create a tensor with sequential values
-Tensor create_sequential_tensor(TensorShape shape, Device device = Device::CUDA) {
-    auto tensor = Tensor::empty(shape, device);
-    size_t n = tensor.numel();
+    // Helper to create PyTorch sequential tensor
+    torch::Tensor create_torch_sequential(const std::vector<int64_t>& shape,
+                                          torch::Device device = torch::kCUDA) {
+        int64_t n = 1;
+        for (auto s : shape)
+            n *= s;
 
-    if (device == Device::CUDA) {
         std::vector<float> data(n);
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = static_cast<float>(i);
         }
-        cudaMemcpy(tensor.ptr<float>(), data.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    } else {
-        float* data = tensor.ptr<float>();
-        for (size_t i = 0; i < n; ++i) {
-            data[i] = static_cast<float>(i);
-        }
+
+        return create_torch_tensor(data, shape, device);
     }
-
-    return tensor;
-}
-
-// Helper to create PyTorch sequential tensor
-torch::Tensor create_torch_sequential(const std::vector<int64_t>& shape,
-                                       torch::Device device = torch::kCUDA) {
-    int64_t n = 1;
-    for (auto s : shape) n *= s;
-
-    std::vector<float> data(n);
-    for (int64_t i = 0; i < n; ++i) {
-        data[i] = static_cast<float>(i);
-    }
-
-    return create_torch_tensor(data, shape, device);
-}
 
 } // anonymous namespace
 
@@ -115,30 +116,30 @@ protected:
 TEST_F(TensorBroadcastTest, CanBroadcast) {
     // Test can_broadcast_to method
     auto a = Tensor::empty({3, 4});
-    EXPECT_TRUE(a.can_broadcast_to({3, 4}));       // Same shape
+    EXPECT_TRUE(a.can_broadcast_to({3, 4})); // Same shape
 
     auto b = Tensor::empty({3, 1});
-    EXPECT_TRUE(b.can_broadcast_to({3, 4}));       // Broadcast dim 1
+    EXPECT_TRUE(b.can_broadcast_to({3, 4})); // Broadcast dim 1
 
     auto c = Tensor::empty({1, 4});
-    EXPECT_TRUE(c.can_broadcast_to({3, 4}));       // Broadcast dim 0
+    EXPECT_TRUE(c.can_broadcast_to({3, 4})); // Broadcast dim 0
 
     auto d = Tensor::empty({1});
-    EXPECT_TRUE(d.can_broadcast_to({3, 4}));       // Broadcast scalar
+    EXPECT_TRUE(d.can_broadcast_to({3, 4})); // Broadcast scalar
 
     auto e = Tensor::empty({4});
-    EXPECT_TRUE(e.can_broadcast_to({3, 4}));       // Broadcast 1D to 2D
+    EXPECT_TRUE(e.can_broadcast_to({3, 4})); // Broadcast 1D to 2D
 
     auto f = Tensor::empty({3, 1, 5});
-    EXPECT_TRUE(f.can_broadcast_to({3, 4, 5}));    // 3D broadcast
+    EXPECT_TRUE(f.can_broadcast_to({3, 4, 5})); // 3D broadcast
 
     // Incompatible shapes
     auto g = Tensor::empty({3, 4});
-    EXPECT_FALSE(g.can_broadcast_to({3, 5}));      // Mismatch in dim 1
-    EXPECT_FALSE(g.can_broadcast_to({4, 4}));      // Mismatch in dim 0
+    EXPECT_FALSE(g.can_broadcast_to({3, 5})); // Mismatch in dim 1
+    EXPECT_FALSE(g.can_broadcast_to({4, 4})); // Mismatch in dim 0
 
     auto h = Tensor::empty({3});
-    EXPECT_FALSE(h.can_broadcast_to({4}));         // Different 1D sizes
+    EXPECT_FALSE(h.can_broadcast_to({4})); // Different 1D sizes
 }
 
 TEST_F(TensorBroadcastTest, BroadcastShape) {
@@ -284,8 +285,8 @@ TEST_F(TensorBroadcastTest, Broadcast3D) {
 
 TEST_F(TensorBroadcastTest, ComplexBroadcast3D) {
     // More complex 3D broadcasting
-    std::vector<float> a_data(3, 5.0f);  // 1*3*1 = 3
-    std::vector<float> b_data(8, 3.0f);  // 2*1*4 = 8
+    std::vector<float> a_data(3, 5.0f); // 1*3*1 = 3
+    std::vector<float> b_data(8, 3.0f); // 2*1*4 = 8
 
     auto a_custom = Tensor::from_vector(a_data, {1, 3, 1}, Device::CUDA);
     auto b_custom = Tensor::from_vector(b_data, {2, 1, 4}, Device::CUDA);
@@ -320,8 +321,8 @@ TEST_F(TensorBroadcastTest, BroadcastAddition) {
 }
 
 TEST_F(TensorBroadcastTest, BroadcastSubtraction) {
-    std::vector<float> a_data(6, 10.0f);  // 2*3*1 = 6
-    std::vector<float> b_data(12, 3.0f);  // 3*4 = 12
+    std::vector<float> a_data(6, 10.0f); // 2*3*1 = 6
+    std::vector<float> b_data(12, 3.0f); // 3*4 = 12
 
     auto a_custom = Tensor::from_vector(a_data, {2, 3, 1}, Device::CUDA);
     auto b_custom = Tensor::from_vector(b_data, {3, 4}, Device::CUDA);
@@ -351,8 +352,8 @@ TEST_F(TensorBroadcastTest, BroadcastMultiplication) {
 }
 
 TEST_F(TensorBroadcastTest, BroadcastDivision) {
-    std::vector<float> a_data(6, 12.0f);  // 2*3*1 = 6
-    std::vector<float> b_data(4, 3.0f);   // 1*4 = 4
+    std::vector<float> a_data(6, 12.0f); // 2*3*1 = 6
+    std::vector<float> b_data(4, 3.0f);  // 1*4 = 4
 
     auto a_custom = Tensor::from_vector(a_data, {2, 3, 1}, Device::CUDA);
     auto b_custom = Tensor::from_vector(b_data, {1, 4}, Device::CUDA);
@@ -390,7 +391,7 @@ TEST_F(TensorBroadcastTest, BroadcastWithEmpty) {
 
 TEST_F(TensorBroadcastTest, BroadcastSingleElement) {
     std::vector<float> single_data = {5.0f};
-    std::vector<float> matrix_data(60, 2.0f);  // 3*4*5 = 60
+    std::vector<float> matrix_data(60, 2.0f); // 3*4*5 = 60
 
     auto single_custom = Tensor::from_vector(single_data, {1, 1, 1}, Device::CUDA);
     auto matrix_custom = Tensor::from_vector(matrix_data, {3, 4, 5}, Device::CUDA);
@@ -473,7 +474,7 @@ TEST_F(TensorBroadcastTest, BroadcastToTensor) {
 }
 
 TEST_F(TensorBroadcastTest, ExpandMultipleDimensions) {
-    std::vector<float> data(3, 3.0f);  // 1*3*1 = 3
+    std::vector<float> data(3, 3.0f); // 1*3*1 = 3
 
     auto tensor_custom = Tensor::from_vector(data, {1, 3, 1}, Device::CUDA);
     auto tensor_torch = create_torch_tensor(data, {1, 3, 1});
@@ -490,8 +491,8 @@ TEST_F(TensorBroadcastTest, ExpandMultipleDimensions) {
 TEST_F(TensorBroadcastTest, MixedRankBroadcast) {
     // Test broadcasting between different ranks
     std::vector<float> rank1_data(5, 1.0f);
-    std::vector<float> rank2_data(15, 2.0f);  // 3*5 = 15
-    std::vector<float> rank3_data(30, 3.0f);  // 2*3*5 = 30
+    std::vector<float> rank2_data(15, 2.0f); // 3*5 = 15
+    std::vector<float> rank3_data(30, 3.0f); // 2*3*5 = 30
 
     auto rank1_custom = Tensor::from_vector(rank1_data, {5}, Device::CUDA);
     auto rank2_custom = Tensor::from_vector(rank2_data, {3, 5}, Device::CUDA);
@@ -561,7 +562,7 @@ TEST_F(TensorBroadcastTest, ChainedBroadcastOperations) {
     // Test chained operations with broadcasting
     std::vector<float> a_data(3, 2.0f);
     std::vector<float> b_data(4, 3.0f);
-    std::vector<float> c_data(12, 1.0f);  // 3*4 = 12
+    std::vector<float> c_data(12, 1.0f); // 3*4 = 12
 
     auto a_custom = Tensor::from_vector(a_data, {3, 1}, Device::CUDA);
     auto b_custom = Tensor::from_vector(b_data, {1, 4}, Device::CUDA);
@@ -599,7 +600,7 @@ TEST_F(TensorBroadcastTest, ComplexBroadcastExpression) {
 
 TEST_F(TensorBroadcastTest, ScalarMultiplication) {
     std::vector<float> scalar_data = {3.0f};
-    std::vector<float> matrix_data(6, 2.0f);  // 2*3 = 6
+    std::vector<float> matrix_data(6, 2.0f); // 2*3 = 6
 
     auto scalar_custom = Tensor::from_vector(scalar_data, {1}, Device::CUDA);
     auto matrix_custom = Tensor::from_vector(matrix_data, {2, 3}, Device::CUDA);
@@ -641,13 +642,13 @@ TEST_F(TensorBroadcastTest, RandomBroadcastOperations) {
         auto add_custom = a_custom + b_custom;
         auto add_torch = a_torch + b_torch;
         compare_tensors(add_custom, add_torch, 1e-4f, 1e-5f,
-                       "RandomBroadcast_Add_" + std::to_string(test));
+                        "RandomBroadcast_Add_" + std::to_string(test));
 
         // Test multiplication
         auto mul_custom = a_custom * b_custom;
         auto mul_torch = a_torch * b_torch;
         compare_tensors(mul_custom, mul_torch, 1e-4f, 1e-5f,
-                       "RandomBroadcast_Mul_" + std::to_string(test));
+                        "RandomBroadcast_Mul_" + std::to_string(test));
     }
 }
 

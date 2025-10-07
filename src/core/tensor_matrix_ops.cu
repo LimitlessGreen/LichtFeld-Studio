@@ -97,50 +97,6 @@ namespace gs::tensor_ops {
     }
 
     // ============= Launch Functions Implementation =============
-
-    void launch_matmul(const float* a, const float* b, float* c,
-                       size_t m, size_t n, size_t k,
-                       cudaStream_t stream) {
-        // For simple matrix multiply, use cuBLAS (handled in tensor_matrix_ops.cpp)
-        // This is a fallback kernel if needed
-        dim3 block(16, 16);
-        dim3 grid((n + block.x - 1) / block.x, (m + block.y - 1) / block.y);
-
-        // Simple naive kernel (cuBLAS is preferred)
-        // Note: This is just a placeholder - actual implementation uses cuBLAS
-    }
-
-    void launch_batch_matmul(const float* a, const float* b, float* c,
-                             size_t batch_size, size_t m, size_t n, size_t k,
-                             cudaStream_t stream) {
-        dim3 block(16, 16);
-        dim3 grid((n + block.x - 1) / block.x,
-                  (m + block.y - 1) / block.y,
-                  batch_size);
-
-        batch_matmul_kernel<<<grid, block, 0, stream>>>(a, b, c, batch_size, m, n, k);
-    }
-
-    void launch_transpose(const float* input, float* output,
-                          size_t rows, size_t cols,
-                          cudaStream_t stream) {
-        const int TILE_DIM = 32;
-        const int BLOCK_ROWS = 8;
-
-        dim3 block(TILE_DIM, BLOCK_ROWS);
-        dim3 grid((cols + TILE_DIM - 1) / TILE_DIM,
-                  (rows + TILE_DIM - 1) / TILE_DIM);
-
-        transpose_kernel<TILE_DIM, BLOCK_ROWS><<<grid, block, 0, stream>>>(
-            input, output, rows, cols);
-    }
-
-    void launch_dot_product(const float* a, const float* b, float* result,
-                            size_t n, cudaStream_t stream) {
-        // For dot product, use cuBLAS (handled in tensor_matrix_ops.cpp)
-        // This is just a placeholder
-    }
-
     void launch_eye(float* data, size_t m, size_t n, cudaStream_t stream) {
         size_t total = m * n;
         int block_size = 256;

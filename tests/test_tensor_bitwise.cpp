@@ -11,57 +11,57 @@ using namespace gs;
 
 namespace {
 
-// Helper to create PyTorch tensor from vector data
-torch::Tensor create_torch_bool_tensor(const std::vector<bool>& data,
-                                        const std::vector<int64_t>& shape,
-                                        torch::Device device = torch::kCUDA) {
-    // Convert bool to uint8 for PyTorch
-    std::vector<uint8_t> uint8_data(data.size());
-    for (size_t i = 0; i < data.size(); ++i) {
-        uint8_data[i] = data[i] ? 1 : 0;
+    // Helper to create PyTorch tensor from vector data
+    torch::Tensor create_torch_bool_tensor(const std::vector<bool>& data,
+                                           const std::vector<int64_t>& shape,
+                                           torch::Device device = torch::kCUDA) {
+        // Convert bool to uint8 for PyTorch
+        std::vector<uint8_t> uint8_data(data.size());
+        for (size_t i = 0; i < data.size(); ++i) {
+            uint8_data[i] = data[i] ? 1 : 0;
+        }
+
+        // Create on CPU first
+        auto cpu_tensor = torch::from_blob(
+                              uint8_data.data(),
+                              shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(data.size())} : shape,
+                              torch::TensorOptions().dtype(torch::kBool))
+                              .clone(); // Clone to own the memory
+
+        // Now move to target device
+        return cpu_tensor.to(device);
     }
 
-    // Create on CPU first
-    auto cpu_tensor = torch::from_blob(
-        uint8_data.data(),
-        shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(data.size())} : shape,
-        torch::TensorOptions().dtype(torch::kBool)
-    ).clone();  // Clone to own the memory
+    void compare_bool_tensors(const Tensor& custom, const torch::Tensor& reference,
+                              const std::string& msg = "") {
+        // Flatten and move to CPU for comparison
+        auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+        auto custom_cpu = custom.cpu();
 
-    // Now move to target device
-    return cpu_tensor.to(device);
-}
+        ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
 
-void compare_bool_tensors(const Tensor& custom, const torch::Tensor& reference,
-                          const std::string& msg = "") {
-    // Flatten and move to CPU for comparison
-    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
-    auto custom_cpu = custom.cpu();
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
 
-    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
 
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
+        auto custom_vec = custom_cpu.to_vector_bool();
+
+        // Use flattened accessor for bool tensors
+        auto ref_accessor = ref_cpu.accessor<bool, 1>();
+
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            bool ref_val = ref_accessor[i];
+            bool custom_val = custom_vec[i];
+
+            EXPECT_EQ(custom_val, ref_val)
+                << msg << ": Mismatch at index " << i
+                << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+        }
     }
-
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
-
-    auto custom_vec = custom_cpu.to_vector_bool();
-
-    // Use flattened accessor for bool tensors
-    auto ref_accessor = ref_cpu.accessor<bool, 1>();
-
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        bool ref_val = ref_accessor[i];
-        bool custom_val = custom_vec[i];
-
-        EXPECT_EQ(custom_val, ref_val)
-            << msg << ": Mismatch at index " << i
-            << " (custom=" << custom_val << ", ref=" << ref_val << ")";
-    }
-}
 
 } // anonymous namespace
 
@@ -270,10 +270,10 @@ TEST_F(TensorBitwiseTest, BitwiseOrAllCombinations) {
 
     // Verify expected truth table
     auto values = result_custom.to_vector_bool();
-    EXPECT_TRUE(values[0]);   // true | true = true
-    EXPECT_TRUE(values[1]);   // true | false = true
-    EXPECT_TRUE(values[2]);   // false | true = true
-    EXPECT_FALSE(values[3]);  // false | false = false
+    EXPECT_TRUE(values[0]);  // true | true = true
+    EXPECT_TRUE(values[1]);  // true | false = true
+    EXPECT_TRUE(values[2]);  // false | true = true
+    EXPECT_FALSE(values[3]); // false | false = false
 }
 
 TEST_F(TensorBitwiseTest, BitwiseOrOnNonBoolFails) {
@@ -327,10 +327,10 @@ TEST_F(TensorBitwiseTest, LogicalVsBitwiseAnd) {
 
     // Verify expected truth table
     auto values = logical_custom.to_vector_bool();
-    EXPECT_TRUE(values[0]);   // true && true = true
-    EXPECT_FALSE(values[1]);  // false && true = false
-    EXPECT_FALSE(values[2]);  // true && false = false
-    EXPECT_FALSE(values[3]);  // false && false = false
+    EXPECT_TRUE(values[0]);  // true && true = true
+    EXPECT_FALSE(values[1]); // false && true = false
+    EXPECT_FALSE(values[2]); // true && false = false
+    EXPECT_FALSE(values[3]); // false && false = false
 }
 
 TEST_F(TensorBitwiseTest, LogicalNot) {

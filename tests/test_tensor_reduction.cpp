@@ -2,11 +2,11 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
-#include <gtest/gtest.h>
-#include <torch/torch.h>
-#include <random>
 #include <cmath>
+#include <gtest/gtest.h>
 #include <numeric>
+#include <random>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -14,51 +14,51 @@ using namespace gs;
 
 namespace {
 
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
-    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
-    auto custom_cpu = custom.cpu();
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-4f, float atol = 1e-5f, const std::string& msg = "") {
+        auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+        auto custom_cpu = custom.cpu();
 
-    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+        ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
 
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
 
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
 
-    auto custom_vec = custom_cpu.to_vector();
-    auto ref_accessor = ref_cpu.accessor<float, 1>();
+        auto custom_vec = custom_cpu.to_vector();
+        auto ref_accessor = ref_cpu.accessor<float, 1>();
 
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        float ref_val = ref_accessor[i];
-        float custom_val = custom_vec[i];
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            float ref_val = ref_accessor[i];
+            float custom_val = custom_vec[i];
 
-        if (std::isnan(ref_val)) {
-            EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
-        } else if (std::isinf(ref_val)) {
-            EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
-        } else {
-            float diff = std::abs(custom_val - ref_val);
-            float threshold = atol + rtol * std::abs(ref_val);
-            EXPECT_LE(diff, threshold)
-                << msg << ": Mismatch at index " << i
-                << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            if (std::isnan(ref_val)) {
+                EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
+            } else if (std::isinf(ref_val)) {
+                EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+            } else {
+                float diff = std::abs(custom_val - ref_val);
+                float threshold = atol + rtol * std::abs(ref_val);
+                EXPECT_LE(diff, threshold)
+                    << msg << ": Mismatch at index " << i
+                    << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            }
         }
     }
-}
 
-void compare_scalars(float custom_val, float ref_val, float tolerance = 1e-4f, const std::string& msg = "") {
-    if (std::isnan(ref_val)) {
-        EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN";
-    } else if (std::isinf(ref_val)) {
-        EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf";
-    } else {
-        EXPECT_NEAR(custom_val, ref_val, tolerance) << msg;
+    void compare_scalars(float custom_val, float ref_val, float tolerance = 1e-4f, const std::string& msg = "") {
+        if (std::isnan(ref_val)) {
+            EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN";
+        } else if (std::isinf(ref_val)) {
+            EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf";
+        } else {
+            EXPECT_NEAR(custom_val, ref_val, tolerance) << msg;
+        }
     }
-}
 
 } // anonymous namespace
 
@@ -576,15 +576,15 @@ TEST_F(TensorReductionTest, RandomDataConsistency) {
         auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
 
         compare_scalars(custom_tensor.sum_scalar(), torch_tensor.sum().item<float>(),
-                       1e-3f, "RandomSum_" + std::to_string(test));
+                        1e-3f, "RandomSum_" + std::to_string(test));
         compare_scalars(custom_tensor.mean_scalar(), torch_tensor.mean().item<float>(),
-                       1e-4f, "RandomMean_" + std::to_string(test));
+                        1e-4f, "RandomMean_" + std::to_string(test));
         compare_scalars(custom_tensor.min_scalar(), torch_tensor.min().item<float>(),
-                       1e-5f, "RandomMin_" + std::to_string(test));
+                        1e-5f, "RandomMin_" + std::to_string(test));
         compare_scalars(custom_tensor.max_scalar(), torch_tensor.max().item<float>(),
-                       1e-5f, "RandomMax_" + std::to_string(test));
+                        1e-5f, "RandomMax_" + std::to_string(test));
         compare_scalars(custom_tensor.norm(2.0f), torch_tensor.norm(2).item<float>(),
-                       1e-3f, "RandomNorm_" + std::to_string(test));
+                        1e-3f, "RandomNorm_" + std::to_string(test));
     }
 }
 
@@ -600,9 +600,9 @@ TEST_F(TensorReductionTest, RandomMultiDimConsistency) {
                                 .reshape({2, 3, 4, 5});
 
         compare_scalars(custom_tensor.sum_scalar(), torch_tensor.sum().item<float>(),
-                       1e-2f, "RandomMultiSum_" + std::to_string(test));
+                        1e-2f, "RandomMultiSum_" + std::to_string(test));
         compare_scalars(custom_tensor.mean_scalar(), torch_tensor.mean().item<float>(),
-                       1e-4f, "RandomMultiMean_" + std::to_string(test));
+                        1e-4f, "RandomMultiMean_" + std::to_string(test));
     }
 }
 

@@ -12,42 +12,42 @@ using namespace gs;
 
 namespace {
 
-torch::Tensor to_torch(const Tensor& t) {
-    auto options = torch::TensorOptions()
-        .dtype([&]() {
-            switch (t.dtype()) {
-                case DataType::Float32: return torch::kFloat32;
-                case DataType::Float16: return torch::kFloat16;
-                case DataType::Int32: return torch::kInt32;
-                case DataType::Int64: return torch::kInt64;
-                case DataType::UInt8: return torch::kUInt8;
-                case DataType::Bool: return torch::kBool;
-                default: return torch::kFloat32;
-            }
-        }())
-        .device(t.device() == Device::CPU ? torch::kCPU : torch::kCUDA);
+    torch::Tensor to_torch(const Tensor& t) {
+        auto options = torch::TensorOptions()
+                           .dtype([&]() {
+                               switch (t.dtype()) {
+                               case DataType::Float32: return torch::kFloat32;
+                               case DataType::Float16: return torch::kFloat16;
+                               case DataType::Int32: return torch::kInt32;
+                               case DataType::Int64: return torch::kInt64;
+                               case DataType::UInt8: return torch::kUInt8;
+                               case DataType::Bool: return torch::kBool;
+                               default: return torch::kFloat32;
+                               }
+                           }())
+                           .device(t.device() == Device::CPU ? torch::kCPU : torch::kCUDA);
 
-    std::vector<int64_t> shape;
-    for (size_t i = 0; i < t.ndim(); ++i) {
-        shape.push_back(static_cast<int64_t>(t.size(i)));
+        std::vector<int64_t> shape;
+        for (size_t i = 0; i < t.ndim(); ++i) {
+            shape.push_back(static_cast<int64_t>(t.size(i)));
+        }
+
+        torch::Tensor result = torch::empty(shape, options);
+
+        if (t.device() == Device::CPU) {
+            std::memcpy(result.data_ptr(), t.raw_ptr(), t.bytes());
+        } else {
+            cudaMemcpy(result.data_ptr(), t.raw_ptr(), t.bytes(), cudaMemcpyDeviceToDevice);
+        }
+
+        return result;
     }
 
-    torch::Tensor result = torch::empty(shape, options);
+    Tensor from_torch(const torch::Tensor& t, Device device = Device::CPU) {
+        auto t_cont = t.contiguous();
 
-    if (t.device() == Device::CPU) {
-        std::memcpy(result.data_ptr(), t.raw_ptr(), t.bytes());
-    } else {
-        cudaMemcpy(result.data_ptr(), t.raw_ptr(), t.bytes(), cudaMemcpyDeviceToDevice);
-    }
-
-    return result;
-}
-
-Tensor from_torch(const torch::Tensor& t, Device device = Device::CPU) {
-    auto t_cont = t.contiguous();
-
-    DataType dtype;
-    switch (t_cont.scalar_type()) {
+        DataType dtype;
+        switch (t_cont.scalar_type()) {
         case torch::kFloat32: dtype = DataType::Float32; break;
         case torch::kFloat16: dtype = DataType::Float16; break;
         case torch::kInt32: dtype = DataType::Int32; break;
@@ -55,83 +55,83 @@ Tensor from_torch(const torch::Tensor& t, Device device = Device::CPU) {
         case torch::kUInt8: dtype = DataType::UInt8; break;
         case torch::kBool: dtype = DataType::Bool; break;
         default: dtype = DataType::Float32; break;
-    }
+        }
 
-    std::vector<size_t> shape;
-    for (int64_t i = 0; i < t_cont.dim(); ++i) {
-        shape.push_back(static_cast<size_t>(t_cont.size(i)));
-    }
+        std::vector<size_t> shape;
+        for (int64_t i = 0; i < t_cont.dim(); ++i) {
+            shape.push_back(static_cast<size_t>(t_cont.size(i)));
+        }
 
-    Tensor result = Tensor::empty(TensorShape(shape), device, dtype);
+        Tensor result = Tensor::empty(TensorShape(shape), device, dtype);
 
-    if (device == Device::CPU) {
-        std::memcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes());
-    } else {
-        if (t_cont.is_cpu()) {
-            cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyHostToDevice);
+        if (device == Device::CPU) {
+            std::memcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes());
         } else {
-            cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyDeviceToDevice);
+            if (t_cont.is_cpu()) {
+                cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyHostToDevice);
+            } else {
+                cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyDeviceToDevice);
+            }
+        }
+
+        return result;
+    }
+
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
+        auto ref_cpu = reference.cpu().contiguous();
+        auto custom_cpu = custom.cpu();
+
+        ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
+
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
+
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
+
+        auto custom_vec = custom_cpu.to_vector();
+        auto ref_ptr = ref_cpu.data_ptr<float>();
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            if (std::isnan(ref_ptr[i])) {
+                EXPECT_TRUE(std::isnan(custom_vec[i])) << msg << ": Expected NaN at index " << i;
+            } else if (std::isinf(ref_ptr[i])) {
+                EXPECT_TRUE(std::isinf(custom_vec[i])) << msg << ": Expected Inf at index " << i;
+            } else {
+                float diff = std::abs(custom_vec[i] - ref_ptr[i]);
+                float threshold = atol + rtol * std::abs(ref_ptr[i]);
+                EXPECT_LE(diff, threshold)
+                    << msg << ": Mismatch at index " << i
+                    << " (custom=" << custom_vec[i] << ", ref=" << ref_ptr[i] << ")";
+            }
         }
     }
 
-    return result;
-}
-
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
-    auto ref_cpu = reference.cpu().contiguous();
-    auto custom_cpu = custom.cpu();
-
-    ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
-
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
-
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
-
-    auto custom_vec = custom_cpu.to_vector();
-    auto ref_ptr = ref_cpu.data_ptr<float>();
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        if (std::isnan(ref_ptr[i])) {
-            EXPECT_TRUE(std::isnan(custom_vec[i])) << msg << ": Expected NaN at index " << i;
-        } else if (std::isinf(ref_ptr[i])) {
-            EXPECT_TRUE(std::isinf(custom_vec[i])) << msg << ": Expected Inf at index " << i;
-        } else {
-            float diff = std::abs(custom_vec[i] - ref_ptr[i]);
-            float threshold = atol + rtol * std::abs(ref_ptr[i]);
-            EXPECT_LE(diff, threshold)
-                << msg << ": Mismatch at index " << i
-                << " (custom=" << custom_vec[i] << ", ref=" << ref_ptr[i] << ")";
+    // Create test tensor with sequential values for both implementations
+    std::pair<Tensor, torch::Tensor> create_test_tensors(const std::vector<int64_t>& shape, Device device = Device::CUDA) {
+        size_t total = 1;
+        for (auto dim : shape) {
+            total *= dim;
         }
+
+        std::vector<float> data(total);
+        for (size_t i = 0; i < total; ++i) {
+            data[i] = static_cast<float>(i);
+        }
+
+        std::vector<size_t> shape_custom;
+        for (auto s : shape) {
+            shape_custom.push_back(static_cast<size_t>(s));
+        }
+
+        auto tensor_custom = Tensor::from_vector(data, TensorShape(shape_custom), device);
+        auto tensor_torch = torch::tensor(data, device == Device::CUDA ? torch::kCUDA : torch::kCPU)
+                                .reshape(shape);
+
+        return {std::move(tensor_custom), tensor_torch};
     }
-}
-
-// Create test tensor with sequential values for both implementations
-std::pair<Tensor, torch::Tensor> create_test_tensors(const std::vector<int64_t>& shape, Device device = Device::CUDA) {
-    size_t total = 1;
-    for (auto dim : shape) {
-        total *= dim;
-    }
-
-    std::vector<float> data(total);
-    for (size_t i = 0; i < total; ++i) {
-        data[i] = static_cast<float>(i);
-    }
-
-    std::vector<size_t> shape_custom;
-    for (auto s : shape) {
-        shape_custom.push_back(static_cast<size_t>(s));
-    }
-
-    auto tensor_custom = Tensor::from_vector(data, TensorShape(shape_custom), device);
-    auto tensor_torch = torch::tensor(data, device == Device::CUDA ? torch::kCUDA : torch::kCPU)
-                             .reshape(shape);
-
-    return {std::move(tensor_custom), tensor_torch};
-}
 
 } // anonymous namespace
 
@@ -262,7 +262,7 @@ TEST_F(TensorViewTest, InvalidSlice) {
 
     // end > size - PyTorch allows this and clamps
     auto slice_custom = tensor_custom.slice(0, 0, 11);
-    auto slice_torch = tensor_torch.slice(0, 0, 11);  // PyTorch clamps to 10
+    auto slice_torch = tensor_torch.slice(0, 0, 11); // PyTorch clamps to 10
 
     // Either should fail or clamp to size
     if (slice_custom.is_valid()) {
@@ -370,7 +370,7 @@ TEST_F(TensorViewTest, Expand) {
 
     // Use -1 to keep original dimension
     auto expanded2_custom = tensor_custom.expand({5, -1, 3});
-    auto expanded2_torch = tensor_torch.expand({5, 3, 3});  // PyTorch doesn't use -1
+    auto expanded2_torch = tensor_torch.expand({5, 3, 3}); // PyTorch doesn't use -1
     compare_tensors(expanded2_custom, expanded2_torch, 1e-5f, 1e-7f, "ExpandWith-1");
 }
 
@@ -452,16 +452,16 @@ TEST_F(TensorViewTest, ChainedViewOperations) {
 
     // Chain multiple view operations
     auto result_custom = tensor_custom.view({6, 4})
-                                      .unsqueeze(0)
-                                      .squeeze(0)
-                                      .reshape({2, 12})
-                                      .flatten();
+                             .unsqueeze(0)
+                             .squeeze(0)
+                             .reshape({2, 12})
+                             .flatten();
 
     auto result_torch = tensor_torch.view({6, 4})
-                                   .unsqueeze(0)
-                                   .squeeze(0)
-                                   .reshape({2, 12})
-                                   .flatten();
+                            .unsqueeze(0)
+                            .squeeze(0)
+                            .reshape({2, 12})
+                            .flatten();
 
     compare_tensors(result_custom, result_torch, 1e-5f, 1e-7f, "ChainedOps");
     EXPECT_FALSE(result_custom.owns_memory());
@@ -510,8 +510,7 @@ TEST_F(TensorViewTest, ComplexReshaping) {
         {2, 3, 20},
         {24, 5},
         {2, 12, 5},
-        {2, 3, 2, 10}
-    };
+        {2, 3, 2, 10}};
 
     for (const auto& shape : valid_shapes) {
         auto view_custom = tensor_custom.view(std::vector<int>(shape.begin(), shape.end()));
@@ -519,7 +518,7 @@ TEST_F(TensorViewTest, ComplexReshaping) {
 
         EXPECT_TRUE(view_custom.is_valid());
         compare_tensors(view_custom, view_torch, 1e-5f, 1e-7f,
-                       "ComplexReshape_" + std::to_string(shape[0]));
+                        "ComplexReshape_" + std::to_string(shape[0]));
         EXPECT_EQ(view_custom.numel(), tensor_custom.numel());
     }
 }
@@ -582,8 +581,8 @@ TEST_F(TensorViewTest, SqueezeEdgeCases) {
 
     // Known difference: Custom implementation keeps at least rank 1,
     // PyTorch goes to rank 0 (scalar tensor)
-    EXPECT_EQ(squeezed_custom.ndim(), 1);  // Custom: shape {1}
-    EXPECT_EQ(squeezed_torch.dim(), 0);    // PyTorch: 0-D scalar
+    EXPECT_EQ(squeezed_custom.ndim(), 1); // Custom: shape {1}
+    EXPECT_EQ(squeezed_torch.dim(), 0);   // PyTorch: 0-D scalar
 
     // Values should still match
     EXPECT_FLOAT_EQ(squeezed_custom.item(), squeezed_torch.item<float>());

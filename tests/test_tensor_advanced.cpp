@@ -5,9 +5,9 @@
 #include <chrono>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <random>
 #include <thread>
+#include <torch/torch.h>
 
 using namespace gs;
 using namespace gs::tensor;
@@ -16,41 +16,41 @@ using namespace gs::tensor;
 
 namespace {
 
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
-    auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
-    auto custom_cpu = custom.cpu();
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
+        auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
+        auto custom_cpu = custom.cpu();
 
-    ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
+        ASSERT_EQ(custom_cpu.ndim(), reference.dim()) << msg << ": Rank mismatch";
 
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(reference.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
+        }
 
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
 
-    auto custom_vec = custom_cpu.to_vector();
-    auto ref_accessor = ref_cpu.accessor<float, 1>();
+        auto custom_vec = custom_cpu.to_vector();
+        auto ref_accessor = ref_cpu.accessor<float, 1>();
 
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        float ref_val = ref_accessor[i];
-        float custom_val = custom_vec[i];
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            float ref_val = ref_accessor[i];
+            float custom_val = custom_vec[i];
 
-        if (std::isnan(ref_val)) {
-            EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
-        } else if (std::isinf(ref_val)) {
-            EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
-        } else {
-            float diff = std::abs(custom_val - ref_val);
-            float threshold = atol + rtol * std::abs(ref_val);
-            EXPECT_LE(diff, threshold)
-                << msg << ": Mismatch at index " << i
-                << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            if (std::isnan(ref_val)) {
+                EXPECT_TRUE(std::isnan(custom_val)) << msg << ": Expected NaN at index " << i;
+            } else if (std::isinf(ref_val)) {
+                EXPECT_TRUE(std::isinf(custom_val)) << msg << ": Expected Inf at index " << i;
+            } else {
+                float diff = std::abs(custom_val - ref_val);
+                float threshold = atol + rtol * std::abs(ref_val);
+                EXPECT_LE(diff, threshold)
+                    << msg << ": Mismatch at index " << i
+                    << " (custom=" << custom_val << ", ref=" << ref_val << ")";
+            }
         }
     }
-}
 
 } // anonymous namespace
 
@@ -318,7 +318,7 @@ TEST_F(TensorAdvancedTest, BatchProcessing) {
         EXPECT_EQ(batches_custom[i].shape()[1], 10);
 
         compare_tensors(batches_custom[i], batches_torch[i], 1e-6f, 1e-7f,
-                       "Batch_" + std::to_string(i));
+                        "Batch_" + std::to_string(i));
     }
 }
 
@@ -403,8 +403,8 @@ TEST_F(TensorAdvancedTest, ChainableInplace) {
 
     // Test inplace chaining: ((1 + 1) * 2) - 1 = 3
     tensor_custom.inplace([](Tensor& t) { t.add_(1.0f); })
-                 .inplace([](Tensor& t) { t.mul_(2.0f); })
-                 .inplace([](Tensor& t) { t.sub_(1.0f); });
+        .inplace([](Tensor& t) { t.mul_(2.0f); })
+        .inplace([](Tensor& t) { t.sub_(1.0f); });
 
     tensor_torch.add_(1.0f).mul_(2.0f).sub_(1.0f);
 
@@ -417,8 +417,8 @@ TEST_F(TensorAdvancedTest, ChainableApply) {
 
     // Test apply (non-mutating): ((1 + 1) * 2) - 1 = 3
     auto result_custom = tensor_custom.apply([](const Tensor& t) { return t.add(1.0f); })
-                                      .apply([](const Tensor& t) { return t.mul(2.0f); })
-                                      .apply([](const Tensor& t) { return t.sub(1.0f); });
+                             .apply([](const Tensor& t) { return t.mul(2.0f); })
+                             .apply([](const Tensor& t) { return t.sub(1.0f); });
 
     auto result_torch = ((tensor_torch + 1.0f) * 2.0f) - 1.0f;
 
@@ -498,8 +498,7 @@ TEST_F(TensorAdvancedTest, SpecialValues) {
         -0.0f,
         std::numeric_limits<float>::min(),
         std::numeric_limits<float>::max(),
-        std::numeric_limits<float>::epsilon()
-    };
+        std::numeric_limits<float>::epsilon()};
 
     auto cpu_custom = Tensor::empty({8}, Device::CPU);
     auto cpu_torch = torch::empty({8}, torch::TensorOptions().device(torch::kCPU));
@@ -560,7 +559,7 @@ TEST_F(TensorAdvancedTest, ConcurrentTensorCreation) {
         for (int i = 0; i < tensors_per_thread; ++i) {
             EXPECT_TRUE(thread_tensors[t][i].is_valid());
             EXPECT_FLOAT_EQ(thread_tensors[t][i].to_vector()[0],
-                          static_cast<float>(t * 100 + i));
+                            static_cast<float>(t * 100 + i));
         }
     }
 }

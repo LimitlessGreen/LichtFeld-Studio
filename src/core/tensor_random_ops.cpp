@@ -3,10 +3,10 @@
 
 #include "core/tensor.hpp"
 #include "core/tensor_ops.hpp"
+#include <atomic>
 #include <curand.h>
 #include <curand_kernel.h>
 #include <random>
-#include <atomic>
 
 #define CHECK_CUDA(call)                              \
     do {                                              \
@@ -40,7 +40,8 @@ namespace gs {
         void* cuda_generator_ = nullptr;
         std::mt19937_64 cpu_generator_;
 
-        RandomGeneratorImpl() : seed_(42), cpu_generator_(seed_) {
+        RandomGeneratorImpl() : seed_(42),
+                                cpu_generator_(seed_) {
             // Initialize CUDA random generator
             curandGenerator_t* gen = new curandGenerator_t;
             CHECK_CURAND(curandCreateGenerator(gen, CURAND_RNG_PSEUDO_DEFAULT));
@@ -62,7 +63,8 @@ namespace gs {
         return instance;
     }
 
-    RandomGenerator::RandomGenerator() : seed_(42), cpu_generator_(seed_) {
+    RandomGenerator::RandomGenerator() : seed_(42),
+                                         cpu_generator_(seed_) {
         // Create implementation
         impl_ = new RandomGeneratorImpl();
     }

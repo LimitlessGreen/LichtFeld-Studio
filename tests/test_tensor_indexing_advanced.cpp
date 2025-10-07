@@ -1,8 +1,8 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <gtest/gtest.h>
 #include "core/tensor.hpp"
+#include <gtest/gtest.h>
 #include <torch/torch.h>
 
 using namespace gs;
@@ -10,42 +10,42 @@ using namespace gs;
 // Helper functions to convert between custom Tensor and torch::Tensor
 namespace {
 
-torch::Tensor to_torch(const Tensor& t) {
-    auto options = torch::TensorOptions()
-        .dtype([&]() {
-            switch (t.dtype()) {
-                case DataType::Float32: return torch::kFloat32;
-                case DataType::Float16: return torch::kFloat16;
-                case DataType::Int32: return torch::kInt32;
-                case DataType::Int64: return torch::kInt64;
-                case DataType::UInt8: return torch::kUInt8;
-                case DataType::Bool: return torch::kBool;
-                default: return torch::kFloat32;
-            }
-        }())
-        .device(t.device() == Device::CPU ? torch::kCPU : torch::kCUDA);
+    torch::Tensor to_torch(const Tensor& t) {
+        auto options = torch::TensorOptions()
+                           .dtype([&]() {
+                               switch (t.dtype()) {
+                               case DataType::Float32: return torch::kFloat32;
+                               case DataType::Float16: return torch::kFloat16;
+                               case DataType::Int32: return torch::kInt32;
+                               case DataType::Int64: return torch::kInt64;
+                               case DataType::UInt8: return torch::kUInt8;
+                               case DataType::Bool: return torch::kBool;
+                               default: return torch::kFloat32;
+                               }
+                           }())
+                           .device(t.device() == Device::CPU ? torch::kCPU : torch::kCUDA);
 
-    std::vector<int64_t> shape;
-    for (size_t i = 0; i < t.ndim(); ++i) {
-        shape.push_back(static_cast<int64_t>(t.size(i)));
+        std::vector<int64_t> shape;
+        for (size_t i = 0; i < t.ndim(); ++i) {
+            shape.push_back(static_cast<int64_t>(t.size(i)));
+        }
+
+        torch::Tensor result = torch::empty(shape, options);
+
+        if (t.device() == Device::CPU) {
+            std::memcpy(result.data_ptr(), t.raw_ptr(), t.bytes());
+        } else {
+            cudaMemcpy(result.data_ptr(), t.raw_ptr(), t.bytes(), cudaMemcpyDeviceToDevice);
+        }
+
+        return result;
     }
 
-    torch::Tensor result = torch::empty(shape, options);
+    Tensor from_torch(const torch::Tensor& t, Device device = Device::CPU) {
+        auto t_cont = t.contiguous();
 
-    if (t.device() == Device::CPU) {
-        std::memcpy(result.data_ptr(), t.raw_ptr(), t.bytes());
-    } else {
-        cudaMemcpy(result.data_ptr(), t.raw_ptr(), t.bytes(), cudaMemcpyDeviceToDevice);
-    }
-
-    return result;
-}
-
-Tensor from_torch(const torch::Tensor& t, Device device = Device::CPU) {
-    auto t_cont = t.contiguous();
-
-    DataType dtype;
-    switch (t_cont.scalar_type()) {
+        DataType dtype;
+        switch (t_cont.scalar_type()) {
         case torch::kFloat32: dtype = DataType::Float32; break;
         case torch::kFloat16: dtype = DataType::Float16; break;
         case torch::kInt32: dtype = DataType::Int32; break;
@@ -53,81 +53,81 @@ Tensor from_torch(const torch::Tensor& t, Device device = Device::CPU) {
         case torch::kUInt8: dtype = DataType::UInt8; break;
         case torch::kBool: dtype = DataType::Bool; break;
         default: dtype = DataType::Float32; break;
-    }
+        }
 
-    std::vector<size_t> shape;
-    for (int64_t i = 0; i < t_cont.dim(); ++i) {
-        shape.push_back(static_cast<size_t>(t_cont.size(i)));
-    }
+        std::vector<size_t> shape;
+        for (int64_t i = 0; i < t_cont.dim(); ++i) {
+            shape.push_back(static_cast<size_t>(t_cont.size(i)));
+        }
 
-    Tensor result = Tensor::empty(TensorShape(shape), device, dtype);
+        Tensor result = Tensor::empty(TensorShape(shape), device, dtype);
 
-    if (device == Device::CPU) {
-        std::memcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes());
-    } else {
-        if (t_cont.is_cpu()) {
-            cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyHostToDevice);
+        if (device == Device::CPU) {
+            std::memcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes());
         } else {
-            cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyDeviceToDevice);
+            if (t_cont.is_cpu()) {
+                cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyHostToDevice);
+            } else {
+                cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyDeviceToDevice);
+            }
         }
+
+        return result;
     }
 
-    return result;
-}
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
+        auto ref_cpu = reference.cpu();
+        auto custom_cpu = custom.cpu();
 
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
-    auto ref_cpu = reference.cpu();
-    auto custom_cpu = custom.cpu();
+        ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
 
-    ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
-
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
-
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
-
-    if (custom_cpu.dtype() == DataType::Bool || ref_cpu.scalar_type() == torch::kBool) {
-        auto custom_vec = custom_cpu.to_vector_bool();
-        auto ref_ptr = ref_cpu.data_ptr<bool>();
-        for (size_t i = 0; i < custom_vec.size(); ++i) {
-            EXPECT_EQ(custom_vec[i], ref_ptr[i]) << msg << ": Mismatch at index " << i;
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
         }
-    } else if (custom_cpu.dtype() == DataType::Int32 || custom_cpu.dtype() == DataType::Int64) {
-        auto custom_vec = custom_cpu.to_vector_int();
-        if (ref_cpu.scalar_type() == torch::kInt32) {
-            auto ref_ptr = ref_cpu.data_ptr<int32_t>();
+
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
+
+        if (custom_cpu.dtype() == DataType::Bool || ref_cpu.scalar_type() == torch::kBool) {
+            auto custom_vec = custom_cpu.to_vector_bool();
+            auto ref_ptr = ref_cpu.data_ptr<bool>();
             for (size_t i = 0; i < custom_vec.size(); ++i) {
                 EXPECT_EQ(custom_vec[i], ref_ptr[i]) << msg << ": Mismatch at index " << i;
             }
-        } else if (ref_cpu.scalar_type() == torch::kInt64) {
-            auto ref_ptr = ref_cpu.data_ptr<int64_t>();
-            for (size_t i = 0; i < custom_vec.size(); ++i) {
-                EXPECT_EQ(custom_vec[i], static_cast<int>(ref_ptr[i]))
-                    << msg << ": Mismatch at index " << i;
+        } else if (custom_cpu.dtype() == DataType::Int32 || custom_cpu.dtype() == DataType::Int64) {
+            auto custom_vec = custom_cpu.to_vector_int();
+            if (ref_cpu.scalar_type() == torch::kInt32) {
+                auto ref_ptr = ref_cpu.data_ptr<int32_t>();
+                for (size_t i = 0; i < custom_vec.size(); ++i) {
+                    EXPECT_EQ(custom_vec[i], ref_ptr[i]) << msg << ": Mismatch at index " << i;
+                }
+            } else if (ref_cpu.scalar_type() == torch::kInt64) {
+                auto ref_ptr = ref_cpu.data_ptr<int64_t>();
+                for (size_t i = 0; i < custom_vec.size(); ++i) {
+                    EXPECT_EQ(custom_vec[i], static_cast<int>(ref_ptr[i]))
+                        << msg << ": Mismatch at index " << i;
+                }
             }
-        }
-    } else {
-        auto custom_vec = custom_cpu.to_vector();
-        auto ref_ptr = ref_cpu.data_ptr<float>();
-        for (size_t i = 0; i < custom_vec.size(); ++i) {
-            if (std::isnan(ref_ptr[i])) {
-                EXPECT_TRUE(std::isnan(custom_vec[i])) << msg << ": Expected NaN at index " << i;
-            } else if (std::isinf(ref_ptr[i])) {
-                EXPECT_TRUE(std::isinf(custom_vec[i])) << msg << ": Expected Inf at index " << i;
-            } else {
-                float diff = std::abs(custom_vec[i] - ref_ptr[i]);
-                float threshold = atol + rtol * std::abs(ref_ptr[i]);
-                EXPECT_LE(diff, threshold)
-                    << msg << ": Mismatch at index " << i
-                    << " (custom=" << custom_vec[i] << ", ref=" << ref_ptr[i] << ")";
+        } else {
+            auto custom_vec = custom_cpu.to_vector();
+            auto ref_ptr = ref_cpu.data_ptr<float>();
+            for (size_t i = 0; i < custom_vec.size(); ++i) {
+                if (std::isnan(ref_ptr[i])) {
+                    EXPECT_TRUE(std::isnan(custom_vec[i])) << msg << ": Expected NaN at index " << i;
+                } else if (std::isinf(ref_ptr[i])) {
+                    EXPECT_TRUE(std::isinf(custom_vec[i])) << msg << ": Expected Inf at index " << i;
+                } else {
+                    float diff = std::abs(custom_vec[i] - ref_ptr[i]);
+                    float threshold = atol + rtol * std::abs(ref_ptr[i]);
+                    EXPECT_LE(diff, threshold)
+                        << msg << ": Mismatch at index " << i
+                        << " (custom=" << custom_vec[i] << ", ref=" << ref_ptr[i] << ")";
+                }
             }
         }
     }
-}
 
 } // anonymous namespace
 
@@ -338,7 +338,8 @@ TEST_F(TensorIndexingAdvancedTest, IndexSelectWithWrapMode) {
     std::vector<int64_t> indices_wrapped;
     for (int idx : indices_vec) {
         int wrapped = idx % 5;
-        if (wrapped < 0) wrapped += 5;
+        if (wrapped < 0)
+            wrapped += 5;
         indices_wrapped.push_back(wrapped);
     }
     auto indices_torch = torch::tensor(indices_wrapped, torch::kInt64);
@@ -383,7 +384,8 @@ TEST_F(TensorIndexingAdvancedTest, GatherWithWrapMode) {
     std::vector<int64_t> indices_wrapped;
     for (int idx : indices_vec) {
         int wrapped = idx % 3;
-        if (wrapped < 0) wrapped += 3;
+        if (wrapped < 0)
+            wrapped += 3;
         indices_wrapped.push_back(wrapped);
     }
     auto indices_torch = torch::tensor(indices_wrapped, torch::kInt64).reshape({1, 3}).expand({2, 3});
@@ -402,7 +404,7 @@ TEST_F(TensorIndexingAdvancedTest, NonzeroBasic) {
     auto t_torch = torch::tensor(data_vec);
 
     auto result_custom = t_custom.nonzero();
-    auto result_torch = t_torch.nonzero().squeeze(-1);  // PyTorch returns 2D, we want 1D
+    auto result_torch = t_torch.nonzero().squeeze(-1); // PyTorch returns 2D, we want 1D
 
     compare_tensors(result_custom, result_torch, 1e-5f, 1e-7f, "NonzeroBasic");
 }
@@ -518,7 +520,8 @@ TEST_F(TensorIndexingAdvancedTest, GatherBasic) {
 
 TEST_F(TensorIndexingAdvancedTest, Gather2D) {
     std::vector<float> data_vec;
-    for (int i = 0; i < 12; ++i) data_vec.push_back(static_cast<float>(i));
+    for (int i = 0; i < 12; ++i)
+        data_vec.push_back(static_cast<float>(i));
 
     auto t_custom = Tensor::from_vector(data_vec, {3, 4}, Device::CPU);
     auto t_torch = torch::tensor(data_vec).reshape({3, 4});
@@ -539,7 +542,8 @@ TEST_F(TensorIndexingAdvancedTest, Gather2D) {
 
 TEST_F(TensorIndexingAdvancedTest, TakeBasic) {
     std::vector<float> data_vec;
-    for (int i = 0; i < 12; ++i) data_vec.push_back(static_cast<float>(i));
+    for (int i = 0; i < 12; ++i)
+        data_vec.push_back(static_cast<float>(i));
 
     auto t_custom = Tensor::from_vector(data_vec, {3, 4}, Device::CPU);
     auto t_torch = torch::tensor(data_vec).reshape({3, 4});

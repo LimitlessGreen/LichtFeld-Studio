@@ -4,12 +4,12 @@
 
 #pragma once
 
+#include "cuda_memory.hpp"
 #include "istrategy.hpp"
 #include "optimizers/fused_adam.hpp"
 #include "optimizers/scheduler.hpp"
 #include <memory>
 #include <torch/torch.h>
-#include "cuda_memory.hpp"
 
 namespace gs::training {
     class MCMC : public IStrategy {

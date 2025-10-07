@@ -1,10 +1,10 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <gtest/gtest.h>
 #include "core/tensor.hpp"
-#include <torch/torch.h>
+#include <gtest/gtest.h>
 #include <limits>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -12,42 +12,42 @@ using namespace gs;
 
 namespace {
 
-torch::Tensor to_torch(const Tensor& t) {
-    auto options = torch::TensorOptions()
-        .dtype([&]() {
-            switch (t.dtype()) {
-                case DataType::Float32: return torch::kFloat32;
-                case DataType::Float16: return torch::kFloat16;
-                case DataType::Int32: return torch::kInt32;
-                case DataType::Int64: return torch::kInt64;
-                case DataType::UInt8: return torch::kUInt8;
-                case DataType::Bool: return torch::kBool;
-                default: return torch::kFloat32;
-            }
-        }())
-        .device(t.device() == Device::CPU ? torch::kCPU : torch::kCUDA);
+    torch::Tensor to_torch(const Tensor& t) {
+        auto options = torch::TensorOptions()
+                           .dtype([&]() {
+                               switch (t.dtype()) {
+                               case DataType::Float32: return torch::kFloat32;
+                               case DataType::Float16: return torch::kFloat16;
+                               case DataType::Int32: return torch::kInt32;
+                               case DataType::Int64: return torch::kInt64;
+                               case DataType::UInt8: return torch::kUInt8;
+                               case DataType::Bool: return torch::kBool;
+                               default: return torch::kFloat32;
+                               }
+                           }())
+                           .device(t.device() == Device::CPU ? torch::kCPU : torch::kCUDA);
 
-    std::vector<int64_t> shape;
-    for (size_t i = 0; i < t.ndim(); ++i) {
-        shape.push_back(static_cast<int64_t>(t.size(i)));
+        std::vector<int64_t> shape;
+        for (size_t i = 0; i < t.ndim(); ++i) {
+            shape.push_back(static_cast<int64_t>(t.size(i)));
+        }
+
+        torch::Tensor result = torch::empty(shape, options);
+
+        if (t.device() == Device::CPU) {
+            std::memcpy(result.data_ptr(), t.raw_ptr(), t.bytes());
+        } else {
+            cudaMemcpy(result.data_ptr(), t.raw_ptr(), t.bytes(), cudaMemcpyDeviceToDevice);
+        }
+
+        return result;
     }
 
-    torch::Tensor result = torch::empty(shape, options);
+    Tensor from_torch(const torch::Tensor& t, Device device = Device::CPU) {
+        auto t_cont = t.contiguous();
 
-    if (t.device() == Device::CPU) {
-        std::memcpy(result.data_ptr(), t.raw_ptr(), t.bytes());
-    } else {
-        cudaMemcpy(result.data_ptr(), t.raw_ptr(), t.bytes(), cudaMemcpyDeviceToDevice);
-    }
-
-    return result;
-}
-
-Tensor from_torch(const torch::Tensor& t, Device device = Device::CPU) {
-    auto t_cont = t.contiguous();
-
-    DataType dtype;
-    switch (t_cont.scalar_type()) {
+        DataType dtype;
+        switch (t_cont.scalar_type()) {
         case torch::kFloat32: dtype = DataType::Float32; break;
         case torch::kFloat16: dtype = DataType::Float16; break;
         case torch::kInt32: dtype = DataType::Int32; break;
@@ -55,112 +55,112 @@ Tensor from_torch(const torch::Tensor& t, Device device = Device::CPU) {
         case torch::kUInt8: dtype = DataType::UInt8; break;
         case torch::kBool: dtype = DataType::Bool; break;
         default: dtype = DataType::Float32; break;
-    }
+        }
 
-    std::vector<size_t> shape;
-    for (int64_t i = 0; i < t_cont.dim(); ++i) {
-        shape.push_back(static_cast<size_t>(t_cont.size(i)));
-    }
+        std::vector<size_t> shape;
+        for (int64_t i = 0; i < t_cont.dim(); ++i) {
+            shape.push_back(static_cast<size_t>(t_cont.size(i)));
+        }
 
-    Tensor result = Tensor::empty(TensorShape(shape), device, dtype);
+        Tensor result = Tensor::empty(TensorShape(shape), device, dtype);
 
-    if (device == Device::CPU) {
-        std::memcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes());
-    } else {
-        if (t_cont.is_cpu()) {
-            cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyHostToDevice);
+        if (device == Device::CPU) {
+            std::memcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes());
         } else {
-            cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyDeviceToDevice);
+            if (t_cont.is_cpu()) {
+                cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyHostToDevice);
+            } else {
+                cudaMemcpy(result.raw_ptr(), t_cont.data_ptr(), result.bytes(), cudaMemcpyDeviceToDevice);
+            }
         }
+
+        return result;
     }
 
-    return result;
-}
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
+        auto ref_cpu = reference.cpu();
+        auto custom_cpu = custom.cpu();
 
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                    float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
-    auto ref_cpu = reference.cpu();
-    auto custom_cpu = custom.cpu();
+        ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
 
-    ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << msg << ": Rank mismatch";
-
-    for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
-        ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
-            << msg << ": Shape mismatch at dim " << i;
-    }
-
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
-        << msg << ": Element count mismatch";
-
-    if (custom_cpu.dtype() == DataType::Bool || ref_cpu.scalar_type() == torch::kBool) {
-        auto custom_vec = custom_cpu.to_vector_bool();
-        auto ref_ptr = ref_cpu.data_ptr<bool>();
-        for (size_t i = 0; i < custom_vec.size(); ++i) {
-            EXPECT_EQ(custom_vec[i], ref_ptr[i]) << msg << ": Mismatch at index " << i;
+        for (size_t i = 0; i < custom_cpu.ndim(); ++i) {
+            ASSERT_EQ(custom_cpu.size(i), static_cast<size_t>(ref_cpu.size(i)))
+                << msg << ": Shape mismatch at dim " << i;
         }
-    } else if (custom_cpu.dtype() == DataType::Int32 || custom_cpu.dtype() == DataType::Int64) {
-        auto custom_vec = custom_cpu.to_vector_int();
-        if (ref_cpu.scalar_type() == torch::kInt32) {
-            auto ref_ptr = ref_cpu.data_ptr<int32_t>();
+
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel()))
+            << msg << ": Element count mismatch";
+
+        if (custom_cpu.dtype() == DataType::Bool || ref_cpu.scalar_type() == torch::kBool) {
+            auto custom_vec = custom_cpu.to_vector_bool();
+            auto ref_ptr = ref_cpu.data_ptr<bool>();
             for (size_t i = 0; i < custom_vec.size(); ++i) {
                 EXPECT_EQ(custom_vec[i], ref_ptr[i]) << msg << ": Mismatch at index " << i;
             }
-        } else if (ref_cpu.scalar_type() == torch::kInt64) {
-            auto ref_ptr = ref_cpu.data_ptr<int64_t>();
+        } else if (custom_cpu.dtype() == DataType::Int32 || custom_cpu.dtype() == DataType::Int64) {
+            auto custom_vec = custom_cpu.to_vector_int();
+            if (ref_cpu.scalar_type() == torch::kInt32) {
+                auto ref_ptr = ref_cpu.data_ptr<int32_t>();
+                for (size_t i = 0; i < custom_vec.size(); ++i) {
+                    EXPECT_EQ(custom_vec[i], ref_ptr[i]) << msg << ": Mismatch at index " << i;
+                }
+            } else if (ref_cpu.scalar_type() == torch::kInt64) {
+                auto ref_ptr = ref_cpu.data_ptr<int64_t>();
+                for (size_t i = 0; i < custom_vec.size(); ++i) {
+                    EXPECT_EQ(custom_vec[i], static_cast<int>(ref_ptr[i]))
+                        << msg << ": Mismatch at index " << i;
+                }
+            }
+        } else {
+            auto custom_vec = custom_cpu.to_vector();
+            auto ref_ptr = ref_cpu.data_ptr<float>();
             for (size_t i = 0; i < custom_vec.size(); ++i) {
-                EXPECT_EQ(custom_vec[i], static_cast<int>(ref_ptr[i]))
-                    << msg << ": Mismatch at index " << i;
-            }
-        }
-    } else {
-        auto custom_vec = custom_cpu.to_vector();
-        auto ref_ptr = ref_cpu.data_ptr<float>();
-        for (size_t i = 0; i < custom_vec.size(); ++i) {
-            if (std::isnan(ref_ptr[i])) {
-                EXPECT_TRUE(std::isnan(custom_vec[i])) << msg << ": Expected NaN at index " << i;
-            } else if (std::isinf(ref_ptr[i])) {
-                EXPECT_TRUE(std::isinf(custom_vec[i])) << msg << ": Expected Inf at index " << i;
-            } else {
-                float diff = std::abs(custom_vec[i] - ref_ptr[i]);
-                float threshold = atol + rtol * std::abs(ref_ptr[i]);
-                EXPECT_LE(diff, threshold)
-                    << msg << ": Mismatch at index " << i
-                    << " (custom=" << custom_vec[i] << ", ref=" << ref_ptr[i] << ")";
+                if (std::isnan(ref_ptr[i])) {
+                    EXPECT_TRUE(std::isnan(custom_vec[i])) << msg << ": Expected NaN at index " << i;
+                } else if (std::isinf(ref_ptr[i])) {
+                    EXPECT_TRUE(std::isinf(custom_vec[i])) << msg << ": Expected Inf at index " << i;
+                } else {
+                    float diff = std::abs(custom_vec[i] - ref_ptr[i]);
+                    float threshold = atol + rtol * std::abs(ref_ptr[i]);
+                    EXPECT_LE(diff, threshold)
+                        << msg << ": Mismatch at index " << i
+                        << " (custom=" << custom_vec[i] << ", ref=" << ref_ptr[i] << ")";
+                }
             }
         }
     }
-}
 
-// Helper to check CUDA availability
-bool is_cuda_available() {
-    int device_count = 0;
-    cudaError_t err = cudaGetDeviceCount(&device_count);
-    if (err != cudaSuccess || device_count == 0) {
-        return false;
+    // Helper to check CUDA availability
+    bool is_cuda_available() {
+        int device_count = 0;
+        cudaError_t err = cudaGetDeviceCount(&device_count);
+        if (err != cudaSuccess || device_count == 0) {
+            return false;
+        }
+
+        // Try to initialize device 0
+        err = cudaSetDevice(0);
+        if (err != cudaSuccess) {
+            return false;
+        }
+
+        // Try to allocate and free memory to verify device works
+        void* test_ptr = nullptr;
+        err = cudaMalloc(&test_ptr, 1024);
+        if (err != cudaSuccess) {
+            return false;
+        }
+        cudaFree(test_ptr);
+
+        // Synchronize to catch any lingering errors
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            return false;
+        }
+
+        return true;
     }
-
-    // Try to initialize device 0
-    err = cudaSetDevice(0);
-    if (err != cudaSuccess) {
-        return false;
-    }
-
-    // Try to allocate and free memory to verify device works
-    void* test_ptr = nullptr;
-    err = cudaMalloc(&test_ptr, 1024);
-    if (err != cudaSuccess) {
-        return false;
-    }
-    cudaFree(test_ptr);
-
-    // Synchronize to catch any lingering errors
-    err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        return false;
-    }
-
-    return true;
-}
 } // anonymous namespace
 
 class TensorClampTest : public ::testing::Test {
@@ -232,7 +232,7 @@ TEST_F(TensorClampTest, ClampInPlaceBasic) {
     auto& result_custom = t_custom.clamp_(-1.0f, 3.0f);
     t_torch.clamp_(-1.0f, 3.0f);
 
-    EXPECT_EQ(&result_custom, &t_custom);  // Should return reference to same object
+    EXPECT_EQ(&result_custom, &t_custom); // Should return reference to same object
 
     compare_tensors(t_custom, t_torch, 1e-5f, 1e-7f, "ClampInPlace");
 }
@@ -455,11 +455,11 @@ TEST_F(TensorClampTest, ClampChaining) {
 
     // Chain multiple clamps
     auto result_custom = t_custom.clamp(-10.0f, 10.0f)
-                                 .clamp(-5.0f, 5.0f)
-                                 .clamp(-1.0f, 1.0f);
+                             .clamp(-5.0f, 5.0f)
+                             .clamp(-1.0f, 1.0f);
     auto result_torch = t_torch.clamp(-10.0f, 10.0f)
-                               .clamp(-5.0f, 5.0f)
-                               .clamp(-1.0f, 1.0f);
+                            .clamp(-5.0f, 5.0f)
+                            .clamp(-1.0f, 1.0f);
 
     compare_tensors(result_custom, result_torch, 1e-5f, 1e-7f, "ClampChaining");
 }
@@ -585,8 +585,7 @@ TEST_F(TensorClampTest, ClampWithInfValues) {
     std::vector<float> data = {
         -std::numeric_limits<float>::infinity(),
         0.0f,
-        std::numeric_limits<float>::infinity()
-    };
+        std::numeric_limits<float>::infinity()};
 
     auto t_custom = Tensor::from_vector(data, {3}, Device::CPU);
     auto t_torch = torch::tensor(data);

@@ -21,8 +21,6 @@
 namespace gs::tensor {
 
     // ============= Creation Utilities =============
-    // These functions are in the tensor namespace, not Tensor class
-    // They delegate to Tensor static methods
 
     Tensor diag(const Tensor& diagonal) {
         if (diagonal.ndim() != 1) {
@@ -72,152 +70,19 @@ namespace gs::tensor {
         return t;
     }
 
-    // ============= Stack/Concatenate Operations =============
+    // ============= Wrappers for Tensor Static Methods =============
+    // These maintain the tensor:: namespace API style
+
     Tensor stack(std::vector<Tensor>&& tensors, int dim) {
-        if (tensors.empty()) {
-            LOG_ERROR("Cannot stack empty vector of tensors");
-            return Tensor();
-        }
-
-        // Check all shapes are the same
-        const auto& first_shape = tensors[0].shape();
-        const auto first_device = tensors[0].device();
-        const auto first_dtype = tensors[0].dtype();
-
-        for (size_t i = 1; i < tensors.size(); ++i) {
-            if (tensors[i].shape() != first_shape) {
-                LOG_ERROR("All tensors must have the same shape for stack");
-                return Tensor();
-            }
-            if (tensors[i].device() != first_device) {
-                LOG_ERROR("All tensors must be on the same device");
-                return Tensor();
-            }
-            if (tensors[i].dtype() != first_dtype) {
-                LOG_ERROR("All tensors must have the same dtype");
-                return Tensor();
-            }
-        }
-
-        // Create new shape with added dimension
-        std::vector<size_t> new_dims = first_shape.dims();
-
-        // Adjust dim to be positive
-        if (dim < 0) {
-            dim = first_shape.rank() + dim + 1;
-        }
-
-        if (dim < 0 || dim > static_cast<int>(first_shape.rank())) {
-            LOG_ERROR("Invalid dimension for stack: {}", dim);
-            return Tensor();
-        }
-
-        new_dims.insert(new_dims.begin() + dim, tensors.size());
-
-        // Create result tensor
-        auto result = Tensor::empty(TensorShape(new_dims), first_device);
-
-        // Copy tensors
-        size_t elements_per_tensor = first_shape.elements();
-        size_t bytes_per_tensor = elements_per_tensor * dtype_size(first_dtype);
-
-        if (dim == 0) {
-            // Simple case: stack along first dimension
-            for (size_t i = 0; i < tensors.size(); ++i) {
-                void* dst = static_cast<char*>(result.raw_ptr()) + i * bytes_per_tensor;
-                if (first_device == Device::CUDA) {
-                    CHECK_CUDA(cudaMemcpy(dst, tensors[i].raw_ptr(), bytes_per_tensor,
-                                          cudaMemcpyDeviceToDevice));
-                } else {
-                    std::memcpy(dst, tensors[i].raw_ptr(), bytes_per_tensor);
-                }
-            }
-        } else {
-            // More complex stacking - would need proper implementation
-            LOG_ERROR("Stack along dimension {} not fully implemented", dim);
-            return Tensor();
-        }
-
-        return result;
+        return Tensor::stack(tensors, dim);
     }
 
     Tensor cat(std::vector<Tensor>&& tensors, int dim) {
-        if (tensors.empty()) {
-            LOG_ERROR("Cannot concatenate empty vector of tensors");
-            return Tensor();
-        }
-
-        if (tensors.size() == 1) {
-            return std::move(tensors[0]);
-        }
-
-        // For now, only implement dim=0
-        if (dim != 0) {
-            LOG_ERROR("Concatenation only implemented for dim=0");
-            return Tensor();
-        }
-
-        // Check shapes (all dimensions except dim must match)
-        const auto& first_shape = tensors[0].shape();
-        const auto first_device = tensors[0].device();
-        const auto first_dtype = tensors[0].dtype();
-
-        size_t total_size_along_dim = first_shape[0];
-
-        for (size_t i = 1; i < tensors.size(); ++i) {
-            const auto& shape = tensors[i].shape();
-
-            if (shape.rank() != first_shape.rank()) {
-                LOG_ERROR("All tensors must have the same number of dimensions");
-                return Tensor();
-            }
-
-            for (size_t d = 1; d < shape.rank(); ++d) {
-                if (shape[d] != first_shape[d]) {
-                    LOG_ERROR("All dimensions except dim={} must match", dim);
-                    return Tensor();
-                }
-            }
-
-            if (tensors[i].device() != first_device) {
-                LOG_ERROR("All tensors must be on the same device");
-                return Tensor();
-            }
-
-            if (tensors[i].dtype() != first_dtype) {
-                LOG_ERROR("All tensors must have the same dtype");
-                return Tensor();
-            }
-
-            total_size_along_dim += shape[0];
-        }
-
-        // Create result shape
-        std::vector<size_t> result_dims = first_shape.dims();
-        result_dims[0] = total_size_along_dim;
-
-        // Create result tensor
-        auto result = Tensor::empty(TensorShape(result_dims), first_device);
-
-        // Copy data
-        size_t offset = 0;
-        for (auto& t : tensors) {
-            size_t bytes = t.bytes();
-            void* dst = static_cast<char*>(result.raw_ptr()) + offset;
-
-            if (first_device == Device::CUDA) {
-                CHECK_CUDA(cudaMemcpy(dst, t.raw_ptr(), bytes, cudaMemcpyDeviceToDevice));
-            } else {
-                std::memcpy(dst, t.raw_ptr(), bytes);
-            }
-
-            offset += bytes;
-        }
-
-        return result;
+        return Tensor::cat(tensors, dim);
     }
 
     // ============= Like Operations =============
+
     Tensor zeros_like(const Tensor& other) {
         return Tensor::zeros(other.shape(), other.device(), other.dtype());
     }
@@ -226,7 +91,6 @@ namespace gs::tensor {
         return Tensor::ones(other.shape(), other.device(), other.dtype());
     }
 
-    // NEW: ones_like with dtype parameter
     Tensor ones_like(const Tensor& other, DataType dtype) {
         return Tensor::ones(other.shape(), other.device(), dtype);
     }
@@ -240,6 +104,7 @@ namespace gs::tensor {
     }
 
     // ============= Utility Functions =============
+
     bool check_valid(const Tensor& t, const std::string& name) {
         if (!t.is_valid()) {
             LOG_ERROR("Tensor '{}' is invalid", name);

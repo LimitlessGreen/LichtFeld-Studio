@@ -6,12 +6,12 @@
 #include <curand_kernel.h>
 
 // Thrust headers for multinomial without replacement
+#include <thrust/copy.h>
 #include <thrust/device_vector.h>
+#include <thrust/execution_policy.h>
+#include <thrust/reduce.h>
 #include <thrust/sequence.h>
 #include <thrust/sort.h>
-#include <thrust/copy.h>
-#include <thrust/reduce.h>
-#include <thrust/execution_policy.h>
 
 namespace gs::tensor_ops {
 
@@ -75,8 +75,10 @@ namespace gs::tensor_ops {
             int result = low + static_cast<int>(val * range);
 
             // Clamp to ensure bounds (handle edge cases)
-            if (result >= high) result = high - 1;
-            if (result < low) result = low;
+            if (result >= high)
+                result = high - 1;
+            if (result < low)
+                result = low;
 
             data[idx] = result;
         }
@@ -88,7 +90,8 @@ namespace gs::tensor_ops {
                                                         float sum, unsigned long long seed) {
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-        if (idx >= num_samples) return;
+        if (idx >= num_samples)
+            return;
 
         curandState state;
         curand_init(seed, idx, 0, &state);
@@ -115,7 +118,8 @@ namespace gs::tensor_ops {
                                                 unsigned long n, unsigned long long seed) {
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-        if (idx >= n) return;
+        if (idx >= n)
+            return;
 
         curandState state;
         curand_init(seed, idx, 0, &state);
@@ -138,7 +142,8 @@ namespace gs::tensor_ops {
 
     void launch_uniform(float* data, size_t n, float low, float high,
                         unsigned long long seed, cudaStream_t stream) {
-        if (n == 0) return;
+        if (n == 0)
+            return;
 
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
@@ -147,7 +152,8 @@ namespace gs::tensor_ops {
 
     void launch_normal(float* data, size_t n, float mean, float std,
                        unsigned long long seed, cudaStream_t stream) {
-        if (n == 0) return;
+        if (n == 0)
+            return;
 
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
@@ -156,7 +162,8 @@ namespace gs::tensor_ops {
 
     void launch_bernoulli(float* data, size_t n, float p,
                           unsigned long long seed, cudaStream_t stream) {
-        if (n == 0) return;
+        if (n == 0)
+            return;
 
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
@@ -165,7 +172,8 @@ namespace gs::tensor_ops {
 
     void launch_randint(int* data, size_t n, int low, int high,
                         unsigned long long seed, cudaStream_t stream) {
-        if (n == 0) return;
+        if (n == 0)
+            return;
 
         int block_size = 256;
         int grid_size = (n + block_size - 1) / block_size;
@@ -173,9 +181,10 @@ namespace gs::tensor_ops {
     }
 
     void launch_multinomial(const float* weights, int* samples,
-                           unsigned long n, unsigned long num_samples, bool replacement,
-                           unsigned long long seed, cudaStream_t stream) {
-        if (n == 0 || num_samples == 0) return;
+                            unsigned long n, unsigned long num_samples, bool replacement,
+                            unsigned long long seed, cudaStream_t stream) {
+        if (n == 0 || num_samples == 0)
+            return;
 
         // Compute sum of weights using Thrust
         auto weights_ptr = thrust::device_pointer_cast(weights);
@@ -183,8 +192,7 @@ namespace gs::tensor_ops {
             thrust::cuda::par.on(stream),
             weights_ptr, weights_ptr + n,
             0.0f,
-            thrust::plus<float>()
-        );
+            thrust::plus<float>());
 
         if (sum <= 0) {
             // Invalid weights, fill with zeros
@@ -218,24 +226,21 @@ namespace gs::tensor_ops {
             // Initialize indices [0, 1, 2, ..., n-1]
             thrust::sequence(
                 thrust::cuda::par.on(stream),
-                indices.begin(), indices.end()
-            );
+                indices.begin(), indices.end());
 
             // Sort indices by keys in descending order
             thrust::sort_by_key(
                 thrust::cuda::par.on(stream),
                 keys.begin(), keys.end(),
                 indices.begin(),
-                thrust::greater<float>()
-            );
+                thrust::greater<float>());
 
             // Copy the first num_samples indices to output
             thrust::copy_n(
                 thrust::cuda::par.on(stream),
                 indices.begin(),
                 num_samples,
-                thrust::device_pointer_cast(samples)
-            );
+                thrust::device_pointer_cast(samples));
         }
     }
 

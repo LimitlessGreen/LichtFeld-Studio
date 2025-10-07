@@ -28,13 +28,13 @@ namespace gs {
 
     // ============= Constructors & Destructor =============
     Tensor::Tensor(void* data, TensorShape shape, Device device, DataType dtype)
-    : data_(data),
-      data_owner_(nullptr),  // Non-owning view
-      shape_(shape),
-      device_(device),
-      dtype_(dtype),
-      initialized_(true),
-      id_(next_id_++) {
+        : data_(data),
+          data_owner_(nullptr), // Non-owning view
+          shape_(shape),
+          device_(device),
+          dtype_(dtype),
+          initialized_(true),
+          id_(next_id_++) {
 
         if (profiling_enabled_) {
             LOG_DEBUG("Created tensor #{} (view): shape={}, device={}, dtype={}",
@@ -43,14 +43,14 @@ namespace gs {
     }
 
     Tensor::Tensor(Tensor&& other) noexcept
-    : data_(other.data_),
-      data_owner_(std::move(other.data_owner_)),
-      shape_(other.shape_),
-      device_(other.device_),
-      dtype_(other.dtype_),
-      initialized_(other.initialized_),
-      is_view_(other.is_view_),
-      id_(other.id_) {
+        : data_(other.data_),
+          data_owner_(std::move(other.data_owner_)),
+          shape_(other.shape_),
+          device_(other.device_),
+          dtype_(other.dtype_),
+          initialized_(other.initialized_),
+          is_view_(other.is_view_),
+          id_(other.id_) {
 
         other.data_ = nullptr;
         other.initialized_ = false;
@@ -151,7 +151,7 @@ namespace gs {
 
             if (device_ == Device::CUDA) {
                 tensor_ops::launch_bool_to_float(ptr<unsigned char>(), result.ptr<float>(),
-                                                numel(), 0);
+                                                 numel(), 0);
                 CHECK_CUDA(cudaDeviceSynchronize());
             } else {
                 const unsigned char* src = ptr<unsigned char>();
@@ -174,7 +174,7 @@ namespace gs {
 
             if (device_ == Device::CUDA) {
                 tensor_ops::launch_float_to_bool(ptr<float>(), result.ptr<unsigned char>(),
-                                                numel(), 0);
+                                                 numel(), 0);
                 CHECK_CUDA(cudaDeviceSynchronize());
             } else {
                 const float* src = ptr<float>();
@@ -197,7 +197,7 @@ namespace gs {
 
             if (device_ == Device::CUDA) {
                 tensor_ops::launch_float_to_int(ptr<float>(), result.ptr<int>(),
-                                               numel(), 0);
+                                                numel(), 0);
                 CHECK_CUDA(cudaDeviceSynchronize());
             } else {
                 const float* src = ptr<float>();
@@ -220,7 +220,7 @@ namespace gs {
 
             if (device_ == Device::CUDA) {
                 tensor_ops::launch_int_to_float(ptr<int>(), result.ptr<float>(),
-                                               numel(), 0);
+                                                numel(), 0);
                 CHECK_CUDA(cudaDeviceSynchronize());
             } else {
                 const int* src = ptr<int>();
@@ -311,7 +311,7 @@ namespace gs {
 
         if (device_ == Device::CUDA) {
             tensor_ops::launch_unary_op(data_, result.data_, numel(),
-                                       UnaryOp::LogicalNot, dtype_, nullptr);
+                                        UnaryOp::LogicalNot, dtype_, nullptr);
             cudaDeviceSynchronize();
         } else {
             const unsigned char* src = ptr<unsigned char>();
@@ -381,75 +381,77 @@ namespace gs {
         return clamp_(std::numeric_limits<float>::lowest(), max);
     }
     // ============= Cumulative sum =============
-Tensor Tensor::cumsum(int dim) const {
-    if (!is_valid()) {
-        LOG_ERROR("cumsum on invalid tensor");
-        return Tensor();
-    }
+    Tensor Tensor::cumsum(int dim) const {
+        if (!is_valid()) {
+            LOG_ERROR("cumsum on invalid tensor");
+            return Tensor();
+        }
 
-    dim = resolve_dim(dim);
-    if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
-        LOG_ERROR("Invalid dimension for cumsum: {}", dim);
-        return Tensor();
-    }
+        dim = resolve_dim(dim);
+        if (dim < 0 || dim >= static_cast<int>(shape_.rank())) {
+            LOG_ERROR("Invalid dimension for cumsum: {}", dim);
+            return Tensor();
+        }
 
-    auto result = clone();
+        auto result = clone();
 
-    if (device_ == Device::CUDA) {
-        // Use CUDA kernel for cumulative sum
-        tensor_ops::launch_cumsum(result.raw_ptr(), shape_.dims().data(),
-                                 shape_.rank(), dim, dtype_, nullptr);
-        cudaDeviceSynchronize();
-    } else {
-        // CPU implementation - iterate through all elements in row-major order
-        if (dtype_ == DataType::Float32) {
-            float* data = result.ptr<float>();
+        if (device_ == Device::CUDA) {
+            // Use CUDA kernel for cumulative sum
+            tensor_ops::launch_cumsum(result.raw_ptr(), shape_.dims().data(),
+                                      shape_.rank(), dim, dtype_, nullptr);
+            cudaDeviceSynchronize();
+        } else {
+            // CPU implementation - iterate through all elements in row-major order
+            if (dtype_ == DataType::Float32) {
+                float* data = result.ptr<float>();
 
-            // Calculate strides for all dimensions (row-major)
-            std::vector<size_t> strides(shape_.rank());
-            strides.back() = 1;
-            for (int i = static_cast<int>(shape_.rank()) - 2; i >= 0; --i) {
-                strides[i] = strides[i + 1] * shape_[i + 1];
-            }
+                // Calculate strides for all dimensions (row-major)
+                std::vector<size_t> strides(shape_.rank());
+                strides.back() = 1;
+                for (int i = static_cast<int>(shape_.rank()) - 2; i >= 0; --i) {
+                    strides[i] = strides[i + 1] * shape_[i + 1];
+                }
 
-            size_t dim_stride = strides[dim];
-            size_t dim_size = shape_[dim];
-            size_t total = numel();
+                size_t dim_stride = strides[dim];
+                size_t dim_size = shape_[dim];
+                size_t total = numel();
 
-            // Process each element: if not first along cumsum dim, add previous
-            for (size_t idx = 0; idx < total; ++idx) {
-                // Get coordinate along the cumsum dimension
-                size_t coord_along_dim = (idx / dim_stride) % dim_size;
+                // Process each element: if not first along cumsum dim, add previous
+                for (size_t idx = 0; idx < total; ++idx) {
+                    // Get coordinate along the cumsum dimension
+                    size_t coord_along_dim = (idx / dim_stride) % dim_size;
 
-                // Skip first elements (they stay as-is)
-                if (coord_along_dim == 0) continue;
+                    // Skip first elements (they stay as-is)
+                    if (coord_along_dim == 0)
+                        continue;
 
-                // Add the previous element along the cumsum dimension
-                data[idx] += data[idx - dim_stride];
-            }
-        } else if (dtype_ == DataType::Int32) {
-            int* data = result.ptr<int>();
+                    // Add the previous element along the cumsum dimension
+                    data[idx] += data[idx - dim_stride];
+                }
+            } else if (dtype_ == DataType::Int32) {
+                int* data = result.ptr<int>();
 
-            std::vector<size_t> strides(shape_.rank());
-            strides.back() = 1;
-            for (int i = static_cast<int>(shape_.rank()) - 2; i >= 0; --i) {
-                strides[i] = strides[i + 1] * shape_[i + 1];
-            }
+                std::vector<size_t> strides(shape_.rank());
+                strides.back() = 1;
+                for (int i = static_cast<int>(shape_.rank()) - 2; i >= 0; --i) {
+                    strides[i] = strides[i + 1] * shape_[i + 1];
+                }
 
-            size_t dim_stride = strides[dim];
-            size_t dim_size = shape_[dim];
-            size_t total = numel();
+                size_t dim_stride = strides[dim];
+                size_t dim_size = shape_[dim];
+                size_t total = numel();
 
-            for (size_t idx = 0; idx < total; ++idx) {
-                size_t coord_along_dim = (idx / dim_stride) % dim_size;
-                if (coord_along_dim == 0) continue;
-                data[idx] += data[idx - dim_stride];
+                for (size_t idx = 0; idx < total; ++idx) {
+                    size_t coord_along_dim = (idx / dim_stride) % dim_size;
+                    if (coord_along_dim == 0)
+                        continue;
+                    data[idx] += data[idx - dim_stride];
+                }
             }
         }
-    }
 
-    return result;
-}
+        return result;
+    }
 
     // ============= TensorShape Implementation =============
     std::string TensorShape::str() const {
@@ -744,9 +746,7 @@ Tensor Tensor::cumsum(int dim) const {
     // ============= Validation & Assertions =============
     Tensor& Tensor::assert_shape(TensorShape expected, const std::string& msg) {
         if (shape_ != expected) {
-            std::string error_msg = msg.empty() ?
-                "Shape assertion failed: expected " + expected.str() + " but got " + shape_.str() :
-                msg;
+            std::string error_msg = msg.empty() ? "Shape assertion failed: expected " + expected.str() + " but got " + shape_.str() : msg;
             LOG_ERROR("{}", error_msg);
             throw TensorError(error_msg, this);
         }
@@ -756,8 +756,8 @@ Tensor Tensor::cumsum(int dim) const {
     Tensor& Tensor::assert_device(Device expected) {
         if (device_ != expected) {
             std::string error_msg = "Device assertion failed: expected " +
-                std::string(device_name(expected)) + " but got " +
-                std::string(device_name(device_));
+                                    std::string(device_name(expected)) + " but got " +
+                                    std::string(device_name(device_));
             LOG_ERROR("{}", error_msg);
             throw TensorError(error_msg, this);
         }
@@ -767,8 +767,8 @@ Tensor Tensor::cumsum(int dim) const {
     Tensor& Tensor::assert_dtype(DataType expected) {
         if (dtype_ != expected) {
             std::string error_msg = "DataType assertion failed: expected " +
-                std::string(dtype_name(expected)) + " but got " +
-                std::string(dtype_name(dtype_));
+                                    std::string(dtype_name(expected)) + " but got " +
+                                    std::string(dtype_name(dtype_));
             LOG_ERROR("{}", error_msg);
             throw TensorError(error_msg, this);
         }
@@ -792,7 +792,7 @@ Tensor Tensor::cumsum(int dim) const {
 
         auto values = to_vector();
         return std::any_of(values.begin(), values.end(),
-                          [](float x) { return std::isnan(x); });
+                           [](float x) { return std::isnan(x); });
     }
 
     bool Tensor::has_inf() const {
@@ -802,61 +802,61 @@ Tensor Tensor::cumsum(int dim) const {
 
         auto values = to_vector();
         return std::any_of(values.begin(), values.end(),
-                          [](float x) { return std::isinf(x); });
+                           [](float x) { return std::isinf(x); });
     }
 
-bool Tensor::all_close(const Tensor& other, float rtol, float atol) const {
-    if (!is_valid() || !other.is_valid()) {
-        return false;
-    }
-
-    // Check shape and dtype match (but not device - we handle that below)
-    if (shape_ != other.shape_ || dtype_ != other.dtype_) {
-        return false;
-    }
-
-    // Handle empty tensors
-    if (numel() == 0) {
-        return true;  // Two empty tensors with same shape are considered close
-    }
-
-    // We need to get the data to CPU for comparison
-    const float* a_data = nullptr;
-    const float* b_data = nullptr;
-
-    // Create temporary CPU tensors if needed
-    Tensor a_temp, b_temp;
-
-    if (device_ == Device::CUDA) {
-        a_temp = to(Device::CPU);
-        a_data = a_temp.ptr<float>();
-    } else {
-        a_data = ptr<float>();
-    }
-
-    if (other.device() == Device::CUDA) {
-        b_temp = other.to(Device::CPU);
-        b_data = b_temp.ptr<float>();
-    } else {
-        b_data = other.ptr<float>();
-    }
-
-    // Check if pointers are valid
-    if (!a_data || !b_data) {
-        return false;
-    }
-
-    // Compare values with tolerance
-    for (size_t i = 0; i < numel(); ++i) {
-        float diff = std::abs(a_data[i] - b_data[i]);
-        float tol = atol + rtol * std::abs(b_data[i]);
-        if (diff > tol) {
+    bool Tensor::all_close(const Tensor& other, float rtol, float atol) const {
+        if (!is_valid() || !other.is_valid()) {
             return false;
         }
-    }
 
-    return true;
-}
+        // Check shape and dtype match (but not device - we handle that below)
+        if (shape_ != other.shape_ || dtype_ != other.dtype_) {
+            return false;
+        }
+
+        // Handle empty tensors
+        if (numel() == 0) {
+            return true; // Two empty tensors with same shape are considered close
+        }
+
+        // We need to get the data to CPU for comparison
+        const float* a_data = nullptr;
+        const float* b_data = nullptr;
+
+        // Create temporary CPU tensors if needed
+        Tensor a_temp, b_temp;
+
+        if (device_ == Device::CUDA) {
+            a_temp = to(Device::CPU);
+            a_data = a_temp.ptr<float>();
+        } else {
+            a_data = ptr<float>();
+        }
+
+        if (other.device() == Device::CUDA) {
+            b_temp = other.to(Device::CPU);
+            b_data = b_temp.ptr<float>();
+        } else {
+            b_data = other.ptr<float>();
+        }
+
+        // Check if pointers are valid
+        if (!a_data || !b_data) {
+            return false;
+        }
+
+        // Compare values with tolerance
+        for (size_t i = 0; i < numel(); ++i) {
+            float diff = std::abs(a_data[i] - b_data[i]);
+            float tol = atol + rtol * std::abs(b_data[i]);
+            if (diff > tol) {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
 #undef CHECK_CUDA
 
