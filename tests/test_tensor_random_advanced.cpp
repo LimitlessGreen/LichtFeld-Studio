@@ -86,14 +86,14 @@ protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA is not available for testing";
         torch::manual_seed(42);
-        tensor::manual_seed(42);
+        Tensor::manual_seed(42);
     }
 };
 
 // ============= Multinomial Tests =============
 
 TEST_F(TensorRandomAdvancedTest, MultinomialBasicCPU) {
-    tensor::manual_seed(123);
+    Tensor::manual_seed(123);
     torch::manual_seed(123);
 
     std::vector<float> weights_data = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
@@ -125,7 +125,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialBasicCPU) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialBasicCUDA) {
-    tensor::manual_seed(456);
+    Tensor::manual_seed(456);
     torch::manual_seed(456);
 
     std::vector<float> weights_data = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
@@ -148,7 +148,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialBasicCUDA) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialWithReplacement) {
-    tensor::manual_seed(789);
+    Tensor::manual_seed(789);
 
     std::vector<float> weights_data = {1.0f, 1.0f, 1.0f};
     auto custom_weights = Tensor::from_vector(weights_data, {3}, Device::CPU);
@@ -178,7 +178,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialWithReplacement) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialWithoutReplacement) {
-    tensor::manual_seed(999);
+    Tensor::manual_seed(999);
     torch::manual_seed(999);
 
     std::vector<float> weights_data = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
@@ -215,7 +215,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialWithoutReplacement) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialPartialSamplingWithoutReplacement) {
-    tensor::manual_seed(111);
+    Tensor::manual_seed(111);
 
     std::vector<float> weights_data = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     auto custom_weights = Tensor::from_vector(weights_data, {7}, Device::CPU);
@@ -237,7 +237,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialPartialSamplingWithoutReplacement) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialBiasedWeights) {
-    tensor::manual_seed(222);
+    Tensor::manual_seed(222);
 
     // Heavily biased weights: index 0 has weight 1000, others have weight 1
     std::vector<float> weights_data = {1000.0f, 1.0f, 1.0f, 1.0f};
@@ -262,7 +262,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialBiasedWeights) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialZeroWeight) {
-    tensor::manual_seed(333);
+    Tensor::manual_seed(333);
 
     // Some weights are zero
     std::vector<float> weights_data = {1.0f, 0.0f, 1.0f, 0.0f};
@@ -284,7 +284,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialZeroWeight) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialSingleSample) {
-    tensor::manual_seed(444);
+    Tensor::manual_seed(444);
     torch::manual_seed(444);
 
     std::vector<float> weights_data = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
@@ -326,7 +326,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialInvalidInputs) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialTooManySamplesWithoutReplacement) {
-    tensor::manual_seed(555);
+    Tensor::manual_seed(555);
 
     std::vector<float> weights_data = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     auto custom_weights = Tensor::from_vector(weights_data, {5}, Device::CPU);
@@ -350,10 +350,10 @@ TEST_F(TensorRandomAdvancedTest, MultinomialReproducibilityCPU) {
                                        6.0f, 7.0f, 8.0f, 9.0f, 10.0f};
     auto weights = Tensor::from_vector(weights_data, {10}, Device::CPU);
 
-    tensor::manual_seed(12345);
+    Tensor::manual_seed(12345);
     auto samples1 = Tensor::multinomial(weights, 20, true);
 
-    tensor::manual_seed(12345);
+    Tensor::manual_seed(12345);
     auto samples2 = Tensor::multinomial(weights, 20, true);
 
     auto values1 = samples1.to_vector_int();
@@ -367,10 +367,10 @@ TEST_F(TensorRandomAdvancedTest, MultinomialReproducibilityCUDA) {
                                        6.0f, 7.0f, 8.0f, 9.0f, 10.0f};
     auto weights = Tensor::from_vector(weights_data, {10}, Device::CUDA);
 
-    tensor::manual_seed(12345);
+    Tensor::manual_seed(12345);
     auto samples1 = Tensor::multinomial(weights, 20, true);
 
-    tensor::manual_seed(12345);
+    Tensor::manual_seed(12345);
     auto samples2 = Tensor::multinomial(weights, 20, true);
 
     auto values1 = samples1.to_vector_int();
@@ -383,10 +383,10 @@ TEST_F(TensorRandomAdvancedTest, MultinomialWithoutReplacementReproducibility) {
     std::vector<float> weights_data = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     auto weights = Tensor::from_vector(weights_data, {5}, Device::CPU);
 
-    tensor::manual_seed(67890);
+    Tensor::manual_seed(67890);
     auto samples1 = Tensor::multinomial(weights, 3, false);
 
-    tensor::manual_seed(67890);
+    Tensor::manual_seed(67890);
     auto samples2 = Tensor::multinomial(weights, 3, false);
 
     auto values1 = samples1.to_vector_int();
@@ -398,7 +398,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialWithoutReplacementReproducibility) {
 // ============= Distribution Tests =============
 
 TEST_F(TensorRandomAdvancedTest, MultinomialUniformDistribution) {
-    tensor::manual_seed(666);
+    Tensor::manual_seed(666);
 
     // Uniform weights
     std::vector<float> weights_data(10, 1.0f);
@@ -420,7 +420,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialUniformDistribution) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialSkewedDistribution) {
-    tensor::manual_seed(777);
+    Tensor::manual_seed(777);
 
     // Skewed weights: linearly increasing
     std::vector<float> weights_data;
@@ -449,7 +449,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialSkewedDistribution) {
 // ============= Performance Test =============
 
 TEST_F(TensorRandomAdvancedTest, MultinomialLargeScaleCUDA) {
-    tensor::manual_seed(888);
+    Tensor::manual_seed(888);
 
     auto weights = Tensor::ones({1000}, Device::CUDA);
     auto samples = Tensor::multinomial(weights, 10000, true);
@@ -480,7 +480,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialLargeScaleCUDA) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialLargeWeightsArray) {
-    tensor::manual_seed(999);
+    Tensor::manual_seed(999);
 
     // 10,000 uniform weights
     auto weights = Tensor::ones({10000}, Device::CUDA);
@@ -499,7 +499,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialLargeWeightsArray) {
 // ============= Integration with Other Ops =============
 
 TEST_F(TensorRandomAdvancedTest, MultinomialAsIndices) {
-    tensor::manual_seed(1111);
+    Tensor::manual_seed(1111);
 
     std::vector<float> weights_data = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     auto weights = Tensor::from_vector(weights_data, {5}, Device::CPU);
@@ -523,7 +523,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialAsIndices) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialGatherPattern) {
-    tensor::manual_seed(2222);
+    Tensor::manual_seed(2222);
 
     // Create a simple embedding-like tensor
     auto embeddings = Tensor::arange(0.0f, 20.0f).reshape({5, 4});
@@ -540,7 +540,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialGatherPattern) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialBatchProcessing) {
-    tensor::manual_seed(3333);
+    Tensor::manual_seed(3333);
 
     std::vector<float> weights_data = {1.0f, 2.0f, 3.0f, 4.0f};
     auto weights = Tensor::from_vector(weights_data, {4}, Device::CUDA);
@@ -571,7 +571,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialBatchProcessing) {
 // ============= Edge Cases =============
 
 TEST_F(TensorRandomAdvancedTest, MultinomialSingleWeight) {
-    tensor::manual_seed(4444);
+    Tensor::manual_seed(4444);
 
     std::vector<float> weights_data = {1.0f};
     auto weights = Tensor::from_vector(weights_data, {1}, Device::CPU);
@@ -589,7 +589,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialSingleWeight) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialVerySmallWeights) {
-    tensor::manual_seed(5555);
+    Tensor::manual_seed(5555);
 
     std::vector<float> weights_data = {1e-10f, 1e-10f, 1e-10f, 1e-10f};
     auto weights = Tensor::from_vector(weights_data, {4}, Device::CPU);
@@ -608,7 +608,7 @@ TEST_F(TensorRandomAdvancedTest, MultinomialVerySmallWeights) {
 }
 
 TEST_F(TensorRandomAdvancedTest, MultinomialVeryLargeWeights) {
-    tensor::manual_seed(6666);
+    Tensor::manual_seed(6666);
 
     std::vector<float> weights_data = {1e6f, 1e6f, 1e6f, 1e6f};
     auto weights = Tensor::from_vector(weights_data, {4}, Device::CPU);

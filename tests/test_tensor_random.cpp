@@ -149,7 +149,7 @@ protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA is not available for testing";
         // Only seed our library
-        tensor::manual_seed(42);
+        Tensor::manual_seed(42);
     }
 };
 
@@ -408,10 +408,10 @@ TEST_F(TensorRandomTest, MultinomialWithoutReplacement) {
 
 TEST_F(TensorRandomTest, ManualSeedReproducibility) {
     // Test that manual seed produces reproducible results
-    tensor::manual_seed(12345);
+    Tensor::manual_seed(12345);
     auto t1 = Tensor::randn({100}, Device::CUDA);
 
-    tensor::manual_seed(12345);
+    Tensor::manual_seed(12345);
     auto t2 = Tensor::randn({100}, Device::CUDA);
 
     // Should produce identical results
@@ -419,10 +419,10 @@ TEST_F(TensorRandomTest, ManualSeedReproducibility) {
 }
 
 TEST_F(TensorRandomTest, DifferentSeedsDifferentResults) {
-    tensor::manual_seed(12345);
+    Tensor::manual_seed(12345);
     auto t1 = Tensor::randn({100}, Device::CUDA);
 
-    tensor::manual_seed(54321);
+    Tensor::manual_seed(54321);
     auto t2 = Tensor::randn({100}, Device::CUDA);
 
     // Different seeds should produce different results
@@ -430,20 +430,20 @@ TEST_F(TensorRandomTest, DifferentSeedsDifferentResults) {
 }
 
 TEST_F(TensorRandomTest, UniformSeedReproducibility) {
-    tensor::manual_seed(999);
+    Tensor::manual_seed(999);
     auto t1 = Tensor::rand({200}, Device::CUDA);
 
-    tensor::manual_seed(999);
+    Tensor::manual_seed(999);
     auto t2 = Tensor::rand({200}, Device::CUDA);
 
     EXPECT_TRUE(t1.all_close(t2, 1e-6f, 1e-7f));
 }
 
 TEST_F(TensorRandomTest, RandIntSeedReproducibility) {
-    tensor::manual_seed(777);
+    Tensor::manual_seed(777);
     auto t1 = Tensor::randint({100}, 0, 10, Device::CUDA, DataType::Float32);
 
-    tensor::manual_seed(777);
+    Tensor::manual_seed(777);
     auto t2 = Tensor::randint({100}, 0, 10, Device::CUDA, DataType::Float32);
 
     EXPECT_TRUE(t1.all_close(t2, 1e-6f, 1e-7f));
@@ -453,7 +453,7 @@ TEST_F(TensorRandomTest, RandIntSeedReproducibility) {
 
 TEST_F(TensorRandomTest, RandLike) {
     auto original = Tensor::zeros({3, 4, 5}, Device::CUDA);
-    auto random = tensor::rand_like(original);
+    auto random = Tensor::rand_like(original);
 
     EXPECT_EQ(random.shape(), original.shape());
     EXPECT_EQ(random.device(), original.device());
@@ -462,7 +462,7 @@ TEST_F(TensorRandomTest, RandLike) {
 
 TEST_F(TensorRandomTest, RandnLike) {
     auto original = Tensor::ones({10, 10}, Device::CUDA);
-    auto random = tensor::randn_like(original);
+    auto random = Tensor::randn_like(original);
 
     EXPECT_EQ(random.shape(), original.shape());
     EXPECT_EQ(random.device(), original.device());
@@ -475,7 +475,7 @@ TEST_F(TensorRandomTest, RandnLike) {
 
 TEST_F(TensorRandomTest, ZerosLike) {
     auto original = Tensor::rand({5, 6}, Device::CUDA);
-    auto zeros = tensor::zeros_like(original);
+    auto zeros = Tensor::zeros_like(original);
 
     EXPECT_EQ(zeros.shape(), original.shape());
     EXPECT_EQ(zeros.device(), original.device());
@@ -488,7 +488,7 @@ TEST_F(TensorRandomTest, ZerosLike) {
 
 TEST_F(TensorRandomTest, OnesLike) {
     auto original = Tensor::rand({4, 7}, Device::CUDA);
-    auto ones = tensor::ones_like(original);
+    auto ones = Tensor::ones_like(original);
 
     EXPECT_EQ(ones.shape(), original.shape());
     EXPECT_EQ(ones.device(), original.device());
@@ -519,20 +519,20 @@ TEST_F(TensorRandomTest, CUDADistribution) {
 
 TEST_F(TensorRandomTest, CPUCUDASameSeedSameResults) {
     // Test CPU reproducibility
-    tensor::manual_seed(999);
+    Tensor::manual_seed(999);
     auto cpu_t1 = Tensor::randn({100}, Device::CPU);
 
-    tensor::manual_seed(999);
+    Tensor::manual_seed(999);
     auto cpu_t2 = Tensor::randn({100}, Device::CPU);
 
     EXPECT_TRUE(cpu_t1.all_close(cpu_t2, 1e-6f, 1e-7f))
         << "CPU should be reproducible with same seed";
 
     // Test CUDA reproducibility
-    tensor::manual_seed(999);
+    Tensor::manual_seed(999);
     auto cuda_t1 = Tensor::randn({100}, Device::CUDA);
 
-    tensor::manual_seed(999);
+    Tensor::manual_seed(999);
     auto cuda_t2 = Tensor::randn({100}, Device::CUDA);
 
     EXPECT_TRUE(cuda_t1.all_close(cuda_t2, 1e-6f, 1e-7f))
@@ -540,10 +540,10 @@ TEST_F(TensorRandomTest, CPUCUDASameSeedSameResults) {
 
     // Both should have similar distribution properties (but not identical values)
     // Use larger sample for more stable statistics
-    tensor::manual_seed(999);
+    Tensor::manual_seed(999);
     auto cpu_large = Tensor::randn({1000}, Device::CPU); // Increased from 100 to 1000
 
-    tensor::manual_seed(999);
+    Tensor::manual_seed(999);
     auto cuda_large = Tensor::randn({1000}, Device::CUDA); // Increased from 100 to 1000
 
     auto [cpu_mean, cpu_std] = compute_stats(cpu_large);
@@ -648,7 +648,7 @@ TEST_F(TensorRandomTest, ZeroElementsMultiDim) {
 // ============= Operations on Random Data =============
 
 TEST_F(TensorRandomTest, ReshapePreservesData) {
-    tensor::manual_seed(123);
+    Tensor::manual_seed(123);
     auto t = Tensor::randn({20}, Device::CUDA);
     auto original_copy = t.clone();
 
@@ -662,7 +662,7 @@ TEST_F(TensorRandomTest, ReshapePreservesData) {
 }
 
 TEST_F(TensorRandomTest, TransposePreservesData) {
-    tensor::manual_seed(456);
+    Tensor::manual_seed(456);
     auto t = Tensor::randn({3, 4}, Device::CUDA);
 
     auto transposed = t.transpose();
@@ -701,7 +701,7 @@ TEST_F(TensorRandomTest, ReductionDimensions) {
 }
 
 TEST_F(TensorRandomTest, ArithmeticOnRandom) {
-    tensor::manual_seed(789);
+    Tensor::manual_seed(789);
     auto t = Tensor::randn({100}, Device::CUDA);
     auto original = t.clone();
 
@@ -718,7 +718,7 @@ TEST_F(TensorRandomTest, ArithmeticOnRandom) {
 }
 
 TEST_F(TensorRandomTest, ChainedOperations) {
-    tensor::manual_seed(999);
+    Tensor::manual_seed(999);
     auto t = Tensor::randn({50}, Device::CUDA);
 
     auto result = t.reshape({10, 5}).t().flatten();
@@ -733,7 +733,7 @@ TEST_F(TensorRandomTest, ChainedOperations) {
 }
 
 TEST_F(TensorRandomTest, SlicePreservesData) {
-    tensor::manual_seed(111);
+    Tensor::manual_seed(111);
     auto t = Tensor::randn({100}, Device::CUDA);
 
     auto slice = t.slice(0, 10, 20);
@@ -770,7 +770,7 @@ TEST_F(TensorRandomTest, CompareGenerationSpeed) {
     const size_t n = 1000000;
 
     // Custom tensor
-    tensor::manual_seed(42);
+    Tensor::manual_seed(42);
     auto start_custom = std::chrono::high_resolution_clock::now();
     auto custom_t = Tensor::randn({n}, Device::CUDA);
     cudaDeviceSynchronize();

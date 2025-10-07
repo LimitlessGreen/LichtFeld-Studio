@@ -12,7 +12,6 @@
 #include <torch/torch.h>
 
 using namespace gs;
-using namespace gs::tensor;
 
 // ============= Helper Functions =============
 
@@ -63,7 +62,7 @@ protected:
         gen_.seed(42);
 
         torch::manual_seed(42);
-        tensor::manual_seed(42);
+        Tensor::manual_seed(42);
     }
 
     void TearDown() override {

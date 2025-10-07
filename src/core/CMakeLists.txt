@@ -2,8 +2,6 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# Core module - fundamental data structures and utilities
-
 # C++ sources (can use C++23)
 set(CORE_SOURCES
         application.cpp
@@ -14,13 +12,13 @@ set(CORE_SOURCES
         splat_data.cpp
         sogs.cpp
         tensor.cpp              # Main tensor implementation
-        tensor_utils.cpp        # Utility functions
+        tensor_utils.cpp        # Minimal utilities (SafeOps, MemoryInfo, functional)
         tensor_matrix_ops.cpp   # Matrix operations (matmul, transpose, etc.)
-	    tensor_unified_ops.cpp
-	    tensor_movement_ops.cpp
+        tensor_unified_ops.cpp  # Unified operations (load, unary, binary, reduce, ternary)
+        tensor_movement_ops.cpp # Movement operations (reshape, permute, etc.)
         tensor_random_ops.cpp   # Random generation operations
         tensor_broadcast.cpp    # Broadcasting implementation
-	    tensor_shape_ops.cpp     # Shape functions
+        tensor_shape_ops.cpp    # Shape functions (reshape, slice, etc.)
         tensor_masking_ops.cpp  # Masking and indexing operations
         tinyply.cpp
 )
@@ -31,10 +29,11 @@ set(CORE_CUDA_SOURCES
         tensor_matrix_ops.cu    # CUDA kernels for matrix operations
         tensor_broadcast_ops.cu # CUDA kernels for broadcasting
         tensor_masking_ops.cu   # CUDA kernels for masking/indexing
-	tensor_random_ops.cu    # CUDA kernels for random ops
+        tensor_random_ops.cu    # CUDA kernels for random ops
 )
 
 add_compile_definitions(_PSTL_USAGE_WARNINGS=0)
+
 # Create CUDA library for tensor operations (C++20)
 if(CORE_CUDA_SOURCES)
     add_library(gs_tensor_kernels STATIC ${CORE_CUDA_SOURCES})
@@ -121,10 +120,10 @@ target_link_libraries(gs_core
         glm::glm
         Threads::Threads
         spdlog::spdlog
-        OpenImageIO::OpenImageIO  # Added from tensor branch
+        OpenImageIO::OpenImageIO
         CUDA::cudart
-        CUDA::cublas          # Added for matrix operations
-        CUDA::curand          # Added for random operations
+        CUDA::cublas          # For matrix operations
+        CUDA::curand          # For random operations
         ${WEBP_LIB}           # WebP for SOG compression
         ${ARCHIVE_LIB}        # LibArchive for SOG bundle support
         PRIVATE
@@ -203,3 +202,4 @@ message(STATUS "  WebP library: ${WEBP_LIB}")
 message(STATUS "  Archive library: ${ARCHIVE_LIB}")
 message(STATUS "  Tensor kernels: CUDA C++20 (gs_tensor_kernels)")
 message(STATUS "  Core library: C++23 (gs_core)")
+message(STATUS "  NOTE: Using Thrust (bundled with CUDA) - no libtorch dependency")

@@ -245,6 +245,105 @@ namespace gs {
         Multinomial = 10
     };
 
+    // ============= Compile-Time Operation Tables =============
+    namespace op_tables {
+        template<typename T>
+        using UnaryFunc = T(*)(T);
+
+        template<typename T>
+        using BinaryFunc = T(*)(T, T);
+
+        template<typename T>
+        using CompareFunc = bool(*)(T, T);
+
+        template<typename T>
+        consteval auto make_unary_ops() {
+            std::array<UnaryFunc<T>, 36> ops{};
+
+            ops[int(UnaryOp::Neg)] = [](T x) { return -x; };
+            ops[int(UnaryOp::Abs)] = [](T x) { return std::abs(x); };
+            ops[int(UnaryOp::Sign)] = [](T x) { return T((x > T(0)) - (x < T(0))); };
+            ops[int(UnaryOp::Reciprocal)] = [](T x) { return T(1) / x; };
+            ops[int(UnaryOp::Exp)] = [](T x) { return std::exp(x); };
+            ops[int(UnaryOp::Exp2)] = [](T x) { return std::exp2(x); };
+            ops[int(UnaryOp::Log)] = [](T x) { return std::log(std::max(x, T(1e-45))); };
+            ops[int(UnaryOp::Log2)] = [](T x) { return std::log2(std::max(x, T(1e-45))); };
+            ops[int(UnaryOp::Log10)] = [](T x) { return std::log10(std::max(x, T(1e-45))); };
+            ops[int(UnaryOp::Log1p)] = [](T x) { return std::log1p(x); };
+            ops[int(UnaryOp::Sqrt)] = [](T x) { return std::sqrt(std::max(x, T(0))); };
+            ops[int(UnaryOp::Rsqrt)] = [](T x) { return T(1) / std::sqrt(std::max(x, T(1e-45))); };
+            ops[int(UnaryOp::Square)] = [](T x) { return x * x; };
+            ops[int(UnaryOp::Sin)] = [](T x) { return std::sin(x); };
+            ops[int(UnaryOp::Cos)] = [](T x) { return std::cos(x); };
+            ops[int(UnaryOp::Tan)] = [](T x) { return std::tan(x); };
+            ops[int(UnaryOp::Asin)] = [](T x) { return std::asin(x); };
+            ops[int(UnaryOp::Acos)] = [](T x) { return std::acos(x); };
+            ops[int(UnaryOp::Atan)] = [](T x) { return std::atan(x); };
+            ops[int(UnaryOp::Sinh)] = [](T x) { return std::sinh(x); };
+            ops[int(UnaryOp::Cosh)] = [](T x) { return std::cosh(x); };
+            ops[int(UnaryOp::Tanh)] = [](T x) { return std::tanh(x); };
+            ops[int(UnaryOp::Sigmoid)] = [](T x) { return T(1) / (T(1) + std::exp(-x)); };
+            ops[int(UnaryOp::Relu)] = [](T x) { return std::max(x, T(0)); };
+            ops[int(UnaryOp::Floor)] = [](T x) { return std::floor(x); };
+            ops[int(UnaryOp::Ceil)] = [](T x) { return std::ceil(x); };
+            ops[int(UnaryOp::Round)] = [](T x) { return std::round(x); };
+            ops[int(UnaryOp::Trunc)] = [](T x) { return std::trunc(x); };
+
+            return ops;
+        }
+
+        template<typename T>
+        consteval auto make_binary_ops() {
+            std::array<BinaryFunc<T>, 22> ops{};
+
+            ops[int(BinaryOp::Add)] = [](T a, T b) { return a + b; };
+            ops[int(BinaryOp::Sub)] = [](T a, T b) { return a - b; };
+            ops[int(BinaryOp::Mul)] = [](T a, T b) { return a * b; };
+            ops[int(BinaryOp::Div)] = [](T a, T b) { return a / b; };
+            ops[int(BinaryOp::Pow)] = [](T a, T b) { return static_cast<T>(std::pow(a, b)); };
+            ops[int(BinaryOp::Maximum)] = [](T a, T b) { return std::max(a, b); };
+            ops[int(BinaryOp::Minimum)] = [](T a, T b) { return std::min(a, b); };
+
+            return ops;
+        }
+
+        template<typename T>
+        consteval auto make_compare_ops() {
+            std::array<CompareFunc<T>, 22> ops{};
+
+            ops[int(BinaryOp::Equal)] = [](T a, T b) { return a == b; };
+            ops[int(BinaryOp::NotEqual)] = [](T a, T b) { return a != b; };
+            ops[int(BinaryOp::Less)] = [](T a, T b) { return a < b; };
+            ops[int(BinaryOp::LessEqual)] = [](T a, T b) { return a <= b; };
+            ops[int(BinaryOp::Greater)] = [](T a, T b) { return a > b; };
+            ops[int(BinaryOp::GreaterEqual)] = [](T a, T b) { return a >= b; };
+
+            return ops;
+        }
+
+        template<typename T>
+        consteval auto make_logical_ops() {
+            std::array<CompareFunc<T>, 22> ops{};
+
+            ops[int(BinaryOp::LogicalAnd)] = [](T a, T b) { return (a != T(0)) && (b != T(0)); };
+            ops[int(BinaryOp::LogicalOr)] = [](T a, T b) { return (a != T(0)) || (b != T(0)); };
+            ops[int(BinaryOp::LogicalXor)] = [](T a, T b) { return (a != T(0)) != (b != T(0)); };
+            ops[int(BinaryOp::BitwiseOr)] = [](T a, T b) { return (a != T(0)) || (b != T(0)); };
+
+            return ops;
+        }
+
+        // Compile-time constants
+        inline constexpr auto float_unary_ops = make_unary_ops<float>();
+        inline constexpr auto float_binary_ops = make_binary_ops<float>();
+        inline constexpr auto float_compare_ops = make_compare_ops<float>();
+        inline constexpr auto float_logical_ops = make_logical_ops<float>();
+
+        inline constexpr auto int_binary_ops = make_binary_ops<int>();
+
+        inline constexpr auto bool_logical_ops = make_logical_ops<unsigned char>();
+    } // namespace op_tables
+
     class TensorShape {
     private:
         std::vector<size_t> dims_;
@@ -286,7 +385,7 @@ namespace gs {
     private:
         void compute_total() {
             if (dims_.empty()) {
-                total_elements_ = 1; // Scalar has 1 element
+                total_elements_ = 1;
             } else {
                 total_elements_ = 1;
                 for (auto d : dims_) {
@@ -295,6 +394,7 @@ namespace gs {
             }
         }
     };
+
     struct MovementArgs {
         std::variant<
             std::monostate,
@@ -345,10 +445,7 @@ namespace gs {
         void manual_seed(uint64_t seed);
         uint64_t get_seed() const { return seed_; }
         void* get_generator(Device device);
-
-        // ADD THIS NEW METHOD:
         uint64_t get_next_cuda_seed();
-
         void* get_impl() { return impl_; }
         const void* get_impl() const { return impl_; }
 
@@ -376,7 +473,6 @@ namespace gs {
         static std::atomic<size_t> next_id_;
         static inline bool profiling_enabled_ = false;
 
-        // NO TEMPLATES - Simple concrete implementations
         Tensor binary_op_impl(const Tensor& other, BinaryOp op) const;
         Tensor binary_op_scalar(float scalar, BinaryOp op) const;
         Tensor& binary_op_inplace_impl(const Tensor& other, BinaryOp op);
@@ -405,7 +501,7 @@ namespace gs {
         Tensor& operator=(const Tensor&) = delete;
         ~Tensor();
 
-        // ============= Multi-dimensional accessor for CPU tensors =============
+        // ============= Multi-dimensional accessor =============
         template <typename T, size_t N>
         class TensorAccessor {
         private:
@@ -417,11 +513,9 @@ namespace gs {
             TensorAccessor(T* data, const std::array<size_t, N>& sizes)
                 : data_(data),
                   sizes_(sizes) {
-                // Compute strides (row-major)
                 strides_[N - 1] = 1;
-                // Use constexpr if to avoid underflow when N=1
                 if constexpr (N > 1) {
-                    for (size_t i = N - 1; i > 0; --i) { // ✅ No underflow
+                    for (size_t i = N - 1; i > 0; --i) {
                         strides_[i - 1] = strides_[i] * sizes_[i];
                     }
                 }
@@ -608,6 +702,8 @@ namespace gs {
             return load(LoadOp::Arange, args);
         }
 
+        static Tensor linspace(float start, float end, size_t steps, Device device = Device::CUDA);
+
         static Tensor eye(size_t n, Device device = Device::CUDA) {
             LoadArgs args;
             args.shape = TensorShape{n, n};
@@ -626,12 +722,11 @@ namespace gs {
             return load(LoadOp::Eye, args);
         }
 
+        static Tensor diag(const Tensor& diagonal);
+
         static Tensor from_blob(void* data, TensorShape shape, Device device, DataType dtype) {
             return Tensor(data, shape, device, dtype);
         }
-
-        void set_bool(std::initializer_list<size_t> indices, bool value);
-        bool get_bool(std::initializer_list<size_t> indices) const;
 
         static Tensor from_vector(const std::vector<float>& data, TensorShape shape,
                                   Device device = Device::CUDA);
@@ -639,6 +734,52 @@ namespace gs {
                                   Device device = Device::CUDA);
         static Tensor from_vector(const std::vector<bool>& data, TensorShape shape,
                                   Device device = Device::CUDA);
+
+        // ============= LIKE OPERATIONS =============
+        static Tensor zeros_like(const Tensor& other) {
+            return zeros(other.shape(), other.device(), other.dtype());
+        }
+
+        static Tensor ones_like(const Tensor& other) {
+            return ones(other.shape(), other.device(), other.dtype());
+        }
+
+        static Tensor ones_like(const Tensor& other, DataType dtype) {
+            return ones(other.shape(), other.device(), dtype);
+        }
+
+        static Tensor rand_like(const Tensor& other) {
+            return rand(other.shape(), other.device(), other.dtype());
+        }
+
+        static Tensor randn_like(const Tensor& other) {
+            return randn(other.shape(), other.device(), other.dtype());
+        }
+
+        static Tensor empty_like(const Tensor& other) {
+            return empty(other.shape(), other.device(), other.dtype());
+        }
+
+        static Tensor full_like(const Tensor& other, float value) {
+            return full(other.shape(), value, other.device(), other.dtype());
+        }
+
+        // ============= COMBINING TENSORS =============
+        static Tensor cat(const std::vector<Tensor>& tensors, int dim = 0);
+        static Tensor stack(const std::vector<Tensor>& tensors, int dim = 0);
+
+        // ============= CONDITIONAL =============
+        static Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y);
+
+        // ============= GLOBAL CONFIGURATION =============
+        static void manual_seed(uint64_t seed) {
+            RandomGenerator::instance().manual_seed(seed);
+        }
+
+        static void enable_profiling(bool enable) { profiling_enabled_ = enable; }
+
+        void set_bool(std::initializer_list<size_t> indices, bool value);
+        bool get_bool(std::initializer_list<size_t> indices) const;
 
         // Data access
         template <typename T>
@@ -682,7 +823,6 @@ namespace gs {
         Tensor to(DataType dtype) const;
         bool is_contiguous() const { return true; }
 
-        // Convenience device conversion
         Tensor cpu() const { return to(Device::CPU); }
         Tensor cuda() const { return to(Device::CUDA); }
 
@@ -703,7 +843,6 @@ namespace gs {
 
         Tensor squeeze(std::optional<int> dim = std::nullopt) const {
             MovementArgs args;
-            // Use INT_MIN as sentinel for "squeeze all", allowing -1 to be a valid dimension
             args.args = dim.value_or(std::numeric_limits<int>::min());
             return movement(MovementOp::Squeeze, args);
         }
@@ -720,7 +859,6 @@ namespace gs {
             return movement(MovementOp::Unsqueeze, args);
         }
 
-        static Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y);
         Tensor expand(std::span<const int> sizes) const {
             MovementArgs args;
             args.args = std::vector<int>(sizes.begin(), sizes.end());
@@ -756,9 +894,6 @@ namespace gs {
         Tensor slice(size_t dim, size_t start, size_t end) const;
 
         Tensor cat(const Tensor& other, int dim = 0) const;
-
-        static Tensor cat(const std::vector<Tensor>& tensors, int dim = 0);
-        static Tensor stack(const std::vector<Tensor>& tensors, int dim = 0);
 
         // Broadcasting
         Tensor broadcast_to(const TensorShape& target_shape) const;
@@ -910,7 +1045,6 @@ namespace gs {
             return reduce(ReduceOp::Argmin, args);
         }
 
-        // Cumulative sum
         Tensor cumsum(int dim = 0) const;
 
         // Scalar reduce operations
@@ -925,7 +1059,6 @@ namespace gs {
         float norm(float p = 2.0f) const;
         float item() const;
 
-        // Template version of item()
         template <typename T>
         T item() const {
             if (!is_valid() || numel() != 1) {
@@ -955,7 +1088,6 @@ namespace gs {
             }
 
             if (numel() == 0) {
-                // Return empty tensor with same shape
                 return empty(shape_, device_, dtype_);
             }
 
@@ -972,7 +1104,6 @@ namespace gs {
             return clamp(std::numeric_limits<float>::lowest(), max);
         }
 
-        // In-place clamp operations
         Tensor& clamp_(float min_val, float max_val);
         Tensor& clamp_min_(float min);
         Tensor& clamp_max_(float max);
@@ -1026,7 +1157,7 @@ namespace gs {
         float& at(std::initializer_list<size_t> indices);
         float at(std::initializer_list<size_t> indices) const;
 
-        // Operator overloads - NO TEMPLATES, just concrete overloads
+        // Operator overloads
         Tensor operator+(const Tensor& other) const { return add(other); }
         Tensor operator+(float scalar) const { return add(scalar); }
         Tensor operator+(int scalar) const { return add(static_cast<float>(scalar)); }
@@ -1070,10 +1201,7 @@ namespace gs {
         Tensor operator||(const Tensor& other) const { return logical_or(other); }
         Tensor operator!() const { return logical_not(); }
 
-        // Bitwise NOT for boolean tensors
         Tensor operator~() const;
-
-        // Bitwise OR for boolean tensors
         Tensor operator|(const Tensor& other) const;
 
         // Other in-place operations
@@ -1086,9 +1214,8 @@ namespace gs {
         std::optional<Tensor> try_reshape(TensorShape shape) const;
 
         static std::vector<Tensor> split_batch(const Tensor& tensor, size_t batch_size);
-        static void enable_profiling(bool enable) { profiling_enabled_ = enable; }
 
-        // Utility template methods - these are OK as they're just helpers
+        // Utility template methods
         template <typename Func>
         Tensor& inplace(Func&& func) {
             func(*this);
@@ -1173,45 +1300,6 @@ namespace gs {
         operator Tensor() const;
     };
 
-    class TensorBuilder {
-    private:
-        TensorShape shape_;
-        Device device_ = Device::CUDA;
-        DataType dtype_ = DataType::Float32;
-        std::optional<float> fill_value_;
-        bool check_finite_ = false;
-
-    public:
-        TensorBuilder& with_shape(TensorShape shape);
-        TensorBuilder& on_device(Device device);
-        TensorBuilder& with_dtype(DataType dtype);
-        TensorBuilder& filled_with(float value);
-        TensorBuilder& ensure_finite();
-        Tensor build();
-    };
-
-    namespace tensor {
-        inline void manual_seed(uint64_t seed) {
-            RandomGenerator::instance().manual_seed(seed);
-        }
-
-        Tensor zeros_like(const Tensor& other);
-        Tensor ones_like(const Tensor& other);
-        Tensor ones_like(const Tensor& other, DataType dtype);
-        Tensor rand_like(const Tensor& other);
-        Tensor randn_like(const Tensor& other);
-
-        Tensor diag(const Tensor& diagonal);
-        Tensor linspace(float start, float end, size_t steps);
-
-        Tensor stack(std::vector<Tensor>&& tensors, int dim = 0);
-        Tensor cat(std::vector<Tensor>&& tensors, int dim = 0);
-
-        bool check_valid(const Tensor& t, const std::string& name);
-        void assert_same_shape(const Tensor& a, const Tensor& b);
-        void assert_same_device(const Tensor& a, const Tensor& b);
-    } // namespace tensor
-
     class TensorError : public std::runtime_error {
     public:
         TensorError(const std::string& msg, const Tensor* t = nullptr);
@@ -1221,6 +1309,9 @@ namespace gs {
         std::string tensor_info_;
     };
 
+    // ============= UTILITY NAMESPACES =============
+
+    // Safe operations namespace
     namespace SafeOps {
         using Tensor = gs::Tensor;
         Tensor divide(const Tensor& a, const Tensor& b, float epsilon = 1e-6f);
@@ -1228,6 +1319,7 @@ namespace gs {
         Tensor sqrt(const Tensor& input, float epsilon = 0.0f);
     } // namespace SafeOps
 
+    // Memory info
     class MemoryInfo {
     public:
         size_t free_bytes = 0;
@@ -1241,6 +1333,7 @@ namespace gs {
         void log() const;
     };
 
+    // Functional operations namespace
     namespace functional {
         Tensor map(const Tensor& input, std::function<float(float)> func);
         float reduce(const Tensor& input, float init, std::function<float(float, float)> func);

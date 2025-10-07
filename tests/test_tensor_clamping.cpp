@@ -169,7 +169,7 @@ protected:
         // Clear any previous CUDA errors
         cudaGetLastError();
 
-        tensor::manual_seed(42);
+        Tensor::manual_seed(42);
         torch::manual_seed(42);
 
         // Initialize CUDA device if available

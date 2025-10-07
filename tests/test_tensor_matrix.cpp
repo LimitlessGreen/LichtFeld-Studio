@@ -57,7 +57,7 @@ protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA is not available for testing";
         torch::manual_seed(42);
-        tensor::manual_seed(42);
+        Tensor::manual_seed(42);
         gen.seed(42);
     }
 
@@ -322,7 +322,7 @@ TEST_F(TensorMatrixTest, Diag) {
     auto custom_diag_vec = Tensor::from_vector(diag_data, {5}, Device::CUDA);
     auto torch_diag_vec = torch::tensor(diag_data, torch::TensorOptions().device(torch::kCUDA));
 
-    auto custom_result = tensor::diag(custom_diag_vec);
+    auto custom_result = Tensor::diag(custom_diag_vec);
     auto torch_result = torch::diag(torch_diag_vec);
 
     compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "Diag");
@@ -637,7 +637,7 @@ TEST_F(TensorMatrixTest, DiagMatMul) {
     std::iota(mat_data.begin(), mat_data.end(), 1.0f);
 
     auto custom_diag_vec = Tensor::from_vector(diag_data, {4}, Device::CUDA);
-    auto custom_diag = tensor::diag(custom_diag_vec);
+    auto custom_diag = Tensor::diag(custom_diag_vec);
     auto custom_mat = Tensor::from_vector(mat_data, {4, 5}, Device::CUDA);
 
     auto torch_diag_vec = torch::tensor(diag_data, torch::TensorOptions().device(torch::kCUDA));

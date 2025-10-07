@@ -89,7 +89,7 @@ protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA is not available for testing";
         torch::manual_seed(42);
-        tensor::manual_seed(42);
+        Tensor::manual_seed(42);
         gen.seed(42);
     }
 

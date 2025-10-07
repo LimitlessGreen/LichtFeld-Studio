@@ -107,7 +107,7 @@ class TensorBroadcastTest : public ::testing::Test {
 protected:
     void SetUp() override {
         torch::manual_seed(42);
-        tensor::manual_seed(42);
+        Tensor::manual_seed(42);
     }
 };
 

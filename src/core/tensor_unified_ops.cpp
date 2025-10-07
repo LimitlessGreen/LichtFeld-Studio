@@ -40,7 +40,6 @@ namespace gs {
                     return result;
                 }
                 result.data_ = ptr;
-                // Create shared_ptr with CUDA deleter
                 result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
                     if (p)
                         cudaFree(p);
@@ -53,7 +52,6 @@ namespace gs {
                     return result;
                 }
                 result.data_ = ptr;
-                // Create shared_ptr with free deleter
                 result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
                     if (p)
                         std::free(p);
@@ -140,7 +138,6 @@ namespace gs {
                     return result;
                 }
 
-                // Generate on CPU and copy
                 if (result.dtype_ == DataType::Float32) {
                     std::vector<float> data(count);
                     for (size_t i = 0; i < count; ++i) {
@@ -250,14 +247,12 @@ namespace gs {
                                                RandomGenerator::instance().get_next_cuda_seed(), 0);
                     cudaDeviceSynchronize();
                 } else if (result.dtype_ == DataType::Float32) {
-                    // Generate ints in a temporary buffer, then convert to float
                     int* temp_buffer;
                     cudaMalloc(&temp_buffer, result.numel() * sizeof(int));
 
                     tensor_ops::launch_randint(temp_buffer, result.numel(), low, high,
                                                RandomGenerator::instance().get_next_cuda_seed(), 0);
 
-                    // Convert int to float using a kernel
                     tensor_ops::launch_int_to_float(temp_buffer, result.ptr<float>(),
                                                     result.numel(), 0);
                     cudaDeviceSynchronize();
@@ -328,24 +323,20 @@ namespace gs {
                                                RandomGenerator::instance().get_next_cuda_seed(), 0);
                 cudaDeviceSynchronize();
             } else {
-                // CPU implementation
                 auto weights_data = weights->to_vector();
 
-                // Normalize
                 float sum = std::accumulate(weights_data.begin(), weights_data.end(), 0.0f);
                 if (sum <= 0) {
                     LOG_ERROR("Weights must sum to positive value");
                     return Tensor();
                 }
 
-                // Create CDF
                 std::vector<float> cdf(n);
                 cdf[0] = weights_data[0] / sum;
                 for (size_t i = 1; i < n; ++i) {
                     cdf[i] = cdf[i - 1] + weights_data[i] / sum;
                 }
 
-                // Use the seeded generator from RandomGenerator
                 auto& gen = *static_cast<std::mt19937_64*>(
                     RandomGenerator::instance().get_generator(Device::CPU));
                 std::uniform_real_distribution<float> dis(0.0f, 1.0f);
@@ -353,32 +344,25 @@ namespace gs {
                 int* samples = result.ptr<int>();
 
                 if (replacement) {
-                    // With replacement: simple sampling
                     for (size_t i = 0; i < num_samples; ++i) {
                         float u = dis(gen);
                         auto it = std::lower_bound(cdf.begin(), cdf.end(), u);
                         samples[i] = static_cast<int>(std::distance(cdf.begin(), it));
                     }
                 } else {
-                    // Without replacement: use Gumbel-max trick
-                    // Note: num_samples is already capped to n by Tensor::multinomial
                     std::vector<std::pair<float, int>> keys(n);
 
-                    // Generate Gumbel keys for each index
                     for (size_t i = 0; i < n; ++i) {
                         float u = dis(gen);
-                        // Clamp to avoid log(0)
                         u = std::clamp(u, 1e-10f, 1.0f - 1e-10f);
                         float gumbel = -std::log(-std::log(u));
                         float log_weight = std::log(std::max(weights_data[i], 1e-10f));
                         keys[i] = {log_weight + gumbel, static_cast<int>(i)};
                     }
 
-                    // Sort by keys (descending)
                     std::sort(keys.begin(), keys.end(),
                               [](const auto& a, const auto& b) { return a.first > b.first; });
 
-                    // Take first num_samples indices (already capped to n)
                     for (size_t i = 0; i < num_samples; ++i) {
                         samples[i] = keys[i].second;
                     }
@@ -448,11 +432,8 @@ namespace gs {
         return result;
     }
 
-    // Static method for multinomial
     Tensor Tensor::multinomial(const Tensor& weights, int num_samples, bool replacement) {
         if (!replacement && static_cast<size_t>(num_samples) > weights.numel()) {
-            // Without replacement, can't sample more than available items
-            // Cap to the number of weights
             num_samples = static_cast<int>(weights.numel());
         }
 
@@ -482,28 +463,13 @@ namespace gs {
                 dtype_, nullptr);
             cudaDeviceSynchronize();
         } else {
-            // CPU implementation
+            // CPU implementation using compile-time operation table
             const float* src = static_cast<const float*>(data_);
             float* dst = static_cast<float*>(result.data_);
 
+            // Use compile-time op table - single line!
             for (size_t i = 0; i < numel(); ++i) {
-                switch (op) {
-                case UnaryOp::Neg: dst[i] = -src[i]; break;
-                case UnaryOp::Abs: dst[i] = std::abs(src[i]); break;
-                case UnaryOp::Exp: dst[i] = std::exp(src[i]); break;
-                case UnaryOp::Log: dst[i] = std::log(std::max(src[i], 1e-45f)); break;
-                case UnaryOp::Sqrt: dst[i] = std::sqrt(std::max(src[i], 0.0f)); break;
-                case UnaryOp::Square: dst[i] = src[i] * src[i]; break;
-                case UnaryOp::Sigmoid: dst[i] = 1.0f / (1.0f + std::exp(-src[i])); break;
-                case UnaryOp::Relu: dst[i] = std::max(src[i], 0.0f); break;
-                case UnaryOp::Sin: dst[i] = std::sin(src[i]); break;
-                case UnaryOp::Cos: dst[i] = std::cos(src[i]); break;
-                case UnaryOp::Tanh: dst[i] = std::tanh(src[i]); break;
-                case UnaryOp::Floor: dst[i] = std::floor(src[i]); break;
-                case UnaryOp::Ceil: dst[i] = std::ceil(src[i]); break;
-                case UnaryOp::Round: dst[i] = std::round(src[i]); break;
-                default: dst[i] = src[i]; break;
-                }
+                dst[i] = op_tables::float_unary_ops[int(op)](src[i]);
             }
         }
 
@@ -517,35 +483,30 @@ namespace gs {
             return Tensor();
         }
 
-        // Get broadcast shape
         auto broadcast_shape = this->broadcast_shape(other.shape());
         if (broadcast_shape.rank() == 0) {
             LOG_ERROR("Incompatible shapes for broadcasting: {} vs {}",
-                      shape_.str(), other.shape().str());
+                      shape_.str(), other.shape_.str());
             return Tensor();
         }
 
-        // Determine output dtype
         DataType out_dtype = dtype_;
         if (op >= BinaryOp::Equal && op <= BinaryOp::GreaterEqual) {
             out_dtype = DataType::Bool;
         } else if (op >= BinaryOp::LogicalAnd && op <= BinaryOp::LogicalXor) {
             out_dtype = DataType::Bool;
         } else if (op >= BinaryOp::BitwiseAnd && op <= BinaryOp::BitwiseXor) {
-            out_dtype = DataType::Bool; // Bitwise ops on bool tensors
+            out_dtype = DataType::Bool;
         } else {
             out_dtype = promote_types(dtype_, other.dtype());
         }
 
-        // Create result with broadcast shape
         auto result = Tensor::empty(broadcast_shape, device_, out_dtype);
 
-        // Check if we need broadcasting
         bool a_needs_broadcast = (shape_ != broadcast_shape);
         bool b_needs_broadcast = (other.shape() != broadcast_shape);
 
         if (!a_needs_broadcast && !b_needs_broadcast) {
-            // No broadcasting needed - direct operation
             if (device_ == Device::CUDA) {
                 tensor_ops::launch_binary_op(
                     raw_ptr(), other.raw_ptr(), result.raw_ptr(),
@@ -554,70 +515,39 @@ namespace gs {
                     nullptr);
                 cudaDeviceSynchronize();
             } else {
-                // CPU implementation for same-shape tensors
+                // CPU implementation using compile-time operation tables
                 if (out_dtype == DataType::Bool && dtype_ == DataType::Float32 && other.dtype() == DataType::Float32) {
-                    // Comparison operations: float inputs, bool output
+                    // Comparison operations
                     const float* src_a = static_cast<const float*>(raw_ptr());
                     const float* src_b = static_cast<const float*>(other.raw_ptr());
                     unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
 
                     for (size_t i = 0; i < result.numel(); ++i) {
-                        bool res = false;
-                        switch (op) {
-                        case BinaryOp::Equal: res = (src_a[i] == src_b[i]); break;
-                        case BinaryOp::NotEqual: res = (src_a[i] != src_b[i]); break;
-                        case BinaryOp::Less: res = (src_a[i] < src_b[i]); break;
-                        case BinaryOp::LessEqual: res = (src_a[i] <= src_b[i]); break;
-                        case BinaryOp::Greater: res = (src_a[i] > src_b[i]); break;
-                        case BinaryOp::GreaterEqual: res = (src_a[i] >= src_b[i]); break;
-                        default: break;
-                        }
-                        dst[i] = res ? 1 : 0;
+                        dst[i] = op_tables::float_compare_ops[int(op)](src_a[i], src_b[i]) ? 1 : 0;
                     }
                 } else if (dtype_ == DataType::Bool && other.dtype() == DataType::Bool && out_dtype == DataType::Bool) {
-                    // Logical/bitwise operations: bool inputs, bool output
+                    // Logical/bitwise operations
                     const unsigned char* src_a = static_cast<const unsigned char*>(raw_ptr());
                     const unsigned char* src_b = static_cast<const unsigned char*>(other.raw_ptr());
                     unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
 
                     for (size_t i = 0; i < result.numel(); ++i) {
-                        bool res = false;
-                        switch (op) {
-                        case BinaryOp::LogicalAnd: res = (src_a[i] != 0) && (src_b[i] != 0); break;
-                        case BinaryOp::LogicalOr: res = (src_a[i] != 0) || (src_b[i] != 0); break;
-                        case BinaryOp::LogicalXor: res = (src_a[i] != 0) != (src_b[i] != 0); break;
-                        case BinaryOp::BitwiseOr: res = (src_a[i] != 0) || (src_b[i] != 0); break;
-                        default: break;
-                        }
-                        dst[i] = res ? 1 : 0;
+                        dst[i] = op_tables::float_logical_ops[int(op)](src_a[i], src_b[i]) ? 1 : 0;
                     }
                 } else if (dtype_ == DataType::Float32 && other.dtype() == DataType::Float32 && out_dtype == DataType::Float32) {
-                    // Arithmetic operations: float inputs, float output
+                    // Arithmetic operations - using compile-time table
                     const float* src_a = static_cast<const float*>(raw_ptr());
                     const float* src_b = static_cast<const float*>(other.raw_ptr());
                     float* dst = static_cast<float*>(result.raw_ptr());
 
                     for (size_t i = 0; i < result.numel(); ++i) {
-                        switch (op) {
-                        case BinaryOp::Add: dst[i] = src_a[i] + src_b[i]; break;
-                        case BinaryOp::Sub: dst[i] = src_a[i] - src_b[i]; break;
-                        case BinaryOp::Mul: dst[i] = src_a[i] * src_b[i]; break;
-                        case BinaryOp::Div: dst[i] = src_a[i] / src_b[i]; break;
-                        case BinaryOp::Pow: dst[i] = std::pow(src_a[i], src_b[i]); break;
-                        case BinaryOp::Maximum: dst[i] = std::max(src_a[i], src_b[i]); break;
-                        case BinaryOp::Minimum: dst[i] = std::min(src_a[i], src_b[i]); break;
-                        default: dst[i] = src_a[i]; break;
-                        }
+                        dst[i] = op_tables::float_binary_ops[int(op)](src_a[i], src_b[i]);
                     }
                 }
             }
         } else {
-            // Broadcasting needed - we need to handle this specially
+            // Broadcasting needed
             if (device_ == Device::CUDA) {
-                // For CUDA, we need a broadcasting-aware kernel
-                // This should be implemented in tensor_ops.cu to handle broadcasting directly
-
-                // For now, let's broadcast first then operate
                 if (a_needs_broadcast) {
                     auto a_broadcast = broadcast_to(broadcast_shape);
                     if (b_needs_broadcast) {
@@ -650,70 +580,34 @@ namespace gs {
                 auto c_shape = broadcast_shape.dims();
 
                 if (out_dtype == DataType::Bool && dtype_ == DataType::Float32 && other.dtype() == DataType::Float32) {
-                    // Comparison operations: float inputs, bool output
                     const float* src_a = static_cast<const float*>(raw_ptr());
                     const float* src_b = static_cast<const float*>(other.raw_ptr());
                     unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
 
                     for (size_t i = 0; i < result.numel(); ++i) {
-                        // Calculate broadcast indices
                         size_t a_idx = broadcast::index(i, c_shape, a_shape);
                         size_t b_idx = broadcast::index(i, c_shape, b_shape);
-
-                        bool res = false;
-                        switch (op) {
-                        case BinaryOp::Equal: res = (src_a[a_idx] == src_b[b_idx]); break;
-                        case BinaryOp::NotEqual: res = (src_a[a_idx] != src_b[b_idx]); break;
-                        case BinaryOp::Less: res = (src_a[a_idx] < src_b[b_idx]); break;
-                        case BinaryOp::LessEqual: res = (src_a[a_idx] <= src_b[b_idx]); break;
-                        case BinaryOp::Greater: res = (src_a[a_idx] > src_b[b_idx]); break;
-                        case BinaryOp::GreaterEqual: res = (src_a[a_idx] >= src_b[b_idx]); break;
-                        default: break;
-                        }
-                        dst[i] = res ? 1 : 0;
+                        dst[i] = op_tables::float_compare_ops[int(op)](src_a[a_idx], src_b[b_idx]) ? 1 : 0;
                     }
                 } else if (dtype_ == DataType::Bool && other.dtype() == DataType::Bool && out_dtype == DataType::Bool) {
-                    // Logical/bitwise operations: bool inputs, bool output
                     const unsigned char* src_a = static_cast<const unsigned char*>(raw_ptr());
                     const unsigned char* src_b = static_cast<const unsigned char*>(other.raw_ptr());
                     unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
 
                     for (size_t i = 0; i < result.numel(); ++i) {
-                        // Calculate broadcast indices
                         size_t a_idx = broadcast::index(i, c_shape, a_shape);
                         size_t b_idx = broadcast::index(i, c_shape, b_shape);
-
-                        bool res = false;
-                        switch (op) {
-                        case BinaryOp::LogicalAnd: res = (src_a[a_idx] != 0) && (src_b[b_idx] != 0); break;
-                        case BinaryOp::LogicalOr: res = (src_a[a_idx] != 0) || (src_b[b_idx] != 0); break;
-                        case BinaryOp::LogicalXor: res = (src_a[a_idx] != 0) != (src_b[b_idx] != 0); break;
-                        case BinaryOp::BitwiseOr: res = (src_a[a_idx] != 0) || (src_b[b_idx] != 0); break;
-                        default: break;
-                        }
-                        dst[i] = res ? 1 : 0;
+                        dst[i] = op_tables::float_logical_ops[int(op)](src_a[a_idx], src_b[b_idx]) ? 1 : 0;
                     }
                 } else if (dtype_ == DataType::Float32 && other.dtype() == DataType::Float32 && out_dtype == DataType::Float32) {
-                    // Arithmetic operations: float inputs, float output
                     const float* src_a = static_cast<const float*>(raw_ptr());
                     const float* src_b = static_cast<const float*>(other.raw_ptr());
                     float* dst = static_cast<float*>(result.raw_ptr());
 
                     for (size_t i = 0; i < result.numel(); ++i) {
-                        // Calculate broadcast indices
                         size_t a_idx = broadcast::index(i, c_shape, a_shape);
                         size_t b_idx = broadcast::index(i, c_shape, b_shape);
-
-                        switch (op) {
-                        case BinaryOp::Add: dst[i] = src_a[a_idx] + src_b[b_idx]; break;
-                        case BinaryOp::Sub: dst[i] = src_a[a_idx] - src_b[b_idx]; break;
-                        case BinaryOp::Mul: dst[i] = src_a[a_idx] * src_b[b_idx]; break;
-                        case BinaryOp::Div: dst[i] = src_a[a_idx] / src_b[b_idx]; break;
-                        case BinaryOp::Pow: dst[i] = std::pow(src_a[a_idx], src_b[b_idx]); break;
-                        case BinaryOp::Maximum: dst[i] = std::max(src_a[a_idx], src_b[b_idx]); break;
-                        case BinaryOp::Minimum: dst[i] = std::min(src_a[a_idx], src_b[b_idx]); break;
-                        default: dst[i] = src_a[a_idx]; break;
-                        }
+                        dst[i] = op_tables::float_binary_ops[int(op)](src_a[a_idx], src_b[b_idx]);
                     }
                 }
             }
@@ -728,7 +622,6 @@ namespace gs {
             return Tensor();
         }
 
-        // Determine output dtype
         DataType out_dtype = dtype_;
         if (op >= BinaryOp::Equal && op <= BinaryOp::GreaterEqual) {
             out_dtype = DataType::Bool;
@@ -744,37 +637,18 @@ namespace gs {
                 nullptr);
             cudaDeviceSynchronize();
         } else {
-            // CPU implementation
+            // CPU implementation using compile-time tables
             const float* src = static_cast<const float*>(raw_ptr());
 
             if (out_dtype == DataType::Bool) {
                 unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
                 for (size_t i = 0; i < numel(); ++i) {
-                    bool res = false;
-                    switch (op) {
-                    case BinaryOp::Equal: res = (src[i] == scalar); break;
-                    case BinaryOp::NotEqual: res = (src[i] != scalar); break;
-                    case BinaryOp::Less: res = (src[i] < scalar); break;
-                    case BinaryOp::LessEqual: res = (src[i] <= scalar); break;
-                    case BinaryOp::Greater: res = (src[i] > scalar); break;
-                    case BinaryOp::GreaterEqual: res = (src[i] >= scalar); break;
-                    default: break;
-                    }
-                    dst[i] = res ? 1 : 0;
+                    dst[i] = op_tables::float_compare_ops[int(op)](src[i], scalar) ? 1 : 0;
                 }
             } else {
                 float* dst = static_cast<float*>(result.raw_ptr());
                 for (size_t i = 0; i < numel(); ++i) {
-                    switch (op) {
-                    case BinaryOp::Add: dst[i] = src[i] + scalar; break;
-                    case BinaryOp::Sub: dst[i] = src[i] - scalar; break;
-                    case BinaryOp::Mul: dst[i] = src[i] * scalar; break;
-                    case BinaryOp::Div: dst[i] = src[i] / scalar; break;
-                    case BinaryOp::Pow: dst[i] = std::pow(src[i], scalar); break;
-                    case BinaryOp::Maximum: dst[i] = std::max(src[i], scalar); break;
-                    case BinaryOp::Minimum: dst[i] = std::min(src[i], scalar); break;
-                    default: dst[i] = src[i]; break;
-                    }
+                    dst[i] = op_tables::float_binary_ops[int(op)](src[i], scalar);
                 }
             }
         }
@@ -802,18 +676,12 @@ namespace gs {
                 nullptr);
             cudaDeviceSynchronize();
         } else {
-            // CPU implementation
+            // CPU implementation using compile-time tables
             float* dst = static_cast<float*>(raw_ptr());
             const float* src = static_cast<const float*>(other.raw_ptr());
 
             for (size_t i = 0; i < numel(); ++i) {
-                switch (op) {
-                case BinaryOp::Add: dst[i] += src[i]; break;
-                case BinaryOp::Sub: dst[i] -= src[i]; break;
-                case BinaryOp::Mul: dst[i] *= src[i]; break;
-                case BinaryOp::Div: dst[i] /= src[i]; break;
-                default: break;
-                }
+                dst[i] = op_tables::float_binary_ops[int(op)](dst[i], src[i]);
             }
         }
 
@@ -835,17 +703,11 @@ namespace gs {
                 nullptr);
             cudaDeviceSynchronize();
         } else {
-            // CPU implementation
+            // CPU implementation using compile-time tables
             float* dst = static_cast<float*>(raw_ptr());
 
             for (size_t i = 0; i < numel(); ++i) {
-                switch (op) {
-                case BinaryOp::Add: dst[i] += scalar; break;
-                case BinaryOp::Sub: dst[i] -= scalar; break;
-                case BinaryOp::Mul: dst[i] *= scalar; break;
-                case BinaryOp::Div: dst[i] /= scalar; break;
-                default: break;
-                }
+                dst[i] = op_tables::float_binary_ops[int(op)](dst[i], scalar);
             }
         }
 
@@ -860,38 +722,31 @@ namespace gs {
 
         // Special handling for Std and Var
         if (op == ReduceOp::Std || op == ReduceOp::Var) {
-            // First compute the mean
             ReduceArgs mean_args = args;
             auto mean_tensor = reduce(ReduceOp::Mean, mean_args);
 
-            // Broadcast mean to original shape if needed
             Tensor mean_broadcast = (mean_tensor.shape() == shape_)
                                         ? mean_tensor.clone()
                                         : mean_tensor.broadcast_to(shape_);
 
-            // Compute (x - mean)^2
             auto diff = this->sub(mean_broadcast);
             auto squared = diff.mul(diff);
 
-            // Compute mean of squared differences (variance)
             auto variance = squared.reduce(ReduceOp::Mean, mean_args);
 
             if (op == ReduceOp::Var) {
                 return variance;
             } else {
-                // Std is sqrt of variance
                 return variance.sqrt();
             }
         }
 
-        // Handle empty axes (reduce all)
         std::vector<int> axes = args.axes;
         if (axes.empty()) {
             axes.resize(shape_.rank());
             std::iota(axes.begin(), axes.end(), 0);
         }
 
-        // Calculate output shape
         std::vector<size_t> out_shape;
         for (size_t i = 0; i < shape_.rank(); ++i) {
             bool is_reduced = std::find(axes.begin(), axes.end(), i) != axes.end();
@@ -900,7 +755,6 @@ namespace gs {
             }
         }
 
-        // Determine output dtype
         DataType out_dtype = dtype_;
         if (op == ReduceOp::Any || op == ReduceOp::All) {
             out_dtype = DataType::Bool;
@@ -910,9 +764,7 @@ namespace gs {
 
         auto result = Tensor::empty(TensorShape(out_shape), device_, out_dtype);
 
-        // CRITICAL FIX: Handle empty tensors - return identity values
         if (numel() == 0) {
-            // For empty tensors, return the identity value for the operation
             float identity_value = 0.0f;
             switch (op) {
             case ReduceOp::Sum:
@@ -929,17 +781,16 @@ namespace gs {
                 identity_value = std::numeric_limits<float>::infinity();
                 break;
             case ReduceOp::Any:
-                identity_value = 0.0f; // False
+                identity_value = 0.0f;
                 break;
             case ReduceOp::All:
-                identity_value = 1.0f; // True
+                identity_value = 1.0f;
                 break;
             default:
                 identity_value = 0.0f;
                 break;
             }
 
-            // Fill result with identity value
             if (device_ == Device::CUDA) {
                 if (out_dtype == DataType::Float32) {
                     std::vector<float> temp(result.numel(), identity_value);
@@ -961,7 +812,6 @@ namespace gs {
             return result;
         }
 
-        // Rest of the existing reduce implementation for non-empty tensors
         if (device_ == Device::CUDA) {
             tensor_ops::launch_reduce_op(
                 raw_ptr(), result.raw_ptr(),
@@ -973,7 +823,6 @@ namespace gs {
         } else {
             // CPU implementation - simplified
             if (op == ReduceOp::Sum && axes.size() == shape_.rank()) {
-                // Full reduction to scalar
                 const float* src = static_cast<const float*>(raw_ptr());
                 float sum = 0;
                 for (size_t i = 0; i < numel(); ++i) {
@@ -981,7 +830,6 @@ namespace gs {
                 }
                 *static_cast<float*>(result.raw_ptr()) = sum;
             } else if (op == ReduceOp::Mean && axes.size() == shape_.rank()) {
-                // Full reduction to scalar
                 const float* src = static_cast<const float*>(raw_ptr());
                 float sum = 0;
                 for (size_t i = 0; i < numel(); ++i) {
@@ -989,7 +837,6 @@ namespace gs {
                 }
                 *static_cast<float*>(result.raw_ptr()) = sum / numel();
             } else if (op == ReduceOp::Max && axes.size() == shape_.rank()) {
-                // Full reduction to scalar
                 const float* src = static_cast<const float*>(raw_ptr());
                 float max_val = src[0];
                 for (size_t i = 1; i < numel(); ++i) {
@@ -997,7 +844,6 @@ namespace gs {
                 }
                 *static_cast<float*>(result.raw_ptr()) = max_val;
             } else if (op == ReduceOp::Min && axes.size() == shape_.rank()) {
-                // Full reduction to scalar
                 const float* src = static_cast<const float*>(raw_ptr());
                 float min_val = src[0];
                 for (size_t i = 1; i < numel(); ++i) {
@@ -1023,7 +869,6 @@ namespace gs {
         }
 
         if (numel() == 0 || b.numel() == 0 || c.numel() == 0) {
-            // If any input is empty, determine the output shape through broadcasting
             auto shape_ab = this->broadcast_shape(b.shape());
             if (shape_ab.rank() == 0) {
                 LOG_ERROR("Incompatible shapes for first two tensors in ternary operation with empty tensors");
@@ -1036,7 +881,6 @@ namespace gs {
                 return Tensor();
             }
 
-            // Return empty tensor with the broadcast shape
             DataType out_dtype = dtype_;
             if (op == TernaryOp::Where) {
                 out_dtype = promote_types(b.dtype(), c.dtype());
@@ -1045,20 +889,17 @@ namespace gs {
             return empty(TensorShape(shape_abc_vec), device_, out_dtype);
         }
 
-        // For Where operation, first tensor should be boolean
         if (op == TernaryOp::Where && dtype_ != DataType::Bool) {
             LOG_ERROR("Where operation requires boolean condition tensor");
             return Tensor();
         }
 
-        // Get broadcast shape for all three tensors
         auto shape_ab = this->broadcast_shape(b.shape());
         if (shape_ab.rank() == 0) {
             LOG_ERROR("Incompatible shapes for first two tensors in ternary operation");
             return Tensor();
         }
 
-        // Now get broadcast shape with third tensor
         auto shape_abc_vec = broadcast::shape(shape_ab.dims(), c.shape().dims());
         if (shape_abc_vec.empty()) {
             LOG_ERROR("Incompatible shapes for ternary operation");
@@ -1067,16 +908,13 @@ namespace gs {
 
         TensorShape shape_abc(shape_abc_vec);
 
-        // Determine output dtype based on operation
         DataType out_dtype = dtype_;
         if (op == TernaryOp::Where) {
-            // For where, output type should match the true/false value types
             out_dtype = promote_types(b.dtype(), c.dtype());
         }
 
         auto result = Tensor::empty(shape_abc, device_, out_dtype);
 
-        // Broadcast all tensors to the final shape
         Tensor a_broadcast, b_broadcast, c_broadcast;
 
         if (shape_ == shape_abc) {
@@ -1098,12 +936,11 @@ namespace gs {
         }
 
         if (device_ == Device::CUDA) {
-            // Use the where kernel for CUDA
             if (op == TernaryOp::Where) {
                 tensor_ops::launch_where(
-                    a_broadcast.ptr<unsigned char>(), // condition (bool)
-                    b_broadcast.ptr<float>(),         // true values
-                    c_broadcast.ptr<float>(),         // false values
+                    a_broadcast.ptr<unsigned char>(),
+                    b_broadcast.ptr<float>(),
+                    c_broadcast.ptr<float>(),
                     result.ptr<float>(),
                     a_broadcast.shape().dims().data(),
                     b_broadcast.shape().dims().data(),
@@ -1145,7 +982,6 @@ namespace gs {
                 float* dst = static_cast<float*>(result.raw_ptr());
 
                 for (size_t i = 0; i < result.numel(); ++i) {
-                    // Preserve NaN values (PyTorch behavior)
                     if (std::isnan(src[i])) {
                         dst[i] = src[i];
                     } else {
@@ -1167,17 +1003,13 @@ namespace gs {
             return 0.0f;
 
         if (p == 2.0f) {
-            // L2 norm: sqrt(sum(x^2))
             auto squared = this->mul(*this);
             return std::sqrt(squared.sum_scalar());
         } else if (p == 1.0f) {
-            // L1 norm: sum(|x|)
             return this->abs().sum_scalar();
         } else if (std::isinf(p)) {
-            // Infinity norm: max(|x|)
             return this->abs().max_scalar();
         } else {
-            // Lp norm: (sum(|x|^p))^(1/p)
             auto abs_vals = this->abs();
             auto powered = abs_vals.pow(p);
             auto sum = powered.sum_scalar();
@@ -1185,24 +1017,20 @@ namespace gs {
         }
     }
 
-    // Broadcasting helper
     std::pair<Tensor, Tensor> Tensor::_broadcasted(const Tensor& other, bool match_dtype) const {
         if (!is_valid() || !other.is_valid()) {
             return {Tensor(), Tensor()};
         }
 
-        // Get broadcast shape
         auto bcast_shape = this->broadcast_shape(other.shape());
         if (bcast_shape.rank() == 0) {
             LOG_ERROR("Incompatible shapes for broadcasting");
             return {Tensor(), Tensor()};
         }
 
-        // Broadcast both tensors (clone if already right shape to avoid copy issues)
         Tensor a_broadcast = (shape_ == bcast_shape) ? this->clone() : broadcast_to(bcast_shape);
         Tensor b_broadcast = (other.shape() == bcast_shape) ? other.clone() : other.broadcast_to(bcast_shape);
 
-        // Match dtypes if requested
         if (match_dtype && dtype_ != other.dtype()) {
             auto common_dtype = promote_types(dtype_, other.dtype());
             if (a_broadcast.dtype() != common_dtype) {
@@ -1228,7 +1056,6 @@ namespace gs {
             return tensors[0].clone();
         }
 
-        // Resolve dimension
         int resolved_dim = dim;
         if (resolved_dim < 0) {
             resolved_dim = tensors[0].shape().rank() + resolved_dim;
@@ -1239,7 +1066,6 @@ namespace gs {
             return Tensor();
         }
 
-        // Check shapes (all dimensions except dim must match)
         const auto& first_shape = tensors[0].shape();
         const auto first_device = tensors[0].device();
         const auto first_dtype = tensors[0].dtype();
@@ -1274,14 +1100,11 @@ namespace gs {
             total_size_along_dim += shape[resolved_dim];
         }
 
-        // Create result shape
         std::vector<size_t> result_dims = first_shape.dims();
         result_dims[resolved_dim] = total_size_along_dim;
 
-        // Create result tensor
         auto result = Tensor::empty(TensorShape(result_dims), first_device, first_dtype);
 
-        // Calculate strides for copying
         size_t outer_size = 1;
         for (int i = 0; i < resolved_dim; ++i) {
             outer_size *= first_shape[i];
@@ -1294,7 +1117,6 @@ namespace gs {
 
         size_t element_size = dtype_size(first_dtype);
 
-        // Copy data chunk by chunk
         if (first_device == Device::CUDA) {
             for (size_t outer = 0; outer < outer_size; ++outer) {
                 size_t result_offset = outer * total_size_along_dim * inner_size;
@@ -1313,7 +1135,6 @@ namespace gs {
                 }
             }
         } else {
-            // CPU implementation
             for (size_t outer = 0; outer < outer_size; ++outer) {
                 size_t result_offset = outer * total_size_along_dim * inner_size;
 
@@ -1343,7 +1164,6 @@ namespace gs {
             return Tensor();
         }
 
-        // Check all shapes are the same
         const auto& first_shape = tensors[0].shape();
         const auto first_device = tensors[0].device();
         const auto first_dtype = tensors[0].dtype();
@@ -1363,10 +1183,8 @@ namespace gs {
             }
         }
 
-        // Create new shape with added dimension
         std::vector<size_t> new_dims = first_shape.dims();
 
-        // Adjust dim to be positive
         if (dim < 0) {
             dim = first_shape.rank() + dim + 1;
         }
@@ -1378,15 +1196,12 @@ namespace gs {
 
         new_dims.insert(new_dims.begin() + dim, tensors.size());
 
-        // Create result tensor
         auto result = Tensor::empty(TensorShape(new_dims), first_device, first_dtype);
 
-        // Copy tensors
         size_t elements_per_tensor = first_shape.elements();
         size_t bytes_per_tensor = elements_per_tensor * dtype_size(first_dtype);
 
         if (dim == 0) {
-            // Simple case: stack along first dimension
             for (size_t i = 0; i < tensors.size(); ++i) {
                 void* dst = static_cast<char*>(result.raw_ptr()) + i * bytes_per_tensor;
                 if (first_device == Device::CUDA) {
@@ -1397,7 +1212,6 @@ namespace gs {
                 }
             }
         } else {
-            // More complex stacking - would need proper implementation
             LOG_ERROR("Stack along dimension {} not fully implemented", dim);
             return Tensor();
         }

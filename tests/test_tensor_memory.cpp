@@ -58,7 +58,7 @@ protected:
         cudaMemGetInfo(&initial_free_mem, &total_mem);
 
         torch::manual_seed(42);
-        tensor::manual_seed(42);
+        Tensor::manual_seed(42);
     }
 
     void TearDown() override {

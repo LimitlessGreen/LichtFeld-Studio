@@ -10,7 +10,6 @@
 #include <torch/torch.h>
 
 using namespace gs;
-using namespace gs::tensor;
 
 // ============= Helper Functions =============
 
@@ -59,7 +58,7 @@ protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA is not available for testing";
         torch::manual_seed(42);
-        tensor::manual_seed(42);
+        Tensor::manual_seed(42);
         gen.seed(42);
     }
 
@@ -71,25 +70,25 @@ protected:
 
 TEST_F(TensorAdvancedTest, Linspace) {
     // Test basic linspace
-    auto t_custom = linspace(0, 10, 11);
+    auto t_custom = Tensor::linspace(0, 10, 11);
     auto t_torch = torch::linspace(0, 10, 11, torch::TensorOptions().device(torch::kCUDA));
 
     compare_tensors(t_custom, t_torch, 1e-5f, 1e-6f, "Linspace_Basic");
 
     // Test linspace with 2 points
-    auto t2_custom = linspace(-5, 5, 2);
+    auto t2_custom = Tensor::linspace(-5, 5, 2);
     auto t2_torch = torch::linspace(-5, 5, 2, torch::TensorOptions().device(torch::kCUDA));
 
     compare_tensors(t2_custom, t2_torch, 1e-5f, 1e-6f, "Linspace_TwoPoints");
 
     // Test single point
-    auto t3_custom = linspace(3.14f, 3.14f, 1);
+    auto t3_custom = Tensor::linspace(3.14f, 3.14f, 1);
     auto t3_torch = torch::linspace(3.14f, 3.14f, 1, torch::TensorOptions().device(torch::kCUDA));
 
     compare_tensors(t3_custom, t3_torch, 1e-5f, 1e-6f, "Linspace_Single");
 
     // Test invalid (0 steps)
-    auto invalid = linspace(0, 1, 0);
+    auto invalid = Tensor::linspace(0, 1, 0);
     EXPECT_FALSE(invalid.is_valid());
 }
 
@@ -109,7 +108,7 @@ TEST_F(TensorAdvancedTest, Stack) {
     tensors_custom.push_back(t2_custom.clone());
     tensors_custom.push_back(t3_custom.clone());
 
-    auto stacked_custom = stack(std::move(tensors_custom), 0);
+    auto stacked_custom = Tensor::stack(std::move(tensors_custom), 0);
     auto stacked_torch = torch::stack({t1_torch, t2_torch, t3_torch}, 0);
 
     EXPECT_EQ(stacked_custom.shape().rank(), stacked_torch.dim());
@@ -121,7 +120,7 @@ TEST_F(TensorAdvancedTest, Stack) {
 
     // Test stacking empty list
     std::vector<Tensor> empty_list;
-    auto invalid = stack(std::move(empty_list));
+    auto invalid = Tensor::stack(std::move(empty_list));
     EXPECT_FALSE(invalid.is_valid());
 }
 
@@ -141,7 +140,7 @@ TEST_F(TensorAdvancedTest, Concatenate) {
     tensors_custom.push_back(t2_custom.clone());
     tensors_custom.push_back(t3_custom.clone());
 
-    auto concatenated_custom = cat(std::move(tensors_custom), 0);
+    auto concatenated_custom = Tensor::cat(std::move(tensors_custom), 0);
     auto concatenated_torch = torch::cat({t1_torch, t2_torch, t3_torch}, 0);
 
     EXPECT_EQ(concatenated_custom.shape().rank(), concatenated_torch.dim());
@@ -154,41 +153,8 @@ TEST_F(TensorAdvancedTest, Concatenate) {
     std::vector<Tensor> mismatched;
     mismatched.push_back(Tensor::zeros({2, 3}, Device::CUDA));
     mismatched.push_back(Tensor::zeros({2, 4}, Device::CUDA));
-    auto invalid = cat(std::move(mismatched), 0);
+    auto invalid = Tensor::cat(std::move(mismatched), 0);
     EXPECT_FALSE(invalid.is_valid());
-}
-
-// ============= Builder Pattern Tests =============
-
-TEST_F(TensorAdvancedTest, TensorBuilder) {
-    // Test basic builder
-    auto t_custom = TensorBuilder()
-                        .with_shape({3, 4, 5})
-                        .on_device(Device::CUDA)
-                        .with_dtype(DataType::Float32)
-                        .filled_with(2.5f)
-                        .build();
-
-    auto t_torch = torch::full({3, 4, 5}, 2.5f, torch::TensorOptions().device(torch::kCUDA));
-
-    EXPECT_TRUE(t_custom.is_valid());
-    EXPECT_EQ(t_custom.shape().rank(), t_torch.dim());
-    EXPECT_EQ(t_custom.device(), Device::CUDA);
-    EXPECT_EQ(t_custom.dtype(), DataType::Float32);
-
-    compare_tensors(t_custom, t_torch, 1e-6f, 1e-7f, "TensorBuilder");
-
-    // Test builder without fill value (empty)
-    auto t2_custom = TensorBuilder()
-                         .with_shape({10})
-                         .on_device(Device::CPU)
-                         .build();
-
-    auto t2_torch = torch::empty({10}, torch::TensorOptions().device(torch::kCPU));
-
-    EXPECT_TRUE(t2_custom.is_valid());
-    EXPECT_EQ(t2_custom.device(), Device::CPU);
-    EXPECT_EQ(t2_custom.numel(), t2_torch.numel());
 }
 
 // ============= Safe Operations Tests =============
@@ -570,7 +536,7 @@ TEST_F(TensorAdvancedTest, LikeOperations) {
     auto original_custom = Tensor::full({3, 4, 5}, 2.5f, Device::CUDA);
     auto original_torch = torch::full({3, 4, 5}, 2.5f, torch::TensorOptions().device(torch::kCUDA));
 
-    auto zeros_custom = zeros_like(original_custom);
+    auto zeros_custom = Tensor::zeros_like(original_custom);
     auto zeros_torch = torch::zeros_like(original_torch);
 
     EXPECT_EQ(zeros_custom.shape(), original_custom.shape());
@@ -579,7 +545,7 @@ TEST_F(TensorAdvancedTest, LikeOperations) {
 
     compare_tensors(zeros_custom, zeros_torch, 1e-6f, 1e-7f, "ZerosLike");
 
-    auto ones_custom = ones_like(original_custom);
+    auto ones_custom = Tensor::ones_like(original_custom);
     auto ones_torch = torch::ones_like(original_torch);
 
     EXPECT_EQ(ones_custom.shape(), original_custom.shape());
@@ -595,7 +561,7 @@ TEST_F(TensorAdvancedTest, DiagOperation) {
     auto diagonal_custom = Tensor::from_vector(diag_data, {5}, Device::CUDA);
     auto diagonal_torch = torch::tensor(diag_data, torch::TensorOptions().device(torch::kCUDA));
 
-    auto matrix_custom = diag(diagonal_custom);
+    auto matrix_custom = Tensor::diag(diagonal_custom);
     auto matrix_torch = torch::diag(diagonal_torch);
 
     EXPECT_EQ(matrix_custom.shape()[0], matrix_torch.size(0));
@@ -662,30 +628,4 @@ TEST_F(TensorAdvancedTest, AssertDtype) {
     // Should throw
     EXPECT_THROW(float_tensor.assert_dtype(DataType::Int32), TensorError);
     EXPECT_THROW(int_tensor.assert_dtype(DataType::Float32), TensorError);
-}
-
-// ============= Same Device/Shape Checks =============
-
-TEST_F(TensorAdvancedTest, AssertSameShape) {
-    auto t1 = Tensor::ones({3, 4}, Device::CUDA);
-    auto t2 = Tensor::zeros({3, 4}, Device::CUDA);
-    auto t3 = Tensor::ones({4, 3}, Device::CUDA);
-
-    // Should pass
-    EXPECT_NO_THROW(assert_same_shape(t1, t2));
-
-    // Should throw
-    EXPECT_THROW(assert_same_shape(t1, t3), TensorError);
-}
-
-TEST_F(TensorAdvancedTest, AssertSameDevice) {
-    auto cuda1 = Tensor::ones({2, 2}, Device::CUDA);
-    auto cuda2 = Tensor::zeros({2, 2}, Device::CUDA);
-    auto cpu1 = Tensor::ones({2, 2}, Device::CPU);
-
-    // Should pass
-    EXPECT_NO_THROW(assert_same_device(cuda1, cuda2));
-
-    // Should throw
-    EXPECT_THROW(assert_same_device(cuda1, cpu1), TensorError);
 }

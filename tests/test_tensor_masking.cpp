@@ -136,7 +136,7 @@ namespace {
 class TensorMaskingTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        tensor::manual_seed(42);
+        Tensor::manual_seed(42);
         torch::manual_seed(42);
     }
 };

@@ -18,11 +18,40 @@
         }                                             \
     } while (0)
 
-namespace gs::tensor {
+namespace gs {
 
-    // ============= Creation Utilities =============
+    // ============= Tensor Static Factory Methods =============
 
-    Tensor diag(const Tensor& diagonal) {
+    Tensor Tensor::linspace(float start, float end, size_t steps, Device device) {
+        if (steps == 0) {
+            LOG_ERROR("Steps must be > 0");
+            return Tensor();
+        }
+
+        if (steps == 1) {
+            return Tensor::full({1}, start, device);
+        }
+
+        auto t = Tensor::empty({steps}, device);
+
+        // Generate on CPU first
+        std::vector<float> data(steps);
+        float step = (end - start) / (steps - 1);
+        for (size_t i = 0; i < steps; ++i) {
+            data[i] = start + i * step;
+        }
+
+        if (device == Device::CUDA) {
+            CHECK_CUDA(cudaMemcpy(t.ptr<float>(), data.data(), steps * sizeof(float),
+                                  cudaMemcpyHostToDevice));
+        } else {
+            std::memcpy(t.ptr<float>(), data.data(), steps * sizeof(float));
+        }
+
+        return t;
+    }
+
+    Tensor Tensor::diag(const Tensor& diagonal) {
         if (diagonal.ndim() != 1) {
             LOG_ERROR("diag requires 1D tensor");
             return Tensor();
@@ -45,116 +74,27 @@ namespace gs::tensor {
         return result;
     }
 
-    Tensor linspace(float start, float end, size_t steps) {
-        if (steps == 0) {
-            LOG_ERROR("Steps must be > 0");
-            return Tensor();
-        }
-
-        if (steps == 1) {
-            return Tensor::full({1}, start, Device::CUDA);
-        }
-
-        auto t = Tensor::empty({steps}, Device::CUDA);
-
-        // Generate on CPU and copy
-        std::vector<float> data(steps);
-        float step = (end - start) / (steps - 1);
-        for (size_t i = 0; i < steps; ++i) {
-            data[i] = start + i * step;
-        }
-
-        CHECK_CUDA(cudaMemcpy(t.ptr<float>(), data.data(), steps * sizeof(float),
-                              cudaMemcpyHostToDevice));
-
-        return t;
-    }
-
-    // ============= Wrappers for Tensor Static Methods =============
-    // These maintain the tensor:: namespace API style
-
-    Tensor stack(std::vector<Tensor>&& tensors, int dim) {
-        return Tensor::stack(tensors, dim);
-    }
-
-    Tensor cat(std::vector<Tensor>&& tensors, int dim) {
-        return Tensor::cat(tensors, dim);
-    }
-
-    // ============= Like Operations =============
-
-    Tensor zeros_like(const Tensor& other) {
-        return Tensor::zeros(other.shape(), other.device(), other.dtype());
-    }
-
-    Tensor ones_like(const Tensor& other) {
-        return Tensor::ones(other.shape(), other.device(), other.dtype());
-    }
-
-    Tensor ones_like(const Tensor& other, DataType dtype) {
-        return Tensor::ones(other.shape(), other.device(), dtype);
-    }
-
-    Tensor rand_like(const Tensor& other) {
-        return Tensor::rand(other.shape(), other.device(), other.dtype());
-    }
-
-    Tensor randn_like(const Tensor& other) {
-        return Tensor::randn(other.shape(), other.device(), other.dtype());
-    }
-
-    // ============= Utility Functions =============
-
-    bool check_valid(const Tensor& t, const std::string& name) {
-        if (!t.is_valid()) {
-            LOG_ERROR("Tensor '{}' is invalid", name);
-            return false;
-        }
-        return true;
-    }
-
-    void assert_same_shape(const Tensor& a, const Tensor& b) {
-        if (a.shape() != b.shape()) {
-            std::string error_msg = "Shape mismatch: " + a.shape().str() + " vs " + b.shape().str();
-            LOG_ERROR("{}", error_msg);
-            throw TensorError(error_msg);
-        }
-    }
-
-    void assert_same_device(const Tensor& a, const Tensor& b) {
-        if (a.device() != b.device()) {
-            std::string error_msg = "Device mismatch";
-            LOG_ERROR("{}", error_msg);
-            throw TensorError(error_msg);
-        }
-    }
-
-#undef CHECK_CUDA
-
-} // namespace gs::tensor
+} // namespace gs
 
 // ============= SafeOps Implementation =============
-namespace gs {
+namespace gs::SafeOps {
 
-    SafeOps::Tensor SafeOps::divide(const Tensor& a, const Tensor& b, float epsilon) {
-        // Safe division: a / (b + epsilon) to avoid division by zero
+    Tensor divide(const Tensor& a, const Tensor& b, float epsilon) {
         auto safe_b = b.add(epsilon);
         return a.div(safe_b);
     }
 
-    SafeOps::Tensor SafeOps::log(const Tensor& input, float epsilon) {
-        // Safe log: clamp input to be at least epsilon
+    Tensor log(const Tensor& input, float epsilon) {
         auto safe_input = input.clamp_min(epsilon);
         return safe_input.log();
     }
 
-    SafeOps::Tensor SafeOps::sqrt(const Tensor& input, float epsilon) {
-        // Safe sqrt: clamp input to be non-negative
+    Tensor sqrt(const Tensor& input, float epsilon) {
         auto safe_input = input.clamp_min(epsilon);
         return safe_input.sqrt();
     }
 
-} // namespace gs
+} // namespace gs::SafeOps
 
 // ============= MemoryInfo Implementation =============
 namespace gs {
@@ -168,21 +108,17 @@ namespace gs {
         info.free_bytes = free_bytes;
         info.total_bytes = total_bytes;
         info.allocated_bytes = total_bytes - free_bytes;
-        info.device_id = 0; // Default to device 0
+        info.device_id = 0;
 
         return info;
     }
 
     MemoryInfo MemoryInfo::cpu() {
         MemoryInfo info;
-
-        // For CPU, we can't easily get memory info portably
-        // This is a placeholder implementation
         info.free_bytes = 0;
         info.total_bytes = 0;
         info.allocated_bytes = 0;
-        info.device_id = -1; // CPU device
-
+        info.device_id = -1;
         return info;
     }
 
@@ -203,7 +139,6 @@ namespace gs::functional {
         auto result = Tensor::empty(input.shape(), input.device());
 
         if (input.device() == Device::CUDA) {
-            // For CUDA, we need to copy to CPU, apply function, copy back
             auto cpu_input = input.to(Device::CPU);
             const float* src = cpu_input.ptr<float>();
             std::vector<float> dst_data(input.numel());
@@ -264,3 +199,5 @@ namespace gs::functional {
     }
 
 } // namespace gs::functional
+
+#undef CHECK_CUDA

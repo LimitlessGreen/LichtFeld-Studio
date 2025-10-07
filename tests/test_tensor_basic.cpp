@@ -61,7 +61,7 @@ protected:
 
         // Set random seed for reproducibility
         torch::manual_seed(42);
-        tensor::manual_seed(42);
+        Tensor::manual_seed(42);
         gen.seed(42);
     }
 

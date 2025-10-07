@@ -135,7 +135,7 @@ protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA is not available for testing";
         torch::manual_seed(42);
-        tensor::manual_seed(42);
+        Tensor::manual_seed(42);
     }
 };
 
@@ -445,7 +445,7 @@ TEST_F(TensorCumsumConvenienceTest, OnesLikeFloat32ToInt32) {
     auto custom_t = Tensor::from_vector(data, {3, 4}, Device::CUDA);
     auto torch_t = torch::zeros({3, 4}, torch::TensorOptions().device(torch::kCUDA));
 
-    auto custom_ones = tensor::ones_like(custom_t, DataType::Int32);
+    auto custom_ones = Tensor::ones_like(custom_t, DataType::Int32);
     auto torch_ones = torch::ones_like(torch_t, torch::TensorOptions().dtype(torch::kInt32));
 
     EXPECT_EQ(custom_ones.dtype(), DataType::Int32);
@@ -458,7 +458,7 @@ TEST_F(TensorCumsumConvenienceTest, OnesLikeFloat32ToBool) {
     auto custom_t = Tensor::from_vector(data, {5}, Device::CUDA);
     auto torch_t = torch::zeros({5}, torch::TensorOptions().device(torch::kCUDA));
 
-    auto custom_ones = tensor::ones_like(custom_t, DataType::Bool);
+    auto custom_ones = Tensor::ones_like(custom_t, DataType::Bool);
     auto torch_ones = torch::ones_like(torch_t, torch::TensorOptions().dtype(torch::kBool));
 
     EXPECT_EQ(custom_ones.dtype(), DataType::Bool);
@@ -469,7 +469,7 @@ TEST_F(TensorCumsumConvenienceTest, OnesLikePreservesDevice) {
     auto custom_cuda = Tensor::zeros({10}, Device::CUDA);
     auto torch_cuda = torch::zeros({10}, torch::TensorOptions().device(torch::kCUDA));
 
-    auto custom_ones = tensor::ones_like(custom_cuda, DataType::Int32);
+    auto custom_ones = Tensor::ones_like(custom_cuda, DataType::Int32);
     auto torch_ones = torch::ones_like(torch_cuda, torch::TensorOptions().dtype(torch::kInt32));
 
     EXPECT_EQ(custom_ones.device(), Device::CUDA);
@@ -483,7 +483,7 @@ TEST_F(TensorCumsumConvenienceTest, OnesLikePreservesShape) {
     auto custom_t = Tensor::from_vector(data, {2, 3, 4, 5}, Device::CUDA);
     auto torch_t = torch::zeros({2, 3, 4, 5}, torch::TensorOptions().device(torch::kCUDA));
 
-    auto custom_ones = tensor::ones_like(custom_t, DataType::Float32);
+    auto custom_ones = Tensor::ones_like(custom_t, DataType::Float32);
     auto torch_ones = torch::ones_like(torch_t);
 
     EXPECT_EQ(custom_ones.ndim(), torch_ones.dim());

@@ -29,7 +29,7 @@ namespace gs {
     // ============= Constructors & Destructor =============
     Tensor::Tensor(void* data, TensorShape shape, Device device, DataType dtype)
         : data_(data),
-          data_owner_(nullptr), // Non-owning view
+          data_owner_(nullptr),
           shape_(shape),
           device_(device),
           dtype_(dtype),
@@ -59,7 +59,6 @@ namespace gs {
 
     Tensor& Tensor::operator=(Tensor&& other) noexcept {
         if (this != &other) {
-            // Resources are automatically cleaned up by shared_ptr
             data_ = other.data_;
             data_owner_ = std::move(other.data_owner_);
             shape_ = other.shape_;
@@ -69,7 +68,6 @@ namespace gs {
             is_view_ = other.is_view_;
             id_ = other.id_;
 
-            // Reset other
             other.data_ = nullptr;
             other.initialized_ = false;
             other.is_view_ = false;
@@ -82,7 +80,6 @@ namespace gs {
             LOG_DEBUG("Destroying tensor #{}: shape={}, device={}, refcount={}",
                       id_, shape_.str(), device_name(device_), data_owner_.use_count());
         }
-        // shared_ptr automatically handles deallocation
     }
 
     Tensor Tensor::clone() const {
@@ -105,7 +102,6 @@ namespace gs {
     }
 
     Tensor Tensor::contiguous() const {
-        // For now, tensors are always contiguous
         return clone();
     }
 
@@ -141,7 +137,7 @@ namespace gs {
             return clone();
         }
 
-        // Support Bool -> Float32 conversion
+        // Bool -> Float32
         if (dtype_ == DataType::Bool && dtype == DataType::Float32) {
             auto result = empty(shape_, device_, DataType::Float32);
 
@@ -164,7 +160,7 @@ namespace gs {
             return result;
         }
 
-        // Support Float32 -> Bool conversion
+        // Float32 -> Bool
         if (dtype_ == DataType::Float32 && dtype == DataType::Bool) {
             auto result = empty(shape_, device_, DataType::Bool);
 
@@ -187,7 +183,7 @@ namespace gs {
             return result;
         }
 
-        // Support Float32 -> Int32 conversion
+        // Float32 -> Int32
         if (dtype_ == DataType::Float32 && dtype == DataType::Int32) {
             auto result = empty(shape_, device_, DataType::Int32);
 
@@ -210,7 +206,7 @@ namespace gs {
             return result;
         }
 
-        // Support Int32 -> Float32 conversion
+        // Int32 -> Float32
         if (dtype_ == DataType::Int32 && dtype == DataType::Float32) {
             auto result = empty(shape_, device_, DataType::Float32);
 
@@ -256,7 +252,7 @@ namespace gs {
         std::vector<Tensor> tensors;
         tensors.push_back(clone());
         tensors.push_back(other.clone());
-        return tensor::cat(std::move(tensors), dim);
+        return Tensor::cat(tensors, dim);
     }
 
     Tensor Tensor::broadcast_to(const TensorShape& target_shape) const {
@@ -276,12 +272,10 @@ namespace gs {
     // ============= Special operations =============
     Tensor Tensor::normalize(int dim, float eps) const {
         if (dim == -1) {
-            // Normalize entire tensor
             auto m = mean();
             auto s = std().add(eps);
             return sub(m).div(s);
         }
-        // Per-dimension would use reduce with axes
         std::vector<int> axes = {dim};
         auto m = mean(axes, true);
         auto s = std(axes, true).add(eps);
@@ -293,14 +287,12 @@ namespace gs {
             return Tensor();
         }
 
-        // logit(x) = log(x / (1 - x))
-        // But we need to clamp x to [eps, 1-eps] first
         auto x_clamped = clamp(eps, 1.0f - eps);
         auto one_minus_x = full(shape_, 1.0f, device_, dtype_).sub(x_clamped);
         return x_clamped.div(one_minus_x).log();
     }
 
-    // ============= NEW: Bitwise NOT =============
+    // ============= Bitwise NOT =============
     Tensor Tensor::operator~() const {
         if (dtype_ != DataType::Bool) {
             LOG_ERROR("Bitwise NOT only works on boolean tensors");
@@ -324,7 +316,7 @@ namespace gs {
         return result;
     }
 
-    // ============= NEW: Bitwise OR =============
+    // ============= Bitwise OR =============
     Tensor Tensor::operator|(const Tensor& other) const {
         if (dtype_ != DataType::Bool || other.dtype() != DataType::Bool) {
             LOG_ERROR("Bitwise OR only works on boolean tensors");
@@ -341,7 +333,6 @@ namespace gs {
 
         if (device_ == Device::CUDA) {
             if (dtype_ == DataType::Float32) {
-                // Use default stream (0) instead of nullptr
                 tensor_ops::launch_clamp_scalar(ptr<float>(), min_val, max_val, numel(), 0);
                 cudaDeviceSynchronize();
             } else if (dtype_ == DataType::Int32) {
@@ -355,7 +346,6 @@ namespace gs {
             if (dtype_ == DataType::Float32) {
                 float* data = ptr<float>();
                 for (size_t i = 0; i < numel(); ++i) {
-                    // Preserve NaN (PyTorch behavior)
                     if (!std::isnan(data[i])) {
                         data[i] = std::clamp(data[i], min_val, max_val);
                     }
@@ -380,6 +370,7 @@ namespace gs {
     Tensor& Tensor::clamp_max_(float max) {
         return clamp_(std::numeric_limits<float>::lowest(), max);
     }
+
     // ============= Cumulative sum =============
     Tensor Tensor::cumsum(int dim) const {
         if (!is_valid()) {
@@ -396,16 +387,13 @@ namespace gs {
         auto result = clone();
 
         if (device_ == Device::CUDA) {
-            // Use CUDA kernel for cumulative sum
             tensor_ops::launch_cumsum(result.raw_ptr(), shape_.dims().data(),
                                       shape_.rank(), dim, dtype_, nullptr);
             cudaDeviceSynchronize();
         } else {
-            // CPU implementation - iterate through all elements in row-major order
             if (dtype_ == DataType::Float32) {
                 float* data = result.ptr<float>();
 
-                // Calculate strides for all dimensions (row-major)
                 std::vector<size_t> strides(shape_.rank());
                 strides.back() = 1;
                 for (int i = static_cast<int>(shape_.rank()) - 2; i >= 0; --i) {
@@ -416,16 +404,12 @@ namespace gs {
                 size_t dim_size = shape_[dim];
                 size_t total = numel();
 
-                // Process each element: if not first along cumsum dim, add previous
                 for (size_t idx = 0; idx < total; ++idx) {
-                    // Get coordinate along the cumsum dimension
                     size_t coord_along_dim = (idx / dim_stride) % dim_size;
 
-                    // Skip first elements (they stay as-is)
                     if (coord_along_dim == 0)
                         continue;
 
-                    // Add the previous element along the cumsum dimension
                     data[idx] += data[idx - dim_stride];
                 }
             } else if (dtype_ == DataType::Int32) {
@@ -810,21 +794,17 @@ namespace gs {
             return false;
         }
 
-        // Check shape and dtype match (but not device - we handle that below)
         if (shape_ != other.shape_ || dtype_ != other.dtype_) {
             return false;
         }
 
-        // Handle empty tensors
         if (numel() == 0) {
-            return true; // Two empty tensors with same shape are considered close
+            return true;
         }
 
-        // We need to get the data to CPU for comparison
         const float* a_data = nullptr;
         const float* b_data = nullptr;
 
-        // Create temporary CPU tensors if needed
         Tensor a_temp, b_temp;
 
         if (device_ == Device::CUDA) {
@@ -841,12 +821,10 @@ namespace gs {
             b_data = other.ptr<float>();
         }
 
-        // Check if pointers are valid
         if (!a_data || !b_data) {
             return false;
         }
 
-        // Compare values with tolerance
         for (size_t i = 0; i < numel(); ++i) {
             float diff = std::abs(a_data[i] - b_data[i]);
             float tol = atol + rtol * std::abs(b_data[i]);
@@ -858,52 +836,11 @@ namespace gs {
         return true;
     }
 
-#undef CHECK_CUDA
-
     // ============= Error Classes =============
     TensorError::TensorError(const std::string& msg, const Tensor* t)
         : std::runtime_error(msg),
           tensor_info_(t ? t->str() : "") {}
 
-    // ============= TensorBuilder Implementation =============
-    TensorBuilder& TensorBuilder::with_shape(TensorShape shape) {
-        shape_ = shape;
-        return *this;
-    }
-
-    TensorBuilder& TensorBuilder::on_device(Device device) {
-        device_ = device;
-        return *this;
-    }
-
-    TensorBuilder& TensorBuilder::with_dtype(DataType dtype) {
-        dtype_ = dtype;
-        return *this;
-    }
-
-    TensorBuilder& TensorBuilder::filled_with(float value) {
-        fill_value_ = value;
-        return *this;
-    }
-
-    TensorBuilder& TensorBuilder::ensure_finite() {
-        check_finite_ = true;
-        return *this;
-    }
-
-    Tensor TensorBuilder::build() {
-        Tensor t;
-        if (fill_value_.has_value()) {
-            t = Tensor::full(shape_, *fill_value_, device_, dtype_);
-        } else {
-            t = Tensor::empty(shape_, device_, dtype_);
-        }
-
-        if (check_finite_) {
-            t.assert_finite();
-        }
-
-        return t;
-    }
+#undef CHECK_CUDA
 
 } // namespace gs
