@@ -19,6 +19,16 @@
 
 namespace gs::tensor_ops {
 
+    // Helper template to execute Thrust operations with correct policy
+    template<typename Func>
+    void run_with_thrust_policy(cudaStream_t stream, Func&& func) {
+        if (stream) {
+            func(thrust::cuda::par.on(stream));
+        } else {
+            func(thrust::cuda::par);
+        }
+    }
+
     // ============= Broadcasting Index Mapping =============
 
     // Device function for computing broadcast index
@@ -191,11 +201,13 @@ namespace gs::tensor_ops {
         auto permuted_src = thrust::make_permutation_iterator(src_ptr, src_index_iter);
 
         // Copy with broadcasting
-        thrust::copy(
-            thrust::cuda::par.on(stream),
-            permuted_src,
-            permuted_src + dst_elements,
-            dst_ptr);
+        run_with_thrust_policy(stream, [&](auto policy) {
+            thrust::copy(
+                policy,
+                permuted_src,
+                permuted_src + dst_elements,
+                dst_ptr);
+        });
     }
 
     void launch_broadcast_bool(const unsigned char* src, unsigned char* dst,
@@ -227,11 +239,13 @@ namespace gs::tensor_ops {
         auto permuted_src = thrust::make_permutation_iterator(src_ptr, src_index_iter);
 
         // Copy with broadcasting
-        thrust::copy(
-            thrust::cuda::par.on(stream),
-            permuted_src,
-            permuted_src + dst_elements,
-            dst_ptr);
+        run_with_thrust_policy(stream, [&](auto policy) {
+            thrust::copy(
+                policy,
+                permuted_src,
+                permuted_src + dst_elements,
+                dst_ptr);
+        });
     }
 
     // ============= Broadcasting Binary Operations =============
@@ -267,12 +281,14 @@ namespace gs::tensor_ops {
             op_functor);
 
         // Transform output indices to results
-        thrust::transform(
-            thrust::cuda::par.on(stream),
-            counting_iter,
-            counting_iter + c_elements,
-            c_ptr,
-            binary_func);
+        run_with_thrust_policy(stream, [&](auto policy) {
+            thrust::transform(
+                policy,
+                counting_iter,
+                counting_iter + c_elements,
+                c_ptr,
+                binary_func);
+        });
     }
 
     void launch_broadcast_add(const float* a, const float* b, float* c,

@@ -42,6 +42,138 @@ namespace gs {
         }
     }
 
+    // ============= Copy Constructor & Assignment =============
+Tensor::Tensor(const Tensor& other)
+    : data_(nullptr),
+      data_owner_(nullptr),
+      shape_(other.shape_),
+      device_(other.device_),
+      dtype_(other.dtype_),
+      initialized_(other.initialized_),
+      is_view_(false),  // Copy is never a view
+      id_(next_id_++) {
+
+    if (!other.initialized_ || other.numel() == 0) {
+        return;
+    }
+
+    // Allocate new memory
+    size_t bytes = other.bytes();
+
+    if (device_ == Device::CUDA) {
+        void* ptr = nullptr;
+        cudaError_t err = cudaMalloc(&ptr, bytes);
+        if (err != cudaSuccess) {
+            LOG_ERROR("Failed to allocate {} bytes on CUDA: {}", bytes, cudaGetErrorString(err));
+            initialized_ = false;
+            return;
+        }
+        data_ = ptr;
+        data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+            if (p)
+                cudaFree(p);
+        });
+
+        // Copy data
+        CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes,
+                   other.device_ == Device::CUDA ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice));
+    } else {
+        void* ptr = std::malloc(bytes);
+        if (!ptr) {
+            LOG_ERROR("Failed to allocate {} bytes on CPU", bytes);
+            initialized_ = false;
+            return;
+        }
+        data_ = ptr;
+        data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+            if (p)
+                std::free(p);
+        });
+
+        // Copy data
+        if (other.device_ == Device::CUDA) {
+            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes, cudaMemcpyDeviceToHost));
+        } else {
+            std::memcpy(data_, other.data_, bytes);
+        }
+    }
+
+    if (profiling_enabled_) {
+        LOG_DEBUG("Copy constructed tensor #{} from #{}: shape={}, device={}, dtype={}",
+                  id_, other.id_, shape_.str(), device_name(device_), dtype_name(dtype_));
+    }
+}
+
+Tensor& Tensor::operator=(const Tensor& other) {
+    if (this == &other) {
+        return *this;
+    }
+
+    // Clean up existing data (shared_ptr will handle deallocation)
+    data_owner_.reset();
+    data_ = nullptr;
+
+    // Copy metadata
+    shape_ = other.shape_;
+    device_ = other.device_;
+    dtype_ = other.dtype_;
+    initialized_ = other.initialized_;
+    is_view_ = false;  // Copy is never a view
+    id_ = next_id_++;
+
+    if (!other.initialized_ || other.numel() == 0) {
+        return *this;
+    }
+
+    // Allocate new memory
+    size_t bytes = other.bytes();
+
+    if (device_ == Device::CUDA) {
+        void* ptr = nullptr;
+        cudaError_t err = cudaMalloc(&ptr, bytes);
+        if (err != cudaSuccess) {
+            LOG_ERROR("Failed to allocate {} bytes on CUDA: {}", bytes, cudaGetErrorString(err));
+            initialized_ = false;
+            return *this;
+        }
+        data_ = ptr;
+        data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+            if (p)
+                cudaFree(p);
+        });
+
+        // Copy data
+        CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes,
+                   other.device_ == Device::CUDA ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice));
+    } else {
+        void* ptr = std::malloc(bytes);
+        if (!ptr) {
+            LOG_ERROR("Failed to allocate {} bytes on CPU", bytes);
+            initialized_ = false;
+            return *this;
+        }
+        data_ = ptr;
+        data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+            if (p)
+                std::free(p);
+        });
+
+        // Copy data
+        if (other.device_ == Device::CUDA) {
+            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes, cudaMemcpyDeviceToHost));
+        } else {
+            std::memcpy(data_, other.data_, bytes);
+        }
+    }
+
+    if (profiling_enabled_) {
+        LOG_DEBUG("Copy assigned tensor #{} from #{}: shape={}, device={}, dtype={}",
+                  id_, other.id_, shape_.str(), device_name(device_), dtype_name(dtype_));
+    }
+
+    return *this;
+}
+
     Tensor::Tensor(Tensor&& other) noexcept
         : data_(other.data_),
           data_owner_(std::move(other.data_owner_)),
@@ -84,22 +216,34 @@ namespace gs {
 
     Tensor Tensor::clone() const {
         if (!is_valid()) {
+            LOG_ERROR("Cannot clone invalid tensor");
             return Tensor();
         }
 
-        Tensor t = empty(shape_, device_, dtype_);
         if (numel() == 0) {
-            return t;
+            // Return empty tensor with same shape and properties
+            return empty(shape_, device_, dtype_);
         }
+
+        // Create new tensor with same properties
+        auto result = empty(shape_, device_, dtype_);
+
+        // Copy data
+        size_t bytes = this->bytes();
 
         if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(t.data_, data_, bytes(), cudaMemcpyDeviceToDevice));
+            cudaError_t err = cudaMemcpy(result.data_, data_, bytes, cudaMemcpyDeviceToDevice);
+            if (err != cudaSuccess) {
+                LOG_ERROR("CUDA memcpy failed in clone(): {}", cudaGetErrorString(err));
+                return Tensor();
+            }
         } else {
-            std::memcpy(t.data_, data_, bytes());
+            std::memcpy(result.data_, data_, bytes);
         }
 
-        return t;
+        return result;
     }
+    // ============= END OF ADDITION =============
 
     Tensor Tensor::contiguous() const {
         return clone();
@@ -695,6 +839,45 @@ namespace gs {
             std::memcpy(result.data(), data_, bytes());
         }
 
+        return result;
+    }
+
+    std::vector<int64_t> Tensor::to_vector_int64() const {
+        LOG_DEBUG("to_vector_int64() called");
+        LOG_DEBUG("  dtype: {}", dtype_name(dtype_));
+        LOG_DEBUG("  device: {}", device_name(device_));
+        LOG_DEBUG("  numel: {}", numel());
+        LOG_DEBUG("  is_valid: {}", is_valid());
+
+        if (dtype_ != DataType::Int64) {
+            LOG_ERROR("to_vector_int64() requires Int64 tensor, got {}", dtype_name(dtype_));
+            return {};
+        }
+
+        if (!is_valid()) {
+            LOG_ERROR("to_vector_int64() on invalid tensor");
+            return {};
+        }
+
+        if (numel() == 0) {
+            LOG_DEBUG("Empty tensor, returning empty vector");
+            return {};
+        }
+
+        LOG_DEBUG("Creating result vector of size {}", numel());
+        std::vector<int64_t> result(numel());
+
+        if (device_ == Device::CUDA) {
+            LOG_DEBUG("Copying from CUDA to CPU, bytes: {}", bytes());
+            CHECK_CUDA(cudaMemcpy(result.data(), data_, bytes(), cudaMemcpyDeviceToHost));
+            LOG_DEBUG("CUDA copy complete");
+        } else {
+            LOG_DEBUG("Copying from CPU memory, bytes: {}", bytes());
+            std::memcpy(result.data(), data_, bytes());
+            LOG_DEBUG("CPU copy complete");
+        }
+
+        LOG_DEBUG("to_vector_int64() complete, returning {} elements", result.size());
         return result;
     }
 

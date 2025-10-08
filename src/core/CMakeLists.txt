@@ -20,6 +20,7 @@ set(CORE_SOURCES
         tensor/tensor_broadcast.cpp    # Broadcasting implementation
         tensor/tensor_shape_ops.cpp    # Shape functions (reshape, slice, etc.)
         tensor/tensor_masking_ops.cpp  # Masking and indexing operations
+        tensor/tensor_advanced_ops.cpp 
         tinyply.cpp
 )
 
@@ -30,6 +31,7 @@ set(CORE_CUDA_SOURCES
         tensor/tensor_broadcast_ops.cu # CUDA kernels for broadcasting
         tensor/tensor_masking_ops.cu   # CUDA kernels for masking/indexing
         tensor/tensor_random_ops.cu    # CUDA kernels for random ops
+	    kmeans_new.cu
 )
 
 add_compile_definitions(_PSTL_USAGE_WARNINGS=0)

@@ -173,5 +173,16 @@ namespace gs::tensor_ops {
     // ============= Cumulative Sum Operation =============
     void launch_cumsum(void* data, const size_t* shape, size_t rank,
                        int dim, DataType dtype, cudaStream_t stream);
+    // ============= Pairwise Distance Operations =============
+    void launch_cdist(const float* a, const float* b, float* out,
+                      size_t N, size_t M, size_t D, float p, cudaStream_t stream);
+
+    // ============= Sorting Operations =============
+    void launch_sort_1d(float* values, int64_t* indices, size_t n,
+                        bool descending, cudaStream_t stream);
+
+    void launch_sort_2d(float* values, int64_t* indices,
+                        size_t outer_size, size_t dim_size, size_t inner_size,
+                        int dim, bool descending, cudaStream_t stream);
 
 } // namespace gs::tensor_ops

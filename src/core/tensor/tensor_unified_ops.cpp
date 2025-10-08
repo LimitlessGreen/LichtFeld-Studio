@@ -476,7 +476,7 @@ namespace gs {
     }
 
     // Binary operations - NO TEMPLATES!
-    Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
+     Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
         if (!validate_binary_op(other, false, true)) {
             return Tensor();
         }
@@ -488,6 +488,7 @@ namespace gs {
             return Tensor();
         }
 
+        // Determine output dtype
         DataType out_dtype = dtype_;
         if (op >= BinaryOp::Equal && op <= BinaryOp::GreaterEqual) {
             out_dtype = DataType::Bool;
@@ -514,8 +515,29 @@ namespace gs {
                 cudaDeviceSynchronize();
             } else {
                 // CPU implementation using compile-time operation tables
-                if (out_dtype == DataType::Bool && dtype_ == DataType::Float32 && other.dtype() == DataType::Float32) {
-                    // Comparison operations
+
+                // Int32 comparison operations
+                if (out_dtype == DataType::Bool && dtype_ == DataType::Int32 && other.dtype() == DataType::Int32) {
+                    const int* src_a = static_cast<const int*>(raw_ptr());
+                    const int* src_b = static_cast<const int*>(other.raw_ptr());
+                    unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
+
+                    for (size_t i = 0; i < result.numel(); ++i) {
+                        bool cmp_result = false;
+                        switch (op) {
+                            case BinaryOp::Equal: cmp_result = (src_a[i] == src_b[i]); break;
+                            case BinaryOp::NotEqual: cmp_result = (src_a[i] != src_b[i]); break;
+                            case BinaryOp::Less: cmp_result = (src_a[i] < src_b[i]); break;
+                            case BinaryOp::LessEqual: cmp_result = (src_a[i] <= src_b[i]); break;
+                            case BinaryOp::Greater: cmp_result = (src_a[i] > src_b[i]); break;
+                            case BinaryOp::GreaterEqual: cmp_result = (src_a[i] >= src_b[i]); break;
+                            default: cmp_result = false; break;
+                        }
+                        dst[i] = cmp_result ? 1 : 0;
+                    }
+                }
+                // Float32 comparison operations
+                else if (out_dtype == DataType::Bool && dtype_ == DataType::Float32 && other.dtype() == DataType::Float32) {
                     const float* src_a = static_cast<const float*>(raw_ptr());
                     const float* src_b = static_cast<const float*>(other.raw_ptr());
                     unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
@@ -523,8 +545,9 @@ namespace gs {
                     for (size_t i = 0; i < result.numel(); ++i) {
                         dst[i] = op_tables::float_compare_ops[int(op)](src_a[i], src_b[i]) ? 1 : 0;
                     }
-                } else if (dtype_ == DataType::Bool && other.dtype() == DataType::Bool && out_dtype == DataType::Bool) {
-                    // Logical/bitwise operations
+                }
+                // Logical operations
+                else if (dtype_ == DataType::Bool && other.dtype() == DataType::Bool && out_dtype == DataType::Bool) {
                     const unsigned char* src_a = static_cast<const unsigned char*>(raw_ptr());
                     const unsigned char* src_b = static_cast<const unsigned char*>(other.raw_ptr());
                     unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
@@ -532,14 +555,25 @@ namespace gs {
                     for (size_t i = 0; i < result.numel(); ++i) {
                         dst[i] = op_tables::float_logical_ops[int(op)](src_a[i], src_b[i]) ? 1 : 0;
                     }
-                } else if (dtype_ == DataType::Float32 && other.dtype() == DataType::Float32 && out_dtype == DataType::Float32) {
-                    // Arithmetic operations - using compile-time table
+                }
+                // Arithmetic operations
+                else if (dtype_ == DataType::Float32 && other.dtype() == DataType::Float32 && out_dtype == DataType::Float32) {
                     const float* src_a = static_cast<const float*>(raw_ptr());
                     const float* src_b = static_cast<const float*>(other.raw_ptr());
                     float* dst = static_cast<float*>(result.raw_ptr());
 
                     for (size_t i = 0; i < result.numel(); ++i) {
                         dst[i] = op_tables::float_binary_ops[int(op)](src_a[i], src_b[i]);
+                    }
+                }
+                // Int32 arithmetic operations
+                else if (dtype_ == DataType::Int32 && other.dtype() == DataType::Int32 && out_dtype == DataType::Int32) {
+                    const int* src_a = static_cast<const int*>(raw_ptr());
+                    const int* src_b = static_cast<const int*>(other.raw_ptr());
+                    int* dst = static_cast<int*>(result.raw_ptr());
+
+                    for (size_t i = 0; i < result.numel(); ++i) {
+                        dst[i] = op_tables::int_binary_ops[int(op)](src_a[i], src_b[i]);
                     }
                 }
             }
@@ -577,7 +611,31 @@ namespace gs {
                 auto b_shape = other.shape().dims();
                 auto c_shape = broadcast_shape.dims();
 
-                if (out_dtype == DataType::Bool && dtype_ == DataType::Float32 && other.dtype() == DataType::Float32) {
+                // Int32 comparison with broadcasting
+                if (out_dtype == DataType::Bool && dtype_ == DataType::Int32 && other.dtype() == DataType::Int32) {
+                    const int* src_a = static_cast<const int*>(raw_ptr());
+                    const int* src_b = static_cast<const int*>(other.raw_ptr());
+                    unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
+
+                    for (size_t i = 0; i < result.numel(); ++i) {
+                        size_t a_idx = broadcast::index(i, c_shape, a_shape);
+                        size_t b_idx = broadcast::index(i, c_shape, b_shape);
+
+                        bool cmp_result = false;
+                        switch (op) {
+                            case BinaryOp::Equal: cmp_result = (src_a[a_idx] == src_b[b_idx]); break;
+                            case BinaryOp::NotEqual: cmp_result = (src_a[a_idx] != src_b[b_idx]); break;
+                            case BinaryOp::Less: cmp_result = (src_a[a_idx] < src_b[b_idx]); break;
+                            case BinaryOp::LessEqual: cmp_result = (src_a[a_idx] <= src_b[b_idx]); break;
+                            case BinaryOp::Greater: cmp_result = (src_a[a_idx] > src_b[b_idx]); break;
+                            case BinaryOp::GreaterEqual: cmp_result = (src_a[a_idx] >= src_b[b_idx]); break;
+                            default: cmp_result = false; break;
+                        }
+                        dst[i] = cmp_result ? 1 : 0;
+                    }
+                }
+                // Float32 comparison with broadcasting
+                else if (out_dtype == DataType::Bool && dtype_ == DataType::Float32 && other.dtype() == DataType::Float32) {
                     const float* src_a = static_cast<const float*>(raw_ptr());
                     const float* src_b = static_cast<const float*>(other.raw_ptr());
                     unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
@@ -587,7 +645,9 @@ namespace gs {
                         size_t b_idx = broadcast::index(i, c_shape, b_shape);
                         dst[i] = op_tables::float_compare_ops[int(op)](src_a[a_idx], src_b[b_idx]) ? 1 : 0;
                     }
-                } else if (dtype_ == DataType::Bool && other.dtype() == DataType::Bool && out_dtype == DataType::Bool) {
+                }
+                // Bool logical with broadcasting
+                else if (dtype_ == DataType::Bool && other.dtype() == DataType::Bool && out_dtype == DataType::Bool) {
                     const unsigned char* src_a = static_cast<const unsigned char*>(raw_ptr());
                     const unsigned char* src_b = static_cast<const unsigned char*>(other.raw_ptr());
                     unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
@@ -597,7 +657,9 @@ namespace gs {
                         size_t b_idx = broadcast::index(i, c_shape, b_shape);
                         dst[i] = op_tables::float_logical_ops[int(op)](src_a[a_idx], src_b[b_idx]) ? 1 : 0;
                     }
-                } else if (dtype_ == DataType::Float32 && other.dtype() == DataType::Float32 && out_dtype == DataType::Float32) {
+                }
+                // Float32 arithmetic with broadcasting
+                else if (dtype_ == DataType::Float32 && other.dtype() == DataType::Float32 && out_dtype == DataType::Float32) {
                     const float* src_a = static_cast<const float*>(raw_ptr());
                     const float* src_b = static_cast<const float*>(other.raw_ptr());
                     float* dst = static_cast<float*>(result.raw_ptr());
@@ -614,7 +676,8 @@ namespace gs {
         return result;
     }
 
-    Tensor Tensor::binary_op_scalar(float scalar, BinaryOp op) const {
+
+     Tensor Tensor::binary_op_scalar(float scalar, BinaryOp op) const {
         if (!validate_unary_op()) {
             return Tensor();
         }
@@ -634,18 +697,54 @@ namespace gs {
                 nullptr);
             cudaDeviceSynchronize();
         } else {
-            // CPU implementation using compile-time tables
-            const float* src = static_cast<const float*>(raw_ptr());
+            // CPU implementation
 
-            if (out_dtype == DataType::Bool) {
+            // Int32 comparison with scalar
+            if (out_dtype == DataType::Bool && dtype_ == DataType::Int32) {
+                const int* src = static_cast<const int*>(raw_ptr());
                 unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
+                int scalar_int = static_cast<int>(scalar);
+
+                for (size_t i = 0; i < numel(); ++i) {
+                    bool cmp_result = false;
+                    switch (op) {
+                        case BinaryOp::Equal: cmp_result = (src[i] == scalar_int); break;
+                        case BinaryOp::NotEqual: cmp_result = (src[i] != scalar_int); break;
+                        case BinaryOp::Less: cmp_result = (src[i] < scalar_int); break;
+                        case BinaryOp::LessEqual: cmp_result = (src[i] <= scalar_int); break;
+                        case BinaryOp::Greater: cmp_result = (src[i] > scalar_int); break;
+                        case BinaryOp::GreaterEqual: cmp_result = (src[i] >= scalar_int); break;
+                        default: cmp_result = false; break;
+                    }
+                    dst[i] = cmp_result ? 1 : 0;
+                }
+            }
+            // Float32 comparison with scalar
+            else if (out_dtype == DataType::Bool && dtype_ == DataType::Float32) {
+                const float* src = static_cast<const float*>(raw_ptr());
+                unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
+
                 for (size_t i = 0; i < numel(); ++i) {
                     dst[i] = op_tables::float_compare_ops[int(op)](src[i], scalar) ? 1 : 0;
                 }
-            } else {
+            }
+            // Float32 arithmetic with scalar
+            else if (dtype_ == DataType::Float32 && out_dtype == DataType::Float32) {
+                const float* src = static_cast<const float*>(raw_ptr());
                 float* dst = static_cast<float*>(result.raw_ptr());
+
                 for (size_t i = 0; i < numel(); ++i) {
                     dst[i] = op_tables::float_binary_ops[int(op)](src[i], scalar);
+                }
+            }
+            // Int32 arithmetic with scalar
+            else if (dtype_ == DataType::Int32 && out_dtype == DataType::Int32) {
+                const int* src = static_cast<const int*>(raw_ptr());
+                int* dst = static_cast<int*>(result.raw_ptr());
+                int scalar_int = static_cast<int>(scalar);
+
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = op_tables::int_binary_ops[int(op)](src[i], scalar_int);
                 }
             }
         }
@@ -721,7 +820,31 @@ namespace gs {
             auto diff = this->sub(mean_broadcast);
             auto squared = diff.mul(diff);
 
-            auto variance = squared.reduce(ReduceOp::Mean, mean_args);
+            // Compute sum of squared differences
+            auto sum_sq = squared.reduce(ReduceOp::Sum, mean_args);
+
+            // Calculate N (number of elements being reduced)
+            std::vector<int> axes = args.axes;
+            if (axes.empty()) {
+                axes.resize(shape_.rank());
+                std::iota(axes.begin(), axes.end(), 0);
+            }
+
+            size_t reduce_count = 1;
+            for (int ax : axes) {
+                reduce_count *= shape_[ax];
+            }
+
+            // For dimensional reductions (with keepdim or specific axes), use unbiased (N-1)
+            // For scalar reductions (all axes), use biased (N)
+            bool is_scalar_reduction = (axes.size() == shape_.rank() && !args.keepdim);
+            float correction = static_cast<float>(reduce_count);
+            if (!is_scalar_reduction && reduce_count > 1) {
+                // Use unbiased estimator (N-1) for dimensional reductions
+                correction = static_cast<float>(reduce_count - 1);
+            }
+
+            auto variance = sum_sq.div(correction);
 
             if (op == ReduceOp::Var) {
                 return variance;
@@ -810,39 +933,165 @@ namespace gs {
                 dtype_, nullptr);
             cudaDeviceSynchronize();
         } else {
-            // CPU implementation - simplified
-            if (op == ReduceOp::Sum && axes.size() == shape_.rank()) {
-                const float* src = static_cast<const float*>(raw_ptr());
-                float sum = 0;
-                for (size_t i = 0; i < numel(); ++i) {
-                    sum += src[i];
+            // CPU implementation
+            const float* src = static_cast<const float*>(raw_ptr());
+            float* dst = static_cast<float*>(result.raw_ptr());
+
+            // Full reduction to scalar
+            if (axes.size() == shape_.rank()) {
+                if (op == ReduceOp::Sum) {
+                    float sum = 0;
+                    for (size_t i = 0; i < numel(); ++i) {
+                        sum += src[i];
+                    }
+                    dst[0] = sum;
+                } else if (op == ReduceOp::Mean) {
+                    float sum = 0;
+                    for (size_t i = 0; i < numel(); ++i) {
+                        sum += src[i];
+                    }
+                    dst[0] = sum / numel();
+                } else if (op == ReduceOp::Max) {
+                    float max_val = src[0];
+                    for (size_t i = 1; i < numel(); ++i) {
+                        max_val = std::max(max_val, src[i]);
+                    }
+                    dst[0] = max_val;
+                } else if (op == ReduceOp::Min) {
+                    float min_val = src[0];
+                    for (size_t i = 1; i < numel(); ++i) {
+                        min_val = std::min(min_val, src[i]);
+                    }
+                    dst[0] = min_val;
+                } else if (op == ReduceOp::Prod) {
+                    float prod = 1.0f;
+                    for (size_t i = 0; i < numel(); ++i) {
+                        prod *= src[i];
+                    }
+                    dst[0] = prod;
                 }
-                *static_cast<float*>(result.raw_ptr()) = sum;
-            } else if (op == ReduceOp::Mean && axes.size() == shape_.rank()) {
-                const float* src = static_cast<const float*>(raw_ptr());
-                float sum = 0;
-                for (size_t i = 0; i < numel(); ++i) {
-                    sum += src[i];
+                return result;
+            }
+
+            // Axis-specific reduction - general implementation
+            // Build mask of which dimensions are reduced
+            std::vector<bool> is_reduced_dim(shape_.rank(), false);
+            for (int ax : axes) {
+                is_reduced_dim[ax] = true;
+            }
+
+            // Calculate input strides
+            auto input_strides = shape_.strides();
+
+            // Calculate output strides
+            std::vector<size_t> out_shape_vec;
+            for (size_t i = 0; i < shape_.rank(); ++i) {
+                if (!is_reduced_dim[i]) {
+                    out_shape_vec.push_back(shape_[i]);
                 }
-                *static_cast<float*>(result.raw_ptr()) = sum / numel();
-            } else if (op == ReduceOp::Max && axes.size() == shape_.rank()) {
-                const float* src = static_cast<const float*>(raw_ptr());
-                float max_val = src[0];
-                for (size_t i = 1; i < numel(); ++i) {
-                    max_val = std::max(max_val, src[i]);
+            }
+
+            std::vector<size_t> output_strides;
+            if (!out_shape_vec.empty()) {
+                output_strides.resize(out_shape_vec.size());
+                output_strides.back() = 1;
+                for (int i = static_cast<int>(out_shape_vec.size()) - 2; i >= 0; --i) {
+                    output_strides[i] = output_strides[i + 1] * out_shape_vec[i + 1];
                 }
-                *static_cast<float*>(result.raw_ptr()) = max_val;
-            } else if (op == ReduceOp::Min && axes.size() == shape_.rank()) {
-                const float* src = static_cast<const float*>(raw_ptr());
-                float min_val = src[0];
-                for (size_t i = 1; i < numel(); ++i) {
-                    min_val = std::min(min_val, src[i]);
+            }
+
+            size_t output_elements = result.numel();
+
+            // Calculate how many elements to reduce per output element
+            size_t reduce_count = 1;
+            std::vector<size_t> reduced_dims;
+            for (size_t i = 0; i < shape_.rank(); ++i) {
+                if (is_reduced_dim[i]) {
+                    reduced_dims.push_back(i);
+                    reduce_count *= shape_[i];
                 }
-                *static_cast<float*>(result.raw_ptr()) = min_val;
-            } else {
-                LOG_WARN("Complex CPU reduce not fully implemented");
-                std::memcpy(result.raw_ptr(), raw_ptr(),
-                            std::min(bytes(), result.bytes()));
+            }
+
+            // Perform reduction
+            for (size_t out_idx = 0; out_idx < output_elements; ++out_idx) {
+                // Convert output linear index to coordinates in output space
+                std::vector<size_t> out_coords;
+                if (!out_shape_vec.empty()) {
+                    out_coords.resize(out_shape_vec.size());
+                    size_t temp = out_idx;
+                    for (size_t i = 0; i < out_shape_vec.size(); ++i) {
+                        out_coords[i] = temp / output_strides[i];
+                        temp %= output_strides[i];
+                    }
+                }
+
+                // Map output coords back to base input coords
+                std::vector<size_t> base_input_coords(shape_.rank());
+                size_t out_coord_idx = 0;
+                for (size_t i = 0; i < shape_.rank(); ++i) {
+                    if (!is_reduced_dim[i]) {
+                        base_input_coords[i] = out_coords[out_coord_idx++];
+                    } else {
+                        base_input_coords[i] = 0;
+                    }
+                }
+
+                // Initialize result with identity value for this output element
+                float result_val = 0.0f;
+                if (op == ReduceOp::Max) {
+                    result_val = -std::numeric_limits<float>::infinity();
+                } else if (op == ReduceOp::Min) {
+                    result_val = std::numeric_limits<float>::infinity();
+                } else if (op == ReduceOp::Prod) {
+                    result_val = 1.0f;
+                }
+
+                // Iterate through all combinations of reduced dimensions
+                for (size_t r = 0; r < reduce_count; ++r) {
+                    // Compute coordinates in the reduced dimensions
+                    size_t temp_r = r;
+                    std::vector<size_t> full_input_coords = base_input_coords;
+
+                    // Fill in reduced dimensions - work backwards for row-major order
+                    for (int rd_idx = static_cast<int>(reduced_dims.size()) - 1; rd_idx >= 0; --rd_idx) {
+                        size_t dim = reduced_dims[rd_idx];
+                        full_input_coords[dim] = temp_r % shape_[dim];
+                        temp_r /= shape_[dim];
+                    }
+
+                    // Calculate linear input index
+                    size_t in_idx = 0;
+                    for (size_t i = 0; i < shape_.rank(); ++i) {
+                        in_idx += full_input_coords[i] * input_strides[i];
+                    }
+
+                    // Apply reduction operation
+                    float val = src[in_idx];
+                    switch (op) {
+                        case ReduceOp::Sum:
+                        case ReduceOp::Mean:  // Mean accumulates like sum, then divides at end
+                            result_val += val;
+                            break;
+                        case ReduceOp::Max:
+                            result_val = std::max(result_val, val);
+                            break;
+                        case ReduceOp::Min:
+                            result_val = std::min(result_val, val);
+                            break;
+                        case ReduceOp::Prod:
+                            result_val *= val;
+                            break;
+                        default:
+                            break;
+                    }
+                }
+
+                // Store result (apply mean if needed)
+                if (op == ReduceOp::Mean) {
+                    dst[out_idx] = result_val / reduce_count;
+                } else {
+                    dst[out_idx] = result_val;
+                }
             }
         }
 
@@ -983,6 +1232,21 @@ namespace gs {
     }
 
     Tensor Tensor::where(const Tensor& condition, const Tensor& x, const Tensor& y) {
+        if (!condition.is_valid() || !x.is_valid() || !y.is_valid()) {
+            LOG_ERROR("where: invalid input tensors");
+            return Tensor();
+        }
+
+        if (condition.dtype() != DataType::Bool) {
+            LOG_ERROR("where: condition must be boolean tensor");
+            return Tensor();
+        }
+
+        // Check device compatibility
+        if (condition.device() != x.device() || x.device() != y.device()) {
+            LOG_ERROR("where: all tensors must be on the same device");
+            return Tensor();
+        }
         return condition.ternary(x, y, TernaryOp::Where);
     }
 
@@ -1002,6 +1266,61 @@ namespace gs {
             auto powered = abs_vals.pow(p);
             auto sum = powered.sum_scalar();
             return std::pow(sum, 1.0f / p);
+        }
+    }
+
+    Tensor Tensor::norm(float p, std::span<const int> dims, bool keepdim) const {
+        if (!is_valid()) {
+            LOG_ERROR("norm() on invalid tensor");
+            return Tensor();
+        }
+
+        if (numel() == 0) {
+            // Return appropriate empty tensor
+            std::vector<size_t> out_shape;
+            for (size_t i = 0; i < shape_.rank(); ++i) {
+                bool is_reduced = false;
+                for (int d : dims) {
+                    if (resolve_dim(d) == static_cast<int>(i)) {
+                        is_reduced = true;
+                        break;
+                    }
+                }
+                if (!is_reduced || keepdim) {
+                    out_shape.push_back(is_reduced ? 1 : shape_[i]);
+                }
+            }
+            return empty(TensorShape(out_shape), device_, dtype_);
+        }
+
+        // Special cases for common norms
+        if (p == 2.0f) {
+            // L2 norm: sqrt(sum(x^2))
+            auto squared = this->mul(*this);
+            auto sum = squared.sum(dims, keepdim);
+            return sum.sqrt();
+        } else if (p == 1.0f) {
+            // L1 norm: sum(|x|)
+            return this->abs().sum(dims, keepdim);
+        } else if (std::isinf(p)) {
+            if (p > 0) {
+                // L-infinity norm: max(|x|)
+                return this->abs().max(dims, keepdim);
+            } else {
+                // L-negative-infinity norm: min(|x|)
+                return this->abs().min(dims, keepdim);
+            }
+        } else if (p == 0.0f) {
+            // L0 "norm": count of non-zero elements
+            // This isn't a true norm, but often used
+            auto nonzero_mask = this->ne(0.0f).to(DataType::Float32);
+            return nonzero_mask.sum(dims, keepdim);
+        } else {
+            // General Lp norm: (sum(|x|^p))^(1/p)
+            auto abs_vals = this->abs();
+            auto powered = abs_vals.pow(p);
+            auto sum = powered.sum(dims, keepdim);
+            return sum.pow(1.0f / p);
         }
     }
 

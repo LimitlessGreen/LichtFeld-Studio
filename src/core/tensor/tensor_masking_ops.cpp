@@ -20,56 +20,104 @@ namespace gs {
 
     // ============= Masking Operations =============
     Tensor Tensor::masked_select(const Tensor& mask) const {
-        if (!is_valid() || !mask.is_valid() || mask.dtype() != DataType::Bool ||
-            shape_ != mask.shape() || device_ != mask.device())
-            return {};
-
-        size_t count = mask.count_nonzero();
-        if (count == 0)
-            return empty({0}, device_, dtype_);
-
-        auto result = empty({count}, device_, dtype_);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_masked_select(ptr<float>(), mask.ptr<unsigned char>(),
-                                             result.ptr<float>(), numel(), count, 0);
-            cudaDeviceSynchronize();
-        } else {
-            const float* src = ptr<float>();
-            const unsigned char* msk = mask.ptr<unsigned char>();
-            float* dst = result.ptr<float>();
-
-            size_t dst_idx = 0;
-            for (size_t i = 0; i < numel(); ++i) {
-                if (msk[i]) {
-                    dst[dst_idx++] = src[i];
-                }
-            }
-        }
-        return result;
+    if (!is_valid() || !mask.is_valid()) {
+        LOG_ERROR("masked_select on invalid tensor");
+        return Tensor();
     }
 
+    if (mask.dtype() != DataType::Bool) {
+        LOG_ERROR("masked_select requires boolean mask");
+        return Tensor();
+    }
+
+    if (mask.shape() != shape_) {
+        LOG_ERROR("Mask shape {} doesn't match tensor shape {}",
+                 mask.shape().str(), shape_.str());
+        return Tensor();
+    }
+
+    // CRITICAL: Check device compatibility BEFORE any operations
+    if (mask.device() != device_) {
+        LOG_ERROR("masked_select: mask device ({}) doesn't match tensor device ({})",
+                 device_name(mask.device()), device_name(device_));
+        return Tensor();
+    }
+
+    // CRITICAL FIX: Count TRUE values in mask to determine output size
+    size_t output_size = mask.count_nonzero();
+
+    LOG_DEBUG("masked_select: input size={}, mask trues={}, output size={}",
+             numel(), output_size, output_size);
+
+    if (output_size == 0) {
+        return empty({0}, device_, dtype_);
+    }
+
+    auto result = empty({output_size}, device_, dtype_);
+
+    if (device_ == Device::CUDA) {
+        // Use CUDA kernel
+        tensor_ops::launch_masked_select(ptr<float>(), mask.ptr<unsigned char>(),
+                                        result.ptr<float>(), numel(), output_size, 0);
+        CHECK_CUDA(cudaDeviceSynchronize());
+    } else {
+        // CPU implementation - FIXED to respect mask
+        const float* src = ptr<float>();
+        const unsigned char* mask_data = mask.ptr<unsigned char>();
+        float* dst = result.ptr<float>();
+
+        size_t write_idx = 0;
+        for (size_t i = 0; i < numel(); ++i) {
+            // CRITICAL FIX: Only copy when mask is TRUE
+            if (mask_data[i]) {
+                dst[write_idx++] = src[i];
+            }
+        }
+
+        LOG_DEBUG("masked_select CPU: wrote {} elements", write_idx);
+    }
+
+    return result;
+}
+
     Tensor& Tensor::masked_fill_(const Tensor& mask, float value) {
-        if (!is_valid() || !mask.is_valid() || mask.dtype() != DataType::Bool ||
-            shape_ != mask.shape() || device_ != mask.device())
+        if (!is_valid() || !mask.is_valid()) {
+            LOG_ERROR("masked_fill_ on invalid tensor");
             return *this;
+        }
+
+        if (mask.dtype() != DataType::Bool) {
+            LOG_ERROR("masked_fill_ requires boolean mask");
+            return *this;
+        }
+
+        if (mask.shape() != shape_) {
+            LOG_ERROR("Mask shape doesn't match tensor shape");
+            return *this;
+        }
+
+        // CRITICAL: Check device compatibility
+        if (mask.device() != device_) {
+            LOG_ERROR("masked_fill_: mask device ({}) doesn't match tensor device ({})",
+                     device_name(mask.device()), device_name(device_));
+            return *this;
+        }
 
         if (device_ == Device::CUDA) {
             tensor_ops::launch_masked_fill(ptr<float>(), mask.ptr<unsigned char>(),
-                                           value, numel(), 0);
-            cudaDeviceSynchronize();
+                                          value, numel(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
         } else {
             float* data = ptr<float>();
-            const unsigned char* msk = mask.ptr<unsigned char>();
+            const unsigned char* mask_data = mask.ptr<unsigned char>();
 
-            std::for_each(std::execution::par_unseq,
-                          std::views::iota(0uz, numel()).begin(),
-                          std::views::iota(0uz, numel()).end(),
-                          [data, msk, value](size_t i) {
-                              if (msk[i])
-                                  data[i] = value;
-                          });
+            for (size_t i = 0; i < numel(); ++i) {
+                if (mask_data[i]) {
+                    data[i] = value;
+                }
+            }
         }
+
         return *this;
     }
 
@@ -734,70 +782,172 @@ namespace gs {
 
     // Nonzero & Count
     size_t Tensor::count_nonzero() const {
-        if (!is_valid() || numel() == 0)
+        if (!is_valid() || numel() == 0) {
             return 0;
+        }
 
         if (device_ == Device::CUDA) {
-            size_t count;
+            // Use CUDA kernel for counting
+            size_t count = 0;
+            size_t* d_count = nullptr;
+            CHECK_CUDA(cudaMalloc(&d_count, sizeof(size_t)));
+            CHECK_CUDA(cudaMemset(d_count, 0, sizeof(size_t)));
+
             if (dtype_ == DataType::Bool) {
-                tensor_ops::launch_count_nonzero_bool(ptr<unsigned char>(), &count, numel(), 0);
-            } else {
-                tensor_ops::launch_count_nonzero_float(ptr<float>(), &count, numel(), 0);
+                tensor_ops::launch_count_nonzero_bool(ptr<unsigned char>(), d_count, numel(), 0);
+            } else if (dtype_ == DataType::Float32) {
+                tensor_ops::launch_count_nonzero_float(ptr<float>(), d_count, numel(), 0);
             }
-            cudaDeviceSynchronize();
+
+            CHECK_CUDA(cudaMemcpy(&count, d_count, sizeof(size_t), cudaMemcpyDeviceToHost));
+            CHECK_CUDA(cudaFree(d_count));
+
             return count;
         } else {
+            // CPU implementation
+            size_t count = 0;
+
             if (dtype_ == DataType::Bool) {
-                return std::count(ptr<unsigned char>(), ptr<unsigned char>() + numel(), 1);
-            } else {
-                return std::count_if(ptr<float>(), ptr<float>() + numel(),
-                                     [](float x) { return x != 0.0f; });
+                const unsigned char* data = ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    if (data[i]) count++;
+                }
+            } else if (dtype_ == DataType::Float32) {
+                const float* data = ptr<float>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    if (data[i] != 0.0f) count++;
+                }
+            } else if (dtype_ == DataType::Int32) {
+                const int* data = ptr<int>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    if (data[i] != 0) count++;
+                }
             }
+
+            return count;
         }
     }
 
-    Tensor Tensor::nonzero() const {
-        if (!is_valid())
-            return {};
 
-        size_t count = count_nonzero();
-        if (count == 0)
+   // Location: Replace existing nonzero() implementation (around line 600-700)
+// grep -C 10 "Tensor Tensor::nonzero"
+
+/**
+ * Returns the indices of non-zero elements.
+ *
+ * For a 1D tensor, returns a 1D tensor of Int64 indices.
+ * For nD tensors, returns a 2D tensor of shape [num_nonzero, ndim] where each row
+ * contains the multi-dimensional index of a non-zero element.
+ *
+ * Example:
+ *   auto t = Tensor::from_vector({0, 1, 0, 2}, {4}, Device::CPU);
+ *   auto idx = t.nonzero();  // Returns [2] tensor: [1, 3]
+ *
+ *   auto t2 = Tensor::from_vector({0, 1, 0, 2, 3, 0}, {2, 3}, Device::CPU);
+ *   auto idx2 = t2.nonzero();  // Returns [3, 2] tensor: [[0,1], [1,0], [1,1]]
+ *
+ * @return Tensor of Int64 indices. Shape is [num_nonzero] for 1D input,
+ *         [num_nonzero, ndim] for multi-dimensional input.
+ */
+Tensor Tensor::nonzero() const {
+    if (!is_valid()) {
+        LOG_ERROR("nonzero() on invalid tensor");
+        return {};
+    }
+
+    size_t count = count_nonzero();
+    if (count == 0) {
+        // Return appropriate empty tensor
+        if (shape_.rank() == 1) {
             return empty({0}, device_, DataType::Int64);
+        } else {
+            return empty({0, shape_.rank()}, device_, DataType::Int64);
+        }
+    }
 
+    // For 1D tensors, return simple list of indices
+    if (shape_.rank() == 1) {
         auto result = empty({count}, device_, DataType::Int64);
 
         if (device_ == Device::CUDA) {
             if (dtype_ == DataType::Bool) {
-                tensor_ops::launch_nonzero_bool(ptr<unsigned char>(),
-                                                reinterpret_cast<int64_t*>(result.raw_ptr()),
-                                                numel(), count, 0);
+                tensor_ops::launch_nonzero_bool(
+                    ptr<unsigned char>(),
+                    reinterpret_cast<int64_t*>(result.raw_ptr()),
+                    numel(), count, 0
+                );
             } else {
-                tensor_ops::launch_nonzero(ptr<float>(),
-                                           reinterpret_cast<int64_t*>(result.raw_ptr()),
-                                           numel(), count, 0);
+                tensor_ops::launch_nonzero(
+                    ptr<float>(),
+                    reinterpret_cast<int64_t*>(result.raw_ptr()),
+                    numel(), count, 0
+                );
             }
             cudaDeviceSynchronize();
         } else {
             int64_t* indices = reinterpret_cast<int64_t*>(result.raw_ptr());
+            size_t idx = 0;
 
             if (dtype_ == DataType::Bool) {
                 const unsigned char* data = ptr<unsigned char>();
-                size_t idx = 0;
                 for (size_t i = 0; i < numel(); ++i) {
-                    if (data[i])
-                        indices[idx++] = i;
+                    if (data[i]) indices[idx++] = i;
                 }
             } else {
                 const float* data = ptr<float>();
-                size_t idx = 0;
                 for (size_t i = 0; i < numel(); ++i) {
-                    if (data[i] != 0.0f)
-                        indices[idx++] = i;
+                    if (data[i] != 0.0f) indices[idx++] = i;
                 }
             }
         }
         return result;
     }
+
+    // For multi-dimensional tensors, return [N, ndim] tensor
+    auto result = empty({count, shape_.rank()}, device_, DataType::Int64);
+
+    if (device_ == Device::CUDA) {
+        // For CUDA, we need to do this on CPU due to complexity
+        auto cpu_tensor = to(Device::CPU);
+        auto cpu_result = cpu_tensor.nonzero();
+        return cpu_result.to(Device::CUDA);
+    } else {
+        // CPU implementation
+        int64_t* indices = reinterpret_cast<int64_t*>(result.raw_ptr());
+        auto strides = shape_.strides();
+        size_t result_idx = 0;
+
+        if (dtype_ == DataType::Bool) {
+            const unsigned char* data = ptr<unsigned char>();
+            for (size_t i = 0; i < numel(); ++i) {
+                if (data[i]) {
+                    // Convert linear index to multi-dimensional indices
+                    size_t temp = i;
+                    for (size_t dim = 0; dim < shape_.rank(); ++dim) {
+                        indices[result_idx * shape_.rank() + dim] = temp / strides[dim];
+                        temp %= strides[dim];
+                    }
+                    result_idx++;
+                }
+            }
+        } else {
+            const float* data = ptr<float>();
+            for (size_t i = 0; i < numel(); ++i) {
+                if (data[i] != 0.0f) {
+                    // Convert linear index to multi-dimensional indices
+                    size_t temp = i;
+                    for (size_t dim = 0; dim < shape_.rank(); ++dim) {
+                        indices[result_idx * shape_.rank() + dim] = temp / strides[dim];
+                        temp %= strides[dim];
+                    }
+                    result_idx++;
+                }
+            }
+        }
+    }
+
+    return result;
+}
 
     std::vector<Tensor> Tensor::nonzero_split() const {
         std::vector<Tensor> result;
@@ -991,6 +1141,92 @@ namespace gs {
         }
         return ptr<unsigned char>()[idx] != 0;
     }
+
+    // Location: After the existing get_bool/set_bool implementations (around line 800+)
+// grep -C 3 "bool Tensor::get_bool"
+
+void Tensor::set_bool(std::span<const size_t> indices, bool value) {
+    if (dtype_ != DataType::Bool) {
+        LOG_ERROR("set_bool() only works on boolean tensors, got {}", dtype_name(dtype_));
+        return;
+    }
+
+    if (indices.size() != shape_.rank()) {
+        LOG_ERROR("set_bool() requires {} indices, got {}", shape_.rank(), indices.size());
+        return;
+    }
+
+    // Calculate linear index from multi-dimensional indices
+    auto strides = shape_.strides();
+
+    size_t linear_idx = 0;
+    for (size_t i = 0; i < indices.size(); ++i) {
+        if (indices[i] >= shape_[i]) {
+            LOG_ERROR("Index {} out of bounds for dimension {} with size {}",
+                     indices[i], i, shape_[i]);
+            return;
+        }
+        linear_idx += indices[i] * strides[i];
+    }
+
+    unsigned char val = value ? 1 : 0;
+
+    if (device_ == Device::CUDA) {
+        cudaError_t err = cudaMemcpy(
+            ptr<unsigned char>() + linear_idx,
+            &val,
+            1,
+            cudaMemcpyHostToDevice
+        );
+        if (err != cudaSuccess) {
+            LOG_ERROR("CUDA memcpy failed in set_bool: {}", cudaGetErrorString(err));
+        }
+    } else {
+        ptr<unsigned char>()[linear_idx] = val;
+    }
+}
+
+bool Tensor::get_bool(std::span<const size_t> indices) const {
+    if (dtype_ != DataType::Bool) {
+        LOG_ERROR("get_bool() only works on boolean tensors, got {}", dtype_name(dtype_));
+        return false;
+    }
+
+    if (indices.size() != shape_.rank()) {
+        LOG_ERROR("get_bool() requires {} indices, got {}", shape_.rank(), indices.size());
+        return false;
+    }
+
+    // Calculate linear index from multi-dimensional indices
+    auto strides = shape_.strides();
+
+    size_t linear_idx = 0;
+    for (size_t i = 0; i < indices.size(); ++i) {
+        if (indices[i] >= shape_[i]) {
+            LOG_ERROR("Index {} out of bounds for dimension {} with size {}",
+                     indices[i], i, shape_[i]);
+            return false;
+        }
+        linear_idx += indices[i] * strides[i];
+    }
+
+    if (device_ == Device::CUDA) {
+        unsigned char val;
+        cudaError_t err = cudaMemcpy(
+            &val,
+            ptr<unsigned char>() + linear_idx,
+            1,
+            cudaMemcpyDeviceToHost
+        );
+        if (err != cudaSuccess) {
+            LOG_ERROR("CUDA memcpy failed in get_bool: {}", cudaGetErrorString(err));
+            return false;
+        }
+        return val != 0;
+    } else {
+        return ptr<unsigned char>()[linear_idx] != 0;
+    }
+}
 
     // Proxy Implementations
     void MaskedTensorProxy::operator=(float value) {

@@ -47,9 +47,6 @@ namespace gs {
         // Initialize GPU tensors on demand
         void initialize_cuda_tensors();
 
-        // Load image from disk and return it
-        torch::Tensor load_and_get_image(int resize_factor = -1);
-
         // Load image from disk just to populate _image_width/_image_height
         void load_image_size(int resize_factor = -1);
 

@@ -646,7 +646,7 @@ TEST_F(TensorBasicTest, ToVectorBool) {
                             .to(torch::kCUDA);
 
     auto custom_vec = tensor_custom.to_vector_bool();
-    auto torch_cpu = tensor_torch.to(torch::kCPU).flatten(); // FIX: Flatten to 1D
+    auto torch_cpu = tensor_torch.to(torch::kCPU).flatten(); // Flatten to 1D
     auto torch_accessor = torch_cpu.accessor<bool, 1>();     // Now 1D is correct
 
     ASSERT_EQ(custom_vec.size(), torch_cpu.numel());

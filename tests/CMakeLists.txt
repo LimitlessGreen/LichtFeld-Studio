@@ -41,6 +41,11 @@ set(OPTIONAL_TEST_FILES
     test_tensor_compat.cpp
     test_tensor_cumsum_convenience.cpp
     test_tensor_conversions_shape.cpp
+    test_tensor_advanced_new.cpp
+    #test_kmeans.cpp
+    #test_kmeans_comparison.cpp
+    #test_tensor_ops_comparison.cpp
+    #test_kmeans_details.cpp
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})

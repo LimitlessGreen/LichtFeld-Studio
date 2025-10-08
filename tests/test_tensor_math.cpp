@@ -13,36 +13,6 @@ using namespace gs;
 
 namespace {
 
-    torch::Tensor to_torch(const Tensor& t) {
-        auto options = torch::TensorOptions()
-                           .dtype([&]() {
-                               switch (t.dtype()) {
-                               case DataType::Float32: return torch::kFloat32;
-                               case DataType::Float16: return torch::kFloat16;
-                               case DataType::Int32: return torch::kInt32;
-                               case DataType::Int64: return torch::kInt64;
-                               case DataType::UInt8: return torch::kUInt8;
-                               case DataType::Bool: return torch::kBool;
-                               default: return torch::kFloat32;
-                               }
-                           }())
-                           .device(t.device() == Device::CPU ? torch::kCPU : torch::kCUDA);
-
-        std::vector<int64_t> shape;
-        for (size_t i = 0; i < t.ndim(); ++i) {
-            shape.push_back(static_cast<int64_t>(t.size(i)));
-        }
-
-        torch::Tensor result = torch::empty(shape, options);
-
-        if (t.device() == Device::CPU) {
-            std::memcpy(result.data_ptr(), t.raw_ptr(), t.bytes());
-        } else {
-            cudaMemcpy(result.data_ptr(), t.raw_ptr(), t.bytes(), cudaMemcpyDeviceToDevice);
-        }
-
-        return result;
-    }
 
     // Helper to create PyTorch tensor from vector data
     torch::Tensor create_torch_tensor(const std::vector<float>& data,
@@ -61,7 +31,7 @@ namespace {
 
     void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
                          float rtol = 1e-5f, float atol = 1e-7f, const std::string& msg = "") {
-        // FIX: Properly move to CPU, flatten, and ensure contiguous memory
+        // Properly move to CPU, flatten, and ensure contiguous memory
         auto ref_cpu = reference.to(torch::kCPU).contiguous().flatten();
         auto custom_cpu = custom.cpu();
 
@@ -77,7 +47,7 @@ namespace {
 
         auto custom_vec = custom_cpu.to_vector();
 
-        // FIX: Use flattened accessor to handle multi-dimensional tensors
+        // Use flattened accessor to handle multi-dimensional tensors
         auto ref_accessor = ref_cpu.accessor<float, 1>();
 
         for (size_t i = 0; i < custom_vec.size(); ++i) {

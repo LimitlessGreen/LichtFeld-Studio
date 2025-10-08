@@ -15,6 +15,16 @@
 
 namespace gs::tensor_ops {
 
+    // Helper template to execute Thrust operations with correct policy
+    template<typename Func>
+    void run_with_thrust_policy(cudaStream_t stream, Func&& func) {
+        if (stream) {
+            func(thrust::cuda::par.on(stream));
+        } else {
+            func(thrust::cuda::par);
+        }
+    }
+
     // ============= Random Operations Kernels =============
 
     // Uniform random generation
@@ -24,8 +34,6 @@ namespace gs::tensor_ops {
 
         if (idx < n) {
             curandState state;
-            // Each thread gets unique seed: base_seed + thread_index
-            // This ensures different random sequences per thread
             curand_init(seed, idx, 0, &state);
             float val = curand_uniform(&state);
             data[idx] = val * (high - low) + low;
@@ -39,7 +47,6 @@ namespace gs::tensor_ops {
 
         if (idx < n) {
             curandState state;
-            // Each thread gets unique seed: base_seed, sequence_id = thread_index
             curand_init(seed, idx, 0, &state);
             data[idx] = curand_normal(&state) * std + mean;
         }
@@ -67,14 +74,11 @@ namespace gs::tensor_ops {
             curandState state;
             curand_init(seed, idx, 0, &state);
 
-            // Generate uniform [0, 1) and scale to [low, high)
             float val = curand_uniform(&state);
             int range = high - low;
 
-            // Scale to integer range [low, high)
             int result = low + static_cast<int>(val * range);
 
-            // Clamp to ensure bounds (handle edge cases)
             if (result >= high)
                 result = high - 1;
             if (result < low)
@@ -96,10 +100,8 @@ namespace gs::tensor_ops {
         curandState state;
         curand_init(seed, idx, 0, &state);
 
-        // Generate random value in [0, sum)
         float u = curand_uniform(&state) * sum;
 
-        // Find the index using linear search (cumulative sum)
         float cumsum = 0.0f;
         for (unsigned long i = 0; i < n; ++i) {
             cumsum += weights[i];
@@ -109,7 +111,6 @@ namespace gs::tensor_ops {
             }
         }
 
-        // Fallback (shouldn't happen unless numerical issues)
         samples[idx] = n - 1;
     }
 
@@ -124,16 +125,13 @@ namespace gs::tensor_ops {
         curandState state;
         curand_init(seed, idx, 0, &state);
 
-        // Generate Gumbel noise: -log(-log(uniform))
         float u = curand_uniform(&state);
 
-        // Clamp to avoid log(0) or log(1)
         u = fmaxf(u, 1e-10f);
         u = fminf(u, 1.0f - 1e-10f);
 
         float gumbel = -logf(-logf(u));
 
-        // Add log-weight
         float log_weight = logf(fmaxf(weights[idx], 1e-10f));
         keys[idx] = log_weight + gumbel;
     }
@@ -188,59 +186,52 @@ namespace gs::tensor_ops {
 
         // Compute sum of weights using Thrust
         auto weights_ptr = thrust::device_pointer_cast(weights);
-        float sum = thrust::reduce(
-            thrust::cuda::par.on(stream),
-            weights_ptr, weights_ptr + n,
-            0.0f,
-            thrust::plus<float>());
+
+        float sum;
+        run_with_thrust_policy(stream, [&](auto policy) {
+            sum = thrust::reduce(
+                policy,
+                weights_ptr, weights_ptr + n,
+                0.0f,
+                thrust::plus<float>());
+        });
 
         if (sum <= 0) {
-            // Invalid weights, fill with zeros
             cudaMemsetAsync(samples, 0, num_samples * sizeof(int), stream);
             return;
         }
 
         if (replacement) {
-            // With replacement: standard multinomial sampling
             int block_size = 256;
             int grid_size = (num_samples + block_size - 1) / block_size;
             multinomial_with_replacement_kernel<<<grid_size, block_size, 0, stream>>>(
                 weights, samples, n, num_samples, sum, seed);
         } else {
-            // Without replacement: use Gumbel-max trick
-            // This method:
-            // 1. Generates Gumbel(log(weight_i)) for each category
-            // 2. Sorts categories by their Gumbel values (descending)
-            // 3. Takes the top num_samples categories
-
-            // Allocate temporary storage
             thrust::device_vector<float> keys(n);
             thrust::device_vector<int> indices(n);
 
-            // Generate Gumbel keys
             int block_size = 256;
             int grid_size = (n + block_size - 1) / block_size;
             generate_gumbel_keys_kernel<<<grid_size, block_size, 0, stream>>>(
                 weights, thrust::raw_pointer_cast(keys.data()), n, seed);
 
-            // Initialize indices [0, 1, 2, ..., n-1]
-            thrust::sequence(
-                thrust::cuda::par.on(stream),
-                indices.begin(), indices.end());
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::sequence(
+                    policy,
+                    indices.begin(), indices.end());
 
-            // Sort indices by keys in descending order
-            thrust::sort_by_key(
-                thrust::cuda::par.on(stream),
-                keys.begin(), keys.end(),
-                indices.begin(),
-                thrust::greater<float>());
+                thrust::sort_by_key(
+                    policy,
+                    keys.begin(), keys.end(),
+                    indices.begin(),
+                    thrust::greater<float>());
 
-            // Copy the first num_samples indices to output
-            thrust::copy_n(
-                thrust::cuda::par.on(stream),
-                indices.begin(),
-                num_samples,
-                thrust::device_pointer_cast(samples));
+                thrust::copy_n(
+                    policy,
+                    indices.begin(),
+                    num_samples,
+                    thrust::device_pointer_cast(samples));
+            });
         }
     }
 

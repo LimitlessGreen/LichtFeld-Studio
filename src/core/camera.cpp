@@ -347,47 +347,6 @@ namespace gs {
         return std::make_tuple(fx, fy, cx, cy);
     }
 
-    torch::Tensor Camera::load_and_get_image(int resize_factor) {
-        // Use pinned memory for faster GPU transfer
-        auto pinned_options = torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true);
-
-        unsigned char* data;
-        int w, h, c;
-
-        // Load image synchronously
-        auto result = load_image(_image_path, resize_factor);
-        data = std::get<0>(result);
-        w = std::get<1>(result);
-        h = std::get<2>(result);
-        c = std::get<3>(result);
-
-        _image_width = w;
-        _image_height = h;
-
-        // Create tensor from pinned memory and transfer asynchronously
-        torch::Tensor image = torch::from_blob(
-            data,
-            {h, w, c},
-            {w * c, c, 1},
-            pinned_options);
-
-        // Use the CUDA stream for async transfer
-        at::cuda::CUDAStreamGuard guard(_stream);
-
-        image = image.to(torch::kCUDA, /*non_blocking=*/true)
-                    .permute({2, 0, 1})
-                    .to(torch::kFloat32) /
-                255.0f;
-
-        // Free the original data
-        free_image(data);
-
-        // Ensure the transfer is complete before returning
-        _stream.synchronize();
-
-        return image;
-    }
-
     void Camera::load_image_size(int resize_factor) {
         // Load image synchronously
         auto result = load_image(_image_path, resize_factor);

@@ -12,6 +12,7 @@
 // Thrust headers
 #include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
+#include <thrust/sort.h>
 #include <thrust/execution_policy.h>
 #include <thrust/fill.h>
 #include <thrust/functional.h>
@@ -24,6 +25,16 @@
 #include <thrust/tuple.h>
 
 namespace gs::tensor_ops {
+
+    // Helper template to execute Thrust operations with correct policy
+    template<typename Func>
+    void run_with_thrust_policy(cudaStream_t stream, Func&& func) {
+        if (stream) {
+            func(thrust::cuda::par.on(stream));
+        } else {
+            func(thrust::cuda::par);
+        }
+    }
 
     // ============= CLAMP SCALAR OPERATIONS =============
 
@@ -60,11 +71,13 @@ namespace gs::tensor_ops {
 
         auto data_ptr = thrust::device_pointer_cast(data);
 
-        thrust::transform(
-            thrust::cuda::par.on(stream),
-            data_ptr, data_ptr + n,
-            data_ptr,
-            ClampScalarFunctor(min_val, max_val));
+        run_with_thrust_policy(stream, [&](auto policy) {
+            thrust::transform(
+                policy,
+                data_ptr, data_ptr + n,
+                data_ptr,
+                ClampScalarFunctor(min_val, max_val));
+        });
     }
 
     void launch_clamp_scalar_int(int* data, int min_val, int max_val, size_t n, cudaStream_t stream) {
@@ -73,11 +86,13 @@ namespace gs::tensor_ops {
 
         auto data_ptr = thrust::device_pointer_cast(data);
 
-        thrust::transform(
-            thrust::cuda::par.on(stream),
-            data_ptr, data_ptr + n,
-            data_ptr,
-            ClampScalarIntFunctor(min_val, max_val));
+        run_with_thrust_policy(stream, [&](auto policy) {
+            thrust::transform(
+                policy,
+                data_ptr, data_ptr + n,
+                data_ptr,
+                ClampScalarIntFunctor(min_val, max_val));
+        });
     }
 
     // ============= UNARY OPERATION FUNCTORS =============
@@ -150,20 +165,24 @@ namespace gs::tensor_ops {
             auto in_ptr = thrust::device_pointer_cast(static_cast<const float*>(input));
             auto out_ptr = thrust::device_pointer_cast(static_cast<float*>(output));
 
-            thrust::transform(
-                thrust::cuda::par.on(stream),
-                in_ptr, in_ptr + n,
-                out_ptr,
-                UnaryOpFunctor<float>(op));
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(
+                    policy,
+                    in_ptr, in_ptr + n,
+                    out_ptr,
+                    UnaryOpFunctor<float>(op));
+            });
         } else if (dtype == DataType::Bool && op == UnaryOp::LogicalNot) {
             auto in_ptr = thrust::device_pointer_cast(static_cast<const unsigned char*>(input));
             auto out_ptr = thrust::device_pointer_cast(static_cast<unsigned char*>(output));
 
-            thrust::transform(
-                thrust::cuda::par.on(stream),
-                in_ptr, in_ptr + n,
-                out_ptr,
-                LogicalNotFunctor());
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(
+                    policy,
+                    in_ptr, in_ptr + n,
+                    out_ptr,
+                    LogicalNotFunctor());
+            });
         }
     }
 
@@ -181,19 +200,20 @@ namespace gs::tensor_ops {
 
         __device__ T operator()(T a, T b) const {
             switch (op) {
-            case BinaryOp::Add: return a + b;
-            case BinaryOp::Sub: return a - b;
-            case BinaryOp::Mul: return a * b;
-            case BinaryOp::Div: return a / b;
-            case BinaryOp::Pow: return pow(a, b);
-            case BinaryOp::Mod: return fmod(a, b);
-            case BinaryOp::Maximum: return fmax(a, b);
-            case BinaryOp::Minimum: return fmin(a, b);
-            default: return T(0);
+                case BinaryOp::Add: return a + b;
+                case BinaryOp::Sub: return a - b;
+                case BinaryOp::Mul: return a * b;
+                case BinaryOp::Div: return a / b;
+                case BinaryOp::Pow: return powf(a, b);
+                case BinaryOp::Mod: return fmodf(a, b);
+                case BinaryOp::Maximum: return fmaxf(a, b);
+                case BinaryOp::Minimum: return fminf(a, b);
+                default: return T(0);
             }
         }
     };
 
+    // Comparison operations functor (works for int and float)
     template <typename T>
     struct ComparisonOpFunctor {
         BinaryOp op;
@@ -233,50 +253,91 @@ namespace gs::tensor_ops {
         }
     };
 
+    // Launch binary op with proper Int32 support
     void launch_binary_op(const void* a, const void* b, void* c, size_t n, BinaryOp op,
                           DataType a_dtype, DataType b_dtype, DataType c_dtype,
                           cudaStream_t stream) {
         if (n == 0)
             return;
 
-        if (c_dtype == DataType::Bool && a_dtype == DataType::Float32) {
-            // Comparison operations
+        // Int32 comparison operations
+        if (c_dtype == DataType::Bool && a_dtype == DataType::Int32 && b_dtype == DataType::Int32) {
+            auto a_ptr = thrust::device_pointer_cast(static_cast<const int*>(a));
+            auto b_ptr = thrust::device_pointer_cast(static_cast<const int*>(b));
+            auto c_ptr = thrust::device_pointer_cast(static_cast<unsigned char*>(c));
+
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(
+                    policy,
+                    a_ptr, a_ptr + n,
+                    b_ptr,
+                    c_ptr,
+                    ComparisonOpFunctor<int>(op));
+            });
+        }
+        // Float32 comparison operations
+        else if (c_dtype == DataType::Bool && a_dtype == DataType::Float32 && b_dtype == DataType::Float32) {
             auto a_ptr = thrust::device_pointer_cast(static_cast<const float*>(a));
             auto b_ptr = thrust::device_pointer_cast(static_cast<const float*>(b));
             auto c_ptr = thrust::device_pointer_cast(static_cast<unsigned char*>(c));
 
-            thrust::transform(
-                thrust::cuda::par.on(stream),
-                a_ptr, a_ptr + n,
-                b_ptr,
-                c_ptr,
-                ComparisonOpFunctor<float>(op));
-        } else if (a_dtype == DataType::Bool && b_dtype == DataType::Bool) {
-            // Logical operations
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(
+                    policy,
+                    a_ptr, a_ptr + n,
+                    b_ptr,
+                    c_ptr,
+                    ComparisonOpFunctor<float>(op));
+            });
+        }
+        // Logical operations
+        else if (a_dtype == DataType::Bool && b_dtype == DataType::Bool) {
             auto a_ptr = thrust::device_pointer_cast(static_cast<const unsigned char*>(a));
             auto b_ptr = thrust::device_pointer_cast(static_cast<const unsigned char*>(b));
             auto c_ptr = thrust::device_pointer_cast(static_cast<unsigned char*>(c));
 
-            thrust::transform(
-                thrust::cuda::par.on(stream),
-                a_ptr, a_ptr + n,
-                b_ptr,
-                c_ptr,
-                LogicalOpFunctor(op));
-        } else if (a_dtype == DataType::Float32 && b_dtype == DataType::Float32) {
-            // Arithmetic operations
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(
+                    policy,
+                    a_ptr, a_ptr + n,
+                    b_ptr,
+                    c_ptr,
+                    LogicalOpFunctor(op));
+            });
+        }
+        // Float32 arithmetic operations
+        else if (a_dtype == DataType::Float32 && b_dtype == DataType::Float32 && c_dtype == DataType::Float32) {
             auto a_ptr = thrust::device_pointer_cast(static_cast<const float*>(a));
             auto b_ptr = thrust::device_pointer_cast(static_cast<const float*>(b));
             auto c_ptr = thrust::device_pointer_cast(static_cast<float*>(c));
 
-            thrust::transform(
-                thrust::cuda::par.on(stream),
-                a_ptr, a_ptr + n,
-                b_ptr,
-                c_ptr,
-                BinaryOpFunctor<float>(op));
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(
+                    policy,
+                    a_ptr, a_ptr + n,
+                    b_ptr,
+                    c_ptr,
+                    BinaryOpFunctor<float>(op));
+            });
+        }
+        // Int32 arithmetic operations
+        else if (a_dtype == DataType::Int32 && b_dtype == DataType::Int32 && c_dtype == DataType::Int32) {
+            auto a_ptr = thrust::device_pointer_cast(static_cast<const int*>(a));
+            auto b_ptr = thrust::device_pointer_cast(static_cast<const int*>(b));
+            auto c_ptr = thrust::device_pointer_cast(static_cast<int*>(c));
+
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(
+                    policy,
+                    a_ptr, a_ptr + n,
+                    b_ptr,
+                    c_ptr,
+                    BinaryOpFunctor<int>(op));
+            });
         }
     }
+
+    // ============= BINARY SCALAR OPERATIONS (FIXED FOR INT32) =============
 
     template <typename T>
     struct BinaryScalarOpFunctor {
@@ -288,19 +349,27 @@ namespace gs::tensor_ops {
 
         __device__ T operator()(T a) const {
             switch (op) {
-            case BinaryOp::Add: return a + scalar;
-            case BinaryOp::Sub: return a - scalar;
-            case BinaryOp::Mul: return a * scalar;
-            case BinaryOp::Div: return a / scalar;
-            case BinaryOp::Pow: return pow(a, scalar);
-            case BinaryOp::Mod: return fmod(a, scalar);
-            case BinaryOp::Maximum: return fmax(a, scalar);
-            case BinaryOp::Minimum: return fmin(a, scalar);
-            default: return T(0);
+                case BinaryOp::Add: return a + scalar;
+                case BinaryOp::Sub: return a - scalar;
+                case BinaryOp::Mul: return a * scalar;
+                case BinaryOp::Div: return a / scalar;
+                case BinaryOp::Pow: {
+                    // Optimize common cases
+                    if (scalar == 2.0f) return a * a;
+                    if (scalar == 0.5f) return sqrtf(fabsf(a));
+                    if (scalar == 1.0f) return a;
+                    if (scalar == 0.0f) return 1.0f;
+                    return powf(a, scalar);
+                }
+                case BinaryOp::Mod: return fmodf(a, scalar);
+                case BinaryOp::Maximum: return fmaxf(a, scalar);
+                case BinaryOp::Minimum: return fminf(a, scalar);
+                default: return T(0);
             }
         }
     };
 
+    // Comparison scalar operations (works for int and float)
     template <typename T>
     struct ComparisonScalarOpFunctor {
         T scalar;
@@ -329,26 +398,59 @@ namespace gs::tensor_ops {
         if (n == 0)
             return;
 
-        if (dst_dtype == DataType::Bool && src_dtype == DataType::Float32) {
-            // Comparison with scalar
+        // Int32 comparison with scalar
+        if (dst_dtype == DataType::Bool && src_dtype == DataType::Int32) {
+            auto data_ptr = thrust::device_pointer_cast(static_cast<const int*>(data));
+            auto result_ptr = thrust::device_pointer_cast(static_cast<unsigned char*>(result));
+            int scalar_int = static_cast<int>(scalar);
+
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(
+                    policy,
+                    data_ptr, data_ptr + n,
+                    result_ptr,
+                    ComparisonScalarOpFunctor<int>(scalar_int, op));
+            });
+        }
+        // Float32 comparison with scalar
+        else if (dst_dtype == DataType::Bool && src_dtype == DataType::Float32) {
             auto data_ptr = thrust::device_pointer_cast(static_cast<const float*>(data));
             auto result_ptr = thrust::device_pointer_cast(static_cast<unsigned char*>(result));
 
-            thrust::transform(
-                thrust::cuda::par.on(stream),
-                data_ptr, data_ptr + n,
-                result_ptr,
-                ComparisonScalarOpFunctor<float>(scalar, op));
-        } else if (src_dtype == DataType::Float32 && dst_dtype == DataType::Float32) {
-            // Arithmetic with scalar
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(
+                    policy,
+                    data_ptr, data_ptr + n,
+                    result_ptr,
+                    ComparisonScalarOpFunctor<float>(scalar, op));
+            });
+        }
+        // Float32 arithmetic with scalar
+        else if (src_dtype == DataType::Float32 && dst_dtype == DataType::Float32) {
             auto data_ptr = thrust::device_pointer_cast(static_cast<const float*>(data));
             auto result_ptr = thrust::device_pointer_cast(static_cast<float*>(result));
 
-            thrust::transform(
-                thrust::cuda::par.on(stream),
-                data_ptr, data_ptr + n,
-                result_ptr,
-                BinaryScalarOpFunctor<float>(scalar, op));
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(
+                    policy,
+                    data_ptr, data_ptr + n,
+                    result_ptr,
+                    BinaryScalarOpFunctor<float>(scalar, op));
+            });
+        }
+        // Int32 arithmetic with scalar
+        else if (src_dtype == DataType::Int32 && dst_dtype == DataType::Int32) {
+            auto data_ptr = thrust::device_pointer_cast(static_cast<const int*>(data));
+            auto result_ptr = thrust::device_pointer_cast(static_cast<int*>(result));
+            int scalar_int = static_cast<int>(scalar);
+
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(
+                    policy,
+                    data_ptr, data_ptr + n,
+                    result_ptr,
+                    BinaryScalarOpFunctor<int>(scalar_int, op));
+            });
         }
     }
 
@@ -359,12 +461,14 @@ namespace gs::tensor_ops {
         auto a_ptr = thrust::device_pointer_cast(static_cast<float*>(a));
         auto b_ptr = thrust::device_pointer_cast(static_cast<const float*>(b));
 
-        thrust::transform(
-            thrust::cuda::par.on(stream),
-            a_ptr, a_ptr + n,
-            b_ptr,
-            a_ptr,
-            BinaryOpFunctor<float>(op));
+        run_with_thrust_policy(stream, [&](auto policy) {
+            thrust::transform(
+                policy,
+                a_ptr, a_ptr + n,
+                b_ptr,
+                a_ptr,
+                BinaryOpFunctor<float>(op));
+        });
     }
 
     void launch_binary_scalar_inplace(void* data, float scalar, size_t n, BinaryOp op, cudaStream_t stream) {
@@ -373,11 +477,13 @@ namespace gs::tensor_ops {
 
         auto data_ptr = thrust::device_pointer_cast(static_cast<float*>(data));
 
-        thrust::transform(
-            thrust::cuda::par.on(stream),
-            data_ptr, data_ptr + n,
-            data_ptr,
-            BinaryScalarOpFunctor<float>(scalar, op));
+        run_with_thrust_policy(stream, [&](auto policy) {
+            thrust::transform(
+                policy,
+                data_ptr, data_ptr + n,
+                data_ptr,
+                BinaryScalarOpFunctor<float>(scalar, op));
+        });
     }
 
     // ============= REDUCE OPERATION FUNCTORS =============
@@ -547,38 +653,40 @@ namespace gs::tensor_ops {
         if (num_axes == 0 || num_axes == rank) {
             float result = 0.0f;
 
-            switch (op) {
-            case ReduceOp::Sum:
-                result = thrust::reduce(thrust::cuda::par.on(stream),
-                                        input_ptr, input_ptr + n,
-                                        0.0f, ReduceSumFunctor());
-                break;
-            case ReduceOp::Mean:
-                result = thrust::reduce(thrust::cuda::par.on(stream),
-                                        input_ptr, input_ptr + n,
-                                        0.0f, ReduceSumFunctor()) /
-                         static_cast<float>(n);
-                break;
-            case ReduceOp::Max:
-                result = thrust::reduce(thrust::cuda::par.on(stream),
-                                        input_ptr, input_ptr + n,
-                                        std::numeric_limits<float>::lowest(),
-                                        ReduceMaxFunctor());
-                break;
-            case ReduceOp::Min:
-                result = thrust::reduce(thrust::cuda::par.on(stream),
-                                        input_ptr, input_ptr + n,
-                                        std::numeric_limits<float>::max(),
-                                        ReduceMinFunctor());
-                break;
-            case ReduceOp::Prod:
-                result = thrust::reduce(thrust::cuda::par.on(stream),
-                                        input_ptr, input_ptr + n,
-                                        1.0f, ReduceProdFunctor());
-                break;
-            default:
-                result = 0.0f;
-            }
+            run_with_thrust_policy(stream, [&](auto policy) {
+                switch (op) {
+                case ReduceOp::Sum:
+                    result = thrust::reduce(policy,
+                                            input_ptr, input_ptr + n,
+                                            0.0f, ReduceSumFunctor());
+                    break;
+                case ReduceOp::Mean:
+                    result = thrust::reduce(policy,
+                                            input_ptr, input_ptr + n,
+                                            0.0f, ReduceSumFunctor()) /
+                             static_cast<float>(n);
+                    break;
+                case ReduceOp::Max:
+                    result = thrust::reduce(policy,
+                                            input_ptr, input_ptr + n,
+                                            std::numeric_limits<float>::lowest(),
+                                            ReduceMaxFunctor());
+                    break;
+                case ReduceOp::Min:
+                    result = thrust::reduce(policy,
+                                            input_ptr, input_ptr + n,
+                                            std::numeric_limits<float>::max(),
+                                            ReduceMinFunctor());
+                    break;
+                case ReduceOp::Prod:
+                    result = thrust::reduce(policy,
+                                            input_ptr, input_ptr + n,
+                                            1.0f, ReduceProdFunctor());
+                    break;
+                default:
+                    result = 0.0f;
+                }
+            });
 
             cudaMemcpyAsync(output, &result, sizeof(float), cudaMemcpyHostToDevice, stream);
             return;
@@ -635,11 +743,13 @@ namespace gs::tensor_ops {
             float scale = 1.0f / reduce_count;
 
             // Scale by 1/N
-            thrust::transform(thrust::cuda::par.on(stream),
-                              output_ptr, output_ptr + output_elements,
-                              thrust::make_constant_iterator(scale),
-                              output_ptr,
-                              thrust::multiplies<float>());
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(policy,
+                                  output_ptr, output_ptr + output_elements,
+                                  thrust::make_constant_iterator(scale),
+                                  output_ptr,
+                                  thrust::multiplies<float>());
+            });
             break;
         }
 
@@ -706,11 +816,13 @@ namespace gs::tensor_ops {
             auto begin = thrust::make_zip_iterator(thrust::make_tuple(a_ptr, b_ptr, c_ptr));
             auto end = thrust::make_zip_iterator(thrust::make_tuple(a_ptr + n, b_ptr + n, c_ptr + n));
 
-            thrust::transform(
-                thrust::cuda::par.on(stream),
-                begin, end,
-                out_ptr,
-                ClampFunctor());
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::transform(
+                    policy,
+                    begin, end,
+                    out_ptr,
+                    ClampFunctor());
+            });
         }
     }
 
@@ -747,11 +859,13 @@ namespace gs::tensor_ops {
         auto src_ptr = thrust::device_pointer_cast(src);
         auto dst_ptr = thrust::device_pointer_cast(dst);
 
-        thrust::transform(
-            thrust::cuda::par.on(stream),
-            src_ptr, src_ptr + n,
-            dst_ptr,
-            BoolToFloatFunctor());
+        run_with_thrust_policy(stream, [&](auto policy) {
+            thrust::transform(
+                policy,
+                src_ptr, src_ptr + n,
+                dst_ptr,
+                BoolToFloatFunctor());
+        });
     }
 
     void launch_float_to_bool(const float* src, unsigned char* dst, size_t n, cudaStream_t stream) {
@@ -761,11 +875,13 @@ namespace gs::tensor_ops {
         auto src_ptr = thrust::device_pointer_cast(src);
         auto dst_ptr = thrust::device_pointer_cast(dst);
 
-        thrust::transform(
-            thrust::cuda::par.on(stream),
-            src_ptr, src_ptr + n,
-            dst_ptr,
-            FloatToBoolFunctor());
+        run_with_thrust_policy(stream, [&](auto policy) {
+            thrust::transform(
+                policy,
+                src_ptr, src_ptr + n,
+                dst_ptr,
+                FloatToBoolFunctor());
+        });
     }
 
     void launch_float_to_int(const float* src, int* dst, size_t n, cudaStream_t stream) {
@@ -775,11 +891,13 @@ namespace gs::tensor_ops {
         auto src_ptr = thrust::device_pointer_cast(src);
         auto dst_ptr = thrust::device_pointer_cast(dst);
 
-        thrust::transform(
-            thrust::cuda::par.on(stream),
-            src_ptr, src_ptr + n,
-            dst_ptr,
-            FloatToIntFunctor());
+        run_with_thrust_policy(stream, [&](auto policy) {
+            thrust::transform(
+                policy,
+                src_ptr, src_ptr + n,
+                dst_ptr,
+                FloatToIntFunctor());
+        });
     }
 
     void launch_int_to_float(const int* src, float* dst, size_t n, cudaStream_t stream) {
@@ -789,11 +907,13 @@ namespace gs::tensor_ops {
         auto src_ptr = thrust::device_pointer_cast(src);
         auto dst_ptr = thrust::device_pointer_cast(dst);
 
-        thrust::transform(
-            thrust::cuda::par.on(stream),
-            src_ptr, src_ptr + n,
-            dst_ptr,
-            IntToFloatFunctor());
+        run_with_thrust_policy(stream, [&](auto policy) {
+            thrust::transform(
+                policy,
+                src_ptr, src_ptr + n,
+                dst_ptr,
+                IntToFloatFunctor());
+        });
     }
 
     // ============= LOAD OPERATION IMPLEMENTATIONS =============
@@ -815,10 +935,12 @@ namespace gs::tensor_ops {
             float value = *static_cast<const float*>(args);
             auto output_ptr = thrust::device_pointer_cast(static_cast<float*>(output));
 
-            thrust::fill(
-                thrust::cuda::par.on(stream),
-                output_ptr, output_ptr + n,
-                value);
+            run_with_thrust_policy(stream, [&](auto policy) {
+                thrust::fill(
+                    policy,
+                    output_ptr, output_ptr + n,
+                    value);
+            });
         }
     }
 
@@ -861,16 +983,30 @@ namespace gs::tensor_ops {
         if (rank == 1) {
             if (dtype == DataType::Float32) {
                 auto data_ptr = thrust::device_pointer_cast(static_cast<float*>(data));
-                thrust::inclusive_scan(
-                    thrust::cuda::par.on(stream),
-                    data_ptr, data_ptr + total,
-                    data_ptr);
+                if (stream) {
+                    thrust::inclusive_scan(
+                        thrust::cuda::par.on(stream),
+                        data_ptr, data_ptr + total,
+                        data_ptr);
+                } else {
+                    thrust::inclusive_scan(
+                        thrust::cuda::par,
+                        data_ptr, data_ptr + total,
+                        data_ptr);
+                }
             } else if (dtype == DataType::Int32) {
                 auto data_ptr = thrust::device_pointer_cast(static_cast<int*>(data));
-                thrust::inclusive_scan(
-                    thrust::cuda::par.on(stream),
-                    data_ptr, data_ptr + total,
-                    data_ptr);
+                if (stream) {
+                    thrust::inclusive_scan(
+                        thrust::cuda::par.on(stream),
+                        data_ptr, data_ptr + total,
+                        data_ptr);
+                } else {
+                    thrust::inclusive_scan(
+                        thrust::cuda::par,
+                        data_ptr, data_ptr + total,
+                        data_ptr);
+                }
             }
             return;
         }
@@ -895,9 +1031,15 @@ namespace gs::tensor_ops {
                 for (size_t seg = 0; seg < num_segments; ++seg) {
                     auto seg_begin = data_ptr + seg * dim_size;
                     auto seg_end = seg_begin + dim_size;
-                    thrust::inclusive_scan(
-                        thrust::cuda::par.on(stream),
-                        seg_begin, seg_end, seg_begin);
+                    if (stream) {
+                        thrust::inclusive_scan(
+                            thrust::cuda::par.on(stream),
+                            seg_begin, seg_end, seg_begin);
+                    } else {
+                        thrust::inclusive_scan(
+                            thrust::cuda::par,
+                            seg_begin, seg_end, seg_begin);
+                    }
                 }
             } else if (dtype == DataType::Int32) {
                 auto data_ptr = thrust::device_pointer_cast(static_cast<int*>(data));
@@ -905,9 +1047,15 @@ namespace gs::tensor_ops {
                 for (size_t seg = 0; seg < num_segments; ++seg) {
                     auto seg_begin = data_ptr + seg * dim_size;
                     auto seg_end = seg_begin + dim_size;
-                    thrust::inclusive_scan(
-                        thrust::cuda::par.on(stream),
-                        seg_begin, seg_end, seg_begin);
+                    if (stream) {
+                        thrust::inclusive_scan(
+                            thrust::cuda::par.on(stream),
+                            seg_begin, seg_end, seg_begin);
+                    } else {
+                        thrust::inclusive_scan(
+                            thrust::cuda::par,
+                            seg_begin, seg_end, seg_begin);
+                    }
                 }
             }
             return;
@@ -931,6 +1079,158 @@ namespace gs::tensor_ops {
                 cudaStreamSynchronize(stream);
             } else {
                 cudaDeviceSynchronize();
+            }
+        }
+    }
+
+    // ============= PAIRWISE DISTANCE (CDIST) KERNEL =============
+
+    template <typename T>
+    __global__ void cdist_kernel(const T* a, const T* b, T* out,
+                                 size_t N, size_t M, size_t D, float p) {
+        size_t i = blockIdx.y * blockDim.y + threadIdx.y;
+        size_t j = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (i >= N || j >= M)
+            return;
+
+        T dist = 0;
+
+        if (p == 2.0f) {
+            // Optimized L2 distance
+            for (size_t d = 0; d < D; ++d) {
+                T diff = a[i * D + d] - b[j * D + d];
+                dist += diff * diff;
+            }
+            dist = sqrt(dist);
+        } else if (p == 1.0f) {
+            // L1 distance
+            for (size_t d = 0; d < D; ++d) {
+                dist += abs(a[i * D + d] - b[j * D + d]);
+            }
+        } else {
+            // General Lp distance
+            for (size_t d = 0; d < D; ++d) {
+                T diff = abs(a[i * D + d] - b[j * D + d]);
+                dist += pow(diff, p);
+            }
+            dist = pow(dist, T(1.0) / p);
+        }
+
+        out[i * M + j] = dist;
+    }
+
+    void launch_cdist(const float* a, const float* b, float* out,
+                      size_t N, size_t M, size_t D, float p, cudaStream_t stream) {
+        if (N == 0 || M == 0)
+            return;
+
+        dim3 block(16, 16);
+        dim3 grid((M + block.x - 1) / block.x, (N + block.y - 1) / block.y);
+
+        cdist_kernel<<<grid, block, 0, stream>>>(a, b, out, N, M, D, p);
+    }
+
+    // ============= SORTING OPERATIONS =============
+
+    void launch_sort_1d(float* values, int64_t* indices, size_t n, bool descending, cudaStream_t stream) {
+        if (n == 0) return;
+
+        auto values_ptr = thrust::device_pointer_cast(values);
+        auto indices_ptr = thrust::device_pointer_cast(indices);
+
+        // Initialize indices to 0, 1, 2, ...
+        run_with_thrust_policy(stream, [&](auto policy) {
+            thrust::sequence(policy, indices_ptr, indices_ptr + n);
+        });
+
+        // Sort by keys, carrying indices along
+        if (stream) {
+            if (descending) {
+                thrust::sort_by_key(thrust::cuda::par.on(stream),
+                    values_ptr, values_ptr + n,
+                    indices_ptr,
+                    thrust::greater<float>());
+            } else {
+                thrust::sort_by_key(thrust::cuda::par.on(stream),
+                    values_ptr, values_ptr + n,
+                    indices_ptr,
+                    thrust::less<float>());
+            }
+        } else {
+            if (descending) {
+                thrust::sort_by_key(thrust::cuda::par,
+                    values_ptr, values_ptr + n,
+                    indices_ptr,
+                    thrust::greater<float>());
+            } else {
+                thrust::sort_by_key(thrust::cuda::par,
+                    values_ptr, values_ptr + n,
+                    indices_ptr,
+                    thrust::less<float>());
+            }
+        }
+    }
+
+    // Functor for creating index sequence
+    struct IndexSequenceFunctor {
+        __device__ int64_t operator()(int64_t i) const {
+            return i;
+        }
+    };
+
+    void launch_sort_2d(float* values, int64_t* indices,
+                        size_t outer_size, size_t dim_size, size_t inner_size,
+                        int dim, bool descending, cudaStream_t stream) {
+        if (dim_size == 0) return;
+
+        // For each slice along the sorting dimension, perform sort
+        for (size_t outer = 0; outer < outer_size; ++outer) {
+            for (size_t inner = 0; inner < inner_size; ++inner) {
+                size_t offset = outer * dim_size * inner_size + inner;
+
+                // Create temporary vectors for this slice
+                thrust::device_vector<float> temp_vals(dim_size);
+                thrust::device_vector<int64_t> temp_idx(dim_size);
+
+                // Copy strided data to contiguous temp
+                for (size_t d = 0; d < dim_size; ++d) {
+                    temp_vals[d] = values[offset + d * inner_size];
+                    temp_idx[d] = static_cast<int64_t>(d);
+                }
+
+                // Sort the temporary vectors
+                if (stream) {
+                    if (descending) {
+                        thrust::sort_by_key(thrust::cuda::par.on(stream),
+                            temp_vals.begin(), temp_vals.end(),
+                            temp_idx.begin(),
+                            thrust::greater<float>());
+                    } else {
+                        thrust::sort_by_key(thrust::cuda::par.on(stream),
+                            temp_vals.begin(), temp_vals.end(),
+                            temp_idx.begin(),
+                            thrust::less<float>());
+                    }
+                } else {
+                    if (descending) {
+                        thrust::sort_by_key(thrust::cuda::par,
+                            temp_vals.begin(), temp_vals.end(),
+                            temp_idx.begin(),
+                            thrust::greater<float>());
+                    } else {
+                        thrust::sort_by_key(thrust::cuda::par,
+                            temp_vals.begin(), temp_vals.end(),
+                            temp_idx.begin(),
+                            thrust::less<float>());
+                    }
+                }
+
+                // Copy back to strided output
+                for (size_t d = 0; d < dim_size; ++d) {
+                    values[offset + d * inner_size] = temp_vals[d];
+                    indices[offset + d * inner_size] = temp_idx[d];
+                }
             }
         }
     }
