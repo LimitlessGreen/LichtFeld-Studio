@@ -11,25 +11,25 @@ set(CORE_SOURCES
         parameters.cpp
         splat_data.cpp
         sogs.cpp
-        tensor.cpp              # Main tensor implementation
-        tensor_utils.cpp        # Minimal utilities (SafeOps, MemoryInfo, functional)
-        tensor_matrix_ops.cpp   # Matrix operations (matmul, transpose, etc.)
-        tensor_unified_ops.cpp  # Unified operations (load, unary, binary, reduce, ternary)
-        tensor_movement_ops.cpp # Movement operations (reshape, permute, etc.)
-        tensor_random_ops.cpp   # Random generation operations
-        tensor_broadcast.cpp    # Broadcasting implementation
-        tensor_shape_ops.cpp    # Shape functions (reshape, slice, etc.)
-        tensor_masking_ops.cpp  # Masking and indexing operations
+        tensor/tensor.cpp              # Main tensor implementation
+        tensor/tensor_utils.cpp        # Minimal utilities (SafeOps, MemoryInfo, functional)
+        tensor/tensor_matrix_ops.cpp   # Matrix operations (matmul, transpose, etc.)
+        tensor/tensor_unified_ops.cpp  # Unified operations (load, unary, binary, reduce, ternary)
+        tensor/tensor_movement_ops.cpp # Movement operations (reshape, permute, etc.)
+        tensor/tensor_random_ops.cpp   # Random generation operations
+        tensor/tensor_broadcast.cpp    # Broadcasting implementation
+        tensor/tensor_shape_ops.cpp    # Shape functions (reshape, slice, etc.)
+        tensor/tensor_masking_ops.cpp  # Masking and indexing operations
         tinyply.cpp
 )
 
 # CUDA sources (limited to C++20)
 set(CORE_CUDA_SOURCES
-        tensor_ops.cu           # CUDA kernels for tensor operations
-        tensor_matrix_ops.cu    # CUDA kernels for matrix operations
-        tensor_broadcast_ops.cu # CUDA kernels for broadcasting
-        tensor_masking_ops.cu   # CUDA kernels for masking/indexing
-        tensor_random_ops.cu    # CUDA kernels for random ops
+        tensor/tensor_ops.cu           # CUDA kernels for tensor operations
+        tensor/tensor_matrix_ops.cu    # CUDA kernels for matrix operations
+        tensor/tensor_broadcast_ops.cu # CUDA kernels for broadcasting
+        tensor/tensor_masking_ops.cu   # CUDA kernels for masking/indexing
+        tensor/tensor_random_ops.cu    # CUDA kernels for random ops
 )
 
 add_compile_definitions(_PSTL_USAGE_WARNINGS=0)
@@ -51,7 +51,7 @@ if(CORE_CUDA_SOURCES)
             PUBLIC
             ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_BINARY_DIR}/include
-            ${CMAKE_SOURCE_DIR}/src       # For inter-module includes
+            ${CMAKE_SOURCE_DIR}/src/tensor      # For inter-module includes
             PRIVATE
             ${CUDAToolkit_INCLUDE_DIRS}
     )
