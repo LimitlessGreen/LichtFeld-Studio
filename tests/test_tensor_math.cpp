@@ -476,7 +476,7 @@ TEST_F(TensorMathTest, Normalize) {
     EXPECT_NEAR(normalized_custom.mean_scalar(), 0.0f, 1e-5f);
 
     // Check std is approximately 1
-    EXPECT_NEAR(normalized_custom.std_scalar(), 1.0f, 1e-4f);
+    EXPECT_NEAR(normalized_custom.std_scalar(false), 1.0f, 1e-4f);
 }
 
 // ============= Chained Operations =============

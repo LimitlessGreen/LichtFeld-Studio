@@ -810,7 +810,11 @@ namespace gs {
 
         // Special handling for Std and Var
         if (op == ReduceOp::Std || op == ReduceOp::Var) {
+            // Use the dedicated unbiased field from ReduceArgs
+            bool unbiased = args.unbiased;
+
             ReduceArgs mean_args = args;
+            mean_args.args = std::monostate{};  // Clear variant args for mean calculation
             auto mean_tensor = reduce(ReduceOp::Mean, mean_args);
 
             Tensor mean_broadcast = (mean_tensor.shape() == shape_)
@@ -835,12 +839,9 @@ namespace gs {
                 reduce_count *= shape_[ax];
             }
 
-            // For dimensional reductions (with keepdim or specific axes), use unbiased (N-1)
-            // For scalar reductions (all axes), use biased (N)
-            bool is_scalar_reduction = (axes.size() == shape_.rank() && !args.keepdim);
+            // Apply Bessel's correction if unbiased and N > 1
             float correction = static_cast<float>(reduce_count);
-            if (!is_scalar_reduction && reduce_count > 1) {
-                // Use unbiased estimator (N-1) for dimensional reductions
+            if (unbiased && reduce_count > 1) {
                 correction = static_cast<float>(reduce_count - 1);
             }
 
@@ -852,6 +853,7 @@ namespace gs {
                 return variance.sqrt();
             }
         }
+
 
         std::vector<int> axes = args.axes;
         if (axes.empty()) {

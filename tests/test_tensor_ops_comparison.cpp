@@ -21,17 +21,24 @@ gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
     for (int i = 0; i < torch_tensor.dim(); ++i) {
         shape.push_back(torch_tensor.size(i));
     }
-    
+
     if (torch_tensor.scalar_type() == torch::kFloat32) {
-        std::vector<float> data(cpu_tensor.data_ptr<float>(), 
+        std::vector<float> data(cpu_tensor.data_ptr<float>(),
                                cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
         return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
     } else if (torch_tensor.scalar_type() == torch::kInt32) {
-        std::vector<int> data(cpu_tensor.data_ptr<int>(), 
+        std::vector<int> data(cpu_tensor.data_ptr<int>(),
                              cpu_tensor.data_ptr<int>() + cpu_tensor.numel());
         return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
+    } else if (torch_tensor.scalar_type() == torch::kBool) {
+        std::vector<bool> data;
+        auto bool_ptr = cpu_tensor.data_ptr<bool>();
+        for (int64_t i = 0; i < cpu_tensor.numel(); ++i) {
+            data.push_back(bool_ptr[i]);
+        }
+        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
     }
-    
+
     return gs::Tensor();
 }
 
@@ -42,7 +49,7 @@ torch::Tensor tensor_to_torch(const gs::Tensor& gs_tensor) {
     for (size_t i = 0; i < cpu_tensor.ndim(); ++i) {
         shape.push_back(cpu_tensor.shape()[i]);
     }
-    
+
     if (gs_tensor.dtype() == gs::DataType::Float32) {
         auto data = cpu_tensor.to_vector();
         auto torch_tensor = torch::from_blob(data.data(), shape, torch::kFloat32).clone();
@@ -51,8 +58,13 @@ torch::Tensor tensor_to_torch(const gs::Tensor& gs_tensor) {
         auto data = cpu_tensor.to_vector_int();
         auto torch_tensor = torch::from_blob(data.data(), shape, torch::kInt32).clone();
         return torch_tensor.cuda();
+    } else if (gs_tensor.dtype() == gs::DataType::Bool) {
+        auto data = cpu_tensor.to_vector_bool();
+        std::vector<uint8_t> uint8_data(data.begin(), data.end());
+        auto torch_tensor = torch::from_blob(uint8_data.data(), shape, torch::kUInt8).clone().to(torch::kBool);
+        return torch_tensor.cuda();
     }
-    
+
     return torch::Tensor();
 }
 
@@ -62,16 +74,36 @@ bool tensors_close(const gs::Tensor& a, const torch::Tensor& b, float tol = FLOA
         std::cout << "Size mismatch: " << a.numel() << " vs " << b.numel() << std::endl;
         return false;
     }
-    
+
     auto a_cpu = a.cpu().to_vector();
     auto b_cpu = b.cpu();
     auto b_ptr = b_cpu.data_ptr<float>();
-    
+
     for (size_t i = 0; i < a.numel(); ++i) {
         float diff = std::abs(a_cpu[i] - b_ptr[i]);
         if (diff > tol) {
-            std::cout << "Mismatch at index " << i << ": " << a_cpu[i] << " vs " << b_ptr[i] 
+            std::cout << "Mismatch at index " << i << ": " << a_cpu[i] << " vs " << b_ptr[i]
                       << " (diff: " << diff << ")" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
+// Helper for bool tensor comparison
+bool bool_tensors_equal(const gs::Tensor& a, const torch::Tensor& b) {
+    if (a.numel() != b.numel()) {
+        std::cout << "Size mismatch: " << a.numel() << " vs " << b.numel() << std::endl;
+        return false;
+    }
+
+    auto a_cpu = a.cpu().to_vector_bool();
+    auto b_cpu = b.cpu();
+    auto b_ptr = b_cpu.data_ptr<bool>();
+
+    for (size_t i = 0; i < a.numel(); ++i) {
+        if (a_cpu[i] != b_ptr[i]) {
+            std::cout << "Mismatch at index " << i << ": " << a_cpu[i] << " vs " << b_ptr[i] << std::endl;
             return false;
         }
     }
@@ -80,7 +112,7 @@ bool tensors_close(const gs::Tensor& a, const torch::Tensor& b, float tol = FLOA
 
 } // anonymous namespace
 
-class TensorOpsComparisonTest : public ::testing::Test {
+class TensorBugHuntingTest : public ::testing::Test {
 protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available";
@@ -91,580 +123,1099 @@ protected:
 };
 
 // ============================================================================
-// Basic Creation and Initialization
+// CRITICAL BUG TESTS - CPU ↔ CUDA Transfer
 // ============================================================================
 
-TEST_F(TensorOpsComparisonTest, Zeros) {
-    auto torch_zeros = torch::zeros({10, 5}, torch::kCUDA);
-    auto gs_zeros = gs::Tensor::zeros({10, 5}, gs::Device::CUDA);
-    
-    EXPECT_TRUE(tensors_close(gs_zeros, torch_zeros));
+TEST_F(TensorBugHuntingTest, CriticalCPUToGPUTransfer) {
+    // The critical test mentioned in the requirements
+    auto t = gs::Tensor::ones({2, 3}, gs::Device::CPU);
+    t.ptr<float>()[0] = 99.0f;
+
+    auto gpu = t.cuda();
+    auto back = gpu.cpu();
+
+    EXPECT_FLOAT_EQ(back.ptr<float>()[0], 99.0f) << "CPU→GPU→CPU transfer corrupted data!";
+
+    // Also test via operator[]
+    EXPECT_FLOAT_EQ(back[0][0], 99.0f) << "Operator[] access shows corrupted data!";
 }
 
-TEST_F(TensorOpsComparisonTest, Ones) {
-    auto torch_ones = torch::ones({10, 5}, torch::kCUDA);
-    auto gs_ones = gs::Tensor::ones({10, 5}, gs::Device::CUDA);
-    
-    EXPECT_TRUE(tensors_close(gs_ones, torch_ones));
+TEST_F(TensorBugHuntingTest, CPUToGPUTransferMultipleValues) {
+    auto t = gs::Tensor::zeros({5, 4}, gs::Device::CPU);
+    float* data = t.ptr<float>();
+
+    // Set unique values
+    for (int i = 0; i < 20; ++i) {
+        data[i] = static_cast<float>(i * 10);
+    }
+
+    auto gpu = t.cuda();
+    auto back = gpu.cpu();
+    float* back_data = back.ptr<float>();
+
+    // Verify all values
+    for (int i = 0; i < 20; ++i) {
+        EXPECT_FLOAT_EQ(back_data[i], static_cast<float>(i * 10))
+            << "Value corrupted at index " << i;
+    }
 }
 
-TEST_F(TensorOpsComparisonTest, Full) {
-    float value = 3.14f;
-    auto torch_full = torch::full({10, 5}, value, torch::kCUDA);
-    auto gs_full = gs::Tensor::full({10, 5}, value, gs::Device::CUDA);
-    
-    EXPECT_TRUE(tensors_close(gs_full, torch_full));
-}
-
-TEST_F(TensorOpsComparisonTest, Arange) {
-    auto torch_arange = torch::arange(0, 100, 1, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-    auto gs_arange = gs::Tensor::arange(0, 100, 1.0f);
-    
-    EXPECT_TRUE(tensors_close(gs_arange, torch_arange));
-}
-
-TEST_F(TensorOpsComparisonTest, Linspace) {
-    auto torch_linspace = torch::linspace(0, 100, 50, torch::kCUDA);
-    auto gs_linspace = gs::Tensor::linspace(0, 100, 50, gs::Device::CUDA);
-    
-    EXPECT_TRUE(tensors_close(gs_linspace, torch_linspace, 1e-3f));
-}
-
-// ============================================================================
-// Shape Operations
-// ============================================================================
-
-TEST_F(TensorOpsComparisonTest, Unsqueeze) {
-    auto torch_data = torch::randn({10}, torch::kCUDA);
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    // Unsqueeze at dim 1
-    auto torch_unsqueezed = torch_data.unsqueeze(1);
-    auto gs_unsqueezed = gs_data.unsqueeze(1);
-    
-    EXPECT_EQ(torch_unsqueezed.size(0), gs_unsqueezed.shape()[0]);
-    EXPECT_EQ(torch_unsqueezed.size(1), gs_unsqueezed.shape()[1]);
-    EXPECT_TRUE(tensors_close(gs_unsqueezed, torch_unsqueezed));
-}
-
-TEST_F(TensorOpsComparisonTest, Squeeze) {
-    auto torch_data = torch::randn({10, 1}, torch::kCUDA);
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    auto torch_squeezed = torch_data.squeeze(1);
-    auto gs_squeezed = gs_data.squeeze(1);
-    
-    EXPECT_EQ(torch_squeezed.size(0), gs_squeezed.shape()[0]);
-    EXPECT_EQ(torch_squeezed.dim(), gs_squeezed.ndim());
-    EXPECT_TRUE(tensors_close(gs_squeezed, torch_squeezed));
-}
-
-TEST_F(TensorOpsComparisonTest, Reshape) {
-    auto torch_data = torch::randn({20}, torch::kCUDA);
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    auto torch_reshaped = torch_data.reshape({4, 5});
-    auto gs_reshaped = gs_data.reshape({4, 5});
-    
-    EXPECT_EQ(torch_reshaped.size(0), gs_reshaped.shape()[0]);
-    EXPECT_EQ(torch_reshaped.size(1), gs_reshaped.shape()[1]);
-    EXPECT_TRUE(tensors_close(gs_reshaped, torch_reshaped));
-}
-
-TEST_F(TensorOpsComparisonTest, Clone) {
+TEST_F(TensorBugHuntingTest, GPUToCPUTransferPreservesData) {
+    // Create directly on GPU, transfer to CPU
     auto torch_data = torch::randn({10, 5}, torch::kCUDA);
     auto gs_data = torch_to_tensor(torch_data);
-    
-    auto torch_cloned = torch_data.clone();
+
+    auto gs_cpu = gs_data.cpu();
+    auto torch_cpu = torch_data.cpu();
+
+    EXPECT_TRUE(tensors_close(gs_cpu, torch_cpu));
+}
+
+TEST_F(TensorBugHuntingTest, RepeatedCPUGPUTransfers) {
+    auto t = gs::Tensor::ones({3, 3}, gs::Device::CPU);
+    t.ptr<float>()[4] = 123.456f;  // Center element
+
+    // Multiple round trips
+    for (int i = 0; i < 5; ++i) {
+        auto gpu = t.cuda();
+        t = gpu.cpu();
+
+        EXPECT_FLOAT_EQ(t.ptr<float>()[4], 123.456f)
+            << "Data corrupted on round trip " << i;
+    }
+}
+
+// ============================================================================
+// CLONE TESTS - Deep Copy Verification
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, CloneIsDeepCopy) {
+    auto original = gs::Tensor::ones({5, 5}, gs::Device::CUDA);
+    auto cloned = original.clone();
+
+    // Modify original
+    auto orig_cpu = original.cpu();
+    orig_cpu.ptr<float>()[0] = 999.0f;
+    original = orig_cpu.cuda();
+
+    // Cloned should be unchanged
+    auto clone_cpu = cloned.cpu();
+    EXPECT_FLOAT_EQ(clone_cpu.ptr<float>()[0], 1.0f)
+        << "Clone shares memory with original!";
+}
+
+TEST_F(TensorBugHuntingTest, CloneCPUTensor) {
+    auto original = gs::Tensor::ones({5, 5}, gs::Device::CPU);
+    original.ptr<float>()[0] = 42.0f;
+
+    auto cloned = original.clone();
+
+    // Modify original
+    original.ptr<float>()[0] = 999.0f;
+
+    // Cloned should be unchanged
+    EXPECT_FLOAT_EQ(cloned.ptr<float>()[0], 42.0f)
+        << "CPU clone shares memory with original!";
+}
+
+TEST_F(TensorBugHuntingTest, ClonePreservesAllValues) {
+    auto torch_data = torch::randn({10, 10}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
     auto gs_cloned = gs_data.clone();
-    
-    EXPECT_TRUE(tensors_close(gs_cloned, torch_cloned));
-}
 
-TEST_F(TensorOpsComparisonTest, Slice) {
-    auto torch_data = torch::randn({100, 5}, torch::kCUDA);
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    // Slice first dimension
-    auto torch_sliced = torch_data.slice(0, 10, 20);
-    auto gs_sliced = gs_data.slice(0, 10, 20);
-    
-    EXPECT_EQ(torch_sliced.size(0), gs_sliced.shape()[0]);
-    EXPECT_EQ(torch_sliced.size(1), gs_sliced.shape()[1]);
-    EXPECT_TRUE(tensors_close(gs_sliced, torch_sliced));
+    EXPECT_TRUE(tensors_close(gs_cloned, torch_data));
 }
 
 // ============================================================================
-// Reduction Operations
+// TENSORROWPROXY ASSIGNMENT TESTS - Multi-dimensional Tensor Assignment
 // ============================================================================
 
-TEST_F(TensorOpsComparisonTest, Min) {
-    auto torch_data = torch::randn({100}, torch::kCUDA);
+TEST_F(TensorBugHuntingTest, TensorRowProxyAssignment2D) {
+    auto torch_dest = torch::zeros({5, 3}, torch::kCUDA);
+    auto torch_src = torch::ones({3}, torch::kCUDA) * 42.0f;
+
+    auto gs_dest = gs::Tensor::zeros({5, 3}, gs::Device::CUDA);
+    auto gs_src = gs::Tensor::ones({3}, gs::Device::CUDA).mul(42.0f);
+
+    // Assign to row 2
+    torch_dest[2] = torch_src;
+    gs_dest[2] = gs_src;
+
+    EXPECT_TRUE(tensors_close(gs_dest, torch_dest))
+        << "TensorRowProxy assignment failed for 2D tensor!";
+}
+
+TEST_F(TensorBugHuntingTest, TensorRowProxyAssignmentFromAnotherRowDebug) {
+    std::cout << "\n=== DEBUGGING row-to-row assignment ===" << std::endl;
+
+    auto torch_data = torch::randn({5, 3}, torch::kCUDA);
     auto gs_data = torch_to_tensor(torch_data);
-    
-    float torch_min = torch_data.min().item<float>();
-    float gs_min = gs_data.min().item();
-    
-    EXPECT_NEAR(gs_min, torch_min, FLOAT_TOLERANCE);
-}
 
-TEST_F(TensorOpsComparisonTest, Max) {
-    auto torch_data = torch::randn({100}, torch::kCUDA);
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    float torch_max = torch_data.max().item<float>();
-    float gs_max = gs_data.max().item();
-    
-    EXPECT_NEAR(gs_max, torch_max, FLOAT_TOLERANCE);
-}
+    // Print ALL data before operation
+    std::cout << "\n--- BEFORE operation ---" << std::endl;
+    for (int row = 0; row < 5; ++row) {
+        std::vector<float> torch_row(3);
+        std::vector<float> gs_row(3);
 
-TEST_F(TensorOpsComparisonTest, Sum) {
-    auto torch_data = torch::randn({100}, torch::kCUDA);
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    float torch_sum = torch_data.sum().item<float>();
-    float gs_sum = gs_data.sum().item();
-    
-    EXPECT_NEAR(gs_sum, torch_sum, 1e-3f); // Slightly relaxed tolerance for sum
-}
+        for (int col = 0; col < 3; ++col) {
+            torch_row[col] = torch_data[row][col].item<float>();
+        }
 
-TEST_F(TensorOpsComparisonTest, Mean) {
-    auto torch_data = torch::randn({100}, torch::kCUDA);
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    float torch_mean = torch_data.mean().item<float>();
-    float gs_mean = gs_data.mean().item();
-    
-    EXPECT_NEAR(gs_mean, torch_mean, FLOAT_TOLERANCE);
-}
+        cudaMemcpy(gs_row.data(), gs_data.ptr<float>() + row * 3,
+                   3 * sizeof(float), cudaMemcpyDeviceToHost);
 
-TEST_F(TensorOpsComparisonTest, Cumsum) {
-    auto torch_data = torch::randn({100}, torch::kCUDA);
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    auto torch_cumsum = torch_data.cumsum(0);
-    auto gs_cumsum = gs_data.cumsum(0);
-    
-    EXPECT_TRUE(tensors_close(gs_cumsum, torch_cumsum, 1e-3f));
-}
+        std::cout << "Row " << row << ":" << std::endl;
+        std::cout << "  PyTorch: [" << torch_row[0] << ", " << torch_row[1] << ", " << torch_row[2] << "]" << std::endl;
+        std::cout << "  GS:      [" << gs_row[0] << ", " << gs_row[1] << ", " << gs_row[2] << "]" << std::endl;
+    }
 
-// ============================================================================
-// Arithmetic Operations
-// ============================================================================
+    // Perform operation
+    std::cout << "\n--- Extracting row 0 ---" << std::endl;
+    auto torch_row0 = torch_data[0].clone();
+    gs::Tensor gs_row0_tensor = gs_data[0];  // TensorRowProxy → Tensor conversion
 
-TEST_F(TensorOpsComparisonTest, Addition) {
-    auto torch_a = torch::randn({10, 5}, torch::kCUDA);
-    auto torch_b = torch::randn({10, 5}, torch::kCUDA);
-    auto gs_a = torch_to_tensor(torch_a);
-    auto gs_b = torch_to_tensor(torch_b);
-    
-    auto torch_result = torch_a + torch_b;
-    auto gs_result = gs_a + gs_b;
-    
-    EXPECT_TRUE(tensors_close(gs_result, torch_result));
-}
+    std::vector<float> torch_row0_check(3);
+    for (int i = 0; i < 3; ++i) {
+        torch_row0_check[i] = torch_row0[i].item<float>();
+    }
 
-TEST_F(TensorOpsComparisonTest, Subtraction) {
-    auto torch_a = torch::randn({10, 5}, torch::kCUDA);
-    auto torch_b = torch::randn({10, 5}, torch::kCUDA);
-    auto gs_a = torch_to_tensor(torch_a);
-    auto gs_b = torch_to_tensor(torch_b);
-    
-    auto torch_result = torch_a - torch_b;
-    auto gs_result = gs_a - gs_b;
-    
-    EXPECT_TRUE(tensors_close(gs_result, torch_result));
-}
+    // Convert to CPU and get values
+    auto gs_row0_cpu = gs_row0_tensor.cpu();
+    auto gs_row0_check = gs_row0_cpu.to_vector();
 
-TEST_F(TensorOpsComparisonTest, Multiplication) {
-    auto torch_a = torch::randn({10, 5}, torch::kCUDA);
-    auto torch_b = torch::randn({10, 5}, torch::kCUDA);
-    auto gs_a = torch_to_tensor(torch_a);
-    auto gs_b = torch_to_tensor(torch_b);
-    
-    auto torch_result = torch_a * torch_b;
-    auto gs_result = gs_a * gs_b;
-    
-    EXPECT_TRUE(tensors_close(gs_result, torch_result));
-}
+    std::cout << "PyTorch row 0 copy: [" << torch_row0_check[0] << ", " << torch_row0_check[1] << ", " << torch_row0_check[2] << "]" << std::endl;
+    std::cout << "GS row 0 copy:      [" << gs_row0_check[0] << ", " << gs_row0_check[1] << ", " << gs_row0_check[2] << "]" << std::endl;
 
-TEST_F(TensorOpsComparisonTest, Division) {
-    auto torch_a = torch::randn({10, 5}, torch::kCUDA);
-    auto torch_b = torch::randn({10, 5}, torch::kCUDA) + 1.0f; // Avoid division by zero
-    auto gs_a = torch_to_tensor(torch_a);
-    auto gs_b = torch_to_tensor(torch_b);
-    
-    auto torch_result = torch_a / torch_b;
-    auto gs_result = gs_a / gs_b;
-    
-    EXPECT_TRUE(tensors_close(gs_result, torch_result, 1e-3f)); // Relaxed tolerance
-}
+    std::cout << "\n--- Assigning to row 4 ---" << std::endl;
+    torch_data[4] = torch_row0;
+    gs_data[4] = gs_row0_tensor;
 
-TEST_F(TensorOpsComparisonTest, ScalarAddition) {
-    auto torch_a = torch::randn({10, 5}, torch::kCUDA);
-    auto gs_a = torch_to_tensor(torch_a);
-    
-    auto torch_result = torch_a + 5.0f;
-    auto gs_result = gs_a + 5.0f;
-    
-    EXPECT_TRUE(tensors_close(gs_result, torch_result));
-}
+    // Print ALL data after operation
+    std::cout << "\n--- AFTER operation ---" << std::endl;
+    for (int row = 0; row < 5; ++row) {
+        std::vector<float> torch_row(3);
+        std::vector<float> gs_row(3);
 
-TEST_F(TensorOpsComparisonTest, ScalarMultiplication) {
-    auto torch_a = torch::randn({10, 5}, torch::kCUDA);
-    auto gs_a = torch_to_tensor(torch_a);
-    
-    auto torch_result = torch_a * 3.5f;
-    auto gs_result = gs_a * 3.5f;
-    
-    EXPECT_TRUE(tensors_close(gs_result, torch_result));
-}
+        for (int col = 0; col < 3; ++col) {
+            torch_row[col] = torch_data[row][col].item<float>();
+        }
 
-TEST_F(TensorOpsComparisonTest, ScalarDivision) {
-    auto torch_a = torch::randn({10, 5}, torch::kCUDA);
-    auto gs_a = torch_to_tensor(torch_a);
-    
-    auto torch_result = torch_a / 2.5f;
-    auto gs_result = gs_a / 2.5f;
-    
-    EXPECT_TRUE(tensors_close(gs_result, torch_result));
-}
+        cudaMemcpy(gs_row.data(), gs_data.ptr<float>() + row * 3,
+                   3 * sizeof(float), cudaMemcpyDeviceToHost);
 
-// ============================================================================
-// Unary Operations
-// ============================================================================
+        std::cout << "Row " << row << ":" << std::endl;
+        std::cout << "  PyTorch: [" << torch_row[0] << ", " << torch_row[1] << ", " << torch_row[2] << "]" << std::endl;
+        std::cout << "  GS:      [" << gs_row[0] << ", " << gs_row[1] << ", " << gs_row[2] << "]" << std::endl;
 
-TEST_F(TensorOpsComparisonTest, Abs) {
-    auto torch_data = torch::randn({10, 5}, torch::kCUDA);
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    auto torch_result = torch_data.abs();
-    auto gs_result = gs_data.abs();
-    
-    EXPECT_TRUE(tensors_close(gs_result, torch_result));
-}
-
-TEST_F(TensorOpsComparisonTest, Square) {
-    auto torch_data = torch::randn({10, 5}, torch::kCUDA);
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    auto torch_result = torch_data.square();
-    auto gs_result = gs_data.square();
-    
-    EXPECT_TRUE(tensors_close(gs_result, torch_result));
-}
-
-TEST_F(TensorOpsComparisonTest, Sqrt) {
-    auto torch_data = torch::rand({10, 5}, torch::kCUDA); // Positive values for sqrt
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    auto torch_result = torch_data.sqrt();
-    auto gs_result = gs_data.sqrt();
-    
-    EXPECT_TRUE(tensors_close(gs_result, torch_result));
-}
-
-// ============================================================================
-// Comparison Operations
-// ============================================================================
-
-TEST_F(TensorOpsComparisonTest, GreaterThan) {
-    auto torch_a = torch::randn({10, 5}, torch::kCUDA);
-    auto gs_a = torch_to_tensor(torch_a);
-    
-    auto torch_result = torch_a > 0.0f;
-    auto gs_result = gs_a > 0.0f;
-    
-    // Convert bool tensors to float for comparison
-    auto torch_result_float = torch_result.to(torch::kFloat32);
-    auto gs_result_float = gs_result.to(gs::DataType::Float32);
-    
-    EXPECT_TRUE(tensors_close(gs_result_float, torch_result_float));
-}
-
-TEST_F(TensorOpsComparisonTest, Equality) {
-    auto torch_a = torch::randint(0, 5, {10, 5}, torch::kCUDA).to(torch::kFloat32);
-    auto gs_a = torch_to_tensor(torch_a);
-    
-    auto torch_result = torch_a == 2.0f;
-    auto gs_result = gs_a == 2.0f;
-    
-    auto torch_result_float = torch_result.to(torch::kFloat32);
-    auto gs_result_float = gs_result.to(gs::DataType::Float32);
-    
-    EXPECT_TRUE(tensors_close(gs_result_float, torch_result_float));
-}
-
-// ============================================================================
-// Data Type Conversion
-// ============================================================================
-
-TEST_F(TensorOpsComparisonTest, ToInt32) {
-    auto torch_data = torch::randn({10, 5}, torch::kCUDA) * 10.0f;
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    auto torch_int = torch_data.to(torch::kInt32);
-    auto gs_int = gs_data.to(gs::DataType::Int32);
-    
-    auto torch_int_cpu = torch_int.cpu();
-    auto gs_int_cpu = gs_int.cpu();
-    
-    auto torch_ptr = torch_int_cpu.data_ptr<int>();
-    auto gs_vec = gs_int_cpu.to_vector_int();
-    
-    for (size_t i = 0; i < gs_vec.size(); ++i) {
-        EXPECT_EQ(gs_vec[i], torch_ptr[i]);
+        if (row == 4) {
+            // Compare row 4 with original row 0
+            bool torch_match = true, gs_match = true;
+            for (int i = 0; i < 3; ++i) {
+                if (std::abs(torch_row[i] - torch_row0_check[i]) > 0.0001f) torch_match = false;
+                if (std::abs(gs_row[i] - gs_row0_check[i]) > 0.0001f) gs_match = false;
+            }
+            std::cout << "  PyTorch row 4 matches row 0? " << (torch_match ? "YES" : "NO") << std::endl;
+            std::cout << "  GS row 4 matches row 0? " << (gs_match ? "YES" : "NO") << std::endl;
+        }
     }
 }
 
-// ============================================================================
-// Memory Operations
-// ============================================================================
+TEST_F(TensorBugHuntingTest, DiagnosticTensorsCloseFunction) {
+    std::cout << "\n=== Testing tensors_close() function ===" << std::endl;
 
-TEST_F(TensorOpsComparisonTest, CopyFrom) {
-    auto torch_src = torch::randn({10, 5}, torch::kCUDA);
-    auto gs_src = torch_to_tensor(torch_src);
-    
-    auto torch_dst = torch::zeros({10, 5}, torch::kCUDA);
-    auto gs_dst = gs::Tensor::zeros({10, 5}, gs::Device::CUDA);
-    
-    torch_dst.copy_(torch_src);
-    gs_dst.copy_from(gs_src);
-    
-    EXPECT_TRUE(tensors_close(gs_dst, torch_dst));
-}
-
-TEST_F(TensorOpsComparisonTest, CPUToGPU) {
-    auto torch_cpu = torch::randn({10, 5});
-    auto gs_cpu_vec = std::vector<float>(torch_cpu.data_ptr<float>(), 
-                                         torch_cpu.data_ptr<float>() + torch_cpu.numel());
-    auto gs_cpu = gs::Tensor::from_vector(gs_cpu_vec, gs::TensorShape({10, 5}), gs::Device::CPU);
-    
-    auto torch_gpu = torch_cpu.cuda();
-    auto gs_gpu = gs_cpu.cuda();
-    
-    EXPECT_TRUE(tensors_close(gs_gpu, torch_gpu));
-}
-
-// ============================================================================
-// Indexing and Masking
-// ============================================================================
-
-TEST_F(TensorOpsComparisonTest, MaskedSelect) {
-    auto torch_data = torch::randn({100}, torch::kCUDA);
+    // Create identical tensors
+    auto torch_data = torch::randn({5, 3}, torch::kCUDA);
     auto gs_data = torch_to_tensor(torch_data);
-    
-    auto torch_mask = torch_data > 0.0f;
-    auto gs_mask = gs_data > 0.0f;
-    
-    auto torch_selected = torch_data.masked_select(torch_mask);
-    auto gs_selected = gs_data.masked_select(gs_mask);
-    
-    EXPECT_EQ(torch_selected.numel(), gs_selected.numel());
-    EXPECT_TRUE(tensors_close(gs_selected, torch_selected));
+
+    // They should be close (identical)
+    bool close_before = tensors_close(gs_data, torch_data);
+    std::cout << "Initial tensors are close? " << (close_before ? "YES" : "NO") << std::endl;
+
+    if (!close_before) {
+        std::cout << "ERROR: Initial conversion doesn't preserve values!" << std::endl;
+
+        // Print differences
+        for (int row = 0; row < 5; ++row) {
+            for (int col = 0; col < 3; ++col) {
+                float torch_val = torch_data[row][col].item<float>();
+
+                std::vector<float> gs_val(1);
+                cudaMemcpy(gs_val.data(), gs_data.ptr<float>() + row * 3 + col,
+                          sizeof(float), cudaMemcpyDeviceToHost);
+
+                float diff = std::abs(torch_val - gs_val[0]);
+                if (diff > 1e-5) {
+                    std::cout << "  Mismatch at [" << row << "," << col << "]: "
+                              << "PyTorch=" << torch_val << ", GS=" << gs_val[0]
+                              << ", diff=" << diff << std::endl;
+                }
+            }
+        }
+    }
+
+    EXPECT_TRUE(close_before) << "Initial tensors should be identical!";
 }
 
-TEST_F(TensorOpsComparisonTest, Nonzero) {
-    auto torch_data = torch::tensor({0.0f, 1.0f, 0.0f, 2.0f, 0.0f, 3.0f}, torch::kCUDA);
+TEST_F(TensorBugHuntingTest, TensorRowProxyAssignmentFromAnotherRowVerbose) {
+    std::cout << "\n=== Original test with verbose output ===" << std::endl;
+
+    auto torch_data = torch::randn({5, 3}, torch::kCUDA);
     auto gs_data = torch_to_tensor(torch_data);
-    
-    auto torch_nz = torch_data.nonzero().squeeze();
-    auto gs_nz = gs_data.nonzero();
-    
-    EXPECT_EQ(torch_nz.numel(), gs_nz.numel());
-    
-    // Compare indices
-    auto torch_nz_cpu = torch_nz.cpu();
-    auto gs_nz_cpu = gs_nz.cpu();
-    auto torch_ptr = torch_nz_cpu.data_ptr<int64_t>();
-    auto gs_vec = gs_nz_cpu.to_vector_int();
-    
-    for (size_t i = 0; i < gs_vec.size(); ++i) {
-        EXPECT_EQ(gs_vec[i], static_cast<int>(torch_ptr[i]));
+
+    std::cout << "Initial tensors_close: " << (tensors_close(gs_data, torch_data) ? "PASS" : "FAIL") << std::endl;
+
+    // Copy row 0 to row 4
+    auto torch_row0 = torch_data[0].clone();
+    auto gs_row0_tensor = gs_data[0];
+
+    torch_data[4] = torch_row0;
+    gs_data[4] = gs_row0_tensor;
+
+    std::cout << "After assignment tensors_close: " << (tensors_close(gs_data, torch_data) ? "PASS" : "FAIL") << std::endl;
+
+    // Manual comparison
+    std::cout << "\nManual element-by-element comparison:" << std::endl;
+    bool all_match = true;
+    for (int row = 0; row < 5; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            float torch_val = torch_data[row][col].item<float>();
+
+            std::vector<float> gs_val(1);
+            cudaMemcpy(gs_val.data(), gs_data.ptr<float>() + row * 3 + col,
+                      sizeof(float), cudaMemcpyDeviceToHost);
+
+            float diff = std::abs(torch_val - gs_val[0]);
+            if (diff > 1e-3) {
+                std::cout << "  MISMATCH at [" << row << "," << col << "]: "
+                          << "PyTorch=" << torch_val << ", GS=" << gs_val[0]
+                          << ", diff=" << diff << std::endl;
+                all_match = false;
+            }
+        }
+    }
+
+    if (all_match) {
+        std::cout << "✓ All elements match!" << std::endl;
+    }
+
+    EXPECT_TRUE(all_match);
+}
+
+TEST_F(TensorBugHuntingTest, DiagnosticAutoVsExplicitType) {
+    std::cout << "\n=== Testing auto vs explicit type ===" << std::endl;
+
+    auto torch_data = torch::randn({5, 3}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    std::cout << "Test 1: Using auto (stays as proxy?)" << std::endl;
+    {
+        auto torch_row0 = torch_data[0].clone();
+        auto gs_row0 = gs_data[0];  // This might be TensorRowProxy!
+
+        std::cout << "  Type of gs_row0: " << typeid(gs_row0).name() << std::endl;
+
+        torch_data[4] = torch_row0;
+        gs_data[4] = gs_row0;
+
+        std::vector<float> gs_row4(3);
+        cudaMemcpy(gs_row4.data(), gs_data.ptr<float>() + 12,
+                  3 * sizeof(float), cudaMemcpyDeviceToHost);
+
+        std::cout << "  GS row 4 after auto: [" << gs_row4[0] << ", " << gs_row4[1] << ", " << gs_row4[2] << "]" << std::endl;
+    }
+
+    // Reset
+    gs_data = torch_to_tensor(torch_data);
+
+    std::cout << "\nTest 2: Using explicit Tensor type (forces conversion)" << std::endl;
+    {
+        auto torch_row0 = torch_data[0].clone();
+        gs::Tensor gs_row0 = gs_data[0];  // Explicit type forces conversion!
+
+        std::cout << "  Type of gs_row0: " << typeid(gs_row0).name() << std::endl;
+
+        torch_data[4] = torch_row0;
+        gs_data[4] = gs_row0;
+
+        std::vector<float> gs_row4(3);
+        cudaMemcpy(gs_row4.data(), gs_data.ptr<float>() + 12,
+                  3 * sizeof(float), cudaMemcpyDeviceToHost);
+
+        std::cout << "  GS row 4 after explicit: [" << gs_row4[0] << ", " << gs_row4[1] << ", " << gs_row4[2] << "]" << std::endl;
     }
 }
 
+TEST_F(TensorBugHuntingTest, TensorRowProxyScalarAssignment) {
+    auto torch_data = torch::zeros({5, 3}, torch::kCUDA);
+    auto gs_data = gs::Tensor::zeros({5, 3}, gs::Device::CUDA);
+
+    // Assign scalar to a row (should broadcast)
+    auto torch_scalar = torch::full({3}, 99.0f, torch::kCUDA);
+    auto gs_scalar = gs::Tensor::full({3}, 99.0f, gs::Device::CUDA);
+
+    torch_data[2] = torch_scalar;
+    gs_data[2] = gs_scalar;
+
+    EXPECT_TRUE(tensors_close(gs_data, torch_data));
+}
+
+TEST_F(TensorBugHuntingTest, TensorRowProxy1DAccess) {
+    auto torch_1d = torch::randn({10}, torch::kCUDA);
+    auto gs_1d = torch_to_tensor(torch_1d);
+
+    // Access single element
+    float torch_val = torch_1d[5].item<float>();
+    float gs_val = gs_1d[5];  // Should convert proxy to float
+
+    EXPECT_FLOAT_EQ(gs_val, torch_val)
+        << "1D TensorRowProxy conversion to float failed!";
+}
+
 // ============================================================================
-// Special K-means Related Operations
+// EXPAND/BROADCAST TESTS - Memory Layout Issues
 // ============================================================================
 
-TEST_F(TensorOpsComparisonTest, ExpandBroadcast) {
+TEST_F(TensorBugHuntingTest, ExpandNarrowingConversion) {
     auto torch_data = torch::randn({1, 5}, torch::kCUDA);
     auto gs_data = torch_to_tensor(torch_data);
-    
+
+    // Expand from {1, 5} to {10, 5}
     auto torch_expanded = torch_data.expand({10, 5});
     auto gs_expanded = gs_data.expand({10, 5});
-    
+
+    EXPECT_TRUE(tensors_close(gs_expanded, torch_expanded))
+        << "Expand with narrowing conversion failed!";
+}
+
+TEST_F(TensorBugHuntingTest, ExpandWithSingletonDimensions) {
+    auto torch_data = torch::randn({1, 1, 5}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    auto torch_expanded = torch_data.expand({10, 8, 5});
+    auto gs_expanded = gs_data.expand({10, 8, 5});
+
     EXPECT_TRUE(tensors_close(gs_expanded, torch_expanded));
 }
 
-TEST_F(TensorOpsComparisonTest, MinimumElementwise) {
-    auto torch_a = torch::randn({10, 5}, torch::kCUDA);
+TEST_F(TensorBugHuntingTest, ExpandThenOperation) {
+    auto torch_a = torch::ones({1, 5}, torch::kCUDA);
     auto torch_b = torch::randn({10, 5}, torch::kCUDA);
+
     auto gs_a = torch_to_tensor(torch_a);
     auto gs_b = torch_to_tensor(torch_b);
-    
-    auto torch_result = torch::minimum(torch_a, torch_b);
-    auto gs_result = gs_a.minimum(gs_b);
-    
+
+    auto torch_expanded = torch_a.expand({10, 5});
+    auto gs_expanded = gs_a.expand({10, 5});
+
+    auto torch_result = torch_expanded + torch_b;
+    auto gs_result = gs_expanded + gs_b;
+
+    EXPECT_TRUE(tensors_close(gs_result, torch_result))
+        << "Operation on expanded tensor failed!";
+}
+
+TEST_F(TensorBugHuntingTest, BroadcastAdd) {
+    auto torch_a = torch::randn({10, 1}, torch::kCUDA);
+    auto torch_b = torch::randn({1, 5}, torch::kCUDA);
+
+    auto gs_a = torch_to_tensor(torch_a);
+    auto gs_b = torch_to_tensor(torch_b);
+
+    auto torch_result = torch_a + torch_b;  // Should broadcast to {10, 5}
+    auto gs_result = gs_a + gs_b;
+
+    EXPECT_TRUE(tensors_close(gs_result, torch_result))
+        << "Broadcasting addition failed!";
+}
+
+// ============================================================================
+// MASKED SELECT TESTS - Expanded Masks
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, MaskedSelectSimple) {
+    auto torch_data = torch::tensor({1.0f, 0.0f, 2.0f, 0.0f, 3.0f}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    auto torch_mask = torch_data > 0.0f;
+    auto gs_mask = gs_data > 0.0f;
+
+    auto torch_selected = torch_data.masked_select(torch_mask);
+    auto gs_selected = gs_data.masked_select(gs_mask);
+
+    EXPECT_EQ(gs_selected.numel(), torch_selected.numel());
+    EXPECT_TRUE(tensors_close(gs_selected, torch_selected));
+}
+
+TEST_F(TensorBugHuntingTest, MaskedSelectExpandedMask) {
+    auto torch_data = torch::randn({10, 5}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    // Create mask from column 0, then expand
+    auto torch_col0 = torch_data.select(1, 0);
+    auto torch_mask_1d = torch_col0 > 0.0f;
+    auto torch_mask = torch_mask_1d.unsqueeze(1).expand({10, 5});
+
+    auto gs_col0 = gs_data.slice(1, 0, 1).squeeze(1);
+    auto gs_mask_1d = gs_col0 > 0.0f;
+    auto gs_mask = gs_mask_1d.unsqueeze(1).expand({10, 5});
+
+    auto torch_selected = torch_data.masked_select(torch_mask);
+    auto gs_selected = gs_data.masked_select(gs_mask);
+
+    EXPECT_EQ(gs_selected.numel(), torch_selected.numel())
+        << "Masked select with expanded mask failed!";
+}
+
+TEST_F(TensorBugHuntingTest, MaskedFill) {
+    auto torch_data = torch::randn({10, 5}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    auto torch_mask = torch_data > 0.0f;
+    auto gs_mask = gs_data > 0.0f;
+
+    auto torch_result = torch_data.clone();
+    torch_result.masked_fill_(torch_mask, -999.0f);
+
+    auto gs_result = gs_data.clone();
+    gs_result.masked_fill_(gs_mask, -999.0f);
+
     EXPECT_TRUE(tensors_close(gs_result, torch_result));
 }
 
-TEST_F(TensorOpsComparisonTest, PointerAccess) {
-    auto torch_data = torch::randn({100}, torch::kCUDA);
+// ============================================================================
+// POINTER ACCESS TESTS - Row-Major Layout
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, PointerAccessRowMajor) {
+    auto torch_data = torch::randn({5, 4}, torch::kCUDA);
     auto gs_data = torch_to_tensor(torch_data);
-    
-    // Copy data using raw pointers
-    std::vector<float> torch_vec(100);
-    std::vector<float> gs_vec(100);
-    
-    cudaMemcpy(torch_vec.data(), torch_data.data_ptr<float>(), 100 * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(gs_vec.data(), gs_data.ptr<float>(), 100 * sizeof(float), cudaMemcpyDeviceToHost);
-    
-    for (size_t i = 0; i < 100; ++i) {
-        EXPECT_NEAR(gs_vec[i], torch_vec[i], FLOAT_TOLERANCE);
+
+    // Access element at [2, 3] via pointer arithmetic
+    size_t idx = 2 * 4 + 3;  // Row-major: row * cols + col
+
+    std::vector<float> torch_val(1), gs_val(1);
+    cudaMemcpy(torch_val.data(), torch_data.data_ptr<float>() + idx, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(gs_val.data(), gs_data.ptr<float>() + idx, sizeof(float), cudaMemcpyDeviceToHost);
+
+    EXPECT_FLOAT_EQ(gs_val[0], torch_val[0])
+        << "Pointer access doesn't match row-major layout!";
+}
+
+TEST_F(TensorBugHuntingTest, PointerAccessAllElements) {
+    auto torch_data = torch::randn({3, 4, 5}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    size_t total = 3 * 4 * 5;
+    std::vector<float> torch_vec(total), gs_vec(total);
+
+    cudaMemcpy(torch_vec.data(), torch_data.data_ptr<float>(), total * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(gs_vec.data(), gs_data.ptr<float>(), total * sizeof(float), cudaMemcpyDeviceToHost);
+
+    for (size_t i = 0; i < total; ++i) {
+        EXPECT_FLOAT_EQ(gs_vec[i], torch_vec[i])
+            << "Mismatch at linear index " << i;
+    }
+}
+
+TEST_F(TensorBugHuntingTest, PointerAccessAfterReshape) {
+    auto torch_data = torch::randn({20}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    auto torch_2d = torch_data.reshape({4, 5});
+    auto gs_2d = gs_data.reshape({4, 5});
+
+    // Data should be contiguous and identical
+    std::vector<float> torch_vec(20), gs_vec(20);
+    cudaMemcpy(torch_vec.data(), torch_2d.data_ptr<float>(), 20 * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(gs_vec.data(), gs_2d.ptr<float>(), 20 * sizeof(float), cudaMemcpyDeviceToHost);
+
+    for (int i = 0; i < 20; ++i) {
+        EXPECT_FLOAT_EQ(gs_vec[i], torch_vec[i]);
     }
 }
 
 // ============================================================================
-// K-means Specific Pattern Tests
+// EDGE CASE TESTS - Empty, Zero-Size, Single Element
 // ============================================================================
 
-TEST_F(TensorOpsComparisonTest, MemcpyPattern) {
-    // Test the pattern: copy a slice of data using cudaMemcpy
-    auto torch_data = torch::randn({100, 5}, torch::kCUDA);
-    auto gs_data = torch_to_tensor(torch_data);
-    
-    auto torch_dest = torch::zeros({10, 5}, torch::kCUDA);
-    auto gs_dest = gs::Tensor::zeros({10, 5}, gs::Device::CUDA);
-    
-    // Copy rows 20-30 to destination
-    cudaMemcpy(torch_dest.data_ptr<float>(), 
-               torch_data.data_ptr<float>() + 20 * 5,
-               10 * 5 * sizeof(float),
-               cudaMemcpyDeviceToDevice);
-    
-    cudaMemcpy(gs_dest.ptr<float>(),
-               gs_data.ptr<float>() + 20 * 5,
-               10 * 5 * sizeof(float),
-               cudaMemcpyDeviceToDevice);
-    
-    EXPECT_TRUE(tensors_close(gs_dest, torch_dest));
+TEST_F(TensorBugHuntingTest, EmptyTensorOperations) {
+    auto torch_empty = torch::empty({0}, torch::kCUDA);
+    auto gs_empty = gs::Tensor::empty({0}, gs::Device::CUDA);
+
+    EXPECT_EQ(gs_empty.numel(), 0);
+    EXPECT_EQ(gs_empty.is_empty(), true);
+
+    // Operations on empty tensors should not crash
+    auto gs_sum = gs_empty.sum();
+    EXPECT_FLOAT_EQ(gs_sum.item(), 0.0f);
 }
 
-TEST_F(TensorOpsComparisonTest, UnsqueezeLinspace) {
-    // Test pattern: linspace then unsqueeze
-    auto torch_ls = torch::linspace(0, 100, 256, torch::kCUDA);
-    auto gs_ls = gs::Tensor::linspace(0, 100, 256, gs::Device::CUDA);
-    
-    auto torch_unsq = torch_ls.unsqueeze(1);
-    auto gs_unsq = gs_ls.unsqueeze(1);
-    
-    EXPECT_EQ(torch_unsq.size(0), gs_unsq.shape()[0]);
-    EXPECT_EQ(torch_unsq.size(1), gs_unsq.shape()[1]);
-    
-    // Check that data is preserved
-    EXPECT_TRUE(tensors_close(gs_unsq, torch_unsq, 1e-3f));
-    
-    // Check we can access the data via pointer
-    std::vector<float> torch_vec(256);
-    std::vector<float> gs_vec(256);
-    cudaMemcpy(torch_vec.data(), torch_unsq.data_ptr<float>(), 256 * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(gs_vec.data(), gs_unsq.ptr<float>(), 256 * sizeof(float), cudaMemcpyDeviceToHost);
-    
-    for (int i = 0; i < 256; ++i) {
-        EXPECT_NEAR(gs_vec[i], torch_vec[i], 1e-3f) << "Mismatch at index " << i;
+TEST_F(TensorBugHuntingTest, SingleElementTensor) {
+    auto torch_single = torch::tensor({42.0f}, torch::kCUDA);
+    auto gs_single = gs::Tensor::from_vector({42.0f}, {1}, gs::Device::CUDA);
+
+    EXPECT_FLOAT_EQ(gs_single.item(), 42.0f);
+
+    // Test CPU/GPU transfer
+    auto cpu = gs_single.cpu();
+    EXPECT_FLOAT_EQ(cpu.item(), 42.0f);
+}
+
+TEST_F(TensorBugHuntingTest, ZeroInOneDimension) {
+    auto torch_zero_dim = torch::empty({0, 5}, torch::kCUDA);
+    auto gs_zero_dim = gs::Tensor::empty({0, 5}, gs::Device::CUDA);
+
+    EXPECT_EQ(gs_zero_dim.numel(), 0);
+
+    // Sum should work
+    auto gs_sum = gs_zero_dim.sum();
+    EXPECT_FLOAT_EQ(gs_sum.item(), 0.0f);
+}
+
+// ============================================================================
+// DTYPE CONVERSION TESTS
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, FloatToIntConversion) {
+    auto torch_float = torch::tensor({1.9f, 2.1f, -1.5f}, torch::kCUDA);
+    auto gs_float = torch_to_tensor(torch_float);
+
+    auto torch_int = torch_float.to(torch::kInt32);
+    auto gs_int = gs_float.to(gs::DataType::Int32);
+
+    auto torch_cpu = torch_int.cpu();
+    auto gs_cpu = gs_int.cpu();
+
+    auto torch_ptr = torch_cpu.data_ptr<int>();
+    auto gs_vec = gs_cpu.to_vector_int();
+
+    for (size_t i = 0; i < gs_vec.size(); ++i) {
+        EXPECT_EQ(gs_vec[i], torch_ptr[i])
+            << "Float to Int conversion mismatch at " << i;
     }
 }
 
-TEST_F(TensorOpsComparisonTest, SqueezeAfterUnsqueeze) {
-    // Test pattern used in 1D k-means
-    auto torch_data = torch::linspace(0, 100, 256, torch::kCUDA);
-    auto gs_data = gs::Tensor::linspace(0, 100, 256, gs::Device::CUDA);
-    
-    auto torch_2d = torch_data.unsqueeze(1);
-    auto gs_2d = gs_data.unsqueeze(1);
-    
-    auto torch_1d = torch_2d.squeeze(1);
-    auto gs_1d = gs_2d.squeeze(1);
-    
-    EXPECT_TRUE(tensors_close(gs_1d, torch_1d, 1e-3f));
+TEST_F(TensorBugHuntingTest, BoolToFloatConversion) {
+    auto torch_bool = torch::tensor({true, false, true}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
+    auto gs_bool = torch_to_tensor(torch_bool);
+
+    auto torch_float = torch_bool.to(torch::kFloat32);
+    auto gs_float = gs_bool.to(gs::DataType::Float32);
+
+    EXPECT_TRUE(tensors_close(gs_float, torch_float));
 }
 
-TEST_F(TensorOpsComparisonTest, Int32Labels) {
-    // Test creating and accessing integer labels
-    auto torch_labels = torch::zeros({100}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    auto gs_labels = gs::Tensor::zeros({100}, gs::Device::CUDA, gs::DataType::Int32);
-    
-    // Set some values
-    std::vector<int> test_vals(100);
-    for (int i = 0; i < 100; ++i) {
-        test_vals[i] = i % 10;
-    }
-    
-    cudaMemcpy(torch_labels.data_ptr<int>(), test_vals.data(), 100 * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(gs_labels.ptr<int>(), test_vals.data(), 100 * sizeof(int), cudaMemcpyHostToDevice);
-    
-    // Read back
-    std::vector<int> torch_readback(100);
-    std::vector<int> gs_readback(100);
-    cudaMemcpy(torch_readback.data(), torch_labels.data_ptr<int>(), 100 * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(gs_readback.data(), gs_labels.ptr<int>(), 100 * sizeof(int), cudaMemcpyDeviceToHost);
-    
-    for (int i = 0; i < 100; ++i) {
-        EXPECT_EQ(gs_readback[i], torch_readback[i]) << "Mismatch at index " << i;
-    }
+TEST_F(TensorBugHuntingTest, FloatToBoolConversion) {
+    auto torch_float = torch::tensor({0.0f, 1.0f, -1.0f, 0.5f}, torch::kCUDA);
+    auto gs_float = torch_to_tensor(torch_float);
+
+    auto torch_bool = torch_float.to(torch::kBool);
+    auto gs_bool = gs_float.to(gs::DataType::Bool);
+
+    EXPECT_TRUE(bool_tensors_equal(gs_bool, torch_bool));
 }
 
-TEST_F(TensorOpsComparisonTest, CudaMemsetPattern) {
-    // Test using cudaMemset on tensor data
-    auto torch_data = torch::zeros({100}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    auto gs_data = gs::Tensor::zeros({100}, gs::Device::CUDA, gs::DataType::Int32);
-    
-    cudaMemset(torch_data.data_ptr<int>(), 0, 100 * sizeof(int));
-    cudaMemset(gs_data.ptr<int>(), 0, 100 * sizeof(int));
-    
-    std::vector<int> torch_vec(100);
-    std::vector<int> gs_vec(100);
-    cudaMemcpy(torch_vec.data(), torch_data.data_ptr<int>(), 100 * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(gs_vec.data(), gs_data.ptr<int>(), 100 * sizeof(int), cudaMemcpyDeviceToHost);
-    
-    for (int i = 0; i < 100; ++i) {
-        EXPECT_EQ(gs_vec[i], 0);
-        EXPECT_EQ(torch_vec[i], 0);
-    }
+// ============================================================================
+// COMPARISON OPERATION TESTS - Int32 Support
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, Int32Comparison) {
+    auto torch_a = torch::randint(0, 100, {10}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto gs_a = torch_to_tensor(torch_a);
+
+    auto torch_result = torch_a > 50;
+    auto gs_result = gs_a > 50;
+
+    EXPECT_TRUE(bool_tensors_equal(gs_result, torch_result))
+        << "Int32 comparison failed!";
 }
 
-TEST_F(TensorOpsComparisonTest, TwoDimensionalPointerAccess) {
-    // Test accessing 2D tensor as flat array
+TEST_F(TensorBugHuntingTest, Int32TensorComparison) {
+    auto torch_a = torch::randint(0, 100, {10}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto torch_b = torch::randint(0, 100, {10}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    auto gs_a = torch_to_tensor(torch_a);
+    auto gs_b = torch_to_tensor(torch_b);
+
+    auto torch_result = torch_a < torch_b;
+    auto gs_result = gs_a < gs_b;
+
+    EXPECT_TRUE(bool_tensors_equal(gs_result, torch_result))
+        << "Int32 tensor-to-tensor comparison failed!";
+}
+
+TEST_F(TensorBugHuntingTest, Int32Equality) {
+    auto torch_a = torch::randint(0, 5, {20}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto gs_a = torch_to_tensor(torch_a);
+
+    auto torch_result = torch_a == 2;
+    auto gs_result = gs_a == 2;
+
+    EXPECT_TRUE(bool_tensors_equal(gs_result, torch_result))
+        << "Int32 equality comparison failed!";
+}
+
+// ============================================================================
+// REDUCTION WITH KEEPDIM TESTS
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, SumWithKeepdim) {
     auto torch_data = torch::randn({10, 5}, torch::kCUDA);
     auto gs_data = torch_to_tensor(torch_data);
-    
-    // Access element at [3, 2] via flat indexing
-    std::vector<float> torch_vec(1);
-    std::vector<float> gs_vec(1);
-    
-    int idx = 3 * 5 + 2;  // row 3, col 2
-    cudaMemcpy(torch_vec.data(), torch_data.data_ptr<float>() + idx, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(gs_vec.data(), gs_data.ptr<float>() + idx, sizeof(float), cudaMemcpyDeviceToHost);
-    
-    EXPECT_NEAR(gs_vec[0], torch_vec[0], FLOAT_TOLERANCE);
+
+    auto torch_sum = torch_data.sum(1, true);
+    auto gs_sum = gs_data.sum(1, true);
+
+    EXPECT_EQ(torch_sum.size(0), gs_sum.shape()[0]);
+    EXPECT_EQ(torch_sum.size(1), gs_sum.shape()[1]);
+    EXPECT_TRUE(tensors_close(gs_sum, torch_sum, 1e-3f));
 }
 
-TEST_F(TensorOpsComparisonTest, RandintPattern) {
-    // Test randint for index selection
-    torch::manual_seed(123);
-    gs::Tensor::manual_seed(123);
-    
-    auto torch_idx = torch::randint(0, 100, {1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    auto gs_idx = gs::Tensor::randint({1}, 0, 100, gs::Device::CUDA, gs::DataType::Int32);
-    
-    int torch_val = torch_idx.cpu().item<int>();
-    int gs_val = gs_idx.cpu().item<int>();
-    
-    // Both should be in valid range
-    EXPECT_GE(torch_val, 0);
-    EXPECT_LT(torch_val, 100);
-    EXPECT_GE(gs_val, 0);
-    EXPECT_LT(gs_val, 100);
+TEST_F(TensorBugHuntingTest, MeanMultipleDims) {
+    auto torch_data = torch::randn({5, 4, 3}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    auto torch_mean = torch_data.mean(std::vector<int64_t>{0, 2}, true);
+    auto gs_mean = gs_data.mean(std::vector<int>{0, 2}, true);
+
+    EXPECT_TRUE(tensors_close(gs_mean, torch_mean));
+}
+
+// ============================================================================
+// VARIANCE AND STD TESTS - Biased vs Unbiased
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, VarianceScalar) {
+    auto torch_data = torch::randn({100}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    // PyTorch: var(unbiased=True) is default
+    // Full signature: torch.var(input, dim=None, unbiased=True, keepdim=False)
+    float torch_var = torch_data.var(/*unbiased=*/true).item<float>();
+    float gs_var = gs_data.var_scalar(/*unbiased=*/true);
+
+    EXPECT_NEAR(gs_var, torch_var, 1e-3f)
+        << "Scalar variance calculation mismatch!";
+}
+
+TEST_F(TensorBugHuntingTest, StdDimensional) {
+    auto torch_data = torch::randn({10, 5}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    // PyTorch: std(dim, unbiased=True, keepdim=False)
+    auto torch_std = torch_data.std(/*dim=*/1, /*unbiased=*/true, /*keepdim=*/true);
+    auto gs_std = gs_data.std(/*dim=*/1, /*keepdim=*/true, /*unbiased=*/true);
+
+    EXPECT_TRUE(tensors_close(gs_std, torch_std, 1e-3f))
+        << "Dimensional std calculation mismatch!";
+}
+
+// ============================================================================
+// MIN/MAX WITH INDICES TESTS
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, MinWithIndices1D) {
+    auto torch_data = torch::randn({10}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    auto [torch_val, torch_idx] = torch_data.min(0);
+    auto [gs_val, gs_idx] = gs_data.min_with_indices(0);
+
+    EXPECT_FLOAT_EQ(gs_val.item(), torch_val.item<float>());
+    EXPECT_EQ(gs_idx.cpu().item<int64_t>(), torch_idx.cpu().item<int64_t>());
+}
+
+TEST_F(TensorBugHuntingTest, MaxWithIndices2D) {
+    auto torch_data = torch::randn({5, 8}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    auto [torch_val, torch_idx] = torch_data.max(1);
+    auto [gs_val, gs_idx] = gs_data.max_with_indices(1);
+
+    EXPECT_TRUE(tensors_close(gs_val, torch_val));
+
+    // Check indices
+    auto torch_idx_cpu = torch_idx.cpu();
+    auto gs_idx_cpu = gs_idx.cpu();
+    auto torch_idx_ptr = torch_idx_cpu.data_ptr<int64_t>();
+    auto gs_idx_vec = gs_idx_cpu.to_vector_int64();
+
+    for (size_t i = 0; i < gs_idx_vec.size(); ++i) {
+        EXPECT_EQ(gs_idx_vec[i], torch_idx_ptr[i])
+            << "Index mismatch at position " << i;
+    }
+}
+
+// ============================================================================
+// SORT TESTS
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, Sort1D) {
+    auto torch_data = torch::randn({20}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    auto [torch_sorted, torch_indices] = torch_data.sort();
+    auto [gs_sorted, gs_indices] = gs_data.sort();
+
+    EXPECT_TRUE(tensors_close(gs_sorted, torch_sorted));
+}
+
+TEST_F(TensorBugHuntingTest, Sort2DDescending) {
+    auto torch_data = torch::randn({5, 10}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    auto [torch_sorted, torch_indices] = torch_data.sort(1, true);
+    auto [gs_sorted, gs_indices] = gs_data.sort(1, true);
+
+    EXPECT_TRUE(tensors_close(gs_sorted, torch_sorted));
+}
+
+// ============================================================================
+// NONZERO TESTS
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, Nonzero2D) {
+    auto torch_data = torch::tensor({{0.0f, 1.0f, 0.0f},
+                                     {2.0f, 0.0f, 3.0f}}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    auto torch_nz = torch_data.nonzero();
+    auto gs_nz = gs_data.nonzero();
+
+    EXPECT_EQ(torch_nz.size(0), gs_nz.shape()[0]);
+    EXPECT_EQ(torch_nz.size(1), gs_nz.shape()[1]);
+}
+
+// ============================================================================
+// CDIST (PAIRWISE DISTANCE) TESTS
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, CDistL2) {
+    auto torch_a = torch::randn({10, 5}, torch::kCUDA);
+    auto torch_b = torch::randn({8, 5}, torch::kCUDA);
+
+    auto gs_a = torch_to_tensor(torch_a);
+    auto gs_b = torch_to_tensor(torch_b);
+
+    auto torch_dist = torch::cdist(torch_a, torch_b, 2.0);
+    auto gs_dist = gs_a.cdist(gs_b, 2.0f);
+
+    EXPECT_TRUE(tensors_close(gs_dist, torch_dist, 1e-3f))
+        << "cdist L2 distance mismatch!";
+}
+
+TEST_F(TensorBugHuntingTest, CDistL1) {
+    auto torch_a = torch::randn({5, 3}, torch::kCUDA);
+    auto torch_b = torch::randn({7, 3}, torch::kCUDA);
+
+    auto gs_a = torch_to_tensor(torch_a);
+    auto gs_b = torch_to_tensor(torch_b);
+
+    auto torch_dist = torch::cdist(torch_a, torch_b, 1.0);
+    auto gs_dist = gs_a.cdist(gs_b, 1.0f);
+
+    EXPECT_TRUE(tensors_close(gs_dist, torch_dist, 1e-3f));
+}
+
+// ============================================================================
+// BROADCAST WITH OPERATIONS TESTS
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, BroadcastMultiplication) {
+    auto torch_a = torch::randn({5, 1, 3}, torch::kCUDA);
+    auto torch_b = torch::randn({1, 4, 3}, torch::kCUDA);
+
+    auto gs_a = torch_to_tensor(torch_a);
+    auto gs_b = torch_to_tensor(torch_b);
+
+    auto torch_result = torch_a * torch_b;
+    auto gs_result = gs_a * gs_b;
+
+    EXPECT_TRUE(tensors_close(gs_result, torch_result));
+}
+
+TEST_F(TensorBugHuntingTest, BroadcastComparison) {
+    auto torch_a = torch::randn({10, 1}, torch::kCUDA);
+    auto torch_b = torch::randn({1, 5}, torch::kCUDA);
+
+    auto gs_a = torch_to_tensor(torch_a);
+    auto gs_b = torch_to_tensor(torch_b);
+
+    auto torch_result = torch_a > torch_b;
+    auto gs_result = gs_a > gs_b;
+
+    EXPECT_TRUE(bool_tensors_equal(gs_result, torch_result));
+}
+
+// ============================================================================
+// ACCESSOR TESTS
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, Accessor2D) {
+    auto torch_data = torch::randn({5, 4}, torch::kCUDA);
+    auto gs_data = torch_to_tensor(torch_data);
+
+    auto gs_cpu = gs_data.cpu();
+    auto accessor = gs_cpu.accessor<float, 2>();
+
+    auto torch_cpu = torch_data.cpu();
+    auto torch_accessor = torch_cpu.accessor<float, 2>();
+
+    for (size_t i = 0; i < 5; ++i) {
+        for (size_t j = 0; j < 4; ++j) {
+            float gs_val = accessor(i, j);
+            float torch_val = torch_accessor[i][j];  // Direct float access
+            EXPECT_FLOAT_EQ(gs_val, torch_val)
+                << "Mismatch at [" << i << ", " << j << "]";
+        }
+    }
+}
+
+// ============================================================================
+// MEMORY LEAK TESTS (Basic)
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, NoMemoryLeakOnMultipleAllocations) {
+    size_t initial_free, initial_total;
+    cudaMemGetInfo(&initial_free, &initial_total);
+
+    // Create and destroy many tensors
+    for (int i = 0; i < 100; ++i) {
+        auto t = gs::Tensor::randn({1000, 1000}, gs::Device::CUDA);
+        // t goes out of scope
+    }
+
+    cudaDeviceSynchronize();
+
+    size_t final_free, final_total;
+    cudaMemGetInfo(&final_free, &final_total);
+
+    // Memory usage should be similar (within 10MB)
+    size_t leak = initial_free > final_free ? initial_free - final_free : 0;
+    EXPECT_LT(leak, 10 * 1024 * 1024)
+        << "Potential memory leak detected: " << (leak / 1024 / 1024) << " MB";
+}
+
+// ============================================================================
+// DIAGNOSTIC TESTS - Compare GS vs PyTorch Behavior
+// ============================================================================
+
+TEST_F(TensorBugHuntingTest, DiagnosticCompareSliceIsView) {
+    std::cout << "\n=== Comparing slice() behavior: GS vs PyTorch ===" << std::endl;
+
+    // PyTorch
+    auto torch_data = torch::randn({5, 3}, torch::kCUDA);
+    void* torch_orig_ptr = torch_data.data_ptr<float>();
+    auto torch_slice = torch_data.slice(0, 0, 1);
+    void* torch_slice_ptr = torch_slice.data_ptr<float>();
+
+    bool torch_is_view = (torch_slice_ptr == torch_orig_ptr);
+    std::cout << "PyTorch: slice is " << (torch_is_view ? "VIEW" : "COPY") << std::endl;
+
+    // GS
+    auto gs_data = gs::Tensor::randn({5, 3}, gs::Device::CUDA);
+    void* gs_orig_ptr = gs_data.raw_ptr();
+    auto gs_slice = gs_data.slice(0, 0, 1);
+    void* gs_slice_ptr = gs_slice.raw_ptr();
+
+    bool gs_is_view = (gs_slice_ptr == gs_orig_ptr);
+    std::cout << "GS: slice is " << (gs_is_view ? "VIEW" : "COPY") << std::endl;
+
+    EXPECT_EQ(gs_is_view, torch_is_view) << "GS slice behavior doesn't match PyTorch!";
+}
+
+TEST_F(TensorBugHuntingTest, DiagnosticCompareCloneIsCopy) {
+    std::cout << "\n=== Comparing clone() behavior: GS vs PyTorch ===" << std::endl;
+
+    // PyTorch
+    auto torch_data = torch::randn({5, 3}, torch::kCUDA);
+    void* torch_orig_ptr = torch_data.data_ptr<float>();
+    auto torch_clone = torch_data.clone();
+    void* torch_clone_ptr = torch_clone.data_ptr<float>();
+
+    bool torch_is_copy = (torch_clone_ptr != torch_orig_ptr);
+    std::cout << "PyTorch: clone is " << (torch_is_copy ? "COPY" : "VIEW") << std::endl;
+
+    // GS
+    auto gs_data = gs::Tensor::randn({5, 3}, gs::Device::CUDA);
+    void* gs_orig_ptr = gs_data.raw_ptr();
+    auto gs_clone = gs_data.clone();
+    void* gs_clone_ptr = gs_clone.raw_ptr();
+
+    bool gs_is_copy = (gs_clone_ptr != gs_orig_ptr);
+    std::cout << "GS: clone is " << (gs_is_copy ? "COPY" : "VIEW") << std::endl;
+
+    EXPECT_EQ(gs_is_copy, torch_is_copy) << "GS clone behavior doesn't match PyTorch!";
+}
+
+TEST_F(TensorBugHuntingTest, DiagnosticCompareSqueezeIsView) {
+    std::cout << "\n=== Comparing squeeze() behavior: GS vs PyTorch ===" << std::endl;
+
+    // PyTorch
+    auto torch_data = torch::randn({1, 5}, torch::kCUDA);
+    void* torch_orig_ptr = torch_data.data_ptr<float>();
+    auto torch_squeezed = torch_data.squeeze(0);
+    void* torch_squeeze_ptr = torch_squeezed.data_ptr<float>();
+
+    bool torch_is_view = (torch_squeeze_ptr == torch_orig_ptr);
+    std::cout << "PyTorch: squeeze is " << (torch_is_view ? "VIEW" : "COPY") << std::endl;
+
+    // GS
+    auto gs_data = gs::Tensor::randn({1, 5}, gs::Device::CUDA);
+    void* gs_orig_ptr = gs_data.raw_ptr();
+    auto gs_squeezed = gs_data.squeeze(0);
+    void* gs_squeeze_ptr = gs_squeezed.raw_ptr();
+
+    bool gs_is_view = (gs_squeeze_ptr == gs_orig_ptr);
+    std::cout << "GS: squeeze is " << (gs_is_view ? "VIEW" : "COPY") << std::endl;
+
+    EXPECT_EQ(gs_is_view, torch_is_view) << "GS squeeze behavior doesn't match PyTorch!";
+}
+
+TEST_F(TensorBugHuntingTest, DiagnosticCompareReshapeIsView) {
+    std::cout << "\n=== Comparing reshape() behavior: GS vs PyTorch ===" << std::endl;
+
+    // PyTorch
+    auto torch_data = torch::randn({6}, torch::kCUDA);
+    void* torch_orig_ptr = torch_data.data_ptr<float>();
+    auto torch_reshaped = torch_data.reshape({2, 3});
+    void* torch_reshape_ptr = torch_reshaped.data_ptr<float>();
+
+    bool torch_is_view = (torch_reshape_ptr == torch_orig_ptr);
+    std::cout << "PyTorch: reshape is " << (torch_is_view ? "VIEW" : "COPY") << std::endl;
+
+    // GS
+    auto gs_data = gs::Tensor::randn({6}, gs::Device::CUDA);
+    void* gs_orig_ptr = gs_data.raw_ptr();
+    auto gs_reshaped = gs_data.reshape({2, 3});
+    void* gs_reshape_ptr = gs_reshaped.raw_ptr();
+
+    bool gs_is_view = (gs_reshape_ptr == gs_orig_ptr);
+    std::cout << "GS: reshape is " << (gs_is_view ? "VIEW" : "COPY") << std::endl;
+
+    EXPECT_EQ(gs_is_view, torch_is_view) << "GS reshape behavior doesn't match PyTorch!";
+}
+
+TEST_F(TensorBugHuntingTest, DiagnosticCompareSliceSqueezeClone) {
+    std::cout << "\n=== Comparing slice()->squeeze()->clone() chain: GS vs PyTorch ===" << std::endl;
+
+    // PyTorch
+    auto torch_data = torch::randn({5, 3}, torch::kCUDA);
+    void* torch_orig_ptr = torch_data.data_ptr<float>();
+
+    auto torch_sliced = torch_data.slice(0, 0, 1);
+    auto torch_squeezed = torch_sliced.squeeze(0);
+    auto torch_cloned = torch_squeezed.clone();
+
+    void* torch_clone_ptr = torch_cloned.data_ptr<float>();
+    bool torch_clone_independent = (torch_clone_ptr != torch_orig_ptr);
+
+    std::cout << "PyTorch: final result is "
+              << (torch_clone_independent ? "INDEPENDENT" : "SHARED MEMORY") << std::endl;
+
+    // GS
+    auto gs_data = gs::Tensor::randn({5, 3}, gs::Device::CUDA);
+    void* gs_orig_ptr = gs_data.raw_ptr();
+
+    auto gs_sliced = gs_data.slice(0, 0, 1);
+    auto gs_squeezed = gs_sliced.squeeze(0);
+    auto gs_cloned = gs_squeezed.clone();
+
+    void* gs_clone_ptr = gs_cloned.raw_ptr();
+    bool gs_clone_independent = (gs_clone_ptr != gs_orig_ptr);
+
+    std::cout << "GS: final result is "
+              << (gs_clone_independent ? "INDEPENDENT" : "SHARED MEMORY") << std::endl;
+
+    EXPECT_EQ(gs_clone_independent, torch_clone_independent)
+        << "GS chain behavior doesn't match PyTorch!";
+}
+
+TEST_F(TensorBugHuntingTest, DiagnosticCompareModificationPropagation) {
+    std::cout << "\n=== Testing modification propagation: GS vs PyTorch ===" << std::endl;
+
+    // PyTorch - test that views see modifications
+    auto torch_data = torch::randn({5, 3}, torch::kCUDA);
+    auto torch_slice = torch_data.slice(0, 0, 1);
+
+    // Save original value
+    float torch_orig = torch_data.index({0, 0}).item<float>();
+
+    // Modify using fill_ (safe way to modify in PyTorch)
+    torch_data.index({0, 0}).fill_(999.0f);
+
+    // Check if slice sees the change
+    float torch_slice_val = torch_slice.index({0, 0}).item<float>();
+    bool torch_view_sees_change = (torch_slice_val == 999.0f);
+
+    std::cout << "PyTorch: slice " << (torch_view_sees_change ? "SEES" : "DOESN'T SEE")
+              << " modification" << std::endl;
+
+    // GS - same test
+    auto gs_data = gs::Tensor::randn({5, 3}, gs::Device::CUDA);
+    auto gs_slice = gs_data.slice(0, 0, 1);
+
+    // Save original value
+    std::vector<float> gs_orig(1);
+    cudaMemcpy(gs_orig.data(), gs_data.ptr<float>(), sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Modify
+    float new_val = 999.0f;
+    cudaMemcpy(gs_data.ptr<float>(), &new_val, sizeof(float), cudaMemcpyHostToDevice);
+
+    // Check if slice sees the change
+    std::vector<float> gs_slice_val(1);
+    cudaMemcpy(gs_slice_val.data(), gs_slice.ptr<float>(), sizeof(float), cudaMemcpyDeviceToHost);
+    bool gs_view_sees_change = (gs_slice_val[0] == 999.0f);
+
+    std::cout << "GS: slice " << (gs_view_sees_change ? "SEES" : "DOESN'T SEE")
+              << " modification" << std::endl;
+
+    EXPECT_EQ(gs_view_sees_change, torch_view_sees_change)
+        << "GS view behavior doesn't match PyTorch!";
+}
+
+TEST_F(TensorBugHuntingTest, DiagnosticCompareCloneIndependence) {
+    std::cout << "\n=== Testing clone independence: GS vs PyTorch ===" << std::endl;
+
+    // PyTorch - test that clones DON'T see modifications
+    auto torch_data = torch::randn({5, 3}, torch::kCUDA);
+    auto torch_clone = torch_data.clone();
+
+    // Save clone's value
+    float torch_clone_orig = torch_clone.index({0, 0}).item<float>();
+
+    // Modify original
+    torch_data.index({0, 0}).fill_(999.0f);
+
+    // Check if clone is unaffected
+    float torch_clone_after = torch_clone.index({0, 0}).item<float>();
+    bool torch_clone_unaffected = (torch_clone_after == torch_clone_orig) && (torch_clone_after != 999.0f);
+
+    std::cout << "PyTorch: clone is " << (torch_clone_unaffected ? "INDEPENDENT" : "AFFECTED")
+              << std::endl;
+
+    // GS - same test
+    auto gs_data = gs::Tensor::randn({5, 3}, gs::Device::CUDA);
+    auto gs_clone = gs_data.clone();
+
+    // Save clone's value
+    std::vector<float> gs_clone_orig(1);
+    cudaMemcpy(gs_clone_orig.data(), gs_clone.ptr<float>(), sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Modify original
+    float new_val = 999.0f;
+    cudaMemcpy(gs_data.ptr<float>(), &new_val, sizeof(float), cudaMemcpyHostToDevice);
+
+    // Check if clone is unaffected
+    std::vector<float> gs_clone_after(1);
+    cudaMemcpy(gs_clone_after.data(), gs_clone.ptr<float>(), sizeof(float), cudaMemcpyDeviceToHost);
+    bool gs_clone_unaffected = (gs_clone_after[0] == gs_clone_orig[0]) && (gs_clone_after[0] != 999.0f);
+
+    std::cout << "GS: clone is " << (gs_clone_unaffected ? "INDEPENDENT" : "AFFECTED")
+              << std::endl;
+
+    EXPECT_EQ(gs_clone_unaffected, torch_clone_unaffected)
+        << "GS clone independence doesn't match PyTorch!";
 }

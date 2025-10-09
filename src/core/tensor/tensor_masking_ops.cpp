@@ -829,118 +829,122 @@ namespace gs {
     }
 
 
-   // Location: Replace existing nonzero() implementation (around line 600-700)
-// grep -C 10 "Tensor Tensor::nonzero"
-
-/**
- * Returns the indices of non-zero elements.
- *
- * For a 1D tensor, returns a 1D tensor of Int64 indices.
- * For nD tensors, returns a 2D tensor of shape [num_nonzero, ndim] where each row
- * contains the multi-dimensional index of a non-zero element.
- *
- * Example:
- *   auto t = Tensor::from_vector({0, 1, 0, 2}, {4}, Device::CPU);
- *   auto idx = t.nonzero();  // Returns [2] tensor: [1, 3]
- *
- *   auto t2 = Tensor::from_vector({0, 1, 0, 2, 3, 0}, {2, 3}, Device::CPU);
- *   auto idx2 = t2.nonzero();  // Returns [3, 2] tensor: [[0,1], [1,0], [1,1]]
- *
- * @return Tensor of Int64 indices. Shape is [num_nonzero] for 1D input,
- *         [num_nonzero, ndim] for multi-dimensional input.
- */
-Tensor Tensor::nonzero() const {
+    Tensor Tensor::nonzero() const {
     if (!is_valid()) {
         LOG_ERROR("nonzero() on invalid tensor");
         return {};
     }
 
-    size_t count = count_nonzero();
-    if (count == 0) {
-        // Return appropriate empty tensor
-        if (shape_.rank() == 1) {
-            return empty({0}, device_, DataType::Int64);
-        } else {
-            return empty({0, shape_.rank()}, device_, DataType::Int64);
-        }
+    if (numel() == 0) {
+        return empty({0, ndim()}, device_, DataType::Int64);
     }
 
-    // For 1D tensors, return simple list of indices
-    if (shape_.rank() == 1) {
-        auto result = empty({count}, device_, DataType::Int64);
+    size_t count = count_nonzero();
+
+    if (count == 0) {
+        return empty({0, ndim()}, device_, DataType::Int64);
+    }
+
+    size_t n_dims = ndim();
+
+    // Special case for 1D tensors
+    if (n_dims == 1) {
+        // Create a flat tensor first
+        auto temp = empty({count}, device_, DataType::Int64);
 
         if (device_ == Device::CUDA) {
             if (dtype_ == DataType::Bool) {
-                tensor_ops::launch_nonzero_bool(
-                    ptr<unsigned char>(),
-                    reinterpret_cast<int64_t*>(result.raw_ptr()),
-                    numel(), count, 0
-                );
+                tensor_ops::launch_nonzero_bool(ptr<unsigned char>(),
+                                               reinterpret_cast<int64_t*>(temp.raw_ptr()),
+                                               numel(), count, 0);
             } else {
-                tensor_ops::launch_nonzero(
-                    ptr<float>(),
-                    reinterpret_cast<int64_t*>(result.raw_ptr()),
-                    numel(), count, 0
-                );
+                tensor_ops::launch_nonzero(ptr<float>(),
+                                          reinterpret_cast<int64_t*>(temp.raw_ptr()),
+                                          numel(), count, 0);
             }
-            cudaDeviceSynchronize();
+            CHECK_CUDA(cudaDeviceSynchronize());
         } else {
-            int64_t* indices = reinterpret_cast<int64_t*>(result.raw_ptr());
-            size_t idx = 0;
+            int64_t* indices = reinterpret_cast<int64_t*>(temp.raw_ptr());
+            size_t write_idx = 0;
 
             if (dtype_ == DataType::Bool) {
                 const unsigned char* data = ptr<unsigned char>();
                 for (size_t i = 0; i < numel(); ++i) {
-                    if (data[i]) indices[idx++] = i;
+                    if (data[i]) {
+                        indices[write_idx++] = static_cast<int64_t>(i);
+                    }
                 }
-            } else {
+            } else if (dtype_ == DataType::Float32) {
                 const float* data = ptr<float>();
                 for (size_t i = 0; i < numel(); ++i) {
-                    if (data[i] != 0.0f) indices[idx++] = i;
+                    if (data[i] != 0.0f) {
+                        indices[write_idx++] = static_cast<int64_t>(i);
+                    }
+                }
+            } else if (dtype_ == DataType::Int32) {
+                const int* data = ptr<int>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    if (data[i] != 0) {
+                        indices[write_idx++] = static_cast<int64_t>(i);
+                    }
                 }
             }
         }
-        return result;
+
+        // Reshape to (count, 1) to match PyTorch
+        return temp.reshape({count, 1});
     }
 
-    // For multi-dimensional tensors, return [N, ndim] tensor
-    auto result = empty({count, shape_.rank()}, device_, DataType::Int64);
+    // Multi-dimensional case
+    auto result = empty({count, n_dims}, device_, DataType::Int64);
 
     if (device_ == Device::CUDA) {
-        // For CUDA, we need to do this on CPU due to complexity
         auto cpu_tensor = to(Device::CPU);
         auto cpu_result = cpu_tensor.nonzero();
-        return cpu_result.to(Device::CUDA);
+        result = cpu_result.to(Device::CUDA);
     } else {
-        // CPU implementation
         int64_t* indices = reinterpret_cast<int64_t*>(result.raw_ptr());
+        size_t write_idx = 0;
+
         auto strides = shape_.strides();
-        size_t result_idx = 0;
 
         if (dtype_ == DataType::Bool) {
             const unsigned char* data = ptr<unsigned char>();
             for (size_t i = 0; i < numel(); ++i) {
                 if (data[i]) {
-                    // Convert linear index to multi-dimensional indices
                     size_t temp = i;
-                    for (size_t dim = 0; dim < shape_.rank(); ++dim) {
-                        indices[result_idx * shape_.rank() + dim] = temp / strides[dim];
+                    for (size_t dim = 0; dim < n_dims; ++dim) {
+                        size_t coord = temp / strides[dim];
                         temp %= strides[dim];
+                        indices[write_idx * n_dims + dim] = static_cast<int64_t>(coord);
                     }
-                    result_idx++;
+                    write_idx++;
                 }
             }
-        } else {
+        } else if (dtype_ == DataType::Float32) {
             const float* data = ptr<float>();
             for (size_t i = 0; i < numel(); ++i) {
                 if (data[i] != 0.0f) {
-                    // Convert linear index to multi-dimensional indices
                     size_t temp = i;
-                    for (size_t dim = 0; dim < shape_.rank(); ++dim) {
-                        indices[result_idx * shape_.rank() + dim] = temp / strides[dim];
+                    for (size_t dim = 0; dim < n_dims; ++dim) {
+                        size_t coord = temp / strides[dim];
                         temp %= strides[dim];
+                        indices[write_idx * n_dims + dim] = static_cast<int64_t>(coord);
                     }
-                    result_idx++;
+                    write_idx++;
+                }
+            }
+        } else if (dtype_ == DataType::Int32) {
+            const int* data = ptr<int>();
+            for (size_t i = 0; i < numel(); ++i) {
+                if (data[i] != 0) {
+                    size_t temp = i;
+                    for (size_t dim = 0; dim < n_dims; ++dim) {
+                        size_t coord = temp / strides[dim];
+                        temp %= strides[dim];
+                        indices[write_idx * n_dims + dim] = static_cast<int64_t>(coord);
+                    }
+                    write_idx++;
                 }
             }
         }
@@ -948,6 +952,7 @@ Tensor Tensor::nonzero() const {
 
     return result;
 }
+
 
     std::vector<Tensor> Tensor::nonzero_split() const {
         std::vector<Tensor> result;
@@ -1026,7 +1031,11 @@ Tensor Tensor::nonzero() const {
 
         if (device_ == Device::CUDA) {
             float value;
-            cudaMemcpy(&value, ptr<float>() + linear_idx, sizeof(float), cudaMemcpyDeviceToHost);
+            cudaError_t err = cudaMemcpy(&value, ptr<float>() + linear_idx, sizeof(float), cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess) {
+                LOG_ERROR("CUDA memcpy failed in at() const: {}", cudaGetErrorString(err));
+                return 0;
+            }
             return value;
         }
         return ptr<float>()[linear_idx];
@@ -1069,37 +1078,6 @@ Tensor Tensor::nonzero() const {
                                [](bool b) { return b ? 1 : 0; });
 
         return from_vector_impl(bytes, shape, device, DataType::Bool);
-    }
-
-    // Conversion
-    std::vector<int> Tensor::to_vector_int() const {
-        if (dtype_ != DataType::Int32 || !is_valid() || numel() == 0)
-            return {};
-
-        std::vector<int> result(numel());
-        if (device_ == Device::CUDA) {
-            cudaMemcpy(result.data(), data_, bytes(), cudaMemcpyDeviceToHost);
-        } else {
-            std::memcpy(result.data(), data_, bytes());
-        }
-        return result;
-    }
-
-    std::vector<bool> Tensor::to_vector_bool() const {
-        if (dtype_ != DataType::Bool || !is_valid() || numel() == 0)
-            return {};
-
-        std::vector<unsigned char> bytes(numel());
-        if (device_ == Device::CUDA) {
-            cudaMemcpy(bytes.data(), data_, this->bytes(), cudaMemcpyDeviceToHost);
-        } else {
-            std::memcpy(bytes.data(), data_, this->bytes());
-        }
-
-        std::vector<bool> result(numel());
-        std::ranges::transform(bytes, result.begin(),
-                               [](auto x) { return x != 0; });
-        return result;
     }
 
     void Tensor::set_bool(std::initializer_list<size_t> indices, bool value) {

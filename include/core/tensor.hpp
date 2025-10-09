@@ -446,6 +446,7 @@ namespace gs {
     struct ReduceArgs {
         std::vector<int> axes;
         bool keepdim = false;
+        bool unbiased = true;
         std::variant<
             std::monostate,
             float>
@@ -1202,36 +1203,38 @@ namespace gs {
             return reduce(ReduceOp::All, args);
         }
 
-        Tensor std(std::span<const int> axes = {}, bool keepdim = false) const {
+        Tensor std(std::span<const int> axes = {}, bool keepdim = false, bool unbiased = true) const {
             ReduceArgs args;
             args.axes = std::vector<int>(axes.begin(), axes.end());
             args.keepdim = keepdim;
+            args.unbiased = unbiased;
             return reduce(ReduceOp::Std, args);
         }
 
-        Tensor std(std::initializer_list<int> axes, bool keepdim = false) const {
-            return std(std::span<const int>(axes), keepdim);
+        Tensor std(std::initializer_list<int> axes, bool keepdim = false, bool unbiased = true) const {
+            return std(std::span<const int>(axes), keepdim, unbiased);
         }
 
-        Tensor std(int dim, bool keepdim = false) const {
+        Tensor std(int dim, bool keepdim = false, bool unbiased = true) const {
             std::vector<int> axes = {dim};
-            return std(std::span<const int>(axes), keepdim);
+            return std(std::span<const int>(axes), keepdim, unbiased);
         }
 
-        Tensor var(std::span<const int> axes = {}, bool keepdim = false) const {
+        Tensor var(std::span<const int> axes = {}, bool keepdim = false, bool unbiased = true) const {
             ReduceArgs args;
             args.axes = std::vector<int>(axes.begin(), axes.end());
             args.keepdim = keepdim;
+            args.unbiased = unbiased;
             return reduce(ReduceOp::Var, args);
         }
 
-        Tensor var(std::initializer_list<int> axes, bool keepdim = false) const {
-            return var(std::span<const int>(axes), keepdim);
+        Tensor var(std::initializer_list<int> axes, bool keepdim = false, bool unbiased = true) const {
+            return var(std::span<const int>(axes), keepdim, unbiased);
         }
 
-        Tensor var(int dim, bool keepdim = false) const {
+        Tensor var(int dim, bool keepdim = false, bool unbiased = true) const {
             std::vector<int> axes = {dim};
-            return var(std::span<const int>(axes), keepdim);
+            return var(std::span<const int>(axes), keepdim, unbiased);
         }
 
         Tensor argmax(std::span<const int> axes = {}, bool keepdim = false) const {
@@ -1255,8 +1258,8 @@ namespace gs {
         float mean_scalar() const { return mean().item(); }
         float min_scalar() const { return min().item(); }
         float max_scalar() const { return max().item(); }
-        float std_scalar(float eps = 1e-8f) const { return std().item(); }
-        float var_scalar(float eps = 1e-8f) const { return var().item(); }
+        float std_scalar(bool unbiased = true) const { return std({}, false, unbiased).item(); }
+        float var_scalar(bool unbiased = true) const { return var({}, false, unbiased).item(); }
         std::pair<float, float> minmax() const { return {min_scalar(), max_scalar()}; }
 
         float norm(float p = 2.0f) const;
@@ -1541,301 +1544,542 @@ namespace gs {
         friend class TensorRowProxy;
     };
 
-    // ============= TensorRowProxy for operator[] =============
-    class TensorRowProxy {
-    private:
-        Tensor* tensor_;
-        size_t row_index_;
+// ============= TensorRowProxy for operator[] =============
+class TensorRowProxy {
+private:
+    Tensor* tensor_;
+    size_t row_index_;
 
-    public:
-        TensorRowProxy(Tensor* tensor, size_t row_index)
-            : tensor_(tensor), row_index_(row_index) {
-            if (tensor_ && row_index_ >= tensor_->shape()[0]) {
-                LOG_ERROR("Row index {} out of bounds for dimension 0 with size {}",
-                          row_index_, tensor_->shape()[0]);
+public:
+    TensorRowProxy(Tensor* tensor, size_t row_index)
+        : tensor_(tensor), row_index_(row_index) {
+        if (tensor_ && row_index_ >= tensor_->shape()[0]) {
+            LOG_ERROR("Row index {} out of bounds for dimension 0 with size {}",
+                      row_index_, tensor_->shape()[0]);
+        }
+    }
+
+    // ============= 2D Access: tensor[i][j] =============
+
+float& operator[](size_t col_index) {
+    if (!tensor_) {
+        LOG_ERROR("TensorRowProxy: null tensor pointer");
+        static float dummy = 0.0f;
+        return dummy;
+    }
+
+    if (tensor_->shape().rank() < 2) {
+        LOG_ERROR("TensorRowProxy: tensor rank {} < 2", tensor_->shape().rank());
+        static float dummy = 0.0f;
+        return dummy;
+    }
+
+    if (col_index >= tensor_->shape()[1]) {
+        LOG_ERROR("Column index {} out of bounds for dimension 1 with size {}",
+                  col_index, tensor_->shape()[1]);
+        static float dummy = 0.0f;
+        return dummy;
+    }
+
+    if (tensor_->device() != Device::CPU) {
+        // For CUDA tensors in read context, we need to provide a workaround
+        // Store the value in a thread-local static so the reference remains valid
+        thread_local static float cuda_read_value = 0.0f;
+
+        size_t linear_idx = row_index_ * tensor_->shape()[1] + col_index;
+
+        cudaError_t err = cudaMemcpy(
+            &cuda_read_value,
+            tensor_->ptr<float>() + linear_idx,
+            sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        if (err != cudaSuccess) {
+            LOG_ERROR("CUDA memcpy failed in TensorRowProxy::operator[]: {}",
+                     cudaGetErrorString(err));
+            cuda_read_value = 0.0f;
+        }
+
+        return cuda_read_value;
+    }
+
+    return tensor_->at({row_index_, col_index});
+}
+
+
+float operator[](size_t col_index) const {
+    if (!tensor_) {
+        LOG_ERROR("TensorRowProxy: null tensor pointer");
+        return 0.0f;
+    }
+
+    if (tensor_->shape().rank() < 2) {
+        LOG_ERROR("TensorRowProxy: tensor rank {} < 2", tensor_->shape().rank());
+        return 0.0f;
+    }
+
+    if (col_index >= tensor_->shape()[1]) {
+        LOG_ERROR("Column index {} out of bounds for dimension 1 with size {}",
+                  col_index, tensor_->shape()[1]);
+        return 0.0f;
+    }
+
+    // Calculate linear index: row_index * num_cols + col_index
+    size_t linear_idx = row_index_ * tensor_->shape()[1] + col_index;
+
+    if (tensor_->device() == Device::CUDA) {
+        float value = 0.0f;
+        cudaError_t err = cudaMemcpy(
+            &value,
+            tensor_->ptr<float>() + linear_idx,
+            sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+        if (err != cudaSuccess) {
+            LOG_ERROR("CUDA memcpy failed in TensorRowProxy::operator[]: {}",
+                     cudaGetErrorString(err));
+            return 0.0f;
+        }
+        return value;
+    } else {
+        return tensor_->ptr<float>()[linear_idx];
+    }
+}
+
+    // ============= 1D Access: Extract Value =============
+
+    // Explicit item extraction (no ambiguity, always works)
+    float item() const {
+        if (!tensor_) {
+            LOG_ERROR("TensorRowProxy::item(): null tensor pointer");
+            return 0.0f;
+        }
+
+        // Handle 2D tensors with shape [N, 1] (like nonzero() output)
+        if (tensor_->shape().rank() == 2 && tensor_->shape()[1] == 1) {
+            // Convert to actual Tensor row first
+            Tensor row_tensor = static_cast<Tensor>(*this);
+            return row_tensor.item();
+        }
+
+        // Standard 1D case
+        if (tensor_->shape().rank() != 1) {
+            LOG_ERROR("TensorRowProxy::item(): only valid for 1D tensors, got rank {}",
+                      tensor_->shape().rank());
+            return 0.0f;
+        }
+
+        if (row_index_ >= tensor_->numel()) {
+            LOG_ERROR("TensorRowProxy::item(): index {} out of bounds for size {}",
+                      row_index_, tensor_->numel());
+            return 0.0f;
+        }
+
+        if (tensor_->device() == Device::CUDA) {
+            float value = 0.0f;
+            cudaError_t err = cudaMemcpy(
+                &value,
+                tensor_->ptr<float>() + row_index_,
+                sizeof(float),
+                cudaMemcpyDeviceToHost
+            );
+            if (err != cudaSuccess) {
+                LOG_ERROR("CUDA memcpy failed in TensorRowProxy::item(): {}",
+                         cudaGetErrorString(err));
+                return 0.0f;
+            }
+            return value;
+        } else {
+            return tensor_->ptr<float>()[row_index_];
+        }
+    }
+
+    operator float() const {
+        if (!tensor_) {
+            LOG_ERROR("TensorRowProxy: null tensor pointer in float conversion");
+            return 0.0f;
+        }
+
+        // Allow implicit conversion for 1D tensors OR 2D [N,1] tensors (like nonzero output)
+        if (tensor_->shape().rank() == 1) {
+            return item();
+        } else if (tensor_->shape().rank() == 2 && tensor_->shape()[1] == 1) {
+            // Special case for [N, 1] shaped tensors
+            return item();
+        } else {
+            LOG_ERROR("Implicit float conversion only valid for 1D or [N,1] tensors, got rank {} with shape {}. Use .item() or convert to Tensor first.",
+                      tensor_->shape().rank(), tensor_->shape().str());
+            return 0.0f;
+        }
+    }
+
+    // Template version for type specification
+template<typename T = float>
+T item_as() const {
+    if (!tensor_) {
+        LOG_ERROR("TensorRowProxy::item_as(): null tensor pointer");
+        return T{};
+    }
+
+    // Handle 2D tensors with shape [N, 1] (like nonzero() output)
+    if (tensor_->shape().rank() == 2 && tensor_->shape()[1] == 1) {
+        // Convert to actual Tensor row first, then extract item
+        Tensor row_tensor = static_cast<Tensor>(*this);
+        return row_tensor.item<T>();
+    }
+
+    // Standard 1D case
+    if (tensor_->shape().rank() != 1) {
+        LOG_ERROR("TensorRowProxy::item_as(): only valid for 1D or [N,1] tensors, got rank {}",
+                  tensor_->shape().rank());
+        return T{};
+    }
+
+    if (row_index_ >= tensor_->numel()) {
+        LOG_ERROR("TensorRowProxy::item_as(): index {} out of bounds for size {}",
+                  row_index_, tensor_->numel());
+        return T{};
+    }
+
+    if (tensor_->device() == Device::CUDA) {
+        T value{};
+
+        // Calculate proper offset based on dtype
+        size_t type_size = dtype_size(tensor_->dtype());
+        const void* src_ptr = static_cast<const char*>(tensor_->raw_ptr()) + row_index_ * type_size;
+
+        cudaError_t err = cudaMemcpy(
+            &value,
+            src_ptr,
+            sizeof(T),
+            cudaMemcpyDeviceToHost
+        );
+        if (err != cudaSuccess) {
+            LOG_ERROR("CUDA memcpy failed in TensorRowProxy::item_as(): {}",
+                     cudaGetErrorString(err));
+            return T{};
+        }
+        return value;
+    } else {
+        // Direct pointer access for CPU tensors
+        // Properly cast based on tensor's actual dtype
+        if (tensor_->dtype() == DataType::Float32) {
+            if constexpr (std::is_same_v<T, float>) {
+                return static_cast<T>(tensor_->ptr<float>()[row_index_]);
+            } else if constexpr (std::is_same_v<T, int>) {
+                return static_cast<T>(tensor_->ptr<float>()[row_index_]);
+            } else if constexpr (std::is_same_v<T, int64_t>) {
+                return static_cast<T>(tensor_->ptr<float>()[row_index_]);
+            }
+        } else if (tensor_->dtype() == DataType::Int32) {
+            if constexpr (std::is_same_v<T, int>) {
+                return static_cast<T>(tensor_->ptr<int>()[row_index_]);
+            } else if constexpr (std::is_same_v<T, float>) {
+                return static_cast<T>(tensor_->ptr<int>()[row_index_]);
+            } else if constexpr (std::is_same_v<T, int64_t>) {
+                return static_cast<T>(tensor_->ptr<int>()[row_index_]);
+            }
+        } else if (tensor_->dtype() == DataType::Int64) {
+            // Proper Int64 handling
+            const int64_t* data = reinterpret_cast<const int64_t*>(tensor_->raw_ptr());
+            if constexpr (std::is_same_v<T, int64_t>) {
+                return data[row_index_];
+            } else if constexpr (std::is_same_v<T, int>) {
+                return static_cast<T>(data[row_index_]);
+            } else if constexpr (std::is_same_v<T, float>) {
+                return static_cast<T>(data[row_index_]);
+            }
+        } else if (tensor_->dtype() == DataType::Bool) {
+            const unsigned char* data = tensor_->ptr<unsigned char>();
+            if constexpr (std::is_same_v<T, bool>) {
+                return data[row_index_] != 0;
+            } else if constexpr (std::is_same_v<T, float>) {
+                return data[row_index_] ? 1.0f : 0.0f;
+            } else if constexpr (std::is_same_v<T, int>) {
+                return data[row_index_] ? 1 : 0;
+            } else if constexpr (std::is_same_v<T, int64_t>) {
+                return data[row_index_] ? 1LL : 0LL;
             }
         }
 
-        // For 2D tensors: tensor[i][j]
-        float& operator[](size_t col_index) {
-            if (!tensor_) {
-                LOG_ERROR("TensorRowProxy: null tensor pointer");
-                static float dummy = 0.0f;
-                return dummy;
-            }
+        LOG_ERROR("Unsupported dtype/type combination for item_as()");
+        return T{};
+    }
+}
 
-            if (tensor_->shape().rank() < 2) {
-                LOG_ERROR("TensorRowProxy: tensor rank {} < 2", tensor_->shape().rank());
-                static float dummy = 0.0f;
-                return dummy;
-            }
+    // Specialized item_as for common types
+    int item_int() const { return item_as<int>(); }
+    int64_t item_int64() const { return item_as<int64_t>(); }
 
-            if (col_index >= tensor_->shape()[1]) {
-                LOG_ERROR("Column index {} out of bounds for dimension 1 with size {}",
-                          col_index, tensor_->shape()[1]);
-                static float dummy = 0.0f;
-                return dummy;
-            }
+    // ============= Conversion to Tensor =============
 
-            return tensor_->at({row_index_, col_index});
+    operator Tensor() const {
+        if (!tensor_) {
+            LOG_ERROR("TensorRowProxy: null tensor pointer");
+            return Tensor();
         }
 
-        float operator[](size_t col_index) const {
-            if (!tensor_) {
-                LOG_ERROR("TensorRowProxy: null tensor pointer");
-                return 0.0f;
+        if (tensor_->shape().rank() > 1) {
+            // For multi-dimensional tensors, manually copy the row data
+            // This ensures we get a true independent copy, not a view
+
+            // Calculate the shape of one row (all dims except first)
+            std::vector<size_t> row_shape;
+            for (size_t i = 1; i < tensor_->shape().rank(); ++i) {
+                row_shape.push_back(tensor_->shape()[i]);
             }
 
-            if (tensor_->shape().rank() < 2) {
-                LOG_ERROR("TensorRowProxy: tensor rank {} < 2", tensor_->shape().rank());
-                return 0.0f;
+            // Create new independent tensor with correct shape
+            auto result = Tensor::empty(TensorShape(row_shape),
+                                       tensor_->device(),
+                                       tensor_->dtype());
+
+            // Calculate how many elements in one row
+            size_t row_elements = 1;
+            for (size_t i = 1; i < tensor_->shape().rank(); ++i) {
+                row_elements *= tensor_->shape()[i];
             }
 
-            if (col_index >= tensor_->shape()[1]) {
-                LOG_ERROR("Column index {} out of bounds for dimension 1 with size {}",
-                          col_index, tensor_->shape()[1]);
-                return 0.0f;
-            }
+            // Calculate byte offset to the start of this row
+            size_t byte_offset = row_index_ * row_elements * dtype_size(tensor_->dtype());
+            size_t copy_bytes = row_elements * dtype_size(tensor_->dtype());
 
-            return tensor_->at({row_index_, col_index});
-        }
-
-        // For 1D tensors: tensor[i] - convert proxy to float
-        operator float() const {
-            if (!tensor_) {
-                LOG_ERROR("TensorRowProxy: null tensor pointer");
-                return 0.0f;
-            }
-
-            if (tensor_->shape().rank() != 1) {
-                LOG_ERROR("Implicit conversion to float only valid for 1D tensors, got rank {}",
-                          tensor_->shape().rank());
-                return 0.0f;
-            }
-
-            return tensor_->at({row_index_});
-        }
-
-        operator float&() {
-            if (!tensor_) {
-                LOG_ERROR("TensorRowProxy: null tensor pointer");
-                static float dummy = 0.0f;
-                return dummy;
-            }
-
-            if (tensor_->shape().rank() != 1) {
-                LOG_ERROR("Implicit conversion to float& only valid for 1D tensors, got rank {}",
-                          tensor_->shape().rank());
-                static float dummy = 0.0f;
-                return dummy;
-            }
-
-            return tensor_->at({row_index_});
-        }
-
-        // Convert to Tensor (for operations on slices)
-        operator Tensor() const {
-            if (!tensor_) {
-                LOG_ERROR("TensorRowProxy: null tensor pointer");
-                return Tensor();
-            }
-
-            // For nD tensors where n > 1, return a slice
-            if (tensor_->shape().rank() > 1) {
-                return tensor_->slice(0, row_index_, row_index_ + 1).squeeze(0);
-            }
-
-            // For 1D tensors, return a scalar tensor
-            float val = tensor_->at({row_index_});
-            auto result = Tensor::empty({1}, tensor_->device(), tensor_->dtype());
+            // Perform deep copy of row data
             if (tensor_->device() == Device::CUDA) {
-                cudaMemcpy(result.raw_ptr(), &val, sizeof(float), cudaMemcpyHostToDevice);
-            } else {
-                *result.ptr<float>() = val;
-            }
-            return result.squeeze();
-        }
-
-        // Extract scalar value with type specification
-        template<typename T = float>
-        T item() const {
-            if (!tensor_) {
-                LOG_ERROR("TensorRowProxy::item(): null tensor pointer");
-                return T{};
-            }
-
-            // Convert to Tensor and call its item() method
-            return Tensor(*this).item<T>();
-        }
-
-        // CRITICAL FIX #1: Enhanced assignment from Tensor
-        TensorRowProxy& operator=(const Tensor& other) {
-            if (!tensor_) {
-                return *this;
-            }
-
-            if (tensor_->shape().rank() > 1) {
-                // Multi-dimensional: assign entire row slice
-                // Calculate the shape of one row (all dims except first)
-                std::vector<size_t> slice_shape;
-                for (size_t i = 1; i < tensor_->shape().rank(); ++i) {
-                    slice_shape.push_back(tensor_->shape()[i]);
-                }
-                TensorShape expected_shape(slice_shape);
-
-                // Validate shape match
-                if (other.shape() != expected_shape) {
-                    LOG_ERROR("Shape mismatch in row assignment: expected {}, got {}",
-                             expected_shape.str(), other.shape().str());
-                    return *this;
-                }
-
-                // Calculate number of elements per row
-                size_t row_elements = 1;
-                for (size_t i = 1; i < tensor_->shape().rank(); ++i) {
-                    row_elements *= tensor_->shape()[i];
-                }
-
-                // Calculate byte offset for this row
-                size_t byte_offset = row_index_ * row_elements * dtype_size(tensor_->dtype());
-                size_t copy_bytes = row_elements * dtype_size(tensor_->dtype());
-
-                // Ensure tensors are on same device
-                auto other_same_device = (other.device() == tensor_->device())
-                    ? other.clone()
-                    : other.to(tensor_->device());
-
-                // Copy data based on device
-                if (tensor_->device() == Device::CUDA) {
-                    cudaError_t err = cudaMemcpy(
-                        static_cast<char*>(tensor_->raw_ptr()) + byte_offset,
-                        other_same_device.raw_ptr(),
-                        copy_bytes,
-                        cudaMemcpyDeviceToDevice
-                    );
-                    if (err != cudaSuccess) {
-                        LOG_ERROR("CUDA memcpy failed in row assignment: {}",
-                                 cudaGetErrorString(err));
-                    }
-                } else {
-                    std::memcpy(
-                        static_cast<char*>(tensor_->raw_ptr()) + byte_offset,
-                        other_same_device.raw_ptr(),
-                        copy_bytes
-                    );
+                cudaError_t err = cudaMemcpy(
+                    result.raw_ptr(),
+                    static_cast<const char*>(tensor_->raw_ptr()) + byte_offset,
+                    copy_bytes,
+                    cudaMemcpyDeviceToDevice
+                );
+                if (err != cudaSuccess) {
+                    LOG_ERROR("CUDA memcpy failed in TensorRowProxy tensor conversion: {}",
+                             cudaGetErrorString(err));
+                    return Tensor();
                 }
             } else {
-                // 1D: assign single element
-                if (other.numel() != 1) {
-                    LOG_ERROR("Cannot assign tensor with {} elements to single position",
-                             other.numel());
-                    return *this;
-                }
-
-                float val = other.item();
-                if (tensor_->device() == Device::CUDA) {
-                    cudaMemcpy(
-                        tensor_->ptr<float>() + row_index_,
-                        &val,
-                        sizeof(float),
-                        cudaMemcpyHostToDevice
-                    );
-                } else {
-                    tensor_->ptr<float>()[row_index_] = val;
-                }
+                std::memcpy(
+                    result.raw_ptr(),
+                    static_cast<const char*>(tensor_->raw_ptr()) + byte_offset,
+                    copy_bytes
+                );
             }
+
+            return result;
+        }
+
+        // For 1D tensors, return a scalar tensor
+        float val = item();
+
+        auto result = Tensor::empty({1}, tensor_->device(), tensor_->dtype());
+
+        if (tensor_->device() == Device::CUDA) {
+            cudaMemcpy(result.raw_ptr(), &val, sizeof(float), cudaMemcpyHostToDevice);
+        } else {
+            *result.ptr<float>() = val;
+        }
+
+        return result.squeeze();
+    }
+
+    // ============= Assignment Operators =============
+
+    TensorRowProxy& operator=(const TensorRowProxy& other) {
+        if (this == &other) {
+            return *this;  // Self-assignment
+        }
+
+        // Convert other proxy to an independent Tensor first
+        // This is crucial for cases like: tensor[4] = tensor[0]
+        // Without this, we'd just copy the proxy metadata (pointer + index)
+        // instead of copying the actual data
+        Tensor other_copy = other;  // Triggers operator Tensor()
+        return operator=(other_copy);  // Use the Tensor assignment operator
+    }
+
+    // Assignment from Tensor
+    TensorRowProxy& operator=(const Tensor& other) {
+        if (!tensor_) {
             return *this;
         }
 
-        // Assignment from float (for 1D tensors)
-        TensorRowProxy& operator=(float value) {
-            if (!tensor_) {
+        if (tensor_->shape().rank() > 1) {
+            // Multi-dimensional: assign entire row slice
+
+            // Calculate expected shape (all dims except first)
+            std::vector<size_t> slice_shape;
+            for (size_t i = 1; i < tensor_->shape().rank(); ++i) {
+                slice_shape.push_back(tensor_->shape()[i]);
+            }
+            TensorShape expected_shape(slice_shape);
+
+            // Validate shape match
+            if (other.shape() != expected_shape) {
+                LOG_ERROR("Shape mismatch in row assignment: expected {}, got {}",
+                         expected_shape.str(), other.shape().str());
                 return *this;
             }
 
-            if (tensor_->shape().rank() != 1) {
-                LOG_ERROR("Float assignment only valid for 1D tensors");
+            // Calculate number of elements per row
+            size_t row_elements = 1;
+            for (size_t i = 1; i < tensor_->shape().rank(); ++i) {
+                row_elements *= tensor_->shape()[i];
+            }
+
+            // Calculate byte offset for this row
+            size_t byte_offset = row_index_ * row_elements * dtype_size(tensor_->dtype());
+            size_t copy_bytes = row_elements * dtype_size(tensor_->dtype());
+
+            // CRITICAL: Always clone to ensure independence from source
+            // This prevents issues when assigning from another row of the same tensor
+            auto other_copy = (other.device() == tensor_->device())
+                ? other.clone()
+                : other.to(tensor_->device());
+
+            // Copy data based on device
+            if (tensor_->device() == Device::CUDA) {
+                cudaError_t err = cudaMemcpy(
+                    static_cast<char*>(tensor_->raw_ptr()) + byte_offset,
+                    other_copy.raw_ptr(),
+                    copy_bytes,
+                    cudaMemcpyDeviceToDevice
+                );
+                if (err != cudaSuccess) {
+                    LOG_ERROR("CUDA memcpy failed in row assignment: {}",
+                             cudaGetErrorString(err));
+                }
+            } else {
+                std::memcpy(
+                    static_cast<char*>(tensor_->raw_ptr()) + byte_offset,
+                    other_copy.raw_ptr(),
+                    copy_bytes
+                );
+            }
+        } else {
+            // 1D: assign single element
+            if (other.numel() != 1) {
+                LOG_ERROR("Cannot assign tensor with {} elements to single position",
+                         other.numel());
                 return *this;
             }
+
+            float val = other.item();
 
             if (tensor_->device() == Device::CUDA) {
-                cudaMemcpy(tensor_->ptr<float>() + row_index_, &value, sizeof(float),
-                          cudaMemcpyHostToDevice);
+                cudaMemcpy(
+                    tensor_->ptr<float>() + row_index_,
+                    &val,
+                    sizeof(float),
+                    cudaMemcpyHostToDevice
+                );
             } else {
-                tensor_->ptr<float>()[row_index_] = value;
+                tensor_->ptr<float>()[row_index_] = val;
             }
+        }
+        return *this;
+    }
+
+    // Assignment from scalar (for 1D tensors)
+    TensorRowProxy& operator=(float value) {
+        if (!tensor_) {
             return *this;
         }
 
-        // ============= Arithmetic operations with TensorRowProxy =============
-
-        Tensor operator-(const TensorRowProxy& other) const {
-            return Tensor(*this).sub(Tensor(other));
+        if (tensor_->shape().rank() != 1) {
+            LOG_ERROR("Float assignment only valid for 1D tensors, got rank {}",
+                      tensor_->shape().rank());
+            return *this;
         }
 
-        Tensor operator+(const TensorRowProxy& other) const {
-            return Tensor(*this).add(Tensor(other));
+        if (row_index_ >= tensor_->numel()) {
+            LOG_ERROR("Index {} out of bounds for size {}", row_index_, tensor_->numel());
+            return *this;
         }
 
-        Tensor operator*(const TensorRowProxy& other) const {
-            return Tensor(*this).mul(Tensor(other));
+        if (tensor_->device() == Device::CUDA) {
+            cudaMemcpy(
+                tensor_->ptr<float>() + row_index_,
+                &value,
+                sizeof(float),
+                cudaMemcpyHostToDevice
+            );
+        } else {
+            tensor_->ptr<float>()[row_index_] = value;
         }
+        return *this;
+    }
 
-        Tensor operator/(const TensorRowProxy& other) const {
-            return Tensor(*this).div(Tensor(other));
-        }
+    // ============= Arithmetic Operations with TensorRowProxy =============
 
-        // Arithmetic operations with scalars
-        Tensor operator-(float scalar) const {
-            return Tensor(*this).sub(scalar);
-        }
+    Tensor operator-(const TensorRowProxy& other) const {
+        return Tensor(*this).sub(Tensor(other));
+    }
 
-        Tensor operator+(float scalar) const {
-            return Tensor(*this).add(scalar);
-        }
+    Tensor operator+(const TensorRowProxy& other) const {
+        return Tensor(*this).add(Tensor(other));
+    }
 
-        Tensor operator*(float scalar) const {
-            return Tensor(*this).mul(scalar);
-        }
+    Tensor operator*(const TensorRowProxy& other) const {
+        return Tensor(*this).mul(Tensor(other));
+    }
 
-        Tensor operator/(float scalar) const {
-            return Tensor(*this).div(scalar);
-        }
+    Tensor operator/(const TensorRowProxy& other) const {
+        return Tensor(*this).div(Tensor(other));
+    }
 
-        // Unary operations returning Tensor
-        Tensor pow(float exponent) const {
-            return Tensor(*this).pow(exponent);
-        }
+    // ============= Arithmetic Operations with Scalars =============
 
-        Tensor sqrt() const {
-            return Tensor(*this).sqrt();
-        }
+    Tensor operator-(float scalar) const {
+        return Tensor(*this).sub(scalar);
+    }
 
-        Tensor abs() const {
-            return Tensor(*this).abs();
-        }
+    Tensor operator+(float scalar) const {
+        return Tensor(*this).add(scalar);
+    }
 
-        Tensor sum() const {
-            return Tensor(*this).sum();
-        }
+    Tensor operator*(float scalar) const {
+        return Tensor(*this).mul(scalar);
+    }
 
-        Tensor mean() const {
-            return Tensor(*this).mean();
-        }
+    Tensor operator/(float scalar) const {
+        return Tensor(*this).div(scalar);
+    }
 
-        Tensor square() const {
-            return Tensor(*this).square();
-        }
+    // ============= Unary Operations =============
 
-        Tensor neg() const {
-            return Tensor(*this).neg();
-        }
+    Tensor operator-() const {
+        return Tensor(*this).neg();
+    }
 
-        Tensor operator-() const {
-            return neg();
-        }
-    };
+    Tensor pow(float exponent) const {
+        return Tensor(*this).pow(exponent);
+    }
 
+    Tensor sqrt() const {
+        return Tensor(*this).sqrt();
+    }
+
+    Tensor abs() const {
+        return Tensor(*this).abs();
+    }
+
+    Tensor neg() const {
+        return Tensor(*this).neg();
+    }
+
+    Tensor sum() const {
+        return Tensor(*this).sum();
+    }
+
+    Tensor mean() const {
+        return Tensor(*this).mean();
+    }
+
+    Tensor square() const {
+        return Tensor(*this).square();
+    }
+};
     // Implementation of Tensor::operator[]
     inline TensorRowProxy Tensor::operator[](size_t index) {
         if (index >= shape_[0]) {

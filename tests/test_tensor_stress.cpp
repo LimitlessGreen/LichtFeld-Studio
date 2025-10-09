@@ -512,10 +512,9 @@ TEST_F(TensorStressTest, NormalizationStability) {
 
     auto custom_normalized = custom_t.normalize();
 
-    // PyTorch doesn't have a direct normalize(), so do it manually
     auto torch_mean = torch_t.mean();
     auto torch_std = torch_t.std(/*unbiased=*/false);
-    auto torch_normalized = (torch_t - torch_mean) / torch_std;
+    auto torch_normalized = (torch_t - torch_mean) / (torch_std + 1e-8f);  // Add epsilon!
 
     EXPECT_FALSE(custom_normalized.has_nan());
     EXPECT_FALSE(custom_normalized.has_inf());

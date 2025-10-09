@@ -42,10 +42,15 @@ set(OPTIONAL_TEST_FILES
     test_tensor_cumsum_convenience.cpp
     test_tensor_conversions_shape.cpp
     test_tensor_advanced_new.cpp
-    #test_kmeans.cpp
-    #test_kmeans_comparison.cpp
-    #test_tensor_ops_comparison.cpp
-    #test_kmeans_details.cpp
+    test_kmeans.cpp
+    test_critical_fixes.cpp
+    test_kmeans_comparison.cpp
+    test_tensor_ops_comparison.cpp
+    test_kmeans_details.cpp
+    test_sort_minimal.cpp
+    test_tensor_debug.cpp
+    test_bugs_found.cpp
+    test_tensor_vs_torch.cpp
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})

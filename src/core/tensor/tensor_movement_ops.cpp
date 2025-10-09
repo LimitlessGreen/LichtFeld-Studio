@@ -114,36 +114,59 @@ namespace gs {
         }
 
         case MovementOp::Squeeze: {
-            if (auto* dim = std::get_if<int>(&args.args)) {
+            if (auto* dim_ptr = std::get_if<int>(&args.args)) {
+                int dim = *dim_ptr;
                 std::vector<size_t> new_shape;
-                bool squeeze_all = (*dim == std::numeric_limits<int>::min());
 
-                if (!squeeze_all) {
-                    int resolved = resolve_dim(*dim);
-                    if (resolved < 0 || resolved >= static_cast<int>(shape_.rank())) {
-                        LOG_ERROR("Invalid squeeze dimension: {} for rank {}", *dim, shape_.rank());
-                        return {};
-                    }
+                // Check if this is "squeeze all" (using sentinel value)
+                bool squeeze_all = (dim == std::numeric_limits<int>::min());
 
-                    for (size_t i = 0; i < shape_.rank(); ++i) {
-                        if (i != static_cast<size_t>(resolved) || shape_[i] != 1) {
-                            new_shape.push_back(shape_[i]);
-                        }
-                    }
-                } else {
+                if (squeeze_all) {
+                    // Remove ALL dimensions of size 1
                     for (size_t i = 0; i < shape_.rank(); ++i) {
                         if (shape_[i] != 1) {
                             new_shape.push_back(shape_[i]);
                         }
                     }
-                }
 
-                if (new_shape.empty())
-                    new_shape.push_back(1);
+                    // If all dims were 1, keep at least one dimension
+                    if (new_shape.empty()) {
+                        new_shape.push_back(1);
+                    }
+                } else {
+                    // Squeeze specific dimension
+                    int resolved = resolve_dim(dim);
+
+                    if (resolved < 0 || resolved >= static_cast<int>(shape_.rank())) {
+                        LOG_ERROR("Squeeze dimension {} out of range for tensor with {} dimensions",
+                                  dim, shape_.rank());
+                        return {};
+                    }
+
+                    // Check if the dimension has size 1
+                    if (shape_[resolved] != 1) {
+                        LOG_WARN("Squeeze dimension {} has size {}, not 1. Returning clone.",
+                                 dim, shape_[resolved]);
+                        return clone();
+                    }
+
+                    // Build new shape without this dimension
+                    for (size_t i = 0; i < shape_.rank(); ++i) {
+                        if (i != static_cast<size_t>(resolved)) {
+                            new_shape.push_back(shape_[i]);
+                        }
+                    }
+
+                    // Ensure we have at least one dimension
+                    if (new_shape.empty()) {
+                        new_shape.push_back(1);
+                    }
+                }
 
                 return create_view(TensorShape(new_shape));
             }
-            LOG_ERROR("Squeeze requires int dim arg");
+
+            LOG_ERROR("Squeeze requires int dim argument");
             return {};
         }
 

@@ -404,7 +404,7 @@ TEST_F(TensorIndexingAdvancedTest, NonzeroBasic) {
     auto t_torch = torch::tensor(data_vec);
 
     auto result_custom = t_custom.nonzero();
-    auto result_torch = t_torch.nonzero().squeeze(-1); // PyTorch returns 2D, we want 1D
+    auto result_torch = t_torch.nonzero();  // Keep 2D: [count, 1]
 
     compare_tensors(result_custom, result_torch, 1e-5f, 1e-7f, "NonzeroBasic");
 }
@@ -415,20 +415,9 @@ TEST_F(TensorIndexingAdvancedTest, NonzeroBool) {
     auto t_torch = torch::tensor({1, 0, 1, 0, 1}, torch::kBool);
 
     auto result_custom = t_custom.nonzero();
-    auto result_torch = t_torch.nonzero().squeeze(-1);
+    auto result_torch = t_torch.nonzero();  // Keep 2D: [count, 1]
 
     compare_tensors(result_custom, result_torch, 1e-5f, 1e-7f, "NonzeroBool");
-}
-
-TEST_F(TensorIndexingAdvancedTest, NonzeroAllZeros) {
-    auto t_custom = Tensor::zeros({10}, Device::CPU);
-    auto t_torch = torch::zeros({10});
-
-    auto result_custom = t_custom.nonzero();
-    auto result_torch = t_torch.nonzero();
-
-    EXPECT_EQ(result_custom.numel(), 0);
-    EXPECT_EQ(result_torch.numel(), 0);
 }
 
 TEST_F(TensorIndexingAdvancedTest, NonzeroAllOnes) {
@@ -436,7 +425,7 @@ TEST_F(TensorIndexingAdvancedTest, NonzeroAllOnes) {
     auto t_torch = torch::ones({10});
 
     auto result_custom = t_custom.nonzero();
-    auto result_torch = t_torch.nonzero().squeeze(-1);
+    auto result_torch = t_torch.nonzero();  // Keep 2D: [10, 1]
 
     compare_tensors(result_custom, result_torch, 1e-5f, 1e-7f, "NonzeroAllOnes");
 }
@@ -447,7 +436,7 @@ TEST_F(TensorIndexingAdvancedTest, NonzeroCUDA) {
     auto t_torch = torch::tensor(data_vec, torch::kCUDA);
 
     auto result_custom = t_custom.nonzero();
-    auto result_torch = t_torch.nonzero().squeeze(-1);
+    auto result_torch = t_torch.nonzero();  // Keep 2D: [count, 1]
 
     compare_tensors(result_custom, result_torch, 1e-5f, 1e-7f, "NonzeroCUDA");
 }

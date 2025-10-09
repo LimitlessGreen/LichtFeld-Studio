@@ -197,7 +197,7 @@ TEST_F(TensorReductionTest, StandardDeviation) {
     auto custom_tensor = Tensor::from_vector(data, {8}, Device::CUDA);
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
 
-    float custom_std = custom_tensor.std_scalar();
+    float custom_std = custom_tensor.std_scalar(/*unbiased=*/false);
     float torch_std = torch_tensor.std(/*unbiased=*/false).item<float>();
 
     compare_scalars(custom_std, torch_std, 1e-4f, "Std");
@@ -211,7 +211,7 @@ TEST_F(TensorReductionTest, StdMultiDim) {
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA))
                             .reshape({2, 3, 4, 5});
 
-    float custom_std = custom_tensor.std_scalar();
+    float custom_std = custom_tensor.std_scalar(/*unbiased=*/false);
     float torch_std = torch_tensor.std(/*unbiased=*/false).item<float>();
 
     compare_scalars(custom_std, torch_std, 1e-3f, "StdMultiDim");
@@ -223,11 +223,11 @@ TEST_F(TensorReductionTest, Variance) {
     auto custom_tensor = Tensor::from_vector(data, {5}, Device::CUDA);
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA));
 
-    float custom_var = custom_tensor.var_scalar();
+    float custom_var = custom_tensor.var_scalar(/*unbiased=*/false);
     float torch_var = torch_tensor.var(/*unbiased=*/false).item<float>();
 
     compare_scalars(custom_var, torch_var, 1e-4f, "Var");
-    EXPECT_NEAR(custom_var, 2.0f, 1e-4f); // Variance of [1,2,3,4,5]
+    EXPECT_NEAR(custom_var, 2.0f, 1e-4f); // Variance of [1,2,3,4,5] with N (biased)
 }
 
 TEST_F(TensorReductionTest, VarMultiDim) {
@@ -240,7 +240,7 @@ TEST_F(TensorReductionTest, VarMultiDim) {
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA))
                             .reshape({3, 4, 5});
 
-    float custom_var = custom_tensor.var_scalar();
+    float custom_var = custom_tensor.var_scalar(/*unbiased=*/false);
     float torch_var = torch_tensor.var(/*unbiased=*/false).item<float>();
 
     compare_scalars(custom_var, torch_var, 1e-3f, "VarMultiDim");
@@ -459,8 +459,8 @@ TEST_F(TensorReductionTest, SingleElement) {
     compare_scalars(custom_tensor.mean_scalar(), torch_tensor.mean().item<float>(), 1e-5f, "SingleMean");
     compare_scalars(custom_tensor.min_scalar(), torch_tensor.min().item<float>(), 1e-5f, "SingleMin");
     compare_scalars(custom_tensor.max_scalar(), torch_tensor.max().item<float>(), 1e-5f, "SingleMax");
-    compare_scalars(custom_tensor.std_scalar(), torch_tensor.std(false).item<float>(), 1e-5f, "SingleStd");
-    compare_scalars(custom_tensor.var_scalar(), torch_tensor.var(false).item<float>(), 1e-5f, "SingleVar");
+    compare_scalars(custom_tensor.std_scalar(false), torch_tensor.std(false).item<float>(), 1e-5f, "SingleStd");
+    compare_scalars(custom_tensor.var_scalar(false), torch_tensor.var(false).item<float>(), 1e-5f, "SingleVar");
 }
 
 TEST_F(TensorReductionTest, NegativeValues) {
@@ -473,7 +473,7 @@ TEST_F(TensorReductionTest, NegativeValues) {
     compare_scalars(custom_tensor.mean_scalar(), torch_tensor.mean().item<float>(), 1e-5f, "NegMean");
     compare_scalars(custom_tensor.min_scalar(), torch_tensor.min().item<float>(), 1e-5f, "NegMin");
     compare_scalars(custom_tensor.max_scalar(), torch_tensor.max().item<float>(), 1e-5f, "NegMax");
-    compare_scalars(custom_tensor.std_scalar(), torch_tensor.std(false).item<float>(), 1e-4f, "NegStd");
+    compare_scalars(custom_tensor.std_scalar(false), torch_tensor.std(false).item<float>(), 1e-4f, "NegStd");
 }
 
 TEST_F(TensorReductionTest, AllZeros) {

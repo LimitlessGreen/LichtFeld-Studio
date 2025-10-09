@@ -54,6 +54,14 @@ bool tensors_close(const Tensor& a, const torch::Tensor& b,
 
 // Helper to extract int64 values from a tensor
 std::vector<int64_t> tensor_to_int64_vector(const Tensor& t) {
+    if (!t.is_valid()) {
+        throw std::runtime_error("tensor_to_int64_vector: invalid tensor");
+    }
+
+    if (t.numel() == 0) {
+        return {};
+    }
+
     auto cpu_t = t.to(Device::CPU);
 
     if (cpu_t.dtype() != DataType::Int64) {
@@ -62,19 +70,8 @@ std::vector<int64_t> tensor_to_int64_vector(const Tensor& t) {
         );
     }
 
-    if (!cpu_t.is_valid() || cpu_t.numel() == 0) {
-        return {};
-    }
-
-    std::vector<int64_t> result(cpu_t.numel());
-    const int64_t* data = reinterpret_cast<const int64_t*>(cpu_t.raw_ptr());
-
-    if (!data) {
-        throw std::runtime_error("Null data pointer in Int64 tensor");
-    }
-
-    std::memcpy(result.data(), data, cpu_t.bytes());
-    return result;
+    // Use the proper API from tensor.cpp
+    return cpu_t.to_vector_int64();
 }
 
 // ============= Test Copy Constructor and Assignment =============
@@ -91,14 +88,23 @@ TEST_F(TensorCopyTest, CopyConstructorCPU) {
     auto a = Tensor::arange(0, 10, 1).to(Device::CPU);
     Tensor b(a);  // Copy constructor
 
+    // Verify metadata matches
     EXPECT_EQ(a.shape(), b.shape());
     EXPECT_EQ(a.device(), b.device());
     EXPECT_EQ(a.dtype(), b.dtype());
+
+    // Verify data matches
     EXPECT_TRUE(a.all_close(b));
 
-    // Verify they are independent
+    // Verify they are independent copies
     b.fill_(42.0f);
     EXPECT_FALSE(a.all_close(b));
+
+    // Verify original is unchanged
+    auto a_vec = a.to_vector();
+    for (size_t i = 0; i < a_vec.size(); ++i) {
+        EXPECT_NEAR(a_vec[i], static_cast<float>(i), 1e-5f);
+    }
 }
 
 TEST_F(TensorCopyTest, CopyConstructorCUDA) {
@@ -113,11 +119,23 @@ TEST_F(TensorCopyTest, CopyConstructorCUDA) {
     // Verify they are independent
     b.fill_(42.0f);
     EXPECT_FALSE(a.all_close(b));
+
+    // Verify b is actually 42
+    auto b_vec = b.to_vector();
+    for (size_t i = 0; i < b_vec.size(); ++i) {
+        EXPECT_NEAR(b_vec[i], 42.0f, 1e-5f);
+    }
 }
 
 TEST_F(TensorCopyTest, CopyAssignmentCPU) {
     auto a = Tensor::arange(0, 10, 1).to(Device::CPU);
     auto b = Tensor::zeros({5}, Device::CPU);
+
+    // Verify b starts as zeros
+    auto b_before = b.to_vector();
+    for (float val : b_before) {
+        EXPECT_NEAR(val, 0.0f, 1e-5f);
+    }
 
     b = a;  // Copy assignment
 
@@ -141,7 +159,16 @@ TEST_F(TensorCopyTest, CopyAssignmentCUDA) {
     EXPECT_TRUE(a.all_close(b));
 
     // Verify they are independent
+    auto a_before = a.to_vector();
     b.fill_(42.0f);
+    auto a_after = a.to_vector();
+
+    // Verify a is unchanged
+    EXPECT_EQ(a_before.size(), a_after.size());
+    for (size_t i = 0; i < a_before.size(); ++i) {
+        EXPECT_NEAR(a_before[i], a_after[i], 1e-5f);
+    }
+
     EXPECT_FALSE(a.all_close(b));
 }
 
@@ -152,7 +179,10 @@ TEST_F(TensorCopyTest, CopyAssignmentSelfAssignment) {
     a = a;  // Self-assignment
 
     auto after_values = a.to_vector();
-    EXPECT_EQ(original_values, after_values);
+    EXPECT_EQ(original_values.size(), after_values.size());
+    for (size_t i = 0; i < original_values.size(); ++i) {
+        EXPECT_NEAR(original_values[i], after_values[i], 1e-5f);
+    }
 }
 
 TEST_F(TensorCopyTest, CopyUnderscoreMethod) {
@@ -186,6 +216,11 @@ TEST_F(TensorCopyTest, CopyLargeTensor) {
     // Modify and verify independence
     b.add_(1.0f);
     EXPECT_FALSE(a.all_close(b));
+
+    // Verify the difference is approximately 1.0
+    auto diff = b.sub(a);
+    auto diff_mean = diff.mean_scalar();
+    EXPECT_NEAR(diff_mean, 1.0f, 1e-4f);
 }
 
 // ============= Test cdist (Pairwise Distance) =============
@@ -213,6 +248,9 @@ TEST_F(TensorCdistTest, CdistL2Basic) {
 
     EXPECT_EQ(result.shape(), TensorShape({5, 7}));
     EXPECT_TRUE(tensors_close(result, torch_result, 1e-4f, 1e-4f));
+
+    // Verify result is on same device as input
+    EXPECT_EQ(result.device(), a.device());
 }
 
 TEST_F(TensorCdistTest, CdistL1) {
@@ -225,6 +263,7 @@ TEST_F(TensorCdistTest, CdistL1) {
 
     auto result = a.cdist(b, 1.0f);
 
+    EXPECT_EQ(result.shape(), TensorShape({5, 7}));
     EXPECT_TRUE(tensors_close(result, torch_result, 1e-4f, 1e-4f));
 }
 
@@ -239,7 +278,7 @@ TEST_F(TensorCdistTest, CdistSamePoints) {
     // Diagonal should be near zero
     for (size_t i = 0; i < 10; ++i) {
         float val = result.to(Device::CPU).at({i, i});
-        EXPECT_NEAR(val, 0.0f, 1e-5f);
+        EXPECT_NEAR(val, 0.0f, 1e-5f) << "Diagonal element " << i << " should be zero";
     }
 
     EXPECT_TRUE(tensors_close(result, torch_result, 1e-4f, 1e-4f));
@@ -290,10 +329,22 @@ TEST_F(TensorCdistTest, CdistNonSquared) {
     auto l2_dist = a.cdist(b, 2.0f);
 
     // L1 distance should be 7.0
-    EXPECT_NEAR(l1_dist.to(Device::CPU).item(), 7.0f, 1e-5f);
+    float l1_val = l1_dist.to(Device::CPU).item();
+    EXPECT_NEAR(l1_val, 7.0f, 1e-5f);
 
-    // L2 distance should be 5.0
-    EXPECT_NEAR(l2_dist.to(Device::CPU).item(), 5.0f, 1e-5f);
+    // L2 distance should be 5.0 (3-4-5 triangle)
+    float l2_val = l2_dist.to(Device::CPU).item();
+    EXPECT_NEAR(l2_val, 5.0f, 1e-5f);
+}
+
+TEST_F(TensorCdistTest, CdistSymmetry) {
+    // Distance matrix should be symmetric for same points
+    auto a = Tensor::randn({20, 10});
+
+    auto dist = a.cdist(a, 2.0f);
+    auto dist_t = dist.t();
+
+    EXPECT_TRUE(dist.all_close(dist_t, 1e-4f, 1e-4f));
 }
 
 // ============= Test min_with_indices and max_with_indices =============
@@ -314,11 +365,15 @@ TEST_F(TensorMinMaxIndicesTest, MinWithIndices1D) {
 
     auto [val, idx] = t.min_with_indices(0);
 
+    // Check value
     EXPECT_NEAR(val.item(), torch_val.item<float>(), 1e-5f);
+    EXPECT_NEAR(val.item(), 1.0f, 1e-5f);
 
-    // FIX: Use proper helper for Int64 tensors
-    auto idx_val = tensor_to_int64_vector(idx);
-    EXPECT_EQ(idx_val[0], torch_idx.item<int64_t>());
+    // Check index
+    auto idx_vec = tensor_to_int64_vector(idx);
+    EXPECT_EQ(idx_vec.size(), 1);
+    EXPECT_EQ(idx_vec[0], torch_idx.item<int64_t>());
+    EXPECT_EQ(idx_vec[0], 3);  // Min is at index 3
 }
 
 TEST_F(TensorMinMaxIndicesTest, MaxWithIndices1D) {
@@ -329,11 +384,15 @@ TEST_F(TensorMinMaxIndicesTest, MaxWithIndices1D) {
 
     auto [val, idx] = t.max_with_indices(0);
 
+    // Check value
     EXPECT_NEAR(val.item(), torch_val.item<float>(), 1e-5f);
+    EXPECT_NEAR(val.item(), 9.0f, 1e-5f);
 
-    // FIX: Use proper helper for Int64 tensors
-    auto idx_val = tensor_to_int64_vector(idx);
-    EXPECT_EQ(idx_val[0], torch_idx.item<int64_t>());
+    // Check index
+    auto idx_vec = tensor_to_int64_vector(idx);
+    EXPECT_EQ(idx_vec.size(), 1);
+    EXPECT_EQ(idx_vec[0], torch_idx.item<int64_t>());
+    EXPECT_EQ(idx_vec[0], 4);  // Max is at index 4
 }
 
 TEST_F(TensorMinMaxIndicesTest, MinWithIndices2D) {
@@ -344,15 +403,24 @@ TEST_F(TensorMinMaxIndicesTest, MinWithIndices2D) {
 
     auto [val, idx] = t.min_with_indices(1);
 
+    // Check shapes
+    EXPECT_EQ(val.shape(), TensorShape({5}));
+    EXPECT_EQ(idx.shape(), TensorShape({5}));
+
+    // Check values match PyTorch
     EXPECT_TRUE(tensors_close(val, torch_val, 1e-5f, 1e-5f));
 
-    // FIX: Use proper helper for Int64 tensors
-    auto our_idx_vec = tensor_to_int64_vector(idx);
-
     // Check indices match
+    auto our_idx_vec = tensor_to_int64_vector(idx);
     auto torch_idx_cpu = torch_idx.cpu();
+
+    EXPECT_EQ(our_idx_vec.size(), 5);
     for (int64_t i = 0; i < torch_idx_cpu.size(0); ++i) {
-        EXPECT_EQ(our_idx_vec[i], torch_idx_cpu[i].item<int64_t>());
+        int64_t torch_idx_val = torch_idx_cpu[i].item<int64_t>();
+        EXPECT_EQ(our_idx_vec[i], torch_idx_val)
+            << "Index mismatch at position " << i;
+        EXPECT_GE(our_idx_vec[i], 0);
+        EXPECT_LT(our_idx_vec[i], 10);
     }
 }
 
@@ -364,15 +432,24 @@ TEST_F(TensorMinMaxIndicesTest, MaxWithIndices2D) {
 
     auto [val, idx] = t.max_with_indices(1);
 
+    // Check shapes
+    EXPECT_EQ(val.shape(), TensorShape({5}));
+    EXPECT_EQ(idx.shape(), TensorShape({5}));
+
+    // Check values match PyTorch
     EXPECT_TRUE(tensors_close(val, torch_val, 1e-5f, 1e-5f));
 
-    // FIX: Use proper helper for Int64 tensors
-    auto our_idx_vec = tensor_to_int64_vector(idx);
-
     // Check indices match
+    auto our_idx_vec = tensor_to_int64_vector(idx);
     auto torch_idx_cpu = torch_idx.cpu();
+
+    EXPECT_EQ(our_idx_vec.size(), 5);
     for (int64_t i = 0; i < torch_idx_cpu.size(0); ++i) {
-        EXPECT_EQ(our_idx_vec[i], torch_idx_cpu[i].item<int64_t>());
+        int64_t torch_idx_val = torch_idx_cpu[i].item<int64_t>();
+        EXPECT_EQ(our_idx_vec[i], torch_idx_val)
+            << "Index mismatch at position " << i;
+        EXPECT_GE(our_idx_vec[i], 0);
+        EXPECT_LT(our_idx_vec[i], 10);
     }
 }
 
@@ -385,7 +462,15 @@ TEST_F(TensorMinMaxIndicesTest, MinWithIndicesDim0) {
     auto [val, idx] = t.min_with_indices(0);
 
     EXPECT_EQ(val.shape(), TensorShape({10}));
+    EXPECT_EQ(idx.shape(), TensorShape({10}));
     EXPECT_TRUE(tensors_close(val, torch_val, 1e-5f, 1e-5f));
+
+    // Verify indices are in valid range
+    auto idx_vec = tensor_to_int64_vector(idx);
+    for (auto i : idx_vec) {
+        EXPECT_GE(i, 0);
+        EXPECT_LT(i, 5);
+    }
 }
 
 TEST_F(TensorMinMaxIndicesTest, MinMaxWithKeepdim) {
@@ -395,6 +480,13 @@ TEST_F(TensorMinMaxIndicesTest, MinMaxWithKeepdim) {
 
     EXPECT_EQ(val.shape(), TensorShape({5, 1, 8}));
     EXPECT_EQ(idx.shape(), TensorShape({5, 1, 8}));
+
+    // Verify indices are in valid range
+    auto idx_vec = tensor_to_int64_vector(idx);
+    for (auto i : idx_vec) {
+        EXPECT_GE(i, 0);
+        EXPECT_LT(i, 10);
+    }
 }
 
 TEST_F(TensorMinMaxIndicesTest, MinMaxNegativeDim) {
@@ -403,7 +495,48 @@ TEST_F(TensorMinMaxIndicesTest, MinMaxNegativeDim) {
     auto [val1, idx1] = t.min_with_indices(-1);
     auto [val2, idx2] = t.min_with_indices(1);
 
+    EXPECT_EQ(val1.shape(), val2.shape());
     EXPECT_TRUE(val1.all_close(val2));
+
+    auto idx1_vec = tensor_to_int64_vector(idx1);
+    auto idx2_vec = tensor_to_int64_vector(idx2);
+    EXPECT_EQ(idx1_vec, idx2_vec);
+}
+
+TEST_F(TensorMinMaxIndicesTest, VerifyCorrectness) {
+    // Create a tensor with known min/max positions
+    auto t = Tensor::from_vector({
+        1.0f, 5.0f, 3.0f,  // row 0: min=1 (idx 0), max=5 (idx 1)
+        4.0f, 2.0f, 9.0f,  // row 1: min=2 (idx 1), max=9 (idx 2)
+        7.0f, 0.0f, 6.0f   // row 2: min=0 (idx 1), max=7 (idx 0)
+    }, {3, 3});
+
+    auto [min_vals, min_idx] = t.min_with_indices(1);
+    auto [max_vals, max_idx] = t.max_with_indices(1);
+
+    // Check min values
+    auto min_vec = min_vals.to_vector();
+    EXPECT_NEAR(min_vec[0], 1.0f, 1e-5f);
+    EXPECT_NEAR(min_vec[1], 2.0f, 1e-5f);
+    EXPECT_NEAR(min_vec[2], 0.0f, 1e-5f);
+
+    // Check min indices
+    auto min_idx_vec = tensor_to_int64_vector(min_idx);
+    EXPECT_EQ(min_idx_vec[0], 0);
+    EXPECT_EQ(min_idx_vec[1], 1);
+    EXPECT_EQ(min_idx_vec[2], 1);
+
+    // Check max values
+    auto max_vec = max_vals.to_vector();
+    EXPECT_NEAR(max_vec[0], 5.0f, 1e-5f);
+    EXPECT_NEAR(max_vec[1], 9.0f, 1e-5f);
+    EXPECT_NEAR(max_vec[2], 7.0f, 1e-5f);
+
+    // Check max indices
+    auto max_idx_vec = tensor_to_int64_vector(max_idx);
+    EXPECT_EQ(max_idx_vec[0], 1);
+    EXPECT_EQ(max_idx_vec[1], 2);
+    EXPECT_EQ(max_idx_vec[2], 0);
 }
 
 // ============= Test sort =============
@@ -428,11 +561,17 @@ TEST_F(TensorSortTest, Sort1DAscending) {
 
     // Verify sorted order
     auto sorted_vec = sorted.to_vector();
-    EXPECT_EQ(sorted_vec[0], 1.0f);
-    EXPECT_EQ(sorted_vec[1], 2.0f);
-    EXPECT_EQ(sorted_vec[2], 5.0f);
-    EXPECT_EQ(sorted_vec[3], 8.0f);
-    EXPECT_EQ(sorted_vec[4], 9.0f);
+    EXPECT_EQ(sorted_vec.size(), 5);
+    EXPECT_NEAR(sorted_vec[0], 1.0f, 1e-5f);
+    EXPECT_NEAR(sorted_vec[1], 2.0f, 1e-5f);
+    EXPECT_NEAR(sorted_vec[2], 5.0f, 1e-5f);
+    EXPECT_NEAR(sorted_vec[3], 8.0f, 1e-5f);
+    EXPECT_NEAR(sorted_vec[4], 9.0f, 1e-5f);
+
+    // Verify it's actually sorted
+    for (size_t i = 1; i < sorted_vec.size(); ++i) {
+        EXPECT_LE(sorted_vec[i-1], sorted_vec[i]);
+    }
 }
 
 TEST_F(TensorSortTest, Sort1DDescending) {
@@ -447,11 +586,17 @@ TEST_F(TensorSortTest, Sort1DDescending) {
 
     // Verify sorted order
     auto sorted_vec = sorted.to_vector();
-    EXPECT_EQ(sorted_vec[0], 9.0f);
-    EXPECT_EQ(sorted_vec[1], 8.0f);
-    EXPECT_EQ(sorted_vec[2], 5.0f);
-    EXPECT_EQ(sorted_vec[3], 2.0f);
-    EXPECT_EQ(sorted_vec[4], 1.0f);
+    EXPECT_EQ(sorted_vec.size(), 5);
+    EXPECT_NEAR(sorted_vec[0], 9.0f, 1e-5f);
+    EXPECT_NEAR(sorted_vec[1], 8.0f, 1e-5f);
+    EXPECT_NEAR(sorted_vec[2], 5.0f, 1e-5f);
+    EXPECT_NEAR(sorted_vec[3], 2.0f, 1e-5f);
+    EXPECT_NEAR(sorted_vec[4], 1.0f, 1e-5f);
+
+    // Verify it's actually sorted descending
+    for (size_t i = 1; i < sorted_vec.size(); ++i) {
+        EXPECT_GE(sorted_vec[i-1], sorted_vec[i]);
+    }
 }
 
 TEST_F(TensorSortTest, SortRandom) {
@@ -467,7 +612,8 @@ TEST_F(TensorSortTest, SortRandom) {
     // Verify sorted property
     auto sorted_vec = sorted.to_vector();
     for (size_t i = 1; i < sorted_vec.size(); ++i) {
-        EXPECT_LE(sorted_vec[i-1], sorted_vec[i]);
+        EXPECT_LE(sorted_vec[i-1], sorted_vec[i])
+            << "Sort order violated at index " << i;
     }
 }
 
@@ -491,16 +637,33 @@ TEST_F(TensorSortTest, SortIndicesCorrect) {
 
     auto [sorted, indices] = t.sort(0, false);
 
-    // FIX: Use proper helper for Int64 tensors
     auto idx_vec = tensor_to_int64_vector(indices);
     auto orig_vec = t.to_vector();
     auto sorted_vec = sorted.to_vector();
 
     // Verify that indices correctly map to sorted values
+    EXPECT_EQ(idx_vec.size(), sorted_vec.size());
     for (size_t i = 0; i < idx_vec.size(); ++i) {
         size_t idx = static_cast<size_t>(idx_vec[i]);
-        EXPECT_EQ(orig_vec[idx], sorted_vec[i]);
+        EXPECT_GE(idx, 0);
+        EXPECT_LT(idx, orig_vec.size());
+        EXPECT_NEAR(orig_vec[idx], sorted_vec[i], 1e-5f)
+            << "Index mapping incorrect at position " << i;
     }
+}
+
+TEST_F(TensorSortTest, SortStability) {
+    // Test with duplicate values to check stability
+    auto t = Tensor::from_vector({3.0f, 1.0f, 2.0f, 1.0f, 3.0f}, {5});
+
+    auto [sorted, indices] = t.sort(0, false);
+
+    auto sorted_vec = sorted.to_vector();
+    EXPECT_NEAR(sorted_vec[0], 1.0f, 1e-5f);
+    EXPECT_NEAR(sorted_vec[1], 1.0f, 1e-5f);
+    EXPECT_NEAR(sorted_vec[2], 2.0f, 1e-5f);
+    EXPECT_NEAR(sorted_vec[3], 3.0f, 1e-5f);
+    EXPECT_NEAR(sorted_vec[4], 3.0f, 1e-5f);
 }
 
 // ============= Test any_scalar and all_scalar =============
@@ -514,6 +677,7 @@ protected:
 
 TEST_F(TensorBoolReductionTest, AnyScalarAllZeros) {
     auto t = Tensor::zeros({10});
+
     EXPECT_FALSE(t.any_scalar());
     EXPECT_FALSE(t.all_scalar());
 
@@ -525,6 +689,7 @@ TEST_F(TensorBoolReductionTest, AnyScalarAllZeros) {
 
 TEST_F(TensorBoolReductionTest, AnyScalarAllOnes) {
     auto t = Tensor::ones({10});
+
     EXPECT_TRUE(t.any_scalar());
     EXPECT_TRUE(t.all_scalar());
 
@@ -535,10 +700,10 @@ TEST_F(TensorBoolReductionTest, AnyScalarAllOnes) {
 
 TEST_F(TensorBoolReductionTest, AnyScalarMixed) {
     auto t = Tensor::zeros({10});
-    // Modify on CPU
+
+    // Modify on CPU to set one element
     auto cpu_t = t.to(Device::CPU);
-    cpu_t.ptr<float>()[5] = 1.0f;  // Set one element to 1
-    // Copy back to CUDA
+    cpu_t.ptr<float>()[5] = 1.0f;
     t = cpu_t.to(Device::CUDA);
 
     EXPECT_TRUE(t.any_scalar());
@@ -557,25 +722,38 @@ TEST_F(TensorBoolReductionTest, AnyAllBoolTensor) {
     t = Tensor::ones_bool({10});
     EXPECT_TRUE(t.any_scalar());
     EXPECT_TRUE(t.all_scalar());
+
+    // Mixed
+    t = Tensor::zeros_bool({10});
+    auto cpu_t = t.to(Device::CPU);
+    cpu_t.ptr<unsigned char>()[0] = 1;
+    t = cpu_t.to(Device::CUDA);
+
+    EXPECT_TRUE(t.any_scalar());
+    EXPECT_FALSE(t.all_scalar());
 }
 
 TEST_F(TensorBoolReductionTest, AnyAllEmpty) {
     auto t = Tensor::empty({0});
+
     EXPECT_FALSE(t.any_scalar());
-    EXPECT_TRUE(t.all_scalar());  // Vacuously true
+    EXPECT_TRUE(t.all_scalar());  // Vacuously true for empty
 }
 
 TEST_F(TensorBoolReductionTest, AnyAllLargeTensor) {
     auto t = Tensor::zeros({1000, 1000});
     EXPECT_FALSE(t.any_scalar());
 
-    // Set one element
+    // Set one element in the middle
     auto cpu_t = t.to(Device::CPU);
     cpu_t.ptr<float>()[500*1000 + 500] = 1.0f;
     t = cpu_t.to(Device::CUDA);
 
     EXPECT_TRUE(t.any_scalar());
     EXPECT_FALSE(t.all_scalar());
+
+    // Verify count
+    EXPECT_EQ(t.count_nonzero(), 1);
 }
 
 // ============= Test TensorOptions =============
@@ -597,8 +775,10 @@ TEST_F(TensorOptionsTest, OptionsConstructors) {
 
     Tensor::TensorOptions opt2(Device::CPU);
     EXPECT_EQ(opt2.device, Device::CPU);
+    EXPECT_EQ(opt2.dtype, DataType::Float32);
 
     Tensor::TensorOptions opt3(DataType::Int32);
+    EXPECT_EQ(opt3.device, Device::CUDA);
     EXPECT_EQ(opt3.dtype, DataType::Int32);
 
     Tensor::TensorOptions opt4(Device::CPU, DataType::Int32);
@@ -613,6 +793,7 @@ TEST_F(TensorOptionsTest, OptionsFromTensor) {
     auto t2 = Tensor::zeros({5}, opts.device, opts.dtype);
     EXPECT_EQ(t2.device(), Device::CPU);
     EXPECT_EQ(t2.dtype(), DataType::Float32);
+    EXPECT_EQ(t2.shape(), TensorShape({5}));
 }
 
 // ============= Integration Tests =============
@@ -626,7 +807,7 @@ protected:
 };
 
 TEST_F(TensorIntegrationTest, KMeansPlusPlusInitialization) {
-    // Test that our new operations work correctly together
+    // Test that our new operations work correctly together for k-means++ initialization
     size_t n = 100;
     size_t d = 5;
 
@@ -635,11 +816,14 @@ TEST_F(TensorIntegrationTest, KMeansPlusPlusInitialization) {
     // Test 1: cdist works
     auto dists = data.cdist(data);
     EXPECT_EQ(dists.shape(), TensorShape({n, n}));
+    EXPECT_TRUE(dists.is_valid());
 
     // Test 2: min_with_indices works on cdist result
     auto [min_dists, min_indices] = dists.min_with_indices(1);
     EXPECT_EQ(min_dists.shape(), TensorShape({n}));
     EXPECT_EQ(min_indices.shape(), TensorShape({n}));
+    EXPECT_TRUE(min_dists.is_valid());
+    EXPECT_TRUE(min_indices.is_valid());
 
     // Test 3: max_with_indices works on the min distances
     auto [max_dist, max_idx] = min_dists.max_with_indices(0);
@@ -652,29 +836,17 @@ TEST_F(TensorIntegrationTest, KMeansPlusPlusInitialization) {
     EXPECT_GE(idx_vec[0], 0);
     EXPECT_LT(idx_vec[0], static_cast<int64_t>(n));
 
-    // Test 5: Verify operations work step by step
+    // Test 5: Verify distance computation is correct
     auto pt1 = data.slice(0, 0, 1);
     auto pt2 = data.slice(0, 50, 51);
 
-    std::cout << "pt1 shape: " << pt1.shape().str() << std::endl;
-    std::cout << "pt2 shape: " << pt2.shape().str() << std::endl;
+    EXPECT_EQ(pt1.shape(), TensorShape({1, d}));
+    EXPECT_EQ(pt2.shape(), TensorShape({1, d}));
 
     auto pt1_vals = pt1.to_vector();
     auto pt2_vals = pt2.to_vector();
 
-    std::cout << "pt1 values: ";
-    for (size_t i = 0; i < pt1_vals.size(); ++i) {
-        std::cout << pt1_vals[i] << " ";
-    }
-    std::cout << std::endl;
-
-    std::cout << "pt2 values: ";
-    for (size_t i = 0; i < pt2_vals.size(); ++i) {
-        std::cout << pt2_vals[i] << " ";
-    }
-    std::cout << std::endl;
-
-    // Verify they're different
+    // Verify they're different points
     bool all_same = true;
     for (size_t i = 0; i < std::min(pt1_vals.size(), pt2_vals.size()); ++i) {
         if (std::abs(pt1_vals[i] - pt2_vals[i]) > 1e-6f) {
@@ -682,17 +854,7 @@ TEST_F(TensorIntegrationTest, KMeansPlusPlusInitialization) {
             break;
         }
     }
-    EXPECT_FALSE(all_same);
-
-    // Test subtraction
-    auto diff = pt1.sub(pt2);
-    std::cout << "diff shape: " << diff.shape().str() << std::endl;
-    auto diff_vals = diff.to_vector();
-    std::cout << "diff values: ";
-    for (size_t i = 0; i < diff_vals.size(); ++i) {
-        std::cout << diff_vals[i] << " ";
-    }
-    std::cout << std::endl;
+    EXPECT_FALSE(all_same) << "Points should be different";
 
     // Manually compute expected distance
     float manual_dist = 0.0f;
@@ -701,28 +863,30 @@ TEST_F(TensorIntegrationTest, KMeansPlusPlusInitialization) {
         manual_dist += d * d;
     }
     manual_dist = std::sqrt(manual_dist);
-    std::cout << "Manual distance: " << manual_dist << std::endl;
 
-    // Now test each operation
+    // Compute using our operations
+    auto diff = pt1.sub(pt2);
+    EXPECT_EQ(diff.shape(), TensorShape({1, d}));
+
     auto squared = diff.pow(2.0f);
-    std::cout << "squared shape: " << squared.shape().str() << std::endl;
-    auto squared_vals = squared.to_vector();
-    std::cout << "squared values: ";
-    for (size_t i = 0; i < squared_vals.size(); ++i) {
-        std::cout << squared_vals[i] << " ";
-    }
-    std::cout << std::endl;
+    EXPECT_EQ(squared.shape(), TensorShape({1, d}));
 
     auto sum_result = squared.sum();
-    std::cout << "sum shape: " << sum_result.shape().str() << std::endl;
     float sum_val = sum_result.item();
-    std::cout << "sum value: " << sum_val << std::endl;
 
     auto sqrt_result = sum_result.sqrt();
     float dist = sqrt_result.item();
-    std::cout << "Final distance: " << dist << std::endl;
 
     EXPECT_NEAR(dist, manual_dist, 1e-5f) << "Computed distance should match manual calculation";
+
+    // Also verify no NaN in intermediate results
+    auto squared_vals = squared.to_vector();
+    for (size_t i = 0; i < squared_vals.size(); ++i) {
+        EXPECT_FALSE(std::isnan(squared_vals[i]))
+            << "NaN found at squared index " << i;
+        EXPECT_GE(squared_vals[i], 0.0f)
+            << "Squared value should be non-negative at index " << i;
+    }
 }
 
 TEST_F(TensorIntegrationTest, CopyAndModify) {
@@ -734,13 +898,33 @@ TEST_F(TensorIntegrationTest, CopyAndModify) {
     EXPECT_TRUE(original.all_close(copy1));
     EXPECT_TRUE(original.all_close(copy2));
 
+    // Store original values
+    auto original_vals = original.to_vector();
+
     // Modify copies independently
     copy1.add_(1.0f);
     copy2.mul_(2.0f);
 
+    // Verify original is unchanged
+    auto original_vals_after = original.to_vector();
+    for (size_t i = 0; i < original_vals.size(); ++i) {
+        EXPECT_NEAR(original_vals[i], original_vals_after[i], 1e-5f);
+    }
+
     EXPECT_FALSE(original.all_close(copy1));
     EXPECT_FALSE(original.all_close(copy2));
     EXPECT_FALSE(copy1.all_close(copy2));
+
+    // Verify modifications are correct
+    auto copy1_vals = copy1.to_vector();
+    for (size_t i = 0; i < original_vals.size(); ++i) {
+        EXPECT_NEAR(copy1_vals[i], original_vals[i] + 1.0f, 1e-5f);
+    }
+
+    auto copy2_vals = copy2.to_vector();
+    for (size_t i = 0; i < original_vals.size(); ++i) {
+        EXPECT_NEAR(copy2_vals[i], original_vals[i] * 2.0f, 1e-5f);
+    }
 }
 
 TEST_F(TensorIntegrationTest, SortAndSelect) {
@@ -752,10 +936,21 @@ TEST_F(TensorIntegrationTest, SortAndSelect) {
     auto top_10 = sorted.slice(0, 0, 10);
     auto top_10_indices = indices.slice(0, 0, 10);
 
+    EXPECT_EQ(top_10.shape(), TensorShape({10}));
+    EXPECT_EQ(top_10_indices.shape(), TensorShape({10}));
+
     // Verify they are the actual smallest values
     auto top_10_vec = top_10.to_vector();
     for (size_t i = 0; i < 9; ++i) {
-        EXPECT_LE(top_10_vec[i], top_10_vec[i+1]);
+        EXPECT_LE(top_10_vec[i], top_10_vec[i+1])
+            << "Top 10 should be sorted at index " << i;
+    }
+
+    // Verify indices are valid
+    auto idx_vec = tensor_to_int64_vector(top_10_indices);
+    for (auto idx : idx_vec) {
+        EXPECT_GE(idx, 0);
+        EXPECT_LT(idx, 100);
     }
 }
 
@@ -764,6 +959,8 @@ TEST_F(TensorIntegrationTest, DistanceMatrixSymmetry) {
 
     auto dist = data.cdist(data);
 
+    EXPECT_EQ(dist.shape(), TensorShape({50, 50}));
+
     // Distance matrix should be symmetric
     auto dist_t = dist.t();
     EXPECT_TRUE(dist.all_close(dist_t, 1e-4f, 1e-4f));
@@ -771,7 +968,15 @@ TEST_F(TensorIntegrationTest, DistanceMatrixSymmetry) {
     // Diagonal should be zero
     for (size_t i = 0; i < 50; ++i) {
         float diag_val = dist.to(Device::CPU).at({i, i});
-        EXPECT_NEAR(diag_val, 0.0f, 1e-5f);
+        EXPECT_NEAR(diag_val, 0.0f, 1e-5f)
+            << "Diagonal element " << i << " should be zero";
+    }
+
+    // All values should be non-negative
+    auto dist_vec = dist.to_vector();
+    for (size_t i = 0; i < dist_vec.size(); ++i) {
+        EXPECT_GE(dist_vec[i], 0.0f)
+            << "Distance should be non-negative at index " << i;
     }
 }
 
@@ -821,7 +1026,8 @@ TEST_F(TensorPerformanceTest, CdistPerformance) {
     std::cout << "  Ratio:    " << (our_time / torch_time) << "x\n";
 
     // We should be within 5x of PyTorch
-    EXPECT_LT(our_time / torch_time, 5.0);
+    EXPECT_LT(our_time / torch_time, 5.0)
+        << "Our implementation should be within 5x of PyTorch";
 }
 
 TEST_F(TensorPerformanceTest, SortPerformance) {
@@ -853,7 +1059,8 @@ TEST_F(TensorPerformanceTest, CopyPerformance) {
     std::cout << "  Time: " << copy_time << " ms\n";
 
     // Should complete in reasonable time (< 100ms)
-    EXPECT_LT(copy_time, 100.0);
+    EXPECT_LT(copy_time, 100.0)
+        << "Copy operation should complete in reasonable time";
 }
 
 // ============= Edge Cases and Error Handling =============
@@ -884,13 +1091,23 @@ TEST_F(TensorEdgeCasesTest, MinMaxInvalidTensor) {
     EXPECT_FALSE(idx.is_valid());
 }
 
+TEST_F(TensorEdgeCasesTest, MinMaxEmptyTensor) {
+    auto t = Tensor::empty({0});
+
+    auto [val, idx] = t.min_with_indices(0);
+    EXPECT_FALSE(val.is_valid());
+    EXPECT_FALSE(idx.is_valid());
+}
+
 TEST_F(TensorEdgeCasesTest, SortInvalidDimension) {
     auto t = Tensor::randn({5, 10});
 
+    // Sort along invalid dimension should handle gracefully
+    // This is implementation-dependent behavior
     auto [sorted, indices] = t.sort(5);  // Invalid dimension
 
-    // Should handle gracefully or return empty
-    // Implementation dependent
+    // Should either return empty or handle the error
+    // We don't specify exact behavior, just that it shouldn't crash
 }
 
 TEST_F(TensorEdgeCasesTest, CopyUninitializedTensor) {
@@ -899,4 +1116,33 @@ TEST_F(TensorEdgeCasesTest, CopyUninitializedTensor) {
 
     EXPECT_FALSE(a.is_valid());
     EXPECT_FALSE(b.is_valid());
+}
+
+TEST_F(TensorEdgeCasesTest, SortSingleElement) {
+    auto t = Tensor::from_vector({42.0f}, {1});
+
+    auto [sorted, indices] = t.sort(0, false);
+
+    EXPECT_EQ(sorted.numel(), 1);
+    EXPECT_NEAR(sorted.item(), 42.0f, 1e-5f);
+
+    auto idx_vec = tensor_to_int64_vector(indices);
+    EXPECT_EQ(idx_vec.size(), 1);
+    EXPECT_EQ(idx_vec[0], 0);
+}
+
+TEST_F(TensorEdgeCasesTest, MinMaxSingleElement) {
+    auto t = Tensor::from_vector({42.0f}, {1});
+
+    auto [min_val, min_idx] = t.min_with_indices(0);
+    auto [max_val, max_idx] = t.max_with_indices(0);
+
+    EXPECT_NEAR(min_val.item(), 42.0f, 1e-5f);
+    EXPECT_NEAR(max_val.item(), 42.0f, 1e-5f);
+
+    auto min_idx_vec = tensor_to_int64_vector(min_idx);
+    auto max_idx_vec = tensor_to_int64_vector(max_idx);
+
+    EXPECT_EQ(min_idx_vec[0], 0);
+    EXPECT_EQ(max_idx_vec[0], 0);
 }

@@ -289,7 +289,7 @@ TEST_F(TensorTorchCompatTest, BatchProcessing) {
 
     auto torch_mean = torch_batch.mean();
     auto torch_std = torch_batch.std(/*unbiased=*/false);
-    auto torch_normalized = (torch_batch - torch_mean) / (torch_std + 1e-12f);
+    auto torch_normalized = (torch_batch - torch_mean) / (torch_std + 1e-8f);  // Match epsilon!
 
     auto custom_relu = custom_normalized.relu();
     auto torch_relu = torch::relu(torch_normalized);
