@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
-#
+
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # Testing module - comprehensive tests for all components
@@ -51,6 +51,9 @@ set(OPTIONAL_TEST_FILES
     test_tensor_debug.cpp
     test_bugs_found.cpp
     test_tensor_vs_torch.cpp
+    test_morton_comparison.cpp
+    #test_sogs_comparison.cpp
+    test_point_cloud_comparison.cpp
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})

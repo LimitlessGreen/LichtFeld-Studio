@@ -10,7 +10,9 @@ set(CORE_SOURCES
         image_io.cpp
         parameters.cpp
         splat_data.cpp
+        splat_data_new.cpp
         sogs.cpp
+        sogs_new.cpp
         tensor/tensor.cpp              # Main tensor implementation
         tensor/tensor_utils.cpp        # Minimal utilities (SafeOps, MemoryInfo, functional)
         tensor/tensor_matrix_ops.cpp   # Matrix operations (matmul, transpose, etc.)
@@ -31,7 +33,8 @@ set(CORE_CUDA_SOURCES
         tensor/tensor_broadcast_ops.cu # CUDA kernels for broadcasting
         tensor/tensor_masking_ops.cu   # CUDA kernels for masking/indexing
         tensor/tensor_random_ops.cu    # CUDA kernels for random ops
-	    kmeans_new.cu
+	kmeans_new.cu
+	morton_encoding_new.cu
 )
 
 add_compile_definitions(_PSTL_USAGE_WARNINGS=0)
@@ -60,6 +63,7 @@ if(CORE_CUDA_SOURCES)
 
     target_link_libraries(gs_tensor_kernels
             PUBLIC
+	    gs_training_kernels
             CUDA::cudart
             CUDA::cublas      # For matrix operations
             CUDA::curand      # For random number generation
