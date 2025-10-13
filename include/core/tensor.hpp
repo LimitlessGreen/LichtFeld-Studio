@@ -349,20 +349,16 @@ namespace gs {
     private:
         std::vector<size_t> dims_;
         size_t total_elements_ = 0;
-        bool initialized_ = false;
 
     public:
         TensorShape() = default;
-        TensorShape(std::initializer_list<size_t> dims) : dims_(dims),
-                                                          initialized_(true) {
+        TensorShape(std::initializer_list<size_t> dims) : dims_(dims) {
             compute_total();
         }
-        explicit TensorShape(const std::vector<size_t>& dims) : dims_(dims),
-                                                                initialized_(true) {
+        explicit TensorShape(const std::vector<size_t>& dims) : dims_(dims) {
             compute_total();
         }
-        explicit TensorShape(std::span<const size_t> dims) : dims_(dims.begin(), dims.end()),
-                                                             initialized_(true) {
+        explicit TensorShape(std::span<const size_t> dims) : dims_(dims.begin(), dims.end()) {
             compute_total();
         }
 
@@ -376,7 +372,6 @@ namespace gs {
         }
         size_t elements() const { return total_elements_; }
         const std::vector<size_t>& dims() const { return dims_; }
-        bool is_initialized() const { return initialized_; }
 
         // Calculate strides for row-major layout
         std::vector<size_t> strides() const {
@@ -480,7 +475,6 @@ namespace gs {
         TensorShape shape_;
         Device device_ = Device::CPU;
         DataType dtype_ = DataType::Float32;
-        bool initialized_ = false;
         bool is_view_ = false;
 
         mutable size_t id_ = 0;
@@ -495,6 +489,7 @@ namespace gs {
         std::pair<Tensor, Tensor> _broadcasted(const Tensor& other, bool match_dtype = true) const;
 
         int resolve_dim(int dim) const {
+            if (!is_valid()) return -1;
             return dim < 0 ? static_cast<int>(shape_.rank()) + dim : dim;
         }
 
@@ -537,7 +532,7 @@ namespace gs {
 
         // Helper to ensure tensor is on same device
         Tensor ensure_same_device(const Tensor& other) const {
-            return (other.device() == device_) ? other.clone() : other.to(device_);
+            return (other.device() == device_) ? other : other.to(device_);
         }
 
         // Helper to create view with shared ownership
@@ -587,7 +582,7 @@ namespace gs {
         Tensor() = default;
         Tensor(void* data, TensorShape shape, Device device, DataType dtype);
 
-        // Copy constructor and assignment
+        // Copy constructor and assignment - SHALLOW COPY (LibTorch behavior)
         Tensor(const Tensor& other);
         Tensor& operator=(const Tensor& other);
 
@@ -637,7 +632,7 @@ namespace gs {
                 LOG_ERROR("accessor() only works on CPU tensors");
                 return TensorAccessor<T, N>(nullptr, std::array<size_t, N>{});
             }
-            if (shape_.rank() != N) {
+            if (!is_valid() || shape_.rank() != N) {
                 LOG_ERROR("accessor() dimension mismatch: tensor has {} dims, requested {}",
                           shape_.rank(), N);
                 return TensorAccessor<T, N>(nullptr, std::array<size_t, N>{});
@@ -899,11 +894,10 @@ namespace gs {
         void set_bool(std::span<const size_t> indices, bool value);
         bool get_bool(std::span<const size_t> indices) const;
 
-        // Data access
+        // Data access - FIXED: Handle invalid tensors safely
         template <typename T>
         T* ptr() {
-            if (!data_ && shape_.elements() > 0) {
-                LOG_ERROR("Tensor #{}: Attempting to access null data pointer", id_);
+            if (!is_valid()) {
                 return nullptr;
             }
             return static_cast<T*>(data_);
@@ -911,8 +905,7 @@ namespace gs {
 
         template <typename T>
         const T* ptr() const {
-            if (!data_ && shape_.elements() > 0) {
-                LOG_ERROR("Tensor #{}: Attempting to access null data pointer", id_);
+            if (!is_valid()) {
                 return nullptr;
             }
             return static_cast<const T*>(data_);
@@ -921,21 +914,43 @@ namespace gs {
         void* raw_ptr() { return data_; }
         const void* raw_ptr() const { return data_; }
 
-        // Properties
+        // Properties - FIXED: Check validity before accessing shape
         const TensorShape& shape() const { return shape_; }
         Device device() const { return device_; }
         DataType dtype() const { return dtype_; }
         bool owns_memory() const { return static_cast<bool>(data_owner_) && !is_view_; }
         bool is_view() const { return is_view_; }
-        bool is_empty() const { return !initialized_ || shape_.elements() == 0; }
-        bool is_valid() const { return initialized_; }
-        size_t numel() const { return shape_.elements(); }
-        size_t bytes() const { return numel() * dtype_size(dtype_); }
-        size_t ndim() const { return shape_.rank(); }
-        size_t size(size_t dim) const { return shape_[dim]; }
+        bool is_empty() const { return !is_valid() || numel() == 0; }
+
+        // CRITICAL: Check data presence, not any flag
+        bool is_valid() const {
+            return static_cast<bool>(data_owner_) || is_view_;
+        }
+
+        // CRITICAL: All size queries must check validity first
+        size_t numel() const {
+            return is_valid() ? shape_.elements() : 0;
+        }
+
+        size_t bytes() const {
+            return numel() * dtype_size(dtype_);
+        }
+
+        size_t ndim() const {
+            return is_valid() ? shape_.rank() : 0;
+        }
+
+        size_t size(size_t dim) const {
+            if (!is_valid()) return 0;
+            if (dim >= shape_.rank()) {
+                LOG_ERROR("Dimension {} out of range for rank {}", dim, shape_.rank());
+                return 0;
+            }
+            return shape_[dim];
+        }
 
         // Memory operations
-        Tensor clone() const;
+        Tensor clone() const;  // Deep copy
         Tensor contiguous() const;
         Tensor to(Device device) const;
         Tensor to(DataType dtype) const;
@@ -1273,6 +1288,7 @@ namespace gs {
             std::vector<int> dims_vec = {dim};
             return norm(p, std::span<const int>(dims_vec), keepdim);
         }
+
         float item() const;
 
         template <typename T>
@@ -1491,7 +1507,7 @@ namespace gs {
             auto end = std::chrono::high_resolution_clock::now();
             if (profiling_enabled_) {
                 auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-                LOG_INFO("{}: {} μs", name, duration.count());
+                LOG_INFO("{}: {} µs", name, duration.count());
             }
             return result;
         }
@@ -1510,7 +1526,7 @@ namespace gs {
         // Utility functions
         std::string str() const;
         std::vector<float> to_vector() const;
-
+        std::vector<uint8_t> to_vector_uint8() const;
         std::vector<int64_t> to_vector_int64() const;
 
         std::vector<int> to_vector_int() const;
@@ -1553,7 +1569,7 @@ private:
 public:
     TensorRowProxy(Tensor* tensor, size_t row_index)
         : tensor_(tensor), row_index_(row_index) {
-        if (tensor_ && row_index_ >= tensor_->shape()[0]) {
+        if (tensor_ && tensor_->is_valid() && row_index_ >= tensor_->shape()[0]) {
             LOG_ERROR("Row index {} out of bounds for dimension 0 with size {}",
                       row_index_, tensor_->shape()[0]);
         }
@@ -1561,98 +1577,97 @@ public:
 
     // ============= 2D Access: tensor[i][j] =============
 
-float& operator[](size_t col_index) {
-    if (!tensor_) {
-        LOG_ERROR("TensorRowProxy: null tensor pointer");
-        static float dummy = 0.0f;
-        return dummy;
-    }
-
-    if (tensor_->shape().rank() < 2) {
-        LOG_ERROR("TensorRowProxy: tensor rank {} < 2", tensor_->shape().rank());
-        static float dummy = 0.0f;
-        return dummy;
-    }
-
-    if (col_index >= tensor_->shape()[1]) {
-        LOG_ERROR("Column index {} out of bounds for dimension 1 with size {}",
-                  col_index, tensor_->shape()[1]);
-        static float dummy = 0.0f;
-        return dummy;
-    }
-
-    if (tensor_->device() != Device::CPU) {
-        // For CUDA tensors in read context, we need to provide a workaround
-        // Store the value in a thread-local static so the reference remains valid
-        thread_local static float cuda_read_value = 0.0f;
-
-        size_t linear_idx = row_index_ * tensor_->shape()[1] + col_index;
-
-        cudaError_t err = cudaMemcpy(
-            &cuda_read_value,
-            tensor_->ptr<float>() + linear_idx,
-            sizeof(float),
-            cudaMemcpyDeviceToHost
-        );
-
-        if (err != cudaSuccess) {
-            LOG_ERROR("CUDA memcpy failed in TensorRowProxy::operator[]: {}",
-                     cudaGetErrorString(err));
-            cuda_read_value = 0.0f;
+    float& operator[](size_t col_index) {
+        if (!tensor_ || !tensor_->is_valid()) {
+            LOG_ERROR("TensorRowProxy: invalid tensor pointer");
+            static float dummy = 0.0f;
+            return dummy;
         }
 
-        return cuda_read_value;
+        if (tensor_->shape().rank() < 2) {
+            LOG_ERROR("TensorRowProxy: tensor rank {} < 2", tensor_->shape().rank());
+            static float dummy = 0.0f;
+            return dummy;
+        }
+
+        if (col_index >= tensor_->shape()[1]) {
+            LOG_ERROR("Column index {} out of bounds for dimension 1 with size {}",
+                      col_index, tensor_->shape()[1]);
+            static float dummy = 0.0f;
+            return dummy;
+        }
+
+        if (tensor_->device() != Device::CPU) {
+            // For CUDA tensors in read context, we need to provide a workaround
+            // Store the value in a thread-local static so the reference remains valid
+            thread_local static float cuda_read_value = 0.0f;
+
+            size_t linear_idx = row_index_ * tensor_->shape()[1] + col_index;
+
+            cudaError_t err = cudaMemcpy(
+                &cuda_read_value,
+                tensor_->ptr<float>() + linear_idx,
+                sizeof(float),
+                cudaMemcpyDeviceToHost
+            );
+
+            if (err != cudaSuccess) {
+                LOG_ERROR("CUDA memcpy failed in TensorRowProxy::operator[]: {}",
+                         cudaGetErrorString(err));
+                cuda_read_value = 0.0f;
+            }
+
+            return cuda_read_value;
+        }
+
+        return tensor_->at({row_index_, col_index});
     }
 
-    return tensor_->at({row_index_, col_index});
-}
-
-
-float operator[](size_t col_index) const {
-    if (!tensor_) {
-        LOG_ERROR("TensorRowProxy: null tensor pointer");
-        return 0.0f;
-    }
-
-    if (tensor_->shape().rank() < 2) {
-        LOG_ERROR("TensorRowProxy: tensor rank {} < 2", tensor_->shape().rank());
-        return 0.0f;
-    }
-
-    if (col_index >= tensor_->shape()[1]) {
-        LOG_ERROR("Column index {} out of bounds for dimension 1 with size {}",
-                  col_index, tensor_->shape()[1]);
-        return 0.0f;
-    }
-
-    // Calculate linear index: row_index * num_cols + col_index
-    size_t linear_idx = row_index_ * tensor_->shape()[1] + col_index;
-
-    if (tensor_->device() == Device::CUDA) {
-        float value = 0.0f;
-        cudaError_t err = cudaMemcpy(
-            &value,
-            tensor_->ptr<float>() + linear_idx,
-            sizeof(float),
-            cudaMemcpyDeviceToHost
-        );
-        if (err != cudaSuccess) {
-            LOG_ERROR("CUDA memcpy failed in TensorRowProxy::operator[]: {}",
-                     cudaGetErrorString(err));
+    float operator[](size_t col_index) const {
+        if (!tensor_ || !tensor_->is_valid()) {
+            LOG_ERROR("TensorRowProxy: invalid tensor pointer");
             return 0.0f;
         }
-        return value;
-    } else {
-        return tensor_->ptr<float>()[linear_idx];
+
+        if (tensor_->shape().rank() < 2) {
+            LOG_ERROR("TensorRowProxy: tensor rank {} < 2", tensor_->shape().rank());
+            return 0.0f;
+        }
+
+        if (col_index >= tensor_->shape()[1]) {
+            LOG_ERROR("Column index {} out of bounds for dimension 1 with size {}",
+                      col_index, tensor_->shape()[1]);
+            return 0.0f;
+        }
+
+        // Calculate linear index: row_index * num_cols + col_index
+        size_t linear_idx = row_index_ * tensor_->shape()[1] + col_index;
+
+        if (tensor_->device() == Device::CUDA) {
+            float value = 0.0f;
+            cudaError_t err = cudaMemcpy(
+                &value,
+                tensor_->ptr<float>() + linear_idx,
+                sizeof(float),
+                cudaMemcpyDeviceToHost
+            );
+            if (err != cudaSuccess) {
+                LOG_ERROR("CUDA memcpy failed in TensorRowProxy::operator[]: {}",
+                         cudaGetErrorString(err));
+                return 0.0f;
+            }
+            return value;
+        } else {
+            return tensor_->ptr<float>()[linear_idx];
+        }
     }
-}
 
     // ============= 1D Access: Extract Value =============
 
     // Explicit item extraction (no ambiguity, always works)
     float item() const {
-        if (!tensor_) {
-            LOG_ERROR("TensorRowProxy::item(): null tensor pointer");
+        if (!tensor_ || !tensor_->is_valid()) {
+            LOG_ERROR("TensorRowProxy::item(): invalid tensor pointer");
             return 0.0f;
         }
 
@@ -1696,8 +1711,8 @@ float operator[](size_t col_index) const {
     }
 
     operator float() const {
-        if (!tensor_) {
-            LOG_ERROR("TensorRowProxy: null tensor pointer in float conversion");
+        if (!tensor_ || !tensor_->is_valid()) {
+            LOG_ERROR("TensorRowProxy: invalid tensor pointer in float conversion");
             return 0.0f;
         }
 
@@ -1715,98 +1730,98 @@ float operator[](size_t col_index) const {
     }
 
     // Template version for type specification
-template<typename T = float>
-T item_as() const {
-    if (!tensor_) {
-        LOG_ERROR("TensorRowProxy::item_as(): null tensor pointer");
-        return T{};
-    }
-
-    // Handle 2D tensors with shape [N, 1] (like nonzero() output)
-    if (tensor_->shape().rank() == 2 && tensor_->shape()[1] == 1) {
-        // Convert to actual Tensor row first, then extract item
-        Tensor row_tensor = static_cast<Tensor>(*this);
-        return row_tensor.item<T>();
-    }
-
-    // Standard 1D case
-    if (tensor_->shape().rank() != 1) {
-        LOG_ERROR("TensorRowProxy::item_as(): only valid for 1D or [N,1] tensors, got rank {}",
-                  tensor_->shape().rank());
-        return T{};
-    }
-
-    if (row_index_ >= tensor_->numel()) {
-        LOG_ERROR("TensorRowProxy::item_as(): index {} out of bounds for size {}",
-                  row_index_, tensor_->numel());
-        return T{};
-    }
-
-    if (tensor_->device() == Device::CUDA) {
-        T value{};
-
-        // Calculate proper offset based on dtype
-        size_t type_size = dtype_size(tensor_->dtype());
-        const void* src_ptr = static_cast<const char*>(tensor_->raw_ptr()) + row_index_ * type_size;
-
-        cudaError_t err = cudaMemcpy(
-            &value,
-            src_ptr,
-            sizeof(T),
-            cudaMemcpyDeviceToHost
-        );
-        if (err != cudaSuccess) {
-            LOG_ERROR("CUDA memcpy failed in TensorRowProxy::item_as(): {}",
-                     cudaGetErrorString(err));
+    template<typename T = float>
+    T item_as() const {
+        if (!tensor_ || !tensor_->is_valid()) {
+            LOG_ERROR("TensorRowProxy::item_as(): invalid tensor pointer");
             return T{};
         }
-        return value;
-    } else {
-        // Direct pointer access for CPU tensors
-        // Properly cast based on tensor's actual dtype
-        if (tensor_->dtype() == DataType::Float32) {
-            if constexpr (std::is_same_v<T, float>) {
-                return static_cast<T>(tensor_->ptr<float>()[row_index_]);
-            } else if constexpr (std::is_same_v<T, int>) {
-                return static_cast<T>(tensor_->ptr<float>()[row_index_]);
-            } else if constexpr (std::is_same_v<T, int64_t>) {
-                return static_cast<T>(tensor_->ptr<float>()[row_index_]);
-            }
-        } else if (tensor_->dtype() == DataType::Int32) {
-            if constexpr (std::is_same_v<T, int>) {
-                return static_cast<T>(tensor_->ptr<int>()[row_index_]);
-            } else if constexpr (std::is_same_v<T, float>) {
-                return static_cast<T>(tensor_->ptr<int>()[row_index_]);
-            } else if constexpr (std::is_same_v<T, int64_t>) {
-                return static_cast<T>(tensor_->ptr<int>()[row_index_]);
-            }
-        } else if (tensor_->dtype() == DataType::Int64) {
-            // Proper Int64 handling
-            const int64_t* data = reinterpret_cast<const int64_t*>(tensor_->raw_ptr());
-            if constexpr (std::is_same_v<T, int64_t>) {
-                return data[row_index_];
-            } else if constexpr (std::is_same_v<T, int>) {
-                return static_cast<T>(data[row_index_]);
-            } else if constexpr (std::is_same_v<T, float>) {
-                return static_cast<T>(data[row_index_]);
-            }
-        } else if (tensor_->dtype() == DataType::Bool) {
-            const unsigned char* data = tensor_->ptr<unsigned char>();
-            if constexpr (std::is_same_v<T, bool>) {
-                return data[row_index_] != 0;
-            } else if constexpr (std::is_same_v<T, float>) {
-                return data[row_index_] ? 1.0f : 0.0f;
-            } else if constexpr (std::is_same_v<T, int>) {
-                return data[row_index_] ? 1 : 0;
-            } else if constexpr (std::is_same_v<T, int64_t>) {
-                return data[row_index_] ? 1LL : 0LL;
-            }
+
+        // Handle 2D tensors with shape [N, 1] (like nonzero() output)
+        if (tensor_->shape().rank() == 2 && tensor_->shape()[1] == 1) {
+            // Convert to actual Tensor row first, then extract item
+            Tensor row_tensor = static_cast<Tensor>(*this);
+            return row_tensor.item<T>();
         }
 
-        LOG_ERROR("Unsupported dtype/type combination for item_as()");
-        return T{};
+        // Standard 1D case
+        if (tensor_->shape().rank() != 1) {
+            LOG_ERROR("TensorRowProxy::item_as(): only valid for 1D or [N,1] tensors, got rank {}",
+                      tensor_->shape().rank());
+            return T{};
+        }
+
+        if (row_index_ >= tensor_->numel()) {
+            LOG_ERROR("TensorRowProxy::item_as(): index {} out of bounds for size {}",
+                      row_index_, tensor_->numel());
+            return T{};
+        }
+
+        if (tensor_->device() == Device::CUDA) {
+            T value{};
+
+            // Calculate proper offset based on dtype
+            size_t type_size = dtype_size(tensor_->dtype());
+            const void* src_ptr = static_cast<const char*>(tensor_->raw_ptr()) + row_index_ * type_size;
+
+            cudaError_t err = cudaMemcpy(
+                &value,
+                src_ptr,
+                sizeof(T),
+                cudaMemcpyDeviceToHost
+            );
+            if (err != cudaSuccess) {
+                LOG_ERROR("CUDA memcpy failed in TensorRowProxy::item_as(): {}",
+                         cudaGetErrorString(err));
+                return T{};
+            }
+            return value;
+        } else {
+            // Direct pointer access for CPU tensors
+            // Properly cast based on tensor's actual dtype
+            if (tensor_->dtype() == DataType::Float32) {
+                if constexpr (std::is_same_v<T, float>) {
+                    return static_cast<T>(tensor_->ptr<float>()[row_index_]);
+                } else if constexpr (std::is_same_v<T, int>) {
+                    return static_cast<T>(tensor_->ptr<float>()[row_index_]);
+                } else if constexpr (std::is_same_v<T, int64_t>) {
+                    return static_cast<T>(tensor_->ptr<float>()[row_index_]);
+                }
+            } else if (tensor_->dtype() == DataType::Int32) {
+                if constexpr (std::is_same_v<T, int>) {
+                    return static_cast<T>(tensor_->ptr<int>()[row_index_]);
+                } else if constexpr (std::is_same_v<T, float>) {
+                    return static_cast<T>(tensor_->ptr<int>()[row_index_]);
+                } else if constexpr (std::is_same_v<T, int64_t>) {
+                    return static_cast<T>(tensor_->ptr<int>()[row_index_]);
+                }
+            } else if (tensor_->dtype() == DataType::Int64) {
+                // Proper Int64 handling
+                const int64_t* data = reinterpret_cast<const int64_t*>(tensor_->raw_ptr());
+                if constexpr (std::is_same_v<T, int64_t>) {
+                    return data[row_index_];
+                } else if constexpr (std::is_same_v<T, int>) {
+                    return static_cast<T>(data[row_index_]);
+                } else if constexpr (std::is_same_v<T, float>) {
+                    return static_cast<T>(data[row_index_]);
+                }
+            } else if (tensor_->dtype() == DataType::Bool) {
+                const unsigned char* data = tensor_->ptr<unsigned char>();
+                if constexpr (std::is_same_v<T, bool>) {
+                    return data[row_index_] != 0;
+                } else if constexpr (std::is_same_v<T, float>) {
+                    return data[row_index_] ? 1.0f : 0.0f;
+                } else if constexpr (std::is_same_v<T, int>) {
+                    return data[row_index_] ? 1 : 0;
+                } else if constexpr (std::is_same_v<T, int64_t>) {
+                    return data[row_index_] ? 1LL : 0LL;
+                }
+            }
+
+            LOG_ERROR("Unsupported dtype/type combination for item_as()");
+            return T{};
+        }
     }
-}
 
     // Specialized item_as for common types
     int item_int() const { return item_as<int>(); }
@@ -1815,8 +1830,8 @@ T item_as() const {
     // ============= Conversion to Tensor =============
 
     operator Tensor() const {
-        if (!tensor_) {
-            LOG_ERROR("TensorRowProxy: null tensor pointer");
+        if (!tensor_ || !tensor_->is_valid()) {
+            LOG_ERROR("TensorRowProxy: invalid tensor pointer");
             return Tensor();
         }
 
@@ -1900,7 +1915,7 @@ T item_as() const {
 
     // Assignment from Tensor
     TensorRowProxy& operator=(const Tensor& other) {
-        if (!tensor_) {
+        if (!tensor_ || !tensor_->is_valid()) {
             return *this;
         }
 
@@ -1982,7 +1997,7 @@ T item_as() const {
 
     // Assignment from scalar (for 1D tensors)
     TensorRowProxy& operator=(float value) {
-        if (!tensor_) {
+        if (!tensor_ || !tensor_->is_valid()) {
             return *this;
         }
 
@@ -2080,16 +2095,23 @@ T item_as() const {
         return Tensor(*this).square();
     }
 };
+
     // Implementation of Tensor::operator[]
     inline TensorRowProxy Tensor::operator[](size_t index) {
-        if (index >= shape_[0]) {
+        if (!is_valid()) {
+            LOG_ERROR("operator[] on invalid tensor");
+        }
+        if (is_valid() && index >= shape_[0]) {
             LOG_ERROR("Index {} out of bounds for dimension 0 with size {}", index, shape_[0]);
         }
         return TensorRowProxy(this, index);
     }
 
     inline const TensorRowProxy Tensor::operator[](size_t index) const {
-        if (index >= shape_[0]) {
+        if (!is_valid()) {
+            LOG_ERROR("operator[] on invalid tensor");
+        }
+        if (is_valid() && index >= shape_[0]) {
             LOG_ERROR("Index {} out of bounds for dimension 0 with size {}", index, shape_[0]);
         }
         return TensorRowProxy(const_cast<Tensor*>(this), index);
@@ -2168,7 +2190,7 @@ T item_as() const {
         template <typename... Funcs>
         auto pipe(Funcs... funcs) {
             return [=](const Tensor& input) -> Tensor {
-                Tensor result = input.clone();
+                Tensor result = input;  // Shallow copy
                 ((result = funcs(std::move(result))), ...);
                 return result;
             };

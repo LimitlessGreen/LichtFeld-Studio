@@ -7,9 +7,13 @@ set(CORE_SOURCES
         application.cpp
         argument_parser.cpp
         camera.cpp
+        camera_ref.cpp
+        camera_new.cpp
         image_io.cpp
+        image_io_new.cpp
         parameters.cpp
         splat_data.cpp
+        splat_data_ref.cpp
         splat_data_new.cpp
         sogs.cpp
         sogs_new.cpp

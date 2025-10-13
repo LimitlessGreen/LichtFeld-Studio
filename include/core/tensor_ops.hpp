@@ -70,6 +70,31 @@ namespace gs::tensor_ops {
                                size_t src_rank, size_t dst_rank,
                                size_t dst_elements, cudaStream_t stream);
 
+    // ============= Broadcasting Binary Operations - NEW UNIFIED INTERFACE =============
+
+    // Forward declare operation functors
+    template<typename T> struct add_op { __device__ T operator()(T a, T b) const { return a + b; } };
+    template<typename T> struct sub_op { __device__ T operator()(T a, T b) const { return a - b; } };
+    template<typename T> struct mul_op { __device__ T operator()(T a, T b) const { return a * b; } };
+    template<typename T> struct div_op { __device__ T operator()(T a, T b) const { return a / b; } };
+    template<typename T> struct pow_op { __device__ T operator()(T a, T b) const { return powf(a, b); } };
+    template<typename T> struct eq_op { __device__ unsigned char operator()(T a, T b) const { return a == b ? 1 : 0; } };
+    template<typename T> struct ne_op { __device__ unsigned char operator()(T a, T b) const { return a != b ? 1 : 0; } };
+    template<typename T> struct lt_op { __device__ unsigned char operator()(T a, T b) const { return a < b ? 1 : 0; } };
+    template<typename T> struct le_op { __device__ unsigned char operator()(T a, T b) const { return a <= b ? 1 : 0; } };
+    template<typename T> struct gt_op { __device__ unsigned char operator()(T a, T b) const { return a > b ? 1 : 0; } };
+    template<typename T> struct ge_op { __device__ unsigned char operator()(T a, T b) const { return a >= b ? 1 : 0; } };
+    struct logical_and_op { __device__ unsigned char operator()(unsigned char a, unsigned char b) const { return (a && b) ? 1 : 0; } };
+    struct logical_or_op { __device__ unsigned char operator()(unsigned char a, unsigned char b) const { return (a || b) ? 1 : 0; } };
+    struct logical_xor_op { __device__ unsigned char operator()(unsigned char a, unsigned char b) const { return (a != b) ? 1 : 0; } };
+
+    // Single unified template for all broadcast binary operations
+    template<typename T, typename OutputT, typename BinaryOp>
+    void launch_broadcast_binary(const T* a, const T* b, OutputT* c,
+                                const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                                size_t a_rank, size_t b_rank, size_t c_rank,
+                                size_t c_elements, BinaryOp op, cudaStream_t stream = 0);
+
     // ============= Matrix Operations =============
     void launch_matmul(const float* a, const float* b, float* c,
                        size_t m, size_t n, size_t k,
@@ -173,6 +198,7 @@ namespace gs::tensor_ops {
     // ============= Cumulative Sum Operation =============
     void launch_cumsum(void* data, const size_t* shape, size_t rank,
                        int dim, DataType dtype, cudaStream_t stream);
+
     // ============= Pairwise Distance Operations =============
     void launch_cdist(const float* a, const float* b, float* out,
                       size_t N, size_t M, size_t D, float p, cudaStream_t stream);

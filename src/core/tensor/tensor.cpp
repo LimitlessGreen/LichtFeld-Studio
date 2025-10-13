@@ -27,193 +27,106 @@ namespace gs {
     std::atomic<size_t> Tensor::next_id_{1};
 
     // ============= Constructors & Destructor =============
+
     Tensor::Tensor(void* data, TensorShape shape, Device device, DataType dtype)
         : data_(data),
-          data_owner_(nullptr),
+          data_owner_(nullptr),  // Non-owning
           shape_(shape),
           device_(device),
           dtype_(dtype),
-          initialized_(true),
+          is_view_(true),  // This is a view
           id_(next_id_++) {
 
         if (profiling_enabled_) {
-            LOG_DEBUG("Created tensor #{} (view): shape={}, device={}, dtype={}",
+            LOG_DEBUG("Created tensor #{} (non-owning view): shape={}, device={}, dtype={}",
                       id_, shape_.str(), device_name(device_), dtype_name(dtype_));
         }
     }
 
-    // ============= Copy Constructor & Assignment =============
-Tensor::Tensor(const Tensor& other)
-    : data_(nullptr),
-      data_owner_(nullptr),
-      shape_(other.shape_),
-      device_(other.device_),
-      dtype_(other.dtype_),
-      initialized_(other.initialized_),
-      is_view_(false),  // Copy is never a view
-      id_(next_id_++) {
-
-    if (!other.initialized_ || other.numel() == 0) {
-        return;
-    }
-
-    // Allocate new memory
-    size_t bytes = other.bytes();
-
-    if (device_ == Device::CUDA) {
-        void* ptr = nullptr;
-        cudaError_t err = cudaMalloc(&ptr, bytes);
-        if (err != cudaSuccess) {
-            LOG_ERROR("Failed to allocate {} bytes on CUDA: {}", bytes, cudaGetErrorString(err));
-            initialized_ = false;
-            return;
-        }
-        data_ = ptr;
-        data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
-            if (p)
-                cudaFree(p);
-        });
-
-        // Copy data
-        CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes,
-                   other.device_ == Device::CUDA ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice));
-    } else {
-        void* ptr = std::malloc(bytes);
-        if (!ptr) {
-            LOG_ERROR("Failed to allocate {} bytes on CPU", bytes);
-            initialized_ = false;
-            return;
-        }
-        data_ = ptr;
-        data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
-            if (p)
-                std::free(p);
-        });
-
-        // Copy data
-        if (other.device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes, cudaMemcpyDeviceToHost));
-        } else {
-            std::memcpy(data_, other.data_, bytes);
-        }
-    }
-
-    if (profiling_enabled_) {
-        LOG_DEBUG("Copy constructed tensor #{} from #{}: shape={}, device={}, dtype={}",
-                  id_, other.id_, shape_.str(), device_name(device_), dtype_name(dtype_));
-    }
-}
-
-Tensor& Tensor::operator=(const Tensor& other) {
-    if (this == &other) {
-        return *this;
-    }
-
-    // Clean up existing data (shared_ptr will handle deallocation)
-    data_owner_.reset();
-    data_ = nullptr;
-
-    // Copy metadata
-    shape_ = other.shape_;
-    device_ = other.device_;
-    dtype_ = other.dtype_;
-    initialized_ = other.initialized_;
-    is_view_ = false;  // Copy is never a view
-    id_ = next_id_++;
-
-    if (!other.initialized_ || other.numel() == 0) {
-        return *this;
-    }
-
-    // Allocate new memory
-    size_t bytes = other.bytes();
-
-    if (device_ == Device::CUDA) {
-        void* ptr = nullptr;
-        cudaError_t err = cudaMalloc(&ptr, bytes);
-        if (err != cudaSuccess) {
-            LOG_ERROR("Failed to allocate {} bytes on CUDA: {}", bytes, cudaGetErrorString(err));
-            initialized_ = false;
-            return *this;
-        }
-        data_ = ptr;
-        data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
-            if (p)
-                cudaFree(p);
-        });
-
-        // Copy data
-        CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes,
-                   other.device_ == Device::CUDA ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice));
-    } else {
-        void* ptr = std::malloc(bytes);
-        if (!ptr) {
-            LOG_ERROR("Failed to allocate {} bytes on CPU", bytes);
-            initialized_ = false;
-            return *this;
-        }
-        data_ = ptr;
-        data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
-            if (p)
-                std::free(p);
-        });
-
-        // Copy data
-        if (other.device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes, cudaMemcpyDeviceToHost));
-        } else {
-            std::memcpy(data_, other.data_, bytes);
-        }
-    }
-
-    if (profiling_enabled_) {
-        LOG_DEBUG("Copy assigned tensor #{} from #{}: shape={}, device={}, dtype={}",
-                  id_, other.id_, shape_.str(), device_name(device_), dtype_name(dtype_));
-    }
-
-    return *this;
-}
-
-    Tensor::Tensor(Tensor&& other) noexcept
-        : data_(other.data_),
-          data_owner_(std::move(other.data_owner_)),
+    // ============= Copy Constructor - SHALLOW COPY (LibTorch behavior) =============
+    Tensor::Tensor(const Tensor& other)
+        : data_(other.data_),                    // Share the pointer
+          data_owner_(other.data_owner_),        // Share ownership via shared_ptr!
           shape_(other.shape_),
           device_(other.device_),
           dtype_(other.dtype_),
-          initialized_(other.initialized_),
           is_view_(other.is_view_),
-          id_(other.id_) {
+          id_(next_id_++) {
 
-        other.data_ = nullptr;
-        other.initialized_ = false;
-        other.is_view_ = false;
+        if (profiling_enabled_) {
+            LOG_DEBUG("Shallow copy: tensor #{} from #{}: shape={}, device={}, dtype={}, refcount={}",
+                      id_, other.id_, shape_.str(), device_name(device_), dtype_name(dtype_),
+                      data_owner_ ? data_owner_.use_count() : 0);
+        }
     }
 
+    // ============= Copy Assignment - SHALLOW COPY (LibTorch behavior) =============
+    Tensor& Tensor::operator=(const Tensor& other) {
+        if (this == &other) {
+            return *this;
+        }
+
+        // Shallow copy - share data via shared_ptr
+        data_ = other.data_;
+        data_owner_ = other.data_owner_;  // shared_ptr handles refcounting automatically
+        shape_ = other.shape_;
+        device_ = other.device_;
+        dtype_ = other.dtype_;
+        is_view_ = other.is_view_;
+        id_ = next_id_++;
+
+        if (profiling_enabled_) {
+            LOG_DEBUG("Shallow assign: tensor #{} from #{}: shape={}, device={}, dtype={}, refcount={}",
+                      id_, other.id_, shape_.str(), device_name(device_), dtype_name(dtype_),
+                      data_owner_ ? data_owner_.use_count() : 0);
+        }
+
+        return *this;
+    }
+
+    // ============= Move Constructor =============
+    Tensor::Tensor(Tensor&& other) noexcept
+        : data_(std::exchange(other.data_, nullptr)),
+          data_owner_(std::move(other.data_owner_)),
+          shape_(std::move(other.shape_)),
+          device_(other.device_),
+          dtype_(other.dtype_),
+          is_view_(std::exchange(other.is_view_, false)),
+          id_(other.id_) {
+
+        if (profiling_enabled_) {
+            LOG_DEBUG("Move constructed: tensor #{} (moved-from is now invalid)", id_);
+        }
+    }
+
+    // ============= Move Assignment =============
     Tensor& Tensor::operator=(Tensor&& other) noexcept {
         if (this != &other) {
-            data_ = other.data_;
+            data_ = std::exchange(other.data_, nullptr);
             data_owner_ = std::move(other.data_owner_);
-            shape_ = other.shape_;
+            shape_ = std::move(other.shape_);
             device_ = other.device_;
             dtype_ = other.dtype_;
-            initialized_ = other.initialized_;
-            is_view_ = other.is_view_;
+            is_view_ = std::exchange(other.is_view_, false);
             id_ = other.id_;
 
-            other.data_ = nullptr;
-            other.initialized_ = false;
-            other.is_view_ = false;
+            if (profiling_enabled_) {
+                LOG_DEBUG("Move assigned: tensor #{} (moved-from is now invalid)", id_);
+            }
         }
         return *this;
     }
 
+    // ============= Destructor =============
     Tensor::~Tensor() {
         if (data_owner_ && profiling_enabled_) {
             LOG_DEBUG("Destroying tensor #{}: shape={}, device={}, refcount={}",
                       id_, shape_.str(), device_name(device_), data_owner_.use_count());
         }
+        // shared_ptr automatically handles memory cleanup when refcount reaches 0
     }
 
+    // ============= Deep Copy (explicit) =============
     Tensor Tensor::clone() const {
         if (!is_valid()) {
             LOG_ERROR("Cannot clone invalid tensor");
@@ -241,16 +154,28 @@ Tensor& Tensor::operator=(const Tensor& other) {
             std::memcpy(result.data_, data_, bytes);
         }
 
+        if (profiling_enabled_) {
+            LOG_DEBUG("Deep clone: tensor #{} from #{}: copied {} bytes",
+                      result.id_, id_, bytes);
+        }
+
         return result;
     }
-    // ============= END OF ADDITION =============
 
+    // ============= Contiguous (only copies if view) =============
     Tensor Tensor::contiguous() const {
+        if (!is_view_) {
+            // Already contiguous and not a view - return shallow copy
+            return *this;
+        }
+        // Is a view - need to make a contiguous deep copy
         return clone();
     }
 
+    // ============= Device Transfer =============
     Tensor Tensor::to(Device device) const {
         if (!is_valid()) {
+            LOG_ERROR("Cannot transfer invalid tensor to device");
             return Tensor();
         }
 
@@ -272,223 +197,174 @@ Tensor& Tensor::operator=(const Tensor& other) {
         return t;
     }
 
+    template<typename SrcT, typename DstT>
+  static Tensor convert_dtype_impl(const Tensor& src, DataType dst_dtype,
+                                    const std::function<DstT(SrcT)>& converter) {
+        auto result = Tensor::empty(src.shape(), src.device(), dst_dtype);
+        if (src.numel() == 0) return result;
+
+        if (src.device() == Device::CUDA) {
+            auto cpu_src = src.to(Device::CPU);
+            const SrcT* src_data = cpu_src.ptr<SrcT>();
+            std::vector<DstT> temp(src.numel());
+            for (size_t i = 0; i < src.numel(); ++i) {
+                temp[i] = converter(src_data[i]);
+            }
+            cudaMemcpy(result.raw_ptr(), temp.data(),
+                       src.numel() * sizeof(DstT), cudaMemcpyHostToDevice);
+        } else {
+            const SrcT* src_data = src.ptr<SrcT>();
+            DstT* dst_data = result.ptr<DstT>();
+            for (size_t i = 0; i < src.numel(); ++i) {
+                dst_data[i] = converter(src_data[i]);
+            }
+        }
+        return result;
+    }
+
+
+    // ============= Type Conversion =============
     Tensor Tensor::to(DataType dtype) const {
-    if (!is_valid()) {
+        if (!is_valid()) {
+            LOG_ERROR("Cannot convert invalid tensor to different dtype");
+            return Tensor();
+        }
+
+        if (dtype_ == dtype) {
+            return clone();
+        }
+
+        // ========== KEPT AS-IS: Bool <-> Float32 (use CUDA kernels) ==========
+        if (dtype_ == DataType::Bool && dtype == DataType::Float32) {
+            auto result = empty(shape_, device_, DataType::Float32);
+            if (numel() == 0) return result;
+
+            if (device_ == Device::CUDA) {
+                tensor_ops::launch_bool_to_float(ptr<unsigned char>(), result.ptr<float>(), numel(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                const unsigned char* src = ptr<unsigned char>();
+                float* dst = result.ptr<float>();
+                for (size_t i = 0; i < numel(); ++i) dst[i] = src[i] ? 1.0f : 0.0f;
+            }
+            return result;
+        }
+
+        if (dtype_ == DataType::Float32 && dtype == DataType::Bool) {
+            auto result = empty(shape_, device_, DataType::Bool);
+            if (numel() == 0) return result;
+
+            if (device_ == Device::CUDA) {
+                tensor_ops::launch_float_to_bool(ptr<float>(), result.ptr<unsigned char>(), numel(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                const float* src = ptr<float>();
+                unsigned char* dst = result.ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) dst[i] = (src[i] != 0.0f) ? 1 : 0;
+            }
+            return result;
+        }
+
+        // ========== KEPT AS-IS: Float32 <-> Int32 (use CUDA kernels) ==========
+        if (dtype_ == DataType::Float32 && dtype == DataType::Int32) {
+            auto result = empty(shape_, device_, DataType::Int32);
+            if (numel() == 0) return result;
+
+            if (device_ == Device::CUDA) {
+                tensor_ops::launch_float_to_int(ptr<float>(), result.ptr<int>(), numel(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                const float* src = ptr<float>();
+                int* dst = result.ptr<int>();
+                for (size_t i = 0; i < numel(); ++i) dst[i] = static_cast<int>(src[i]);
+            }
+            return result;
+        }
+
+        if (dtype_ == DataType::Int32 && dtype == DataType::Float32) {
+            auto result = empty(shape_, device_, DataType::Float32);
+            if (numel() == 0) return result;
+
+            if (device_ == Device::CUDA) {
+                tensor_ops::launch_int_to_float(ptr<int>(), result.ptr<float>(), numel(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                const int* src = ptr<int>();
+                float* dst = result.ptr<float>();
+                for (size_t i = 0; i < numel(); ++i) dst[i] = static_cast<float>(src[i]);
+            }
+            return result;
+        }
+
+        // ========== COMPACT: UInt8 Conversions (8 conversions in ~40 lines) ==========
+        if (dtype_ == DataType::Float32 && dtype == DataType::UInt8) {
+            return convert_dtype_impl<float, uint8_t>(*this, DataType::UInt8,
+                [](float v) { return static_cast<uint8_t>(std::round(std::clamp(v, 0.0f, 255.0f))); });
+        }
+
+        if (dtype_ == DataType::UInt8 && dtype == DataType::Float32) {
+            return convert_dtype_impl<uint8_t, float>(*this, DataType::Float32,
+                [](uint8_t v) { return static_cast<float>(v); });
+        }
+
+        if (dtype_ == DataType::Int32 && dtype == DataType::UInt8) {
+            return convert_dtype_impl<int, uint8_t>(*this, DataType::UInt8,
+                [](int v) { return static_cast<uint8_t>(std::clamp(v, 0, 255)); });
+        }
+
+        if (dtype_ == DataType::UInt8 && dtype == DataType::Int32) {
+            return convert_dtype_impl<uint8_t, int>(*this, DataType::Int32,
+                [](uint8_t v) { return static_cast<int>(v); });
+        }
+
+        if (dtype_ == DataType::Bool && dtype == DataType::UInt8) {
+            return convert_dtype_impl<unsigned char, uint8_t>(*this, DataType::UInt8,
+                [](unsigned char v) { return v ? 1 : 0; });
+        }
+
+        if (dtype_ == DataType::UInt8 && dtype == DataType::Bool) {
+            return convert_dtype_impl<uint8_t, unsigned char>(*this, DataType::Bool,
+                [](uint8_t v) { return v != 0 ? 1 : 0; });
+        }
+
+        if (dtype_ == DataType::Int64 && dtype == DataType::UInt8) {
+            return convert_dtype_impl<int64_t, uint8_t>(*this, DataType::UInt8,
+                [](int64_t v) { return static_cast<uint8_t>(std::clamp(v, static_cast<int64_t>(0), static_cast<int64_t>(255))); });
+        }
+
+        if (dtype_ == DataType::UInt8 && dtype == DataType::Int64) {
+            return convert_dtype_impl<uint8_t, int64_t>(*this, DataType::Int64,
+                [](uint8_t v) { return static_cast<int64_t>(v); });
+        }
+
+        // ========== COMPACT: Int64 Conversions (4 conversions in ~20 lines) ==========
+        if (dtype_ == DataType::Int64 && dtype == DataType::Float32) {
+            return convert_dtype_impl<int64_t, float>(*this, DataType::Float32,
+                [](int64_t v) { return static_cast<float>(v); });
+        }
+
+        if (dtype_ == DataType::Float32 && dtype == DataType::Int64) {
+            return convert_dtype_impl<float, int64_t>(*this, DataType::Int64,
+                [](float v) { return static_cast<int64_t>(v); });
+        }
+
+        if (dtype_ == DataType::Int32 && dtype == DataType::Int64) {
+            return convert_dtype_impl<int, int64_t>(*this, DataType::Int64,
+                [](int v) { return static_cast<int64_t>(v); });
+        }
+
+        if (dtype_ == DataType::Int64 && dtype == DataType::Int32) {
+            return convert_dtype_impl<int64_t, int>(*this, DataType::Int32,
+                [](int64_t v) { return static_cast<int>(v); });
+        }
+
+        LOG_ERROR("Type conversion from {} to {} not implemented",
+                  dtype_name(dtype_), dtype_name(dtype));
         return Tensor();
     }
 
-    if (dtype_ == dtype) {
-        return clone();
-    }
 
-    // Bool -> Float32
-    if (dtype_ == DataType::Bool && dtype == DataType::Float32) {
-        auto result = empty(shape_, device_, DataType::Float32);
-
-        if (numel() == 0) {
-            return result;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_bool_to_float(ptr<unsigned char>(), result.ptr<float>(),
-                                             numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const unsigned char* src = ptr<unsigned char>();
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = src[i] ? 1.0f : 0.0f;
-            }
-        }
-
-        return result;
-    }
-
-    // Float32 -> Bool
-    if (dtype_ == DataType::Float32 && dtype == DataType::Bool) {
-        auto result = empty(shape_, device_, DataType::Bool);
-
-        if (numel() == 0) {
-            return result;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_float_to_bool(ptr<float>(), result.ptr<unsigned char>(),
-                                             numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* src = ptr<float>();
-            unsigned char* dst = result.ptr<unsigned char>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = (src[i] != 0.0f) ? 1 : 0;
-            }
-        }
-
-        return result;
-    }
-
-    // Float32 -> Int32
-    if (dtype_ == DataType::Float32 && dtype == DataType::Int32) {
-        auto result = empty(shape_, device_, DataType::Int32);
-
-        if (numel() == 0) {
-            return result;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_float_to_int(ptr<float>(), result.ptr<int>(),
-                                            numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const float* src = ptr<float>();
-            int* dst = result.ptr<int>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = static_cast<int>(src[i]);
-            }
-        }
-
-        return result;
-    }
-
-    // Int32 -> Float32
-    if (dtype_ == DataType::Int32 && dtype == DataType::Float32) {
-        auto result = empty(shape_, device_, DataType::Float32);
-
-        if (numel() == 0) {
-            return result;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_int_to_float(ptr<int>(), result.ptr<float>(),
-                                            numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const int* src = ptr<int>();
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = static_cast<float>(src[i]);
-            }
-        }
-
-        return result;
-    }
-
-    // Int64 -> Float32
-    if (dtype_ == DataType::Int64 && dtype == DataType::Float32) {
-        auto result = empty(shape_, device_, DataType::Float32);
-
-        if (numel() == 0) {
-            return result;
-        }
-
-        if (device_ == Device::CUDA) {
-            auto cpu_tensor = to(Device::CPU);
-            const int64_t* src = cpu_tensor.ptr<int64_t>();
-            std::vector<float> temp(numel());
-            for (size_t i = 0; i < numel(); ++i) {
-                temp[i] = static_cast<float>(src[i]);
-            }
-            CHECK_CUDA(cudaMemcpy(result.raw_ptr(), temp.data(),
-                                  numel() * sizeof(float), cudaMemcpyHostToDevice));
-        } else {
-            const int64_t* src = ptr<int64_t>();
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = static_cast<float>(src[i]);
-            }
-        }
-
-        return result;
-    }
-
-    // Float32 -> Int64
-    if (dtype_ == DataType::Float32 && dtype == DataType::Int64) {
-        auto result = empty(shape_, device_, DataType::Int64);
-
-        if (numel() == 0) {
-            return result;
-        }
-
-        if (device_ == Device::CUDA) {
-            auto cpu_tensor = to(Device::CPU);
-            const float* src = cpu_tensor.ptr<float>();
-            std::vector<int64_t> temp(numel());
-            for (size_t i = 0; i < numel(); ++i) {
-                temp[i] = static_cast<int64_t>(src[i]);
-            }
-            CHECK_CUDA(cudaMemcpy(result.raw_ptr(), temp.data(),
-                                  numel() * sizeof(int64_t), cudaMemcpyHostToDevice));
-        } else {
-            const float* src = ptr<float>();
-            int64_t* dst = reinterpret_cast<int64_t*>(result.raw_ptr());
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = static_cast<int64_t>(src[i]);
-            }
-        }
-
-        return result;
-    }
-
-    // Int32 -> Int64
-    if (dtype_ == DataType::Int32 && dtype == DataType::Int64) {
-        auto result = empty(shape_, device_, DataType::Int64);
-
-        if (numel() == 0) {
-            return result;
-        }
-
-        if (device_ == Device::CUDA) {
-            auto cpu_tensor = to(Device::CPU);
-            const int* src = cpu_tensor.ptr<int>();
-            std::vector<int64_t> temp(numel());
-            for (size_t i = 0; i < numel(); ++i) {
-                temp[i] = static_cast<int64_t>(src[i]);
-            }
-            CHECK_CUDA(cudaMemcpy(result.raw_ptr(), temp.data(),
-                                  numel() * sizeof(int64_t), cudaMemcpyHostToDevice));
-        } else {
-            const int* src = ptr<int>();
-            int64_t* dst = reinterpret_cast<int64_t*>(result.raw_ptr());
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = static_cast<int64_t>(src[i]);
-            }
-        }
-
-        return result;
-    }
-
-    // Int64 -> Int32
-    if (dtype_ == DataType::Int64 && dtype == DataType::Int32) {
-        auto result = empty(shape_, device_, DataType::Int32);
-
-        if (numel() == 0) {
-            return result;
-        }
-
-        if (device_ == Device::CUDA) {
-            auto cpu_tensor = to(Device::CPU);
-            const int64_t* src = cpu_tensor.ptr<int64_t>();
-            std::vector<int> temp(numel());
-            for (size_t i = 0; i < numel(); ++i) {
-                temp[i] = static_cast<int>(src[i]);
-            }
-            CHECK_CUDA(cudaMemcpy(result.raw_ptr(), temp.data(),
-                                  numel() * sizeof(int), cudaMemcpyHostToDevice));
-        } else {
-            const int64_t* src = ptr<int64_t>();
-            int* dst = result.ptr<int>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = static_cast<int>(src[i]);
-            }
-        }
-
-        return result;
-    }
-
-    LOG_ERROR("Type conversion from {} to {} not implemented",
-              dtype_name(dtype_), dtype_name(dtype));
-    return Tensor();
-}
+    // ============= In-place Operations =============
 
     Tensor& Tensor::zero_() {
         if (!is_valid() || numel() == 0) {
@@ -504,12 +380,65 @@ Tensor& Tensor::operator=(const Tensor& other) {
         return *this;
     }
 
+    Tensor& Tensor::fill_(float value) {
+        if (!is_valid() || numel() == 0) {
+            return *this;
+        }
+
+        if (device_ == Device::CUDA) {
+            std::vector<float> temp(numel(), value);
+            CHECK_CUDA(cudaMemcpy(data_, temp.data(), bytes(), cudaMemcpyHostToDevice));
+        } else {
+            float* data = ptr<float>();
+            std::fill(data, data + numel(), value);
+        }
+
+        return *this;
+    }
+
+    Tensor& Tensor::copy_from(const Tensor& other) {
+        if (!is_valid() || !other.is_valid()) {
+            LOG_ERROR("Invalid tensors for copy_from");
+            return *this;
+        }
+
+        if (shape_ != other.shape_) {
+            LOG_ERROR("Shape mismatch in copy_from: {} vs {}", shape_.str(), other.shape_.str());
+            return *this;
+        }
+
+        if (dtype_ != other.dtype_) {
+            LOG_ERROR("Dtype mismatch in copy_from");
+            return *this;
+        }
+
+        if (numel() == 0) {
+            return *this;
+        }
+
+        if (device_ == Device::CUDA && other.device_ == Device::CUDA) {
+            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes(), cudaMemcpyDeviceToDevice));
+        } else if (device_ == Device::CUDA && other.device_ == Device::CPU) {
+            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes(), cudaMemcpyHostToDevice));
+        } else if (device_ == Device::CPU && other.device_ == Device::CUDA) {
+            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes(), cudaMemcpyDeviceToHost));
+        } else {
+            std::memcpy(data_, other.data_, bytes());
+        }
+
+        return *this;
+    }
+
+    // ============= Shape Operations =============
+
     Tensor Tensor::cat(const Tensor& other, int dim) const {
         std::vector<Tensor> tensors;
         tensors.push_back(clone());
         tensors.push_back(other.clone());
         return Tensor::cat(tensors, dim);
     }
+
+    // ============= Broadcasting =============
 
     Tensor Tensor::broadcast_to(const TensorShape& target_shape) const {
         return gs::broadcast_to(*this, target_shape);
@@ -526,20 +455,27 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     // ============= Special operations =============
+
     Tensor Tensor::normalize(int dim, float eps) const {
+        if (!is_valid()) {
+            LOG_ERROR("Cannot normalize invalid tensor");
+            return Tensor();
+        }
+
         if (dim == -1) {
             auto m = mean();
-            auto s = std({}, false, false).add(eps);  // Pass: axes={}, keepdim=false, unbiased=false
+            auto s = std({}, false, false).add(eps);
             return sub(m).div(s);
         }
         std::vector<int> axes = {dim};
         auto m = mean(axes, true);
-        auto s = std(axes, true, false).add(eps);  // Pass: axes, keepdim=true, unbiased=false
+        auto s = std(axes, true, false).add(eps);
         return sub(m).div(s);
     }
 
     Tensor Tensor::logit(float eps) const {
         if (!is_valid()) {
+            LOG_ERROR("Cannot compute logit of invalid tensor");
             return Tensor();
         }
 
@@ -548,8 +484,14 @@ Tensor& Tensor::operator=(const Tensor& other) {
         return x_clamped.div(one_minus_x).log();
     }
 
-    // ============= Bitwise NOT =============
+    // ============= Bitwise Operations =============
+
     Tensor Tensor::operator~() const {
+        if (!is_valid()) {
+            LOG_ERROR("Bitwise NOT on invalid tensor");
+            return Tensor();
+        }
+
         if (dtype_ != DataType::Bool) {
             LOG_ERROR("Bitwise NOT only works on boolean tensors");
             return Tensor();
@@ -572,8 +514,12 @@ Tensor& Tensor::operator=(const Tensor& other) {
         return result;
     }
 
-    // ============= Bitwise OR =============
     Tensor Tensor::operator|(const Tensor& other) const {
+        if (!is_valid() || !other.is_valid()) {
+            LOG_ERROR("Bitwise OR on invalid tensor");
+            return Tensor();
+        }
+
         if (dtype_ != DataType::Bool || other.dtype() != DataType::Bool) {
             LOG_ERROR("Bitwise OR only works on boolean tensors");
             return Tensor();
@@ -581,6 +527,8 @@ Tensor& Tensor::operator=(const Tensor& other) {
 
         return binary_op_impl(other, BinaryOp::BitwiseOr);
     }
+
+    // ============= Clamp Operations =============
 
     Tensor& Tensor::clamp_(float min_val, float max_val) {
         if (!is_valid() || numel() == 0) {
@@ -628,6 +576,7 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     // ============= Cumulative sum =============
+
     Tensor Tensor::cumsum(int dim) const {
         if (!is_valid()) {
             LOG_ERROR("cumsum on invalid tensor");
@@ -684,10 +633,8 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     // ============= TensorShape Implementation =============
+
     std::string TensorShape::str() const {
-        if (!initialized_) {
-            return "[uninitialized]";
-        }
         if (dims_.empty()) {
             return "[]";
         }
@@ -703,17 +650,18 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     // ============= Tensor String Representation =============
+
     std::string Tensor::str() const {
         std::ostringstream oss;
         oss << "Tensor(";
-        if (!initialized_) {
-            oss << "uninitialized";
+        if (!is_valid()) {
+            oss << "invalid";
         } else {
             oss << "shape=" << shape_.str();
             oss << ", device=" << device_name(device_);
             oss << ", dtype=" << dtype_name(dtype_);
             if (data_owner_) {
-                oss << ", owned";
+                oss << ", owned, refcount=" << data_owner_.use_count();
             } else {
                 oss << ", view";
             }
@@ -723,6 +671,7 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     // ============= Debug Functions =============
+
     void Tensor::log_info(const std::string& name) const {
         const std::string& prefix = name.empty() ? "Tensor" : name;
 
@@ -753,6 +702,11 @@ Tensor& Tensor::operator=(const Tensor& other) {
         std::println("\n=== {} ===", name.empty() ? "Tensor" : name);
         std::println("{}", str());
 
+        if (!is_valid()) {
+            std::println("  (invalid tensor)");
+            return;
+        }
+
         if (shape_.rank() == 1) {
             print_1d(max_per_dim);
         } else if (shape_.rank() == 2) {
@@ -765,6 +719,8 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     void Tensor::print_1d(size_t max_elem) const {
+        if (!is_valid()) return;
+
         auto values = debug_values(std::min(max_elem, numel()));
         std::print("  [");
 
@@ -781,7 +737,7 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     void Tensor::print_2d(size_t max_per_dim) const {
-        if (shape_.rank() != 2)
+        if (!is_valid() || shape_.rank() != 2)
             return;
 
         size_t rows = std::min(max_per_dim, shape_[0]);
@@ -809,54 +765,7 @@ Tensor& Tensor::operator=(const Tensor& other) {
         }
     }
 
-    Tensor& Tensor::fill_(float value) {
-        if (!is_valid() || numel() == 0) {
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            std::vector<float> temp(numel(), value);
-            CHECK_CUDA(cudaMemcpy(data_, temp.data(), bytes(), cudaMemcpyHostToDevice));
-        } else {
-            float* data = ptr<float>();
-            std::fill(data, data + numel(), value);
-        }
-
-        return *this;
-    }
-
-    Tensor& Tensor::copy_from(const Tensor& other) {
-        if (!is_valid() || !other.is_valid()) {
-            LOG_ERROR("Invalid tensors for copy_from");
-            return *this;
-        }
-
-        if (shape_ != other.shape_) {
-            LOG_ERROR("Shape mismatch in copy_from: {} vs {}", shape_.str(), other.shape_.str());
-            return *this;
-        }
-
-        if (dtype_ != other.dtype_) {
-            LOG_ERROR("Dtype mismatch in copy_from");
-            return *this;
-        }
-
-        if (numel() == 0) {
-            return *this;
-        }
-
-        if (device_ == Device::CUDA && other.device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes(), cudaMemcpyDeviceToDevice));
-        } else if (device_ == Device::CUDA && other.device_ == Device::CPU) {
-            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes(), cudaMemcpyHostToDevice));
-        } else if (device_ == Device::CPU && other.device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(data_, other.data_, bytes(), cudaMemcpyDeviceToHost));
-        } else {
-            std::memcpy(data_, other.data_, bytes());
-        }
-
-        return *this;
-    }
+    // ============= Utility Functions =============
 
     std::optional<Tensor> Tensor::try_reshape(TensorShape shape) const {
         if (!is_valid()) {
@@ -961,8 +870,14 @@ Tensor& Tensor::operator=(const Tensor& other) {
             return float_tensor.to_vector();
         }
 
+        // Handle UInt8 dtype by converting to float (NEW)
+        if (dtype_ == DataType::UInt8) {
+            auto float_tensor = to(DataType::Float32);
+            return float_tensor.to_vector();
+        }
+
         if (dtype_ != DataType::Float32) {
-            LOG_ERROR("to_vector only supports float32, int32, int64 and bool tensors, got {}",
+            LOG_ERROR("to_vector only supports float32, int32, int64, uint8 and bool tensors, got {}",
                       dtype_name(dtype_));
             return {};
         }
@@ -978,6 +893,7 @@ Tensor& Tensor::operator=(const Tensor& other) {
         return result;
     }
 
+
     std::vector<int64_t> Tensor::to_vector_int64() const {
         LOG_DEBUG("to_vector_int64() called");
         LOG_DEBUG("  dtype: {}", dtype_name(dtype_));
@@ -985,13 +901,13 @@ Tensor& Tensor::operator=(const Tensor& other) {
         LOG_DEBUG("  numel: {}", numel());
         LOG_DEBUG("  is_valid: {}", is_valid());
 
-        if (dtype_ != DataType::Int64) {
-            LOG_ERROR("to_vector_int64() requires Int64 tensor, got {}", dtype_name(dtype_));
+        if (!is_valid()) {
+            LOG_ERROR("to_vector_int64() on invalid tensor");
             return {};
         }
 
-        if (!is_valid()) {
-            LOG_ERROR("to_vector_int64() on invalid tensor");
+        if (dtype_ != DataType::Int64) {
+            LOG_ERROR("to_vector_int64() requires Int64 tensor, got {}", dtype_name(dtype_));
             return {};
         }
 
@@ -1027,7 +943,7 @@ Tensor& Tensor::operator=(const Tensor& other) {
             return {};
         }
 
-        // FIXED: Handle Bool dtype by converting to int
+        // Handle Bool dtype by converting to int
         if (dtype_ == DataType::Bool) {
             auto int_tensor = to(DataType::Int32);
             return int_tensor.to_vector_int();
@@ -1051,8 +967,15 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     std::vector<bool> Tensor::to_vector_bool() const {
-        if (dtype_ != DataType::Bool || !is_valid()) {
+        if (!is_valid()) {
             LOG_ERROR("to_vector_bool only supports valid bool tensors");
+            return {};
+        }
+
+        // Support both Bool and UInt8 dtypes (UInt8 can be used as byte array)
+        if (dtype_ != DataType::Bool && dtype_ != DataType::UInt8) {
+            LOG_ERROR("to_vector_bool only supports bool and uint8 tensors, got {}",
+                      dtype_name(dtype_));
             return {};
         }
 
@@ -1078,19 +1001,70 @@ Tensor& Tensor::operator=(const Tensor& other) {
         return result;
     }
 
+    std::vector<uint8_t> Tensor::to_vector_uint8() const {
+        if (!is_valid()) {
+            LOG_ERROR("to_vector_uint8 on invalid tensor");
+            return {};
+        }
+
+        if (numel() == 0) {
+            return {};
+        }
+
+        // Handle UInt8 dtype directly
+        if (dtype_ == DataType::UInt8) {
+            std::vector<uint8_t> result(numel());
+
+            if (device_ == Device::CUDA) {
+                CHECK_CUDA(cudaMemcpy(result.data(), data_, bytes(), cudaMemcpyDeviceToHost));
+            } else {
+                std::memcpy(result.data(), data_, bytes());
+            }
+
+            return result;
+        }
+
+        // Handle Bool dtype (convert to uint8)
+        if (dtype_ == DataType::Bool) {
+            std::vector<uint8_t> result(numel());
+
+            if (device_ == Device::CUDA) {
+                CHECK_CUDA(cudaMemcpy(result.data(), data_, bytes(), cudaMemcpyDeviceToHost));
+            } else {
+                const unsigned char* src = ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    result[i] = src[i];
+                }
+            }
+
+            return result;
+        }
+
+        // For other types, log error
+        LOG_ERROR("to_vector_uint8 only supports uint8 and bool tensors directly, got {}. "
+                  "Convert to UInt8 first using .to(DataType::UInt8)",
+                  dtype_name(dtype_));
+        return {};
+    }
+
     void Tensor::dump_diagnostic(const std::string& filename) const {
         std::ofstream file(filename);
         std::print(file, "=== Tensor Diagnostic Dump ===\n");
         std::print(file, "Info: {}\n", str());
         std::print(file, "Memory address: {}\n", data_);
-        std::print(file, "Bytes: {}\n", bytes());
 
-        if (device_ == Device::CPU || numel() < 10000) {
-            auto values = to_vector();
-            std::print(file, "Values ({} total):\n", values.size());
-            for (size_t i = 0; i < std::min(size_t(1000), values.size()); ++i) {
-                std::print(file, "[{}]: {}\n", i, values[i]);
+        if (is_valid()) {
+            std::print(file, "Bytes: {}\n", bytes());
+
+            if (device_ == Device::CPU || numel() < 10000) {
+                auto values = to_vector();
+                std::print(file, "Values ({} total):\n", values.size());
+                for (size_t i = 0; i < std::min(size_t(1000), values.size()); ++i) {
+                    std::print(file, "[{}]: {}\n", i, values[i]);
+                }
             }
+        } else {
+            std::print(file, "Tensor is invalid\n");
         }
 
         file.close();
@@ -1098,7 +1072,14 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     // ============= Validation & Assertions =============
+
     Tensor& Tensor::assert_shape(TensorShape expected, const std::string& msg) {
+        if (!is_valid()) {
+            std::string error_msg = "Cannot assert shape on invalid tensor";
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg, this);
+        }
+
         if (shape_ != expected) {
             std::string error_msg = msg.empty() ? "Shape assertion failed: expected " + expected.str() + " but got " + shape_.str() : msg;
             LOG_ERROR("{}", error_msg);
@@ -1108,6 +1089,12 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     Tensor& Tensor::assert_device(Device expected) {
+        if (!is_valid()) {
+            std::string error_msg = "Cannot assert device on invalid tensor";
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg, this);
+        }
+
         if (device_ != expected) {
             std::string error_msg = "Device assertion failed: expected " +
                                     std::string(device_name(expected)) + " but got " +
@@ -1119,6 +1106,12 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     Tensor& Tensor::assert_dtype(DataType expected) {
+        if (!is_valid()) {
+            std::string error_msg = "Cannot assert dtype on invalid tensor";
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg, this);
+        }
+
         if (dtype_ != expected) {
             std::string error_msg = "DataType assertion failed: expected " +
                                     std::string(dtype_name(expected)) + " but got " +
@@ -1130,6 +1123,12 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     Tensor& Tensor::assert_finite() {
+        if (!is_valid()) {
+            std::string error_msg = "Cannot assert finite on invalid tensor";
+            LOG_ERROR("{}", error_msg);
+            throw TensorError(error_msg, this);
+        }
+
         if (has_nan() || has_inf()) {
             std::string error_msg = "Tensor contains NaN or Inf values";
             LOG_ERROR("{}", error_msg);
@@ -1139,6 +1138,7 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     // ============= Comparison Utilities =============
+
     bool Tensor::has_nan() const {
         if (!is_valid() || numel() == 0) {
             return false;
@@ -1207,6 +1207,7 @@ Tensor& Tensor::operator=(const Tensor& other) {
     }
 
     // ============= Error Classes =============
+
     TensorError::TensorError(const std::string& msg, const Tensor* t)
         : std::runtime_error(msg),
           tensor_info_(t ? t->str() : "") {}

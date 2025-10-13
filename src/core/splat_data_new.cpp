@@ -5,619 +5,891 @@
 #include "core/splat_data_new.hpp"
 #include "core/logger.hpp"
 #include "core/parameters.hpp"
+#include "core/point_cloud_new.hpp"
+#include <iostream>
 #include "core/sogs_new.hpp"
+#include "external/nanoflann.hpp"
 #include "external/tinyply.hpp"
-#include "kernels/morton_encoding_new.cuh"
-#include "kernels/training_kernels.cuh"
+
 #include <algorithm>
 #include <cmath>
+#include <expected>
+#include <filesystem>
+#include <format>
 #include <fstream>
+#include <future>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
-#include <sstream>
+#include <print>
+#include <string>
+#include <thread>
+#include <vector>
 
-namespace gs {
+namespace {
 
-    namespace {
-        /**
-         * @brief Compute mean distance to K nearest neighbors using Tensor operations
-         *
-         * This is a simplified version that computes pairwise distances and finds
-         * the K smallest for each point. For very large point clouds, consider
-         * using a KD-tree implementation.
-         */
-        Tensor compute_mean_neighbor_distances(const Tensor& points, int k = 3) {
-            const size_t N = points.size(0);
+    // Point cloud adaptor for nanoflann
+    struct PointCloudAdaptor {
+        const float* points;
+        size_t num_points;
 
-            if (N <= 1) {
-                return Tensor::full({N}, 0.01f, points.device(), DataType::Float32);
-            }
+        PointCloudAdaptor(const float* pts, size_t n)
+            : points(pts), num_points(n) {}
 
-            // For small point clouds, compute all pairwise distances
-            if (N < 10000) {
-                // Compute pairwise distances: ||points[i] - points[j]||^2
-                // Using broadcasting: (N, 1, 3) - (1, N, 3) -> (N, N, 3) -> (N, N)
-                auto p1 = points.unsqueeze(1);  // [N, 1, 3]
-                auto p2 = points.unsqueeze(0);  // [1, N, 3]
-                auto diffs = p1 - p2;            // [N, N, 3]
-                auto dist_sq = (diffs * diffs).sum(2);  // [N, N]
+        inline size_t kdtree_get_point_count() const { return num_points; }
 
-                // Sort distances for each point and take mean of k smallest (excluding self)
-                auto sorted_dists = dist_sq.sort(1);  // Returns (values, indices)
-                auto k_nearest = sorted_dists.first.slice(1, 1, std::min(k + 1, static_cast<int>(N)));  // Skip self at index 0
-
-                // Take mean and sqrt
-                auto mean_dist_sq = k_nearest.mean(1);
-                return mean_dist_sq.sqrt().clamp_min(1e-7f);
-            } else {
-                // For large point clouds, use a sampling-based approximation
-                LOG_WARN("Using sampling-based neighbor distance for {} points", N);
-
-                const size_t sample_size = 1000;
-                auto indices = Tensor::randint({sample_size}, 0, static_cast<int>(N), points.device());
-                auto sampled_points = points.index_select(0, indices);
-
-                // Compute distances to sampled points for all points
-                auto p1 = points.unsqueeze(1);  // [N, 1, 3]
-                auto p2 = sampled_points.unsqueeze(0);  // [1, S, 3]
-                auto diffs = p1 - p2;
-                auto dist_sq = (diffs * diffs).sum(2);  // [N, S]
-
-                // Sort and take k smallest
-                auto sorted_dists = dist_sq.sort(1);
-                auto k_nearest = sorted_dists.first.slice(1, 0, std::min(k, static_cast<int>(sample_size)));
-
-                auto mean_dist_sq = k_nearest.mean(1);
-                return mean_dist_sq.sqrt().clamp_min(1e-7f);
-            }
+        inline float kdtree_get_pt(const size_t idx, const size_t dim) const {
+            return points[idx * 3 + dim];
         }
 
-        /**
-         * @brief Convert RGB to SH DC coefficient
-         */
-        Tensor rgb_to_sh(const Tensor& rgb) {
-            constexpr float kInvSH = 0.28209479177387814f;
-            return (rgb - 0.5f) / kInvSH;
+        template <class BBOX>
+        bool kdtree_get_bbox(BBOX& /* bb */) const { return false; }
+    };
+
+    using KDTree = nanoflann::KDTreeSingleIndexAdaptor<
+        nanoflann::L2_Simple_Adaptor<float, PointCloudAdaptor>,
+        PointCloudAdaptor,
+        3>;
+
+    /**
+     * @brief Compute mean distance to 3 nearest neighbors for each point
+     */
+    gs::Tensor compute_mean_neighbor_distances(const gs::Tensor& points) {
+        auto cpu_points = points.cpu();
+        const int num_points = cpu_points.size(0);
+
+        if (cpu_points.ndim() != 2 || cpu_points.size(1) != 3) {
+            LOG_ERROR("Input points must have shape [N, 3], got {}", cpu_points.shape().str());
+            return gs::Tensor();
         }
 
-        /**
-         * @brief Write PLY file using tinyply
-         */
-        void write_ply_impl(const PointCloudNew& pc,
-                            const std::filesystem::path& root,
-                            int iteration) {
-            std::filesystem::create_directories(root);
+        if (cpu_points.dtype() != gs::DataType::Float32) {
+            LOG_ERROR("Input points must be float32");
+            return gs::Tensor();
+        }
 
-            // Convert to CPU for file writing
-            auto pc_cpu = pc.cpu();
+        if (num_points <= 1) {
+            return gs::Tensor::full({static_cast<size_t>(num_points)}, 0.01f, points.device());
+        }
 
-            // Get raw pointers to data
-            std::vector<float*> data_ptrs;
-            data_ptrs.push_back(pc_cpu.means.ptr<float>());
+        const float* data = cpu_points.ptr<float>();
 
-            if (pc_cpu.normals.is_valid()) {
-                data_ptrs.push_back(pc_cpu.normals.ptr<float>());
-            }
-            if (pc_cpu.sh0.is_valid()) {
-                data_ptrs.push_back(pc_cpu.sh0.ptr<float>());
-            }
-            if (pc_cpu.shN.is_valid()) {
-                data_ptrs.push_back(pc_cpu.shN.ptr<float>());
-            }
-            if (pc_cpu.opacity.is_valid()) {
-                data_ptrs.push_back(pc_cpu.opacity.ptr<float>());
-            }
-            if (pc_cpu.scaling.is_valid()) {
-                data_ptrs.push_back(pc_cpu.scaling.ptr<float>());
-            }
-            if (pc_cpu.rotation.is_valid()) {
-                data_ptrs.push_back(pc_cpu.rotation.ptr<float>());
+        PointCloudAdaptor cloud(data, num_points);
+        KDTree index(3, cloud, nanoflann::KDTreeSingleIndexAdaptorParams(10));
+        index.buildIndex();
+
+        auto result = gs::Tensor::zeros({static_cast<size_t>(num_points)}, gs::Device::CPU);
+        float* result_data = result.ptr<float>();
+
+        #pragma omp parallel for if (num_points > 1000)
+        for (int i = 0; i < num_points; i++) {
+            const float query_pt[3] = {
+                data[i * 3 + 0],
+                data[i * 3 + 1],
+                data[i * 3 + 2]
+            };
+
+            const size_t num_results = std::min(4, num_points);
+            std::vector<size_t> ret_indices(num_results);
+            std::vector<float> out_dists_sqr(num_results);
+
+            nanoflann::KNNResultSet<float> resultSet(num_results);
+            resultSet.init(&ret_indices[0], &out_dists_sqr[0]);
+            index.findNeighbors(resultSet, &query_pt[0], nanoflann::SearchParameters(10));
+
+            float sum_dist = 0.0f;
+            int valid_neighbors = 0;
+
+            for (size_t j = 0; j < num_results && valid_neighbors < 3; j++) {
+                if (out_dists_sqr[j] > 1e-8f) {
+                    sum_dist += std::sqrt(out_dists_sqr[j]);
+                    valid_neighbors++;
+                }
             }
 
-            // Create PLY file
+            result_data[i] = (valid_neighbors > 0) ? (sum_dist / valid_neighbors) : 0.01f;
+        }
+
+        return result.to(points.device());
+    }
+
+    /**
+     * @brief Write PLY file implementation
+     */
+    void write_ply_impl(const gs::PointCloudNew& pc,
+                        const std::filesystem::path& root,
+                        int iteration,
+                        const std::string& stem) {
+        namespace fs = std::filesystem;
+        fs::create_directories(root);
+
+        // Collect all tensors and convert to CPU
+        std::vector<gs::Tensor> tensors;
+        tensors.push_back(pc.means.cpu().contiguous());
+
+        if (pc.normals.is_valid()) {
+            tensors.push_back(pc.normals.cpu().contiguous());
+        }
+
+        if (pc.sh0.is_valid()) {
+            // sh0 is [N, 1, 3] - transpose to [N, 3, 1] for PLY flatten, then flatten to [N, 3]
+            auto sh0_transposed = pc.sh0.transpose(1, 2).contiguous();
+            tensors.push_back(sh0_transposed.flatten(1).cpu().contiguous());
+        }
+
+        if (pc.shN.is_valid()) {
+            // shN is [N, coeffs, 3] - transpose to [N, 3, coeffs], then flatten to [N, 3*coeffs]
+            auto shN_transposed = pc.shN.transpose(1, 2).contiguous();
+            tensors.push_back(shN_transposed.flatten(1).cpu().contiguous());
+        }
+
+        if (pc.opacity.is_valid()) {
+            tensors.push_back(pc.opacity.cpu().contiguous());
+        }
+
+        if (pc.scaling.is_valid()) {
+            tensors.push_back(pc.scaling.cpu().contiguous());
+        }
+
+        if (pc.rotation.is_valid()) {
+            tensors.push_back(pc.rotation.cpu().contiguous());
+        }
+
+        auto write_output_ply = [](const fs::path& file_path,
+                                   const std::vector<gs::Tensor>& data,
+                                   const std::vector<std::string>& attr_names) {
             tinyply::PlyFile ply;
             size_t attr_off = 0;
 
-            for (size_t i = 0; i < data_ptrs.size(); ++i) {
-                // Determine number of attributes for this data block
-                size_t num_attrs = 3; // Default for positions, normals, scaling
-
-                if (i == data_ptrs.size() - 1 && pc_cpu.attribute_names.back().find("rot_") != std::string::npos) {
-                    num_attrs = 4; // Rotation has 4 components
-                } else if (pc_cpu.attribute_names[attr_off] == "opacity") {
-                    num_attrs = 1; // Opacity is scalar
-                } else if (pc_cpu.attribute_names[attr_off].find("f_dc_") != std::string::npos ||
-                           pc_cpu.attribute_names[attr_off].find("f_rest_") != std::string::npos) {
-                    // Count how many consecutive f_dc_ or f_rest_ attributes
-                    num_attrs = 0;
-                    size_t j = attr_off;
-                    while (j < pc_cpu.attribute_names.size() &&
-                           (pc_cpu.attribute_names[j].find("f_dc_") != std::string::npos ||
-                            pc_cpu.attribute_names[j].find("f_rest_") != std::string::npos)) {
-                        num_attrs++;
-                        j++;
-                    }
-                }
-
-                std::vector<std::string> attrs(pc_cpu.attribute_names.begin() + attr_off,
-                                               pc_cpu.attribute_names.begin() + attr_off + num_attrs);
+            for (const auto& tensor : data) {
+                const size_t cols = tensor.size(1);
+                std::vector<std::string> attrs(attr_names.begin() + attr_off,
+                                               attr_names.begin() + attr_off + cols);
 
                 ply.add_properties_to_element(
                     "vertex",
                     attrs,
                     tinyply::Type::FLOAT32,
-                    pc_cpu.size(),
-                    reinterpret_cast<uint8_t*>(data_ptrs[i]),
+                    tensor.size(0),
+                    reinterpret_cast<uint8_t*>(const_cast<float*>(tensor.ptr<float>())),
                     tinyply::Type::INVALID, 0);
 
-                attr_off += num_attrs;
+                attr_off += cols;
             }
 
-            // Write file
-            auto filename = root / ("splat_" + std::to_string(iteration) + ".ply");
             std::filebuf fb;
-            fb.open(filename, std::ios::out | std::ios::binary);
+            fb.open(file_path, std::ios::out | std::ios::binary);
             std::ostream out_stream(&fb);
             ply.write(out_stream, /*binary=*/true);
-        }
-    } // anonymous namespace
+        };
 
-    // Constructor
-    SplatDataNew::SplatDataNew(int sh_degree,
-                               Tensor means_in,
-                               Tensor sh0_in,
-                               Tensor shN_in,
-                               Tensor scaling_in,
-                               Tensor rotation_in,
-                               Tensor opacity_in,
-                               float scene_scale_in)
-        : means(std::move(means_in)),
-          opacity(std::move(opacity_in)),
-          rotation(std::move(rotation_in)),
-          scaling(std::move(scaling_in)),
-          sh0(std::move(sh0_in)),
-          shN(std::move(shN_in)),
-          max_sh_degree(sh_degree),
-          active_sh_degree(0),
-          scene_scale(scene_scale_in) {
-
-        // Initialize densification info
-        if (means.is_valid()) {
-            densification_info = Tensor::zeros({means.size(0)}, means.device(), DataType::Float32);
+        if (stem.empty()) {
+            write_output_ply(
+                root / ("splat_" + std::to_string(iteration) + ".ply"),
+                tensors,
+                pc.attribute_names);
+        } else {
+            write_output_ply(
+                root / std::string(stem + ".ply"),
+                tensors,
+                pc.attribute_names);
         }
     }
 
-    // Get combined SH coefficients
-    Tensor SplatDataNew::get_shs() const {
-        if (!sh0.is_valid()) {
-            return Tensor();
-        }
-
-        if (!shN.is_valid() || shN.numel() == 0) {
-            return sh0;
-        }
-
-        // Concatenate along dimension 2 (coefficients): [N, 3, 1] + [N, 3, K-1] = [N, 3, K]
-        return Tensor::cat({sh0, shN}, 2);
-    }
-
-    // Get opacity with sigmoid activation
-    Tensor SplatDataNew::get_opacity() const {
-        return opacity.sigmoid().squeeze(-1);
-    }
-
-    // Get rotation with normalization
-    Tensor SplatDataNew::get_rotation() const {
-        return rotation.normalize(-1);
-    }
-
-    // Get scaling with exp activation
-    Tensor SplatDataNew::get_scaling() const {
-        return scaling.exp();
-    }
-
-    // Increment SH degree
-    void SplatDataNew::increment_sh_degree() {
-        if (active_sh_degree < max_sh_degree) {
-            active_sh_degree++;
-        }
-    }
-
-    // Transform gaussians
-    SplatDataNew& SplatDataNew::transform(const glm::mat4& transform_matrix) {
-        LOG_TIMER("SplatDataNew::transform");
-
-        if (!means.is_valid() || means.size(0) == 0) {
-            return *this;
-        }
-
-        const size_t N = means.size(0);
-
-        // Ensure data is on CUDA
-        if (means.device() != Device::CUDA) {
-            LOG_ERROR("Transform requires data on CUDA device");
-            return *this;
-        }
-
-        // Convert GLM matrix to float array (GLM is column-major, kernel expects row-major)
-        float transform_array[16];
-        for (int i = 0; i < 4; ++i) {
-            for (int j = 0; j < 4; ++j) {
-                transform_array[i * 4 + j] = transform_matrix[j][i];
-            }
-        }
-
-        // 1. Transform positions using kernel
-        gs::training::launch_transform_positions(
-            means.ptr<float>(),
-            transform_array,
-            static_cast<int>(N),
-            nullptr  // default stream
-        );
-
-        // 2. Extract rotation from transform matrix
-        glm::mat3 rot_mat(transform_matrix);
-
-        // Normalize columns to remove scale
-        glm::vec3 scale;
-        for (int i = 0; i < 3; ++i) {
-            scale[i] = glm::length(rot_mat[i]);
-            if (scale[i] > 0.0f) {
-                rot_mat[i] /= scale[i];
-            }
-        }
-
-        // Convert rotation matrix to quaternion
-        glm::quat rot_quat = glm::quat_cast(rot_mat);
-
-        // 3. Transform rotations if there's non-identity rotation
-        if (std::abs(rot_quat.w - 1.0f) > 1e-6f ||
-            std::abs(rot_quat.x) > 1e-6f ||
-            std::abs(rot_quat.y) > 1e-6f ||
-            std::abs(rot_quat.z) > 1e-6f) {
-
-            float rot_quat_array[4] = {rot_quat.w, rot_quat.x, rot_quat.y, rot_quat.z};
-
-            gs::training::launch_transform_quaternions(
-                rotation.ptr<float>(),
-                rot_quat_array,
-                static_cast<int>(N),
-                nullptr  // default stream
-            );
-        }
-
-        // 4. Transform scaling if non-uniform scale is present
-        if (std::abs(scale.x - 1.0f) > 1e-6f ||
-            std::abs(scale.y - 1.0f) > 1e-6f ||
-            std::abs(scale.z - 1.0f) > 1e-6f) {
-
-            // Average scale factor (for isotropic gaussian scaling)
-            float avg_scale = (scale.x + scale.y + scale.z) / 3.0f;
-
-            // Since scaling is log(scale), we add log of the scale factor
-            float log_scale = std::log(avg_scale);
-
-            gs::training::launch_add_scalar_to_tensor(
-                scaling.ptr<float>(),
-                log_scale,
-                static_cast<int>(N * 3),  // 3 components per gaussian
-                nullptr  // default stream
-            );
-        }
-
-        // 5. Update scene scale using kernels
-        // Allocate temporary GPU memory for computations
-        auto scene_center_tensor = Tensor::zeros({3}, Device::CUDA, DataType::Float32);
-        auto distances_tensor = Tensor::zeros({N}, Device::CUDA, DataType::Float32);
-        auto median_tensor = Tensor::zeros({1}, Device::CUDA, DataType::Float32);
-
-        // Compute mean of positions
-        gs::training::launch_compute_mean_3d(
-            means.ptr<float>(),
-            scene_center_tensor.ptr<float>(),
-            static_cast<int>(N),
-            nullptr
-        );
-
-        // Compute distances from center
-        gs::training::launch_compute_distances_from_center(
-            means.ptr<float>(),
-            scene_center_tensor.ptr<float>(),
-            distances_tensor.ptr<float>(),
-            static_cast<int>(N),
-            nullptr
-        );
-
-        // Compute median distance (using mean as approximation for now)
-        gs::training::launch_compute_mean(
-            distances_tensor.ptr<float>(),
-            median_tensor.ptr<float>(),
-            static_cast<int>(N),
-            nullptr
-        );
-
-        // Synchronize to ensure all operations complete
-        cudaDeviceSynchronize();
-
-        // Copy median back to host
-        float new_scene_scale = median_tensor.item();
-
-        // Update scene scale if significant change
-        if (std::abs(new_scene_scale - scene_scale) > scene_scale * 0.1f) {
-            LOG_DEBUG("Updating scene scale: {} -> {}", scene_scale, new_scene_scale);
-            scene_scale = new_scene_scale;
-        }
-
-        LOG_DEBUG("Transformed {} gaussians", N);
-        return *this;
-    }
-
-    // Export to PLY
-    void SplatDataNew::save_ply(const std::filesystem::path& root, int iteration) const {
-        auto pc = to_point_cloud();
-        write_ply_impl(pc, root, iteration);
-    }
-
-    // Export to SOG
-    void SplatDataNew::save_sog(const std::filesystem::path& root, int iteration, int kmeans_iterations) const {
+    /**
+     * @brief Write SOG format implementation
+     */
+    std::filesystem::path write_sog_impl(const gs::SplatDataNew& splat_data,
+                                         const std::filesystem::path& root,
+                                         int iteration,
+                                         int kmeans_iterations) {
         namespace fs = std::filesystem;
-
-        if (!is_valid()) {
-            LOG_ERROR("Cannot save invalid SplatDataNew to SOG format");
-            return;
-        }
 
         // Create SOG subdirectory
         fs::path sog_dir = root / "sog";
         fs::create_directories(sog_dir);
 
         // Set up SOG write options - use .sog extension to create bundle
-        core::SogWriteOptionsNew options{
+        std::filesystem::path sog_out_path = sog_dir /
+            ("splat_" + std::to_string(iteration) + "_sog.sog");
+
+        gs::core::SogWriteOptionsNew options{
             .iterations = kmeans_iterations,
-            .output_path = sog_dir / ("splat_" + std::to_string(iteration) + ".sog")
+            .output_path = sog_out_path
         };
 
-        // Write SOG format using the new interface
-        auto result = core::write_sog_new(*this, options);
+        // Write SOG format
+        auto result = gs::core::write_sog_new(splat_data, options);
         if (!result) {
             LOG_ERROR("Failed to write SOG format: {}", result.error());
         } else {
             LOG_DEBUG("Successfully wrote SOG format for iteration {}", iteration);
         }
+
+        return sog_out_path;
     }
 
-    // Convert to point cloud
-    PointCloudNew SplatDataNew::to_point_cloud() const {
-        if (!means.is_valid() || means.size(0) == 0) {
-            return PointCloudNew();
-        }
+} // anonymous namespace
 
-        const size_t N = means.size(0);
+namespace gs {
 
-        // Allocate Gaussian point cloud
-        PointCloudNew pc;
+    // ========== CONSTRUCTOR & DESTRUCTOR ==========
 
-        // Get SH dimensions
-        size_t sh0_channels = sh0.is_valid() ? sh0.size(1) : 0;
-        size_t sh0_coeffs = sh0.is_valid() ? sh0.size(2) : 0;
-        size_t shN_channels = shN.is_valid() ? shN.size(1) : 0;
-        size_t shN_coeffs = shN.is_valid() ? shN.size(2) : 0;
-
-        pc.allocate_gaussian(N, sh0_channels, sh0_coeffs, shN_channels, shN_coeffs);
-
-        // Copy data
-        pc.means = means.clone();
-        pc.opacity = opacity.clone();
-        pc.rotation = rotation.clone(); // Store raw quaternions, not normalized
-        pc.scaling = scaling.clone();
-
-        if (sh0.is_valid()) {
-            pc.sh0 = sh0.clone();
-        }
-        if (shN.is_valid()) {
-            pc.shN = shN.clone();
-        }
-
-        // Normals are zeros for Gaussians
-        if (pc.normals.is_valid()) {
-            pc.normals.zero_();
-        }
-
-        // Set attribute names
-        pc.attribute_names = get_attribute_names();
-
-        return pc;
+    SplatDataNew::SplatDataNew(int sh_degree,
+                               Tensor means_,
+                               Tensor sh0_,
+                               Tensor shN_,
+                               Tensor scaling_,
+                               Tensor rotation_,
+                               Tensor opacity_,
+                               float scene_scale_)
+        : max_sh_degree(sh_degree),
+          active_sh_degree(0),
+          scene_scale(scene_scale_),
+          means(std::move(means_)),
+          sh0(std::move(sh0_)),
+          shN(std::move(shN_)),
+          scaling(std::move(scaling_)),
+          rotation(std::move(rotation_)),
+          opacity(std::move(opacity_)) {
     }
 
-    // Get attribute names for PLY format
+    SplatDataNew::~SplatDataNew() {
+        wait_for_saves();
+    }
+
+    // ========== MOVE SEMANTICS ==========
+
+    SplatDataNew::SplatDataNew(SplatDataNew&& other) noexcept
+        : active_sh_degree(other.active_sh_degree),
+          max_sh_degree(other.max_sh_degree),
+          scene_scale(other.scene_scale),
+          means(std::move(other.means)),
+          sh0(std::move(other.sh0)),
+          shN(std::move(other.shN)),
+          scaling(std::move(other.scaling)),
+          rotation(std::move(other.rotation)),
+          opacity(std::move(other.opacity)),
+          densification_info(std::move(other.densification_info))
+    {
+        // Reset the moved-from object
+        other.active_sh_degree = 0;
+        other.max_sh_degree = 0;
+        other.scene_scale = 0.0f;
+    }
+
+    SplatDataNew& SplatDataNew::operator=(SplatDataNew&& other) noexcept {
+        if (this != &other) {
+            // Wait for any pending saves to complete
+            wait_for_saves();
+
+            // Move scalar members
+            active_sh_degree = other.active_sh_degree;
+            max_sh_degree = other.max_sh_degree;
+            scene_scale = other.scene_scale;
+
+            // Move tensors
+            means = std::move(other.means);
+            sh0 = std::move(other.sh0);
+            shN = std::move(other.shN);
+            scaling = std::move(other.scaling);
+            rotation = std::move(other.rotation);
+            opacity = std::move(other.opacity);
+            densification_info = std::move(other.densification_info);
+        }
+        return *this;
+    }
+
+    // ========== COMPUTED GETTERS ==========
+
+    Tensor SplatDataNew::get_means() const {
+        return means;
+    }
+
+    Tensor SplatDataNew::get_opacity() const {
+        return opacity.sigmoid().squeeze(-1);
+    }
+
+    Tensor SplatDataNew::get_rotation() const {
+        // Normalize quaternions along the last dimension
+        // rotation is [N, 4], we want to normalize each quaternion
+        // norm = sqrt(sum(x^2)) along dim=1, keepdim=true to get [N, 1]
+        auto squared = rotation.square();
+        auto sum_squared = squared.sum({1}, true); // [N, 1]
+        auto norm = sum_squared.sqrt(); // [N, 1]
+        return rotation.div(norm.clamp_min(1e-12f)); // Avoid division by zero
+    }
+
+    Tensor SplatDataNew::get_scaling() const {
+        return scaling.exp();
+    }
+
+    Tensor SplatDataNew::get_shs() const {
+        // sh0 is [N, 1, 3], shN is [N, coeffs, 3]
+        // Concatenate along dim 1 (coeffs) to get [N, total_coeffs, 3]
+        return sh0.cat(shN, 1);
+    }
+
+    // ========== TRANSFORMATION ==========
+
+    SplatDataNew& SplatDataNew::transform(const glm::mat4& transform_matrix) {
+    LOG_TIMER("SplatDataNew::transform");
+
+    if (!means.is_valid() || means.size(0) == 0) {
+        LOG_WARN("Cannot transform invalid or empty SplatDataNew");
+        return *this;
+    }
+
+    const int num_points = means.size(0);
+    auto device = means.device();
+
+    // 1. Transform positions (means)
+    std::vector<float> transform_data = {
+        transform_matrix[0][0], transform_matrix[0][1], transform_matrix[0][2], transform_matrix[0][3],
+        transform_matrix[1][0], transform_matrix[1][1], transform_matrix[1][2], transform_matrix[1][3],
+        transform_matrix[2][0], transform_matrix[2][1], transform_matrix[2][2], transform_matrix[2][3],
+        transform_matrix[3][0], transform_matrix[3][1], transform_matrix[3][2], transform_matrix[3][3]
+    };
+
+    auto transform_tensor = Tensor::from_vector(transform_data, TensorShape({4, 4}), device);
+    auto ones = Tensor::ones({static_cast<size_t>(num_points), 1}, device);
+    auto means_homo = means.cat(ones, 1);
+    auto transformed_means = transform_tensor.mm(means_homo.t()).t();
+
+    means = transformed_means.slice(1, 0, 3).contiguous();
+
+    // 2. Extract rotation from transform matrix
+    glm::mat3 rot_mat(transform_matrix);
+    glm::vec3 scale;
+    for (int i = 0; i < 3; ++i) {
+        scale[i] = glm::length(rot_mat[i]);
+        if (scale[i] > 0.0f) {
+            rot_mat[i] /= scale[i];
+        }
+    }
+
+    glm::quat rotation_quat = glm::quat_cast(rot_mat);
+
+    // 3. Transform rotations (quaternions) if there's rotation
+    if (std::abs(rotation_quat.w - 1.0f) > 1e-6f) {
+        std::vector<float> rot_data = {rotation_quat.w, rotation_quat.x, rotation_quat.y, rotation_quat.z};
+        auto rot_tensor = Tensor::from_vector(rot_data, TensorShape({4}), device);
+
+        auto q = rotation;
+        std::vector<int> expand_shape = {num_points, 4};
+        auto q_rot = rot_tensor.unsqueeze(0).expand(std::span<const int>(expand_shape));
+
+        auto w1 = q_rot.slice(1, 0, 1).squeeze(1);
+        auto x1 = q_rot.slice(1, 1, 2).squeeze(1);
+        auto y1 = q_rot.slice(1, 2, 3).squeeze(1);
+        auto z1 = q_rot.slice(1, 3, 4).squeeze(1);
+
+        auto w2 = q.slice(1, 0, 1).squeeze(1);
+        auto x2 = q.slice(1, 1, 2).squeeze(1);
+        auto y2 = q.slice(1, 2, 3).squeeze(1);
+        auto z2 = q.slice(1, 3, 4).squeeze(1);
+
+        auto w_new = w1.mul(w2).sub(x1.mul(x2)).sub(y1.mul(y2)).sub(z1.mul(z2));
+        auto x_new = w1.mul(x2).add(x1.mul(w2)).add(y1.mul(z2)).sub(z1.mul(y2));
+        auto y_new = w1.mul(y2).sub(x1.mul(z2)).add(y1.mul(w2)).add(z1.mul(x2));
+        auto z_new = w1.mul(z2).add(x1.mul(y2)).sub(y1.mul(x2)).add(z1.mul(w2));
+
+        std::vector<Tensor> components = {
+            w_new.unsqueeze(1),
+            x_new.unsqueeze(1),
+            y_new.unsqueeze(1),
+            z_new.unsqueeze(1)
+        };
+        rotation = Tensor::cat(components, 1);
+    }
+
+    // 4. Transform scaling
+    if (std::abs(scale.x - 1.0f) > 1e-6f ||
+        std::abs(scale.y - 1.0f) > 1e-6f ||
+        std::abs(scale.z - 1.0f) > 1e-6f) {
+
+        float avg_scale = (scale.x + scale.y + scale.z) / 3.0f;
+        scaling = scaling.add(std::log(avg_scale));
+    }
+
+    // 5. Update scene scale
+    Tensor scene_center = means.mean({0}, false);
+    Tensor dists = means.sub(scene_center).norm(2.0f, {1}, false);
+    auto sorted_dists = dists.sort(0, false);
+    float new_scene_scale = sorted_dists.first[num_points / 2].item();
+
+    if (std::abs(new_scene_scale - scene_scale) > scene_scale * 0.1f) {
+        scene_scale = new_scene_scale;
+    }
+
+    LOG_DEBUG("Transformed {} gaussians", num_points);
+    return *this;
+}
+
+
+    // ========== UTILITY METHODS ==========
+
+    void SplatDataNew::increment_sh_degree() {
+        if (active_sh_degree < max_sh_degree) {
+            active_sh_degree++;
+        }
+    }
+
+    void SplatDataNew::set_active_sh_degree(int sh_degree) {
+        if (sh_degree <= max_sh_degree) {
+            active_sh_degree = sh_degree;
+        } else {
+            active_sh_degree = max_sh_degree;
+        }
+    }
+
     std::vector<std::string> SplatDataNew::get_attribute_names() const {
-        std::vector<std::string> attrs{"x", "y", "z", "nx", "ny", "nz"};
+        std::vector<std::string> a{"x", "y", "z", "nx", "ny", "nz"};
 
-        // SH0 attributes
+        // sh0 attributes: [N, 3, 1] -> 3 features
         if (sh0.is_valid()) {
-            size_t sh0_size = sh0.size(1) * sh0.size(2);
-            for (size_t i = 0; i < sh0_size; ++i) {
-                attrs.emplace_back("f_dc_" + std::to_string(i));
+            size_t sh0_features = sh0.size(1) * sh0.size(2);
+            for (size_t i = 0; i < sh0_features; ++i) {
+                a.emplace_back("f_dc_" + std::to_string(i));
             }
         }
 
-        // SHN attributes
+        // shN attributes: [N, 3, coeffs]
         if (shN.is_valid()) {
-            size_t shN_size = shN.size(1) * shN.size(2);
-            for (size_t i = 0; i < shN_size; ++i) {
-                attrs.emplace_back("f_rest_" + std::to_string(i));
+            size_t shN_features = shN.size(1) * shN.size(2);
+            for (size_t i = 0; i < shN_features; ++i) {
+                a.emplace_back("f_rest_" + std::to_string(i));
             }
         }
 
-        // Opacity
-        attrs.emplace_back("opacity");
+        a.emplace_back("opacity");
 
-        // Scaling
-        for (int i = 0; i < 3; ++i) {
-            attrs.emplace_back("scale_" + std::to_string(i));
+        // scaling attributes
+        if (scaling.is_valid()) {
+            for (size_t i = 0; i < scaling.size(1); ++i) {
+                a.emplace_back("scale_" + std::to_string(i));
+            }
         }
 
-        // Rotation
-        for (int i = 0; i < 4; ++i) {
-            attrs.emplace_back("rot_" + std::to_string(i));
+        // rotation attributes
+        if (rotation.is_valid()) {
+            for (size_t i = 0; i < rotation.size(1); ++i) {
+                a.emplace_back("rot_" + std::to_string(i));
+            }
         }
 
-        return attrs;
+        return a;
     }
 
-    // Validate structure
     bool SplatDataNew::is_valid() const {
         if (!means.is_valid()) {
-            LOG_ERROR("SplatDataNew: means is invalid");
+            LOG_ERROR("SplatDataNew: means tensor is invalid");
             return false;
         }
 
-        const size_t N = means.size(0);
+        size_t n = means.size(0);
 
         if (means.ndim() != 2 || means.size(1) != 3) {
-            LOG_ERROR("SplatDataNew: means must be [N, 3]");
+            LOG_ERROR("SplatDataNew: means must be [N, 3], got {}", means.shape().str());
             return false;
         }
 
-        if (!opacity.is_valid() || opacity.size(0) != N || opacity.size(1) != 1) {
-            LOG_ERROR("SplatDataNew: opacity must be [N, 1]");
+        if (sh0.is_valid() && (sh0.ndim() != 3 || sh0.size(0) != n || sh0.size(2) != 3)) {
+            LOG_ERROR("SplatDataNew: sh0 must be [N, 1, 3], got {}", sh0.shape().str());
             return false;
         }
 
-        if (!rotation.is_valid() || rotation.size(0) != N || rotation.size(1) != 4) {
-            LOG_ERROR("SplatDataNew: rotation must be [N, 4]");
+        if (shN.is_valid() && (shN.ndim() != 3 || shN.size(0) != n || shN.size(2) != 3)) {
+            LOG_ERROR("SplatDataNew: shN must be [N, coeffs, 3], got {}", shN.shape().str());
             return false;
         }
 
-        if (!scaling.is_valid() || scaling.size(0) != N || scaling.size(1) != 3) {
-            LOG_ERROR("SplatDataNew: scaling must be [N, 3]");
+        if (scaling.is_valid() &&
+            (scaling.ndim() != 2 || scaling.size(0) != n || scaling.size(1) != 3)) {
+            LOG_ERROR("SplatDataNew: scaling must be [N, 3], got {}", scaling.shape().str());
             return false;
         }
 
-        if (!sh0.is_valid() || sh0.size(0) != N) {
-            LOG_ERROR("SplatDataNew: sh0 must have N points");
+        if (rotation.is_valid() &&
+            (rotation.ndim() != 2 || rotation.size(0) != n || rotation.size(1) != 4)) {
+            LOG_ERROR("SplatDataNew: rotation must be [N, 4], got {}", rotation.shape().str());
+            return false;
+        }
+
+        if (opacity.is_valid() &&
+            (opacity.ndim() != 2 || opacity.size(0) != n || opacity.size(1) != 1)) {
+            LOG_ERROR("SplatDataNew: opacity must be [N, 1], got {}", opacity.shape().str());
             return false;
         }
 
         return true;
     }
 
-    // Diagnostic string
-    std::string SplatDataNew::str() const {
-        std::ostringstream oss;
-        oss << "SplatDataNew(";
-        oss << "points=" << size();
-        oss << ", sh_degree=" << active_sh_degree << "/" << max_sh_degree;
-        oss << ", scene_scale=" << scene_scale;
+    // ========== ASYNC SAVE MANAGEMENT ==========
 
-        if (sh0.is_valid()) {
-            oss << ", sh0=" << sh0.shape().str();
-        }
-        if (shN.is_valid()) {
-            oss << ", shN=" << shN.shape().str();
-        }
+    void SplatDataNew::wait_for_saves() const {
+        std::lock_guard<std::mutex> lock(save_mutex);
 
-        oss << ")";
-        return oss.str();
+        // Wait for all pending saves
+        for (auto& future : save_futures) {
+            if (future.valid()) {
+                try {
+                    future.wait();
+                } catch (const std::exception& e) {
+                    LOG_ERROR("Error waiting for save to complete: {}", e.what());
+                }
+            }
+        }
+        save_futures.clear();
     }
 
-    // Initialize from point cloud
+    void SplatDataNew::cleanup_finished_saves() const {
+        std::lock_guard<std::mutex> lock(save_mutex);
+
+        // Remove completed futures
+        save_futures.erase(
+            std::remove_if(save_futures.begin(), save_futures.end(),
+                           [](const std::future<void>& f) {
+                               return !f.valid() ||
+                                      f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+                           }),
+            save_futures.end());
+
+        // Log if we have many pending saves
+        if (save_futures.size() > 5) {
+            LOG_WARN("Multiple saves pending: {} operations in queue", save_futures.size());
+        }
+    }
+
+    // ========== EXPORT METHODS ==========
+
+    void SplatDataNew::save_ply(const std::filesystem::path& root,
+                                 int iteration,
+                                 bool join_threads,
+                                 std::string stem) const {
+        auto pc = to_point_cloud();
+
+        if (join_threads) {
+            // Synchronous save - wait for completion
+            write_ply_impl(pc, root, iteration, stem);
+        } else {
+            // Asynchronous save
+            cleanup_finished_saves();
+
+            std::lock_guard<std::mutex> lock(save_mutex);
+            save_futures.emplace_back(
+                std::async(std::launch::async,
+                    [pc = std::move(pc), root, iteration, stem]() {
+                        try {
+                            write_ply_impl(pc, root, iteration, stem);
+                        } catch (const std::exception& e) {
+                            LOG_ERROR("Failed to save PLY for iteration {}: {}",
+                                      iteration, e.what());
+                        }
+                    }));
+        }
+    }
+
+    std::filesystem::path SplatDataNew::save_sog(const std::filesystem::path& root,
+                                                  int iteration,
+                                                  int kmeans_iterations,
+                                                  bool join_threads) const {
+        // SOG must always be synchronous - k-means clustering is too heavy for async
+        return write_sog_impl(*this, root, iteration, kmeans_iterations);
+    }
+
+    PointCloudNew SplatDataNew::to_point_cloud() const {
+        PointCloudNew pc;
+
+        // Basic attributes
+        pc.means = means.cpu().contiguous();
+        pc.normals = Tensor::zeros_like(pc.means);
+
+        // Gaussian attributes - sh0 and shN are in correct layout [N, 3, coeffs]
+        if (sh0.is_valid()) {
+            pc.sh0 = sh0.cpu().contiguous();
+        }
+
+        if (shN.is_valid()) {
+            pc.shN = shN.cpu().contiguous();
+        }
+
+        if (opacity.is_valid()) {
+            pc.opacity = opacity.cpu().contiguous();
+        }
+
+        if (scaling.is_valid()) {
+            pc.scaling = scaling.cpu().contiguous();
+        }
+
+        if (rotation.is_valid()) {
+            // Normalize rotation before export
+            auto normalized_rotation = get_rotation(); // This already normalizes
+            pc.rotation = normalized_rotation.cpu().contiguous();
+        }
+
+        // Set attribute names for PLY export
+        pc.attribute_names = get_attribute_names();
+
+        return pc;
+    }
+
+    // ========== CROPPING ==========
+
+    SplatDataNew SplatDataNew::crop_by_cropbox(const geometry::BoundingBox& bounding_box) const {
+        LOG_TIMER("SplatDataNew::crop_by_cropbox");
+
+        if (!means.is_valid() || means.size(0) == 0) {
+            LOG_WARN("Cannot crop invalid or empty SplatDataNew");
+            return SplatDataNew();
+        }
+
+        // Get bounding box properties
+        const auto bbox_min = bounding_box.getMinBounds();
+        const auto bbox_max = bounding_box.getMaxBounds();
+        const auto& world2bbox_transform = bounding_box.getworld2BBox();
+
+        const int num_points = means.size(0);
+
+        LOG_DEBUG("Cropping {} points with bounding box: min({}, {}, {}), max({}, {}, {})",
+                  num_points, bbox_min.x, bbox_min.y, bbox_min.z,
+                  bbox_max.x, bbox_max.y, bbox_max.z);
+
+        // Get transformation matrix from the EuclideanTransform
+        glm::mat4 world_to_bbox_matrix = world2bbox_transform.toMat4();
+
+        // Convert transformation matrix to tensor (transposed for row-major)
+        std::vector<float> transform_data = {
+            world_to_bbox_matrix[0][0], world_to_bbox_matrix[1][0], world_to_bbox_matrix[2][0], world_to_bbox_matrix[3][0],
+            world_to_bbox_matrix[0][1], world_to_bbox_matrix[1][1], world_to_bbox_matrix[2][1], world_to_bbox_matrix[3][1],
+            world_to_bbox_matrix[0][2], world_to_bbox_matrix[1][2], world_to_bbox_matrix[2][2], world_to_bbox_matrix[3][2],
+            world_to_bbox_matrix[0][3], world_to_bbox_matrix[1][3], world_to_bbox_matrix[2][3], world_to_bbox_matrix[3][3]
+        };
+        auto transform_tensor = Tensor::from_vector(
+            transform_data,
+            TensorShape({4, 4}),
+            means.device());
+
+        // Convert means to homogeneous coordinates [N, 4]
+        auto ones = Tensor::ones({static_cast<size_t>(num_points), 1}, means.device());
+        auto means_homo = means.cat(ones, 1);
+
+        // Transform all points: (4x4) @ (Nx4)^T = (4xN), then transpose back to (Nx4)
+        auto transformed_points = transform_tensor.mm(means_homo.t()).t();
+
+        // Extract xyz coordinates (drop homogeneous coordinate)
+        auto local_points = transformed_points.slice(1, 0, 3);
+
+        // Create bounding box bounds tensors
+        std::vector<float> bbox_min_data = {bbox_min.x, bbox_min.y, bbox_min.z};
+        std::vector<float> bbox_max_data = {bbox_max.x, bbox_max.y, bbox_max.z};
+
+        auto bbox_min_tensor = Tensor::from_vector(
+            bbox_min_data,
+            TensorShape({3}),
+            means.device());
+        auto bbox_max_tensor = Tensor::from_vector(
+            bbox_max_data,
+            TensorShape({3}),
+            means.device());
+
+        // Check which points are inside the bounding box
+        auto inside_min = local_points.ge(bbox_min_tensor.unsqueeze(0)); // [N, 3]
+        auto inside_max = local_points.le(bbox_max_tensor.unsqueeze(0)); // [N, 3]
+
+        // Point is inside if all 3 coordinates satisfy both min and max constraints
+        std::vector<int> reduce_dims = {1};
+        auto inside_mask = (inside_min && inside_max).all(std::span<const int>(reduce_dims), false); // [N]
+
+        // Count points inside
+        int points_inside = inside_mask.sum_scalar();
+
+        LOG_DEBUG("Found {} points inside bounding box ({:.1f}%)",
+                  points_inside, (float)points_inside / num_points * 100.0f);
+
+        if (points_inside == 0) {
+            LOG_WARN("No points found inside bounding box, returning empty SplatDataNew");
+            return SplatDataNew();
+        }
+
+        // Get indices of points inside the bounding box
+        auto indices = inside_mask.nonzero(); // [points_inside, 1]
+
+        if (indices.ndim() == 2) {
+            indices = indices.squeeze(1); // [points_inside]
+        }
+
+        // Index all tensors using the indices
+        auto cropped_means = means.index_select(0, indices).contiguous();
+        auto cropped_sh0 = sh0.index_select(0, indices).contiguous();
+        auto cropped_shN = shN.index_select(0, indices).contiguous();
+        auto cropped_scaling = scaling.index_select(0, indices).contiguous();
+        auto cropped_rotation = rotation.index_select(0, indices).contiguous();
+        auto cropped_opacity = opacity.index_select(0, indices).contiguous();
+
+        // Recalculate scene scale for the cropped data
+        Tensor scene_center = cropped_means.mean({0}, false);
+        Tensor dists = cropped_means.sub(scene_center).norm(2.0f, {1}, false);
+
+        float new_scene_scale = scene_scale;
+        if (points_inside > 1) {
+            auto sorted_dists = dists.sort(0, false);
+            new_scene_scale = sorted_dists.first[points_inside / 2].item();
+        }
+
+        // Create new SplatDataNew with cropped tensors
+        SplatDataNew cropped_splat(
+            max_sh_degree,
+            std::move(cropped_means),
+            std::move(cropped_sh0),
+            std::move(cropped_shN),
+            std::move(cropped_scaling),
+            std::move(cropped_rotation),
+            std::move(cropped_opacity),
+            new_scene_scale);
+
+        // Copy over the active SH degree
+        cropped_splat.active_sh_degree = active_sh_degree;
+
+        // If densification info exists and has the right size, crop it too
+        if (densification_info.is_valid() && densification_info.size(0) == num_points) {
+            cropped_splat.densification_info =
+                densification_info.index_select(0, indices).contiguous();
+        }
+
+        LOG_DEBUG("Successfully cropped SplatDataNew: {} -> {} points (scale: {:.4f} -> {:.4f})",
+                  num_points, points_inside, scene_scale, new_scene_scale);
+
+        return cropped_splat;
+    }
+
+    // ========== FACTORY METHOD ==========
+
     std::expected<SplatDataNew, std::string> SplatDataNew::init_model_from_pointcloud(
         const param::TrainingParameters& params,
         const Tensor& scene_center,
         const PointCloudNew& pcd) {
 
         try {
-            Tensor positions;
-            Tensor colors;
+            // Generate positions and colors based on init type
+            Tensor positions, colors;
 
-            if (pcd.means.is_valid() && pcd.colors.is_valid()) {
-                // Use provided point cloud
-                positions = pcd.means.clone();
-                colors = pcd.colors.clone() * 255.0f; // Convert from [0,1] to [0,255]
-            } else if (params.optimization.random) {
-                // Random initialization
+            if (params.optimization.random) {
                 const int num_points = params.optimization.init_num_pts;
                 const float extent = params.optimization.init_extent;
 
-                positions = (Tensor::rand({static_cast<size_t>(num_points), 3}, Device::CUDA) * 2.0f - 1.0f) * extent;
-                colors = Tensor::rand({static_cast<size_t>(num_points), 3}, Device::CUDA) * 255.0f;
+                positions = (Tensor::rand({static_cast<size_t>(num_points), 3}, Device::CUDA)
+                             .mul(2.0f).sub(1.0f)).mul(extent);
+                colors = Tensor::rand({static_cast<size_t>(num_points), 3}, Device::CUDA);
             } else {
-                return std::unexpected("No valid point cloud data and random initialization is disabled");
+                if (!pcd.means.is_valid() || !pcd.colors.is_valid()) {
+                    return std::unexpected("Point cloud has invalid means or colors");
+                }
+
+                positions = pcd.means.cuda();
+                colors = pcd.colors.cuda().div(255.0f); // Normalize to [0, 1]
             }
 
-            // Ensure on CUDA
-            positions = positions.cuda();
-            colors = colors.cuda();
+            auto scene_center_device = scene_center.to(positions.device());
+            const Tensor dists = positions.sub(scene_center_device).norm(2.0f, {1}, false);
 
-            // Compute scene scale
-            auto scene_center_cuda = scene_center.cuda();
-            auto dists = (positions - scene_center_cuda.unsqueeze(0)).norm(2, 1);
+            // Get median distance for scene scale
+            auto sorted_dists = dists.sort(0, false);
+            const float scene_scale = sorted_dists.first[dists.size(0) / 2].item();
 
-            // Compute median distance
-            auto sorted_dists = dists.sort();
-            size_t median_idx = sorted_dists.first.size(0) / 2;
-            float scene_scale = sorted_dists.first[median_idx].item();
+            // RGB to SH conversion (DC component)
+            auto rgb_to_sh = [](const Tensor& rgb) {
+                constexpr float kInvSH = 0.28209479177387814f;
+                return rgb.sub(0.5f).div(kInvSH);
+            };
 
-            // 1. Means
-            Tensor means;
+            // 1. means
+            Tensor means_;
             if (params.optimization.random) {
-                means = positions * scene_scale;
+                means_ = positions.mul(scene_scale).cuda();
             } else {
-                means = positions;
+                means_ = positions.cuda();
             }
 
-            // 2. Scaling (log(σ))
-            auto nn_dist = compute_mean_neighbor_distances(means);  // [N]
-            auto log_dist = (nn_dist.sqrt() * params.optimization.init_scaling).log();  // [N]
+            // 2. scaling (log(σ))
+            auto nn_dist = compute_mean_neighbor_distances(means_).clamp_min(1e-7f);
+            std::vector<int> scale_expand_shape = {static_cast<int>(means_.size(0)), 3};
+            auto scaling_ = nn_dist.sqrt()
+                            .mul(params.optimization.init_scaling)
+                            .log()
+                            .unsqueeze(-1)
+                            .expand(std::span<const int>(scale_expand_shape))
+                            .cuda();
 
-            // Stack 3 copies to create [N, 3]
-            auto scaling = Tensor::stack({log_dist, log_dist, log_dist}, 1);
+            // 3. rotation (quaternion, identity)
+            auto ones_col = Tensor::ones({means_.size(0), 1}, Device::CUDA);
+            auto zeros_cols = Tensor::zeros({means_.size(0), 3}, Device::CUDA);
+            auto rotation_ = ones_col.cat(zeros_cols, 1); // [1, 0, 0, 0] for each point
 
-            // 3. Rotation (quaternion, identity: w=1, x=y=z=0)
-            auto rotation = Tensor::zeros({means.size(0), 4}, Device::CUDA, DataType::Float32);
-            // Set first column to 1 (w component)
-            auto rotation_w = rotation.slice(1, 0, 1);
-            rotation_w.fill_(1.0f);
+            // 4. opacity (inverse sigmoid of init_opacity)
+            auto opacity_ = Tensor::full(
+                {means_.size(0), 1},
+                params.optimization.init_opacity,
+                Device::CUDA).logit();
 
-            // 4. Opacity (inverse sigmoid of init value)
-            auto opacity = (Tensor::ones({means.size(0), 1}, Device::CUDA) * params.optimization.init_opacity).logit();
+            // 5. shs (SH coefficients)
+            // CRITICAL: Match ACTUAL reference layout [N, coeffs, channels] NOT the documented layout!
+            auto colors_device = colors.cuda();
+            auto fused_color = rgb_to_sh(colors_device);
 
-            // 5. SH coefficients
-            auto colors_float = colors / 255.0f;
-            auto fused_color = rgb_to_sh(colors_float);  // [N, 3]
+            const int64_t feature_shape = static_cast<int64_t>(
+                std::pow(params.optimization.sh_degree + 1, 2));
 
-            // Calculate number of SH coefficients
-            const int64_t feature_shape = static_cast<int64_t>(std::pow(params.optimization.sh_degree + 1, 2));
+            // Create SH tensor with ACTUAL REFERENCE layout: [N, coeffs, channels]
+            auto shs = Tensor::zeros(
+                {fused_color.size(0), static_cast<size_t>(feature_shape), 3},
+                Device::CUDA);
 
-            // sh0 is just the DC coefficient: [N, 3] -> [N, 3, 1]
-            auto sh0 = fused_color.unsqueeze(-1);  // [N, 3, 1]
+            // Fill DC coefficient (coefficient 0) for all channels
+            // shs[:, 0, :] = fused_color
+            auto shs_cpu = shs.cpu();
+            auto fused_cpu = fused_color.cpu();
 
-            // shN contains the rest of the coefficients (all zeros initially)
-            auto shN = Tensor::zeros({fused_color.size(0), 3, static_cast<size_t>(feature_shape - 1)},
-                                     Device::CUDA, DataType::Float32);  // [N, 3, K-1]
+            auto shs_acc = shs_cpu.accessor<float, 3>();
+            auto fused_acc = fused_cpu.accessor<float, 2>();
 
-            LOG_INFO("Scene scale: {}", scene_scale);
-            LOG_INFO("Initialized SplatDataNew with:");
-            LOG_INFO("  - {} points", means.size(0));
-            LOG_INFO("  - Max SH degree: {}", params.optimization.sh_degree);
-            LOG_INFO("  - Total SH coefficients: {}", feature_shape);
-            LOG_INFO("  - sh0 shape: {}", sh0.shape().str());
-            LOG_INFO("  - shN shape: {}", shN.shape().str());
+            for (size_t i = 0; i < fused_color.size(0); ++i) {
+                for (size_t c = 0; c < 3; ++c) {
+                    shs_acc(i, 0, c) = fused_acc(i, c);  // Set channel c at coeff=0
+                }
+            }
 
-            return SplatDataNew(
+            // Move back to CUDA
+            shs = shs_cpu.cuda();
+
+            // Split into sh0 and shN along coeffs dimension (dim 1)
+            // Result: sh0 [N, 1, 3], shN [N, (degree+1)^2-1, 3]
+            auto sh0_ = shs.slice(1, 0, 1).contiguous();     // [N, 1, 3]
+            auto shN_ = shs.slice(1, 1, feature_shape).contiguous(); // [N, coeffs-1, 3]
+
+            std::println("Scene scale: {}", scene_scale);
+            std::println("Initialized SplatDataNew with:");
+            std::println("  - {} points", means_.size(0));
+            std::println("  - Max SH degree: {}", params.optimization.sh_degree);
+            std::println("  - Total SH coefficients: {}", feature_shape);
+            std::println("  - sh0 shape: {}", sh0_.shape().str());
+            std::println("  - shN shape: {}", shN_.shape().str());
+            std::println("  - Layout: [N, channels={}, coeffs]", sh0_.size(1));
+
+            auto result = SplatDataNew(
                 params.optimization.sh_degree,
-                means.contiguous(),
-                sh0.contiguous(),
-                shN.contiguous(),
-                scaling.contiguous(),
-                rotation.contiguous(),
-                opacity.contiguous(),
-                scene_scale
-            );
+                std::move(means_),
+                std::move(sh0_),
+                std::move(shN_),
+                std::move(scaling_),
+                std::move(rotation_),
+                std::move(opacity_),
+                scene_scale);
+
+            return result;
 
         } catch (const std::exception& e) {
-            return std::unexpected(std::format("Failed to initialize SplatDataNew: {}", e.what()));
+            return std::unexpected(
+                std::format("Failed to initialize SplatDataNew: {}", e.what()));
         }
     }
 

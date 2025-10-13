@@ -84,41 +84,46 @@ protected:
     }
 };
 
+// FIXED: Test shallow copy behavior (LibTorch-like)
 TEST_F(TensorCopyTest, CopyConstructorCPU) {
     auto a = Tensor::arange(0, 10, 1).to(Device::CPU);
-    Tensor b(a);  // Copy constructor
+    Tensor b(a);  // Copy constructor - SHALLOW COPY
 
     // Verify metadata matches
     EXPECT_EQ(a.shape(), b.shape());
     EXPECT_EQ(a.device(), b.device());
     EXPECT_EQ(a.dtype(), b.dtype());
 
-    // Verify data matches
+    // Verify data matches initially
     EXPECT_TRUE(a.all_close(b));
 
-    // Verify they are independent copies
+    // CRITICAL: With shallow copy, modifying b also modifies a
     b.fill_(42.0f);
-    EXPECT_FALSE(a.all_close(b));
 
-    // Verify original is unchanged
+    // Both should now be 42 (shared data!)
+    EXPECT_TRUE(a.all_close(b));
+
+    // Verify both are 42
     auto a_vec = a.to_vector();
+    auto b_vec = b.to_vector();
     for (size_t i = 0; i < a_vec.size(); ++i) {
-        EXPECT_NEAR(a_vec[i], static_cast<float>(i), 1e-5f);
+        EXPECT_NEAR(a_vec[i], 42.0f, 1e-5f);
+        EXPECT_NEAR(b_vec[i], 42.0f, 1e-5f);
     }
 }
 
 TEST_F(TensorCopyTest, CopyConstructorCUDA) {
     auto a = Tensor::arange(0, 10, 1).to(Device::CUDA);
-    Tensor b(a);  // Copy constructor
+    Tensor b(a);  // Copy constructor - SHALLOW COPY
 
     EXPECT_EQ(a.shape(), b.shape());
     EXPECT_EQ(a.device(), b.device());
     EXPECT_EQ(a.dtype(), b.dtype());
     EXPECT_TRUE(a.all_close(b));
 
-    // Verify they are independent
+    // With shallow copy, both point to same data
     b.fill_(42.0f);
-    EXPECT_FALSE(a.all_close(b));
+    EXPECT_TRUE(a.all_close(b));  // Both should be 42
 
     // Verify b is actually 42
     auto b_vec = b.to_vector();
@@ -137,39 +142,40 @@ TEST_F(TensorCopyTest, CopyAssignmentCPU) {
         EXPECT_NEAR(val, 0.0f, 1e-5f);
     }
 
-    b = a;  // Copy assignment
+    b = a;  // Copy assignment - SHALLOW COPY
 
     EXPECT_EQ(a.shape(), b.shape());
     EXPECT_EQ(a.device(), b.device());
     EXPECT_TRUE(a.all_close(b));
 
-    // Verify they are independent
+    // With shallow copy, both point to same data
     b.fill_(42.0f);
-    EXPECT_FALSE(a.all_close(b));
+    EXPECT_TRUE(a.all_close(b));  // Both should be 42
 }
 
 TEST_F(TensorCopyTest, CopyAssignmentCUDA) {
     auto a = Tensor::arange(0, 10, 1).to(Device::CUDA);
     auto b = Tensor::zeros({5}, Device::CUDA);
 
-    b = a;  // Copy assignment
+    b = a;  // Copy assignment - SHALLOW COPY
 
     EXPECT_EQ(a.shape(), b.shape());
     EXPECT_EQ(a.device(), b.device());
     EXPECT_TRUE(a.all_close(b));
 
-    // Verify they are independent
-    auto a_before = a.to_vector();
+    // With shallow copy, modifying b also modifies a
     b.fill_(42.0f);
-    auto a_after = a.to_vector();
 
-    // Verify a is unchanged
-    EXPECT_EQ(a_before.size(), a_after.size());
-    for (size_t i = 0; i < a_before.size(); ++i) {
-        EXPECT_NEAR(a_before[i], a_after[i], 1e-5f);
+    auto a_after = a.to_vector();
+    auto b_after = b.to_vector();
+
+    // Both should be 42
+    for (size_t i = 0; i < a_after.size(); ++i) {
+        EXPECT_NEAR(a_after[i], 42.0f, 1e-5f);
+        EXPECT_NEAR(b_after[i], 42.0f, 1e-5f);
     }
 
-    EXPECT_FALSE(a.all_close(b));
+    EXPECT_TRUE(a.all_close(b));
 }
 
 TEST_F(TensorCopyTest, CopyAssignmentSelfAssignment) {
@@ -185,15 +191,40 @@ TEST_F(TensorCopyTest, CopyAssignmentSelfAssignment) {
     }
 }
 
+// NEW TEST: Verify clone() creates independent copy
+TEST_F(TensorCopyTest, CloneCreatesDeepCopy) {
+    auto a = Tensor::arange(0, 10, 1).to(Device::CPU);
+    auto b = a.clone();  // Deep copy via clone()
+
+    EXPECT_EQ(a.shape(), b.shape());
+    EXPECT_TRUE(a.all_close(b));
+
+    // Now modifying b should NOT affect a
+    b.fill_(42.0f);
+    EXPECT_FALSE(a.all_close(b));
+
+    // Verify a is unchanged
+    auto a_vec = a.to_vector();
+    for (size_t i = 0; i < a_vec.size(); ++i) {
+        EXPECT_NEAR(a_vec[i], static_cast<float>(i), 1e-5f);
+    }
+
+    // Verify b is 42
+    auto b_vec = b.to_vector();
+    for (size_t i = 0; i < b_vec.size(); ++i) {
+        EXPECT_NEAR(b_vec[i], 42.0f, 1e-5f);
+    }
+}
+
 TEST_F(TensorCopyTest, CopyUnderscoreMethod) {
     auto a = Tensor::arange(0, 10, 1);
     auto b = Tensor::zeros({10});
 
-    b.copy_(a);  // Using copy_() method
+    b.copy_(a);  // Using copy_() method - deep copy into b
 
     EXPECT_TRUE(a.all_close(b));
 
-    // Verify they are independent
+    // copy_() does a deep copy, so they are independent
     b.fill_(42.0f);
     EXPECT_FALSE(a.all_close(b));
 }
@@ -209,18 +240,54 @@ TEST_F(TensorCopyTest, CopyEmptyTensor) {
 
 TEST_F(TensorCopyTest, CopyLargeTensor) {
     auto a = Tensor::randn({1000, 1000});
-    Tensor b(a);
+    Tensor b(a);  // Shallow copy
 
     EXPECT_TRUE(a.all_close(b, 1e-5f, 1e-5f));
 
-    // Modify and verify independence
+    // With shallow copy, modifying b affects a
     b.add_(1.0f);
-    EXPECT_FALSE(a.all_close(b));
+    EXPECT_TRUE(a.all_close(b));  // Both should have the same values
 
-    // Verify the difference is approximately 1.0
-    auto diff = b.sub(a);
-    auto diff_mean = diff.mean_scalar();
-    EXPECT_NEAR(diff_mean, 1.0f, 1e-4f);
+    // Verify they both increased by 1.0
+    // (Can't directly test this without saving original, but the fact
+    // that they're still equal proves shallow copy behavior)
+}
+
+// NEW TEST: Verify LibTorch parity
+TEST_F(TensorCopyTest, LibTorchParityShallowCopy) {
+    // Test that our behavior matches LibTorch exactly
+
+    // Our implementation
+    auto gs_a = Tensor::arange(0, 5, 1).to(Device::CPU);
+    auto gs_b = gs_a;  // Shallow copy
+    gs_b.fill_(99.0f);
+
+    // LibTorch
+    auto torch_a = torch::arange(0, 5, 1);
+    auto torch_b = torch_a;  // Shallow copy in LibTorch
+    torch_b.fill_(99.0f);
+
+    // Both should show same behavior: a is also 99
+    EXPECT_NEAR(gs_a.to_vector()[0], 99.0f, 1e-5f);
+    EXPECT_NEAR(torch_a[0].item<float>(), 99.0f, 1e-5f);
+}
+
+TEST_F(TensorCopyTest, LibTorchParityClone) {
+    // Test that clone() matches LibTorch
+
+    // Our implementation
+    auto gs_a = Tensor::arange(0, 5, 1).to(Device::CPU);
+    auto gs_b = gs_a.clone();  // Deep copy
+    gs_b.fill_(99.0f);
+
+    // LibTorch
+    auto torch_a = torch::arange(0, 5, 1);
+    auto torch_b = torch_a.clone();  // Deep copy in LibTorch
+    torch_b.fill_(99.0f);
+
+    // Both should show same behavior: a is unchanged
+    EXPECT_NEAR(gs_a.to_vector()[0], 0.0f, 1e-5f);
+    EXPECT_NEAR(torch_a[0].item<float>(), 0.0f, 1e-5f);
 }
 
 // ============= Test cdist (Pairwise Distance) =============
@@ -891,9 +958,11 @@ TEST_F(TensorIntegrationTest, KMeansPlusPlusInitialization) {
 
 TEST_F(TensorIntegrationTest, CopyAndModify) {
     auto original = Tensor::randn({100});
-    Tensor copy1 = original;  // Copy constructor
+
+    // IMPORTANT: Use clone() for independent copy
+    auto copy1 = original.clone();  // Deep copy
     auto copy2 = Tensor::empty_like(original);
-    copy2.copy_(original);  // copy_ method
+    copy2.copy_(original);  // copy_() also does deep copy
 
     EXPECT_TRUE(original.all_close(copy1));
     EXPECT_TRUE(original.all_close(copy2));
@@ -1052,15 +1121,15 @@ TEST_F(TensorPerformanceTest, CopyPerformance) {
     auto large = Tensor::randn({10000, 1000});
 
     double copy_time = measure_time([&]() {
-        Tensor copy = large;  // Copy constructor
-    }, 5);  // Fewer iterations for large tensor
+        Tensor copy = large;  // Shallow copy (very fast!)
+    }, 5);
 
     std::cout << "Copy Performance (10000x1000):\n";
     std::cout << "  Time: " << copy_time << " ms\n";
 
-    // Should complete in reasonable time (< 100ms)
-    EXPECT_LT(copy_time, 100.0)
-        << "Copy operation should complete in reasonable time";
+    // Shallow copy should be very fast
+    EXPECT_LT(copy_time, 1.0)  // Should be under 1ms
+        << "Shallow copy operation should be very fast";
 }
 
 // ============= Edge Cases and Error Handling =============

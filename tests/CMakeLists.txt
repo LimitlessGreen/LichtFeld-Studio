@@ -52,8 +52,12 @@ set(OPTIONAL_TEST_FILES
     test_bugs_found.cpp
     test_tensor_vs_torch.cpp
     test_morton_comparison.cpp
-    #test_sogs_comparison.cpp
     test_point_cloud_comparison.cpp
+    test_tensor_move.cpp
+    test_splatdata.cpp
+    test_camera.cpp
+    test_image_io_comparison.cpp
+    #test_sogs_comparison.cpp
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})

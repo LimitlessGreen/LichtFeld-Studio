@@ -9,20 +9,30 @@
 
 namespace gs {
 
-    // Just pure functions - no classes!
+    // Pure functions for broadcasting - no classes!
     namespace broadcast {
 
-        // Get broadcast shape for two shapes
+        /**
+         * @brief Compute broadcast shape for two shapes following NumPy rules
+         * @param a First shape
+         * @param b Second shape
+         * @return Broadcast result shape, or empty vector if incompatible
+         * @details
+         * - Aligns shapes from the right
+         * - Dimensions must either match or one must be 1
+         * - Result takes the maximum of each dimension
+         * - Handles zero dimensions: 0 can only broadcast with another 0
+         */
         inline std::vector<size_t> shape(std::span<const size_t> a, std::span<const size_t> b) {
             size_t max_rank = std::max(a.size(), b.size());
             std::vector<size_t> result(max_rank);
 
-            // Work backwards (numpy-style)
+            // Work backwards (numpy-style broadcasting)
             for (size_t i = 0; i < max_rank; ++i) {
                 size_t dim_a = (i < a.size()) ? a[a.size() - 1 - i] : 1;
                 size_t dim_b = (i < b.size()) ? b[b.size() - 1 - i] : 1;
 
-                // In NumPy, a dimension of 0 can only broadcast with another 0
+                // Handle zero dimensions
                 if (dim_a == 0 && dim_b == 0) {
                     result[max_rank - 1 - i] = 0;
                 } else if (dim_a == 0 || dim_b == 0) {
@@ -37,7 +47,25 @@ namespace gs {
             return result;
         }
 
-        // Map output index to input index
+        /**
+         * @brief Check if two shapes are broadcast-compatible
+         * @param a First shape
+         * @param b Second shape
+         * @return True if shapes can be broadcast together, false otherwise
+         */
+        inline bool can_broadcast(std::span<const size_t> a, std::span<const size_t> b) {
+            auto result = shape(a, b);
+            return !result.empty();
+        }
+
+        /**
+         * @brief Map output index to input index for broadcasting (CPU fallback)
+         * @param out_idx Linear index in output array
+         * @param out_shape Shape of output array
+        * @param in_shape Shape of input array
+         * @return Linear index in input array
+         * @details Used for CPU fallback when CUDA is not available
+         */
         inline size_t index(size_t out_idx, std::span<const size_t> out_shape,
                             std::span<const size_t> in_shape) {
             size_t in_idx = 0;
