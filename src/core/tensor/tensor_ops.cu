@@ -1271,4 +1271,143 @@ void launch_cdist(const float* a, const float* b, float* out,
         if (stream) cudaStreamSynchronize(stream);
     }
 
+    // Add at the end of tensor_ops.cu, before the closing namespace
+
+// ============= CONCATENATION OPERATIONS =============
+
+// Optimized kernel for last dimension concatenation
+template<typename T>
+__global__ void cat_last_dim_kernel(
+    T* output,
+    const T** input_ptrs,
+    const size_t* input_sizes,
+    size_t num_tensors,
+    size_t num_rows,
+    size_t row_size)
+{
+    size_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= num_rows) return;
+
+    size_t result_offset = 0;
+    for (size_t t = 0; t < num_tensors; ++t) {
+        size_t tensor_dim_size = input_sizes[t];
+
+        // Copy this tensor's chunk for this row
+        const T* src = input_ptrs[t] + row * tensor_dim_size;
+        T* dst = output + row * row_size + result_offset;
+
+        for (size_t i = 0; i < tensor_dim_size; ++i) {
+            dst[i] = src[i];
+        }
+
+        result_offset += tensor_dim_size;
+    }
+}
+
+void launch_cat_last_dim(
+    void* output,
+    const std::vector<Tensor>& tensors,
+    size_t num_rows,
+    size_t row_size,
+    size_t element_size,
+    cudaStream_t stream)
+{
+    size_t num_tensors = tensors.size();
+
+    // Prepare device arrays
+    thrust::device_vector<const float*> d_input_ptrs(num_tensors);
+    thrust::device_vector<size_t> d_input_sizes(num_tensors);
+
+    for (size_t i = 0; i < num_tensors; ++i) {
+        d_input_ptrs[i] = static_cast<const float*>(tensors[i].raw_ptr());
+        d_input_sizes[i] = tensors[i].shape()[tensors[i].shape().rank() - 1];
+    }
+
+    int block_size = 256;
+    int grid_size = (num_rows + block_size - 1) / block_size;
+
+    cat_last_dim_kernel<<<grid_size, block_size, 0, stream>>>(
+        static_cast<float*>(output),
+        thrust::raw_pointer_cast(d_input_ptrs.data()),
+        thrust::raw_pointer_cast(d_input_sizes.data()),
+        num_tensors,
+        num_rows,
+        row_size);
+}
+
+// General kernel for middle dimension concatenation
+template<typename T>
+__global__ void cat_middle_dim_kernel(
+    T* output,
+    const T** input_ptrs,
+    const size_t* input_sizes,
+    size_t num_tensors,
+    size_t outer_size,
+    size_t inner_size,
+    size_t total_dim_size)
+{
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = outer_size * total_dim_size * inner_size;
+
+    if (idx >= total) return;
+
+    // Decompose index
+    size_t outer_idx = idx / (total_dim_size * inner_size);
+    size_t remainder = idx % (total_dim_size * inner_size);
+    size_t dim_idx = remainder / inner_size;
+    size_t inner_idx = remainder % inner_size;
+
+    // Find which tensor this element belongs to
+    size_t accumulated = 0;
+    for (size_t t = 0; t < num_tensors; ++t) {
+        if (dim_idx < accumulated + input_sizes[t]) {
+            size_t tensor_dim_idx = dim_idx - accumulated;
+            size_t src_idx = outer_idx * input_sizes[t] * inner_size +
+                           tensor_dim_idx * inner_size + inner_idx;
+            output[idx] = input_ptrs[t][src_idx];
+            return;
+        }
+        accumulated += input_sizes[t];
+    }
+}
+
+void launch_cat_middle_dim(
+    void* output,
+    const std::vector<Tensor>& tensors,
+    size_t outer_size,
+    size_t inner_size,
+    int resolved_dim,
+    size_t element_size,
+    cudaStream_t stream)
+{
+    size_t num_tensors = tensors.size();
+    size_t total_dim_size = 0;
+    for (const auto& t : tensors) {
+        total_dim_size += t.shape()[resolved_dim];
+    }
+
+    size_t total_elements = outer_size * total_dim_size * inner_size;
+
+    // Prepare device arrays
+    thrust::device_vector<const float*> d_input_ptrs(num_tensors);
+    thrust::device_vector<size_t> d_input_sizes(num_tensors);
+
+    for (size_t i = 0; i < num_tensors; ++i) {
+        d_input_ptrs[i] = static_cast<const float*>(tensors[i].raw_ptr());
+        d_input_sizes[i] = tensors[i].shape()[resolved_dim];
+    }
+
+    int block_size = 256;
+    int grid_size = (total_elements + block_size - 1) / block_size;
+
+    cat_middle_dim_kernel<<<grid_size, block_size, 0, stream>>>(
+        static_cast<float*>(output),
+        thrust::raw_pointer_cast(d_input_ptrs.data()),
+        thrust::raw_pointer_cast(d_input_sizes.data()),
+        num_tensors,
+        outer_size,
+        inner_size,
+        total_dim_size);
+}
+
 } // namespace gs::tensor_ops

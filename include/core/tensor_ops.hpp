@@ -211,4 +211,10 @@ namespace gs::tensor_ops {
                         size_t outer_size, size_t dim_size, size_t inner_size,
                         int dim, bool descending, cudaStream_t stream);
 
+    // ============= Concatenation Operations =============
+    void launch_cat_last_dim(void* output, const std::vector<Tensor>& tensors, size_t num_rows,
+        size_t row_size, size_t element_size, cudaStream_t stream);
+
+    void launch_cat_middle_dim(void* output, const std::vector<Tensor>& tensors, size_t outer_size, size_t inner_size,
+        int resolved_dim, size_t element_size, cudaStream_t stream);
 } // namespace gs::tensor_ops
