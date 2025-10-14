@@ -450,21 +450,8 @@ namespace gs {
             return Tensor();
         }
 
-        auto result = empty(shape_, device_, DataType::Bool);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_unary_op(data_, result.data_, numel(),
-                                        UnaryOp::LogicalNot, dtype_, nullptr);
-            cudaDeviceSynchronize();
-        } else {
-            const unsigned char* src = ptr<unsigned char>();
-            unsigned char* dst = result.ptr<unsigned char>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = !src[i];
-            }
-        }
-
-        return result;
+        // Use the new functor-based logical_not() method
+        return logical_not();
     }
 
     Tensor Tensor::operator|(const Tensor& other) const {
@@ -478,7 +465,7 @@ namespace gs {
             return Tensor();
         }
 
-        return binary_op_impl(other, BinaryOp::BitwiseOr);
+        return logical_or(other);
     }
 
     // ============= Clamp Operations =============
@@ -491,13 +478,11 @@ namespace gs {
         if (device_ == Device::CUDA) {
             if (dtype_ == DataType::Float32) {
                 tensor_ops::launch_clamp_scalar(ptr<float>(), min_val, max_val, numel(), 0);
-                cudaDeviceSynchronize();
             } else if (dtype_ == DataType::Int32) {
                 tensor_ops::launch_clamp_scalar_int(ptr<int>(),
                                                     static_cast<int>(min_val),
                                                     static_cast<int>(max_val),
                                                     numel(), 0);
-                cudaDeviceSynchronize();
             }
         } else {
             if (dtype_ == DataType::Float32) {

@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include "core/tensor_functors.hpp"
 #include "core/tensor_ops.hpp"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
@@ -184,7 +185,7 @@ namespace gs::tensor_ops {
         if (n == 0 || num_samples == 0)
             return;
 
-        // Compute sum of weights using Thrust
+        // Compute sum of weights using Thrust with centralized sum_op
         auto weights_ptr = thrust::device_pointer_cast(weights);
 
         float sum;
@@ -193,7 +194,7 @@ namespace gs::tensor_ops {
                 policy,
                 weights_ptr, weights_ptr + n,
                 0.0f,
-                thrust::plus<float>());
+                ops::sum_op());
         });
 
         if (sum <= 0) {

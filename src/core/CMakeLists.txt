@@ -18,7 +18,7 @@ set(CORE_SOURCES
         sogs.cpp
         sogs_new.cpp
         tensor/tensor.cpp              # Main tensor implementation
-        tensor/tensor_utils.cpp        # Minimal utilities (SafeOps, MemoryInfo, functional)
+        tensor/tensor_utils.cpp        # Minimal utilities MemoryInfo)
         tensor/tensor_matrix_ops.cpp   # Matrix operations (matmul, transpose, etc.)
         tensor/tensor_unified_ops.cpp  # Unified operations (load, unary, binary, reduce, ternary)
         tensor/tensor_movement_ops.cpp # Movement operations (reshape, permute, etc.)

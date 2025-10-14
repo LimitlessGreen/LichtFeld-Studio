@@ -157,55 +157,6 @@ TEST_F(TensorAdvancedTest, Concatenate) {
     EXPECT_FALSE(invalid.is_valid());
 }
 
-// ============= Safe Operations Tests =============
-
-TEST_F(TensorAdvancedTest, SafeDivide) {
-    auto a_custom = Tensor::full({3, 3}, 10.0f, Device::CUDA);
-    auto b_custom = Tensor::full({3, 3}, 0.0f, Device::CUDA);
-
-    float epsilon = 1e-6f;
-    auto result_custom = SafeOps::divide(a_custom, b_custom, epsilon);
-
-    // PyTorch equivalent: a / (b + epsilon)
-    auto a_torch = torch::full({3, 3}, 10.0f, torch::TensorOptions().device(torch::kCUDA));
-    auto b_torch = torch::full({3, 3}, 0.0f, torch::TensorOptions().device(torch::kCUDA));
-    auto result_torch = a_torch / (b_torch + epsilon);
-
-    EXPECT_TRUE(result_custom.is_valid());
-    EXPECT_FALSE(result_custom.has_inf());
-    compare_tensors(result_custom, result_torch, 1e-4f, 1e-5f, "SafeDivide");
-}
-
-TEST_F(TensorAdvancedTest, SafeLog) {
-    auto negative_custom = Tensor::full({2, 2}, -5.0f, Device::CUDA);
-
-    float epsilon = 1e-6f;
-    auto log_result_custom = SafeOps::log(negative_custom, epsilon);
-
-    // PyTorch equivalent: log(max(x, epsilon))
-    auto negative_torch = torch::full({2, 2}, -5.0f, torch::TensorOptions().device(torch::kCUDA));
-    auto log_result_torch = torch::log(torch::clamp(negative_torch, epsilon));
-
-    EXPECT_TRUE(log_result_custom.is_valid());
-    EXPECT_FALSE(log_result_custom.has_nan());
-    compare_tensors(log_result_custom, log_result_torch, 1e-4f, 1e-5f, "SafeLog");
-}
-
-TEST_F(TensorAdvancedTest, SafeSqrt) {
-    auto neg_sqrt_custom = Tensor::full({2, 2}, -4.0f, Device::CUDA);
-
-    float epsilon = 0.0f;
-    auto sqrt_result_custom = SafeOps::sqrt(neg_sqrt_custom, epsilon);
-
-    // PyTorch equivalent: sqrt(max(x, epsilon))
-    auto neg_sqrt_torch = torch::full({2, 2}, -4.0f, torch::TensorOptions().device(torch::kCUDA));
-    auto sqrt_result_torch = torch::sqrt(torch::clamp(neg_sqrt_torch, epsilon));
-
-    EXPECT_TRUE(sqrt_result_custom.is_valid());
-    EXPECT_FALSE(sqrt_result_custom.has_nan());
-    compare_tensors(sqrt_result_custom, sqrt_result_torch, 1e-5f, 1e-6f, "SafeSqrt");
-}
-
 // ============= Memory Info Tests =============
 
 TEST_F(TensorAdvancedTest, MemoryInfo) {

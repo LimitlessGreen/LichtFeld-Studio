@@ -1,7 +1,10 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include "core/tensor_functors.hpp"
 #include "core/tensor_ops.hpp"
+#include "core/memory_pool.hpp"
+#include "core/logger.hpp"
 #include <cuda_runtime.h>
 #include <thrust/copy.h>
 #include <thrust/device_ptr.h>
@@ -202,11 +205,22 @@ namespace gs::tensor_ops {
                                  size_t c_elements, BinaryOp op, cudaStream_t stream) {
         if (c_elements == 0) return;
 
-        // Copy shapes to device
-        int *d_a_shape, *d_b_shape, *d_c_shape;
-        cudaMalloc(&d_a_shape, a_rank * sizeof(int));
-        cudaMalloc(&d_b_shape, b_rank * sizeof(int));
-        cudaMalloc(&d_c_shape, c_rank * sizeof(int));
+        // Allocate shape arrays from memory pool (fast!)
+        int* d_a_shape = static_cast<int*>(
+            CudaMemoryPool::instance().allocate(a_rank * sizeof(int), stream));
+        int* d_b_shape = static_cast<int*>(
+            CudaMemoryPool::instance().allocate(b_rank * sizeof(int), stream));
+        int* d_c_shape = static_cast<int*>(
+            CudaMemoryPool::instance().allocate(c_rank * sizeof(int), stream));
+
+        if (!d_a_shape || !d_b_shape || !d_c_shape) {
+            LOG_ERROR("Failed to allocate shape arrays from memory pool");
+            // Clean up any successful allocations
+            if (d_a_shape) CudaMemoryPool::instance().deallocate(d_a_shape, stream);
+            if (d_b_shape) CudaMemoryPool::instance().deallocate(d_b_shape, stream);
+            if (d_c_shape) CudaMemoryPool::instance().deallocate(d_c_shape, stream);
+            return;
+        }
 
         std::vector<int> a_vec(a_shape, a_shape + a_rank);
         std::vector<int> b_vec(b_shape, b_shape + b_rank);
@@ -224,47 +238,48 @@ namespace gs::tensor_ops {
             a, b, c, d_a_shape, d_b_shape, d_c_shape,
             a_rank, b_rank, c_rank, c_elements, op);
 
-        cudaFree(d_a_shape);
-        cudaFree(d_b_shape);
-        cudaFree(d_c_shape);
+        // Return shape arrays to memory pool (instant, cached for reuse)
+        CudaMemoryPool::instance().deallocate(d_a_shape, stream);
+        CudaMemoryPool::instance().deallocate(d_b_shape, stream);
+        CudaMemoryPool::instance().deallocate(d_c_shape, stream);
     }
 
     // ============================================================================
-    // EXPLICIT INSTANTIATIONS - Required for template linking
+    // EXPLICIT INSTANTIATIONS - Use centralized functors from gs::ops
     // ============================================================================
 
     // Float32 arithmetic
-    template void launch_broadcast_binary(const float*, const float*, float*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, add_op<float>, cudaStream_t);
-    template void launch_broadcast_binary(const float*, const float*, float*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, sub_op<float>, cudaStream_t);
-    template void launch_broadcast_binary(const float*, const float*, float*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, mul_op<float>, cudaStream_t);
-    template void launch_broadcast_binary(const float*, const float*, float*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, div_op<float>, cudaStream_t);
-    template void launch_broadcast_binary(const float*, const float*, float*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, pow_op<float>, cudaStream_t);
+    template void launch_broadcast_binary(const float*, const float*, float*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::add_op, cudaStream_t);
+    template void launch_broadcast_binary(const float*, const float*, float*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::sub_op, cudaStream_t);
+    template void launch_broadcast_binary(const float*, const float*, float*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::mul_op, cudaStream_t);
+    template void launch_broadcast_binary(const float*, const float*, float*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::div_op, cudaStream_t);
+    template void launch_broadcast_binary(const float*, const float*, float*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::pow_op, cudaStream_t);
 
     // Float32 comparison
-    template void launch_broadcast_binary(const float*, const float*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, eq_op<float>, cudaStream_t);
-    template void launch_broadcast_binary(const float*, const float*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ne_op<float>, cudaStream_t);
-    template void launch_broadcast_binary(const float*, const float*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, lt_op<float>, cudaStream_t);
-    template void launch_broadcast_binary(const float*, const float*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, le_op<float>, cudaStream_t);
-    template void launch_broadcast_binary(const float*, const float*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, gt_op<float>, cudaStream_t);
-    template void launch_broadcast_binary(const float*, const float*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ge_op<float>, cudaStream_t);
+    template void launch_broadcast_binary(const float*, const float*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::equal_op, cudaStream_t);
+    template void launch_broadcast_binary(const float*, const float*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::not_equal_op, cudaStream_t);
+    template void launch_broadcast_binary(const float*, const float*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::less_op, cudaStream_t);
+    template void launch_broadcast_binary(const float*, const float*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::less_equal_op, cudaStream_t);
+    template void launch_broadcast_binary(const float*, const float*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::greater_op, cudaStream_t);
+    template void launch_broadcast_binary(const float*, const float*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::greater_equal_op, cudaStream_t);
 
     // Int32 arithmetic
-    template void launch_broadcast_binary(const int*, const int*, int*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, add_op<int>, cudaStream_t);
-    template void launch_broadcast_binary(const int*, const int*, int*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, sub_op<int>, cudaStream_t);
-    template void launch_broadcast_binary(const int*, const int*, int*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, mul_op<int>, cudaStream_t);
-    template void launch_broadcast_binary(const int*, const int*, int*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, div_op<int>, cudaStream_t);
+    template void launch_broadcast_binary(const int*, const int*, int*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::add_op, cudaStream_t);
+    template void launch_broadcast_binary(const int*, const int*, int*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::sub_op, cudaStream_t);
+    template void launch_broadcast_binary(const int*, const int*, int*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::mul_op, cudaStream_t);
+    template void launch_broadcast_binary(const int*, const int*, int*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::div_op, cudaStream_t);
 
     // Int32 comparison
-    template void launch_broadcast_binary(const int*, const int*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, eq_op<int>, cudaStream_t);
-    template void launch_broadcast_binary(const int*, const int*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ne_op<int>, cudaStream_t);
-    template void launch_broadcast_binary(const int*, const int*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, lt_op<int>, cudaStream_t);
-    template void launch_broadcast_binary(const int*, const int*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, le_op<int>, cudaStream_t);
-    template void launch_broadcast_binary(const int*, const int*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, gt_op<int>, cudaStream_t);
-    template void launch_broadcast_binary(const int*, const int*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ge_op<int>, cudaStream_t);
+    template void launch_broadcast_binary(const int*, const int*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::equal_op, cudaStream_t);
+    template void launch_broadcast_binary(const int*, const int*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::not_equal_op, cudaStream_t);
+    template void launch_broadcast_binary(const int*, const int*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::less_op, cudaStream_t);
+    template void launch_broadcast_binary(const int*, const int*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::less_equal_op, cudaStream_t);
+    template void launch_broadcast_binary(const int*, const int*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::greater_op, cudaStream_t);
+    template void launch_broadcast_binary(const int*, const int*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::greater_equal_op, cudaStream_t);
 
     // Bool logical
-    template void launch_broadcast_binary(const unsigned char*, const unsigned char*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, logical_and_op, cudaStream_t);
-    template void launch_broadcast_binary(const unsigned char*, const unsigned char*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, logical_or_op, cudaStream_t);
-    template void launch_broadcast_binary(const unsigned char*, const unsigned char*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, logical_xor_op, cudaStream_t);
+    template void launch_broadcast_binary(const unsigned char*, const unsigned char*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::logical_and_op, cudaStream_t);
+    template void launch_broadcast_binary(const unsigned char*, const unsigned char*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::logical_or_op, cudaStream_t);
+    template void launch_broadcast_binary(const unsigned char*, const unsigned char*, unsigned char*, const size_t*, const size_t*, const size_t*, size_t, size_t, size_t, size_t, ops::logical_xor_op, cudaStream_t);
 
 } // namespace gs::tensor_ops

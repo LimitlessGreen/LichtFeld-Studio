@@ -3,49 +3,62 @@
 
 #pragma once
 
-#include "core/tensor.hpp"
+#include "core/tensor_functors.hpp"
 #include <cuda_runtime.h>
 #include <vector>
+
+namespace gs {
+    // Forward declarations
+    class Tensor;
+
+    enum class Device : uint8_t;
+    enum class DataType : uint8_t;
+    enum class ReduceOp : uint8_t;
+    enum class LoadOp : uint8_t;
+}
+
+namespace gs::tensor_ops {
+
+    // ============= Generic CUDA Operations =============
+    template<typename InT, typename OutT, typename Op>
+    void launch_binary_op_generic(const InT* a, const InT* b, OutT* c, size_t n,
+                                  Op op, cudaStream_t stream = nullptr);
+
+    template<typename T, typename OutT, typename Op>
+    void launch_unary_op_generic(const T* input, OutT* output, size_t n,
+                                 Op op, cudaStream_t stream = nullptr);
+
+    template<typename T, typename OutputT, typename Op>
+    void launch_scalar_op_generic(const T* data, T scalar, OutputT* result, size_t n,
+                                  Op op, cudaStream_t stream = nullptr);
+
+} // namespace gs::tensor_ops
+
+// ============= CPU Helpers (Generic, Header-Only) =============
+namespace gs {
+    // CPU helper for unary operations
+    template<typename T, typename OutT, typename Op>
+    void apply_unary_cpu(const T* input, OutT* output, size_t n, Op op) {
+        for (size_t i = 0; i < n; ++i) {
+            output[i] = op(input[i]);
+        }
+    }
+
+    // CPU helper for binary operations
+    template<typename T, typename OutputT, typename Op>
+    void apply_binary_cpu(const T* a, const T* b, OutputT* c, size_t n, Op op) {
+        for (size_t i = 0; i < n; ++i) {
+            c[i] = op(a[i], b[i]);
+        }
+    }
+} // namespace gs
 
 namespace gs::tensor_ops {
 
     // ============= Clamp Scalar Operations =============
     void launch_clamp_scalar(float* data, float min_val, float max_val, size_t n, cudaStream_t stream);
+    void launch_clamp_fused(const float* src, float* dst, float min_val, float max_val, size_t n, cudaStream_t stream);
     void launch_clamp_scalar_int(int* data, int min_val, int max_val, size_t n, cudaStream_t stream);
-
-    // ============= Unified Operations =============
-    void launch_unary_op(const void* input, void* output,
-                         size_t n, UnaryOp op,
-                         DataType dtype, cudaStream_t stream);
-
-    void launch_unary_op_inplace(void* data, size_t n,
-                                 UnaryOp op, DataType dtype,
-                                 cudaStream_t stream);
-
-    void launch_binary_op(const void* a, const void* b, void* c,
-                          size_t n, BinaryOp op,
-                          DataType a_dtype, DataType b_dtype, DataType c_dtype,
-                          cudaStream_t stream);
-
-    void launch_binary_scalar(const void* data, float scalar, void* result,
-                              size_t n, BinaryOp op,
-                              DataType src_dtype, DataType dst_dtype,
-                              cudaStream_t stream);
-
-    void launch_binary_op_inplace(void* a, const void* b, size_t n,
-                                  BinaryOp op, cudaStream_t stream);
-
-    void launch_binary_scalar_inplace(void* data, float scalar, size_t n,
-                                      BinaryOp op, cudaStream_t stream);
-
-    // ============= Unified Binary Operation Dispatcher =============
-    template<typename SrcT, typename DstT = SrcT>
-    void launch_binary_operation(
-        const void* a, const void* b, void* c,
-        const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
-        size_t a_rank, size_t b_rank, size_t c_rank,
-        size_t c_elements, BinaryOp op,
-        cudaStream_t stream = 0);
 
     void launch_reduce_op(const void* input, void* output,
                           const size_t* shape, size_t rank,
@@ -53,9 +66,6 @@ namespace gs::tensor_ops {
                           bool keepdim, ReduceOp op,
                           DataType dtype, cudaStream_t stream);
 
-    void launch_ternary_op(const void* a, const void* b, const void* c, void* output,
-                           size_t n, TernaryOp op,
-                           DataType dtype, cudaStream_t stream);
 
     // ============= Load Operations =============
     void launch_load_op(void* output, const size_t* shape, size_t rank,

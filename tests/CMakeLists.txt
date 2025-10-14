@@ -58,6 +58,9 @@ set(OPTIONAL_TEST_FILES
     test_camera.cpp
     test_image_io_comparison.cpp
     test_tensor_benchmark.cpp
+    test_memory_pool_benchmark.cpp
+    test_broadcast_benchmark.cpp
+    test_reduction_benchmark.cpp
     #test_sogs_comparison.cpp
 )
 
