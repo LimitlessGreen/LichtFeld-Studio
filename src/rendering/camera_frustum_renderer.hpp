@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "core/camera.hpp"
+#include "core/camera_new.hpp"
 #include "gl_resources.hpp"
 #include "shader_manager.hpp"
 #include <glm/glm.hpp>
@@ -19,14 +19,14 @@ namespace gs::rendering {
         ~CameraFrustumRenderer() = default;
 
         Result<void> init();
-        Result<void> render(const std::vector<std::shared_ptr<const Camera>>& cameras,
+        Result<void> render(const std::vector<std::shared_ptr<const CameraNew>>& cameras,
                             const glm::mat4& view,
                             const glm::mat4& projection,
                             float scale = 0.1f,
                             const glm::vec3& train_color = glm::vec3(0.0f, 1.0f, 0.0f),
                             const glm::vec3& eval_color = glm::vec3(1.0f, 0.0f, 0.0f));
 
-        Result<int> pickCamera(const std::vector<std::shared_ptr<const Camera>>& cameras,
+        Result<int> pickCamera(const std::vector<std::shared_ptr<const CameraNew>>& cameras,
                                const glm::vec2& mouse_pos,
                                const glm::vec2& viewport_pos,
                                const glm::vec2& viewport_size,
@@ -42,7 +42,7 @@ namespace gs::rendering {
     private:
         Result<void> createGeometry();
         Result<void> createPickingFBO();
-        void prepareInstances(const std::vector<std::shared_ptr<const Camera>>& cameras,
+        void prepareInstances(const std::vector<std::shared_ptr<const CameraNew>>& cameras,
                               float scale,
                               const glm::vec3& train_color,
                               const glm::vec3& eval_color,

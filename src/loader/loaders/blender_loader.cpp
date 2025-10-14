@@ -3,18 +3,16 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "loader/loaders/blender_loader.hpp"
-#include "core/camera.hpp"
+#include "core/camera_new.hpp"
 #include "core/logger.hpp"
-#include "core/point_cloud.hpp"
+#include "core/point_cloud_new.hpp"
 #include "formats/transforms.hpp"
-#include "loader/torch_converter.hpp"
 #include "training/dataset.hpp"
 #include <chrono>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <nlohmann/json.hpp>
-#include <torch/torch.h>
 
 namespace gs::loader {
 
@@ -29,7 +27,7 @@ namespace gs::loader {
         if (!std::filesystem::exists(path)) {
             std::string error_msg = std::format("Path does not exist: {}", path.string());
             LOG_ERROR("{}", error_msg);
-            throw std::runtime_error(error_msg);
+            return std::unexpected(error_msg);
         }
 
         // Report initial progress
@@ -49,17 +47,18 @@ namespace gs::loader {
                 transforms_file = path / "transforms.json";
                 LOG_DEBUG("Found transforms.json");
             } else {
-                LOG_ERROR("No transforms file found in directory: {}", path.string());
-                throw std::runtime_error(
-                    "No transforms file found (expected 'transforms.json' or 'transforms_train.json')");
+                std::string error_msg = "No transforms file found (expected 'transforms.json' or 'transforms_train.json')";
+                LOG_ERROR("{}", error_msg);
+                return std::unexpected(error_msg);
             }
         } else if (path.extension() == ".json") {
             // Direct path to transforms file
             transforms_file = path;
             LOG_DEBUG("Using direct transforms file: {}", transforms_file.string());
         } else {
-            LOG_ERROR("Path must be a directory or a JSON file: {}", path.string());
-            throw std::runtime_error("Path must be a directory or a JSON file");
+            std::string error_msg = "Path must be a directory or a JSON file";
+            LOG_ERROR("{}", error_msg);
+            return std::unexpected(error_msg);
         }
 
         // Validation only mode
@@ -68,8 +67,9 @@ namespace gs::loader {
             // Check if the transforms file is valid JSON
             std::ifstream file(transforms_file);
             if (!file) {
-                LOG_ERROR("Cannot open transforms file: {}", transforms_file.string());
-                throw std::runtime_error("Cannot open transforms file");
+                std::string error_msg = std::format("Cannot open transforms file: {}", transforms_file.string());
+                LOG_ERROR("{}", error_msg);
+                return std::unexpected(error_msg);
             }
 
             // Try to parse as JSON (basic validation)
@@ -78,13 +78,14 @@ namespace gs::loader {
                 file >> j;
 
                 if (!j.contains("frames") || !j["frames"].is_array()) {
-                    LOG_ERROR("Invalid transforms file: missing 'frames' array");
-                    throw std::runtime_error("Invalid transforms file: missing 'frames' array");
+                    std::string error_msg = "Invalid transforms file: missing 'frames' array";
+                    LOG_ERROR("{}", error_msg);
+                    return std::unexpected(error_msg);
                 }
             } catch (const std::exception& e) {
                 std::string error_msg = std::format("Invalid JSON: {}", e.what());
                 LOG_ERROR("{}", error_msg);
-                throw std::runtime_error(error_msg);
+                return std::unexpected(error_msg);
             }
 
             if (options.progress) {
@@ -98,10 +99,10 @@ namespace gs::loader {
                 .data = LoadedScene{
                     .cameras = nullptr,
                     .point_cloud = nullptr},
-                .scene_center = torch::zeros({3}),
+                .scene_center = Tensor::zeros({3}, Device::CPU),
                 .loader_used = name(),
                 .load_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time),
-                .warnings = {"Blender/NeRF datasets use random point cloud initialization"}};
+                .warnings = {"Validation mode - point cloud not loaded"}};
         }
 
         // Load the dataset
@@ -112,24 +113,14 @@ namespace gs::loader {
         try {
             LOG_INFO("Loading Blender/NeRF dataset from: {}", transforms_file.string());
 
-            // Read transforms and create cameras using CUDA version
-            auto result = read_transforms_cameras_and_images_cuda(transforms_file);
-            auto& cuda_camera_infos = result.cameras;
-            float* scene_center = result.scene_center;
+            // Read transforms and create cameras
+            auto [cameras, scene_center] = read_transforms_cameras_and_images(transforms_file);
 
             if (options.progress) {
-                options.progress(40.0f, std::format("Creating {} cameras...", cuda_camera_infos.size()));
+                options.progress(40.0f, std::format("Creating {} cameras...", cameras.size()));
             }
 
-            LOG_DEBUG("Creating {} camera objects", cuda_camera_infos.size());
-
-            // Convert CUDA cameras to torch-based Camera objects
-            std::vector<std::shared_ptr<Camera>> cameras;
-            cameras.reserve(cuda_camera_infos.size());
-
-            for (size_t i = 0; i < cuda_camera_infos.size(); ++i) {
-                cameras.push_back(internal::cuda_to_camera(cuda_camera_infos[i], static_cast<int>(i)));
-            }
+            LOG_DEBUG("Creating {} camera objects", cameras.size());
 
             // Create dataset configuration
             gs::param::DatasetConfig dataset_config;
@@ -142,14 +133,15 @@ namespace gs::loader {
                 std::move(cameras), dataset_config, gs::training::CameraDataset::Split::ALL);
 
             if (options.progress) {
-                options.progress(60.0f, "Generating random point cloud...");
+                options.progress(60.0f, "Generating initialization point cloud...");
             }
 
-            // Generate random point cloud for Blender datasets
+            // Generate random point cloud for initialization
+            // Note: Blender/NeRF datasets don't typically include sparse point clouds
+            // If a pointcloud.ply exists, users should load it separately via the PLY loader
             LOG_DEBUG("Generating random point cloud for initialization");
-            auto cuda_pc = generate_random_point_cloud_cuda();
-            auto random_pc = internal::cuda_to_point_cloud(cuda_pc);
-            auto point_cloud = std::make_shared<PointCloud>(std::move(random_pc));
+            auto random_pc = generate_random_point_cloud();
+            auto point_cloud = std::make_shared<PointCloudNew>(std::move(random_pc));
             LOG_INFO("Generated random point cloud with {} points", point_cloud->size());
 
             if (options.progress) {
@@ -160,27 +152,30 @@ namespace gs::loader {
             auto load_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                 end_time - start_time);
 
-            // Create result with shared_ptr
-            LoadResult result_final{
+            // Get scene center values for logging
+            auto scene_center_cpu = scene_center.cpu();
+            const float* sc_ptr = scene_center_cpu.ptr<float>();
+
+            LoadResult result{
                 .data = LoadedScene{
                     .cameras = std::move(dataset),
                     .point_cloud = std::move(point_cloud)},
-                .scene_center = internal::array_to_tensor(scene_center),
+                .scene_center = scene_center,
                 .loader_used = name(),
                 .load_time = load_time,
                 .warnings = {"Using random point cloud initialization"}};
 
             LOG_INFO("Blender/NeRF dataset loaded successfully in {}ms", load_time.count());
-            LOG_INFO("  - {} cameras", cuda_camera_infos.size());
+            LOG_INFO("  - {} cameras", dataset->size());
             LOG_DEBUG("  - Scene center: [{:.3f}, {:.3f}, {:.3f}]",
-                      scene_center[0], scene_center[1], scene_center[2]);
+                      sc_ptr[0], sc_ptr[1], sc_ptr[2]);
 
-            return result_final;
+            return result;
 
         } catch (const std::exception& e) {
             std::string error_msg = std::format("Failed to load Blender/NeRF dataset: {}", e.what());
             LOG_ERROR("{}", error_msg);
-            throw std::runtime_error(error_msg);
+            return std::unexpected(error_msg);
         }
     }
 
@@ -210,4 +205,5 @@ namespace gs::loader {
     int BlenderLoader::priority() const {
         return 5; // Medium priority
     }
+
 } // namespace gs::loader

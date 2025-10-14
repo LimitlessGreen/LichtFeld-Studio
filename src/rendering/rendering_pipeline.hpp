@@ -1,17 +1,17 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
- *
+*
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #pragma once
 
-#include "core/camera.hpp"
-#include "core/splat_data.hpp"
+#include "core/camera_new.hpp"
+#include "core/splat_data_new.hpp"
+#include "core/tensor.hpp"
 #include "geometry/bounding_box.hpp"
 #include "point_cloud_renderer.hpp"
 #include "rendering/rendering.hpp"
 #include "screen_renderer.hpp"
 #include <glm/glm.hpp>
-#include <torch/torch.h>
 
 namespace gs::rendering {
 
@@ -33,15 +33,15 @@ namespace gs::rendering {
         };
 
         struct RenderResult {
-            torch::Tensor image;
-            torch::Tensor depth;
+            Tensor image;
+            Tensor depth;
             bool valid = false;
         };
 
         RenderingPipeline();
 
         // Main render function - now returns Result
-        Result<RenderResult> render(const SplatData& model, const RenderRequest& request);
+        Result<RenderResult> render(const SplatDataNew& model, const RenderRequest& request);
 
         // Static upload function - now returns Result
         static Result<void> uploadToScreen(const RenderResult& result,
@@ -49,11 +49,11 @@ namespace gs::rendering {
                                            const glm::ivec2& viewport_size);
 
     private:
-        Result<Camera> createCamera(const RenderRequest& request);
+        Result<CameraNew> createCamera(const RenderRequest& request);
         glm::vec2 computeFov(float fov_degrees, int width, int height);
-        Result<RenderResult> renderPointCloud(const SplatData& model, const RenderRequest& request);
+        Result<RenderResult> renderPointCloud(const SplatDataNew& model, const RenderRequest& request);
 
-        torch::Tensor background_;
+        Tensor background_;
         std::unique_ptr<PointCloudRenderer> point_cloud_renderer_;
     };
 

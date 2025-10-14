@@ -4,20 +4,19 @@
 
 #include "rendering_pipeline.hpp"
 #include "gs_rasterizer.hpp"
-// #include "training/rasterization/rasterizer.hpp"
 
 #include <print>
 
 namespace gs::rendering {
 
     RenderingPipeline::RenderingPipeline()
-        : background_(torch::zeros({3}, torch::kFloat32).to(torch::kCUDA)) {
+        : background_(Tensor::zeros({3}, Device::CUDA, DataType::Float32)) {
         point_cloud_renderer_ = std::make_unique<PointCloudRenderer>();
         LOG_DEBUG("RenderingPipeline initialized");
     }
 
     Result<RenderingPipeline::RenderResult> RenderingPipeline::render(
-        const SplatData& model,
+        const SplatDataNew& model,
         const RenderRequest& request) {
 
         LOG_TIMER_TRACE("RenderingPipeline::render");
@@ -39,16 +38,23 @@ namespace gs::rendering {
         LOG_TRACE("Using gaussian splatting rendering mode");
 
         // Update background tensor in-place to avoid allocation
-        background_[0] = request.background_color.r;
-        background_[1] = request.background_color.g;
-        background_[2] = request.background_color.b;
+        // Access the tensor data directly
+        auto bg_data = background_.ptr<float>();
+        if (bg_data && background_.device() == Device::CUDA) {
+            float bg_values[3] = {
+                request.background_color.r,
+                request.background_color.g,
+                request.background_color.b
+            };
+            cudaMemcpy(bg_data, bg_values, 3 * sizeof(float), cudaMemcpyHostToDevice);
+        }
 
         // Create camera for this frame
         auto cam_result = createCamera(request);
         if (!cam_result) {
             return std::unexpected(cam_result.error());
         }
-        Camera cam = std::move(*cam_result);
+        CameraNew cam = std::move(*cam_result);
 
         // Handle crop box conversion
         const geometry::BoundingBox* geom_bbox = nullptr;
@@ -65,18 +71,14 @@ namespace gs::rendering {
 
         try {
             // Perform rendering with fast_rasterize
-            SplatData& mutable_model = const_cast<SplatData&>(model);
+            SplatDataNew& mutable_model = const_cast<SplatDataNew&>(model);
 
             RenderResult result;
             if (request.gut) {
-                throw;
-                // auto render_result = gs::training::rasterize(
-                //     cam, mutable_model, background_, request.scaling_modifier, false, request.antialiasing, static_cast<training::RenderMode>(request.render_mode), nullptr);
-                // result.image = render_result.image;
-                // result.depth = render_result.depth;
+                throw std::runtime_error("GUT rendering mode not yet implemented for new tensor backend");
             } else {
-                result.image = rasterize(cam, mutable_model, background_);
-                result.depth = torch::empty({0}, torch::kFloat32); // No depth support in fast_rasterize; set empty
+                //result.image = rasterize(cam, mutable_model, background_);
+                //result.depth = Tensor::empty({0}, Device::CUDA, DataType::Float32); // No depth support in fast_rasterize
             }
             result.valid = true;
 
@@ -90,7 +92,7 @@ namespace gs::rendering {
     }
 
     Result<RenderingPipeline::RenderResult> RenderingPipeline::renderPointCloud(
-        const SplatData& model,
+        const SplatDataNew& model,
         const RenderRequest& request) {
 
         LOG_TIMER_TRACE("RenderingPipeline::renderPointCloud");
@@ -221,22 +223,41 @@ namespace gs::rendering {
         }
 
         // Read back the rendered image
-        std::vector<float> pixels(request.viewport_size.x * request.viewport_size.y * 3);
-        glReadPixels(0, 0, request.viewport_size.x, request.viewport_size.y, GL_RGB, GL_FLOAT, pixels.data());
+        const int width = request.viewport_size.x;
+        const int height = request.viewport_size.y;
+        std::vector<float> pixels(width * height * 3);
+        glReadPixels(0, 0, width, height, GL_RGB, GL_FLOAT, pixels.data());
 
-        // Convert to torch tensor
-        auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-        torch::Tensor image_cpu = torch::from_blob(pixels.data(),
-                                                   {request.viewport_size.y, request.viewport_size.x, 3},
-                                                   options)
-                                      .clone();
+        // Create tensor from the pixel data
+        auto image_cpu = Tensor::from_vector(pixels, {static_cast<size_t>(height),
+                                                      static_cast<size_t>(width),
+                                                      3},
+                                            Device::CPU);
 
         // Flip vertically (OpenGL has origin at bottom-left)
-        image_cpu = torch::flip(image_cpu, {0});
+        // Manual flip since we don't have torch::flip
+        {
+            auto data = image_cpu.ptr<float>();
+            const size_t row_size = width * 3 * sizeof(float);
+            std::vector<float> temp_row(width * 3);
+
+            for (int y = 0; y < height / 2; ++y) {
+                int top_row = y;
+                int bottom_row = height - 1 - y;
+
+                float* top_ptr = data + top_row * width * 3;
+                float* bottom_ptr = data + bottom_row * width * 3;
+
+                // Swap rows
+                std::memcpy(temp_row.data(), top_ptr, row_size);
+                std::memcpy(top_ptr, bottom_ptr, row_size);
+                std::memcpy(bottom_ptr, temp_row.data(), row_size);
+            }
+        }
 
         // Convert to CHW format and move to CUDA
         RenderResult result;
-        result.image = image_cpu.permute({2, 0, 1}).to(torch::kCUDA);
+        result.image = image_cpu.permute({2, 0, 1}).cuda();
         result.valid = true;
 
         LOG_TRACE("Point cloud rendering completed");
@@ -248,60 +269,65 @@ namespace gs::rendering {
         ScreenQuadRenderer& renderer,
         const glm::ivec2& viewport_size) {
 
-        if (!result.valid || !result.image.defined()) {
+        if (!result.valid || !result.image.is_valid()) {
             LOG_ERROR("Invalid render result for upload");
             return std::unexpected("Invalid render result");
         }
 
         // Try direct CUDA upload if available
-        if (renderer.isInteropEnabled() && result.image.is_cuda()) {
+        if (renderer.isInteropEnabled() && result.image.device() == Device::CUDA) {
             LOG_TRACE("Using CUDA interop for screen upload");
             // Keep data on GPU - convert [C, H, W] to [H, W, C] format
             auto image_hwc = result.image.permute({1, 2, 0}).contiguous();
 
-            if (image_hwc.size(0) == viewport_size.y && image_hwc.size(1) == viewport_size.x) {
+            if (image_hwc.size(0) == static_cast<size_t>(viewport_size.y) &&
+                image_hwc.size(1) == static_cast<size_t>(viewport_size.x)) {
                 return renderer.uploadFromCUDA(image_hwc, viewport_size.x, viewport_size.y);
             }
         }
 
         // Fallback to CPU copy
         LOG_TRACE("Using CPU copy for screen upload");
-        auto image = (result.image * 255)
-                         .to(torch::kCPU)
-                         .to(torch::kU8)
+        auto image = (result.image * 255.0f)
+                         .cpu()
+                         .to(DataType::UInt8)
                          .permute({1, 2, 0})
                          .contiguous();
 
-        if (image.size(0) != viewport_size.y ||
-            image.size(1) != viewport_size.x ||
-            !image.data_ptr<unsigned char>()) {
+        if (image.size(0) != static_cast<size_t>(viewport_size.y) ||
+            image.size(1) != static_cast<size_t>(viewport_size.x) ||
+            !image.ptr<unsigned char>()) {
             LOG_ERROR("Image dimensions mismatch or invalid data");
             return std::unexpected("Image dimensions mismatch or invalid data");
         }
 
-        return renderer.uploadData(image.data_ptr<unsigned char>(),
+        return renderer.uploadData(image.ptr<unsigned char>(),
                                    viewport_size.x, viewport_size.y);
     }
 
-    Result<Camera> RenderingPipeline::createCamera(const RenderRequest& request) {
+    Result<CameraNew> RenderingPipeline::createCamera(const RenderRequest& request) {
         LOG_TIMER_TRACE("RenderingPipeline::createCamera");
 
         // Convert view matrix to camera matrix
-        torch::Tensor R_tensor = torch::tensor({request.view_rotation[0][0], request.view_rotation[1][0], request.view_rotation[2][0],
-                                                request.view_rotation[0][1], request.view_rotation[1][1], request.view_rotation[2][1],
-                                                request.view_rotation[0][2], request.view_rotation[1][2], request.view_rotation[2][2]},
-                                               torch::TensorOptions().dtype(torch::kFloat32))
-                                     .reshape({3, 3});
+        std::vector<float> R_data = {
+            request.view_rotation[0][0], request.view_rotation[1][0], request.view_rotation[2][0],
+            request.view_rotation[0][1], request.view_rotation[1][1], request.view_rotation[2][1],
+            request.view_rotation[0][2], request.view_rotation[1][2], request.view_rotation[2][2]
+        };
 
-        torch::Tensor t_tensor = torch::tensor({request.view_translation[0],
-                                                request.view_translation[1],
-                                                request.view_translation[2]},
-                                               torch::TensorOptions().dtype(torch::kFloat32))
-                                     .reshape({3, 1});
+        auto R_tensor = Tensor::from_vector(R_data, {3, 3}, Device::CPU);
+
+        std::vector<float> t_data = {
+            request.view_translation[0],
+            request.view_translation[1],
+            request.view_translation[2]
+        };
+
+        auto t_tensor = Tensor::from_vector(t_data, {3, 1}, Device::CPU);
 
         // Convert from view to camera space
         R_tensor = R_tensor.transpose(0, 1);
-        t_tensor = -R_tensor.mm(t_tensor).squeeze();
+        t_tensor = (-R_tensor.mm(t_tensor)).squeeze();
 
         // Compute field of view
         glm::vec2 fov = computeFov(request.fov,
@@ -309,15 +335,15 @@ namespace gs::rendering {
                                    request.viewport_size.y);
 
         try {
-            return Camera(
+            return CameraNew(
                 R_tensor,
                 t_tensor,
                 fov2focal(fov.x, request.viewport_size.x),
                 fov2focal(fov.y, request.viewport_size.y),
                 request.viewport_size.x / 2.0f,
                 request.viewport_size.y / 2.0f,
-                torch::empty({0}, torch::kFloat32),
-                torch::empty({0}, torch::kFloat32),
+                Tensor::empty({0}, Device::CPU, DataType::Float32),
+                Tensor::empty({0}, Device::CPU, DataType::Float32),
                 gsplat::CameraModelType::PINHOLE,
                 "render_camera",
                 "none",

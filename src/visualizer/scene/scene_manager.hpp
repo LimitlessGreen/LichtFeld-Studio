@@ -15,7 +15,7 @@ namespace gs {
     // Forward declarations
     class Trainer;
     class TrainerManager;
-    class SplatData;
+    class SplatDataNew;
 
     namespace visualizer {
         class RenderingManager;
@@ -101,7 +101,7 @@ namespace gs {
         void clear();
 
         // For rendering - gets appropriate model
-        const SplatData* getModelForRendering() const;
+        const SplatDataNew* getModelForRendering() const;
 
         // Direct info queries
         struct SceneInfo {

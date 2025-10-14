@@ -116,10 +116,16 @@ namespace gs::rendering {
         return {};
     }
 
-    torch::Tensor PointCloudRenderer::extractRGBFromSH(const torch::Tensor& shs) {
+    Tensor PointCloudRenderer::extractRGBFromSH(const Tensor& shs) {
         const float SH_C0 = 0.28209479177387814f;
-        torch::Tensor features_dc = shs.index({torch::indexing::Slice(), 0, torch::indexing::Slice()});
-        torch::Tensor colors = features_dc * SH_C0 + 0.5f;
+
+        // Extract features_dc: shs[:, 0, :]
+        // We need to slice along dimension 1 (the second dimension)
+        Tensor features_dc = shs.slice(1, 0, 1).squeeze(1);
+
+        // Calculate colors: features_dc * SH_C0 + 0.5
+        Tensor colors = features_dc * SH_C0 + 0.5f;
+
         return colors.clamp(0.0f, 1.0f);
     }
 
@@ -160,7 +166,7 @@ namespace gs::rendering {
         return {};
     }
 
-    Result<void> PointCloudRenderer::render(const SplatData& splat_data,
+    Result<void> PointCloudRenderer::render(const SplatDataNew& splat_data,
                                             const glm::mat4& view,
                                             const glm::mat4& projection,
                                             float voxel_size,
@@ -181,11 +187,11 @@ namespace gs::rendering {
         GLStateGuard state_guard;
 
         // Get positions and SH coefficients
-        torch::Tensor positions = splat_data.get_means();
-        torch::Tensor shs = splat_data.get_shs();
+        Tensor positions = splat_data.get_means();
+        Tensor shs = splat_data.get_shs();
 
         // Extract RGB colors from SH coefficients
-        torch::Tensor colors = extractRGBFromSH(shs);
+        Tensor colors = extractRGBFromSH(shs);
 
         // Ensure tensors are on CPU and contiguous
         auto pos_cpu = positions.cpu().contiguous();
@@ -208,13 +214,13 @@ namespace gs::rendering {
         }
 
         // Create spans for the data
-        if (!pos_cpu.data_ptr<float>() || !col_cpu.data_ptr<float>()) {
+        if (!pos_cpu.ptr<float>() || !col_cpu.ptr<float>()) {
             LOG_ERROR("Null tensor data pointer");
             return std::unexpected("Null tensor data pointer");
         }
 
-        std::span<const float> pos_span(pos_cpu.data_ptr<float>(), pos_cpu.numel());
-        std::span<const float> col_span(col_cpu.data_ptr<float>(), col_cpu.numel());
+        std::span<const float> pos_span(pos_cpu.ptr<float>(), pos_cpu.numel());
+        std::span<const float> col_span(col_cpu.ptr<float>(), col_cpu.numel());
 
         // Upload data to GPU
         if (auto result = uploadPointData(pos_span, col_span); !result) {

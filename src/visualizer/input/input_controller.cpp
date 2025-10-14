@@ -715,9 +715,18 @@ namespace gs::visualizer {
 
         LOG_DEBUG("Moving camera to view ID: {} ({})", event.cam_id, cam_data->image_name());
 
-        // Use raw CPU pointers directly - safer and more efficient
-        const float* R_data = cam_data->R_cpu_ptr();
-        const float* T_data = cam_data->T_cpu_ptr();
+        // Get rotation and translation tensors and ensure they're on CPU
+        auto R_tensor = cam_data->R().cpu();
+        auto T_tensor = cam_data->T().cpu();
+
+        // Get raw CPU pointers - safer and more efficient
+        const float* R_data = R_tensor.ptr<float>();
+        const float* T_data = T_tensor.ptr<float>();
+
+        if (!R_data || !T_data) {
+            LOG_ERROR("Failed to get camera R/T data pointers");
+            return;
+        }
 
         // R_data is world_to_cam rotation stored row-major
         // We need cam_to_world for the viewport
@@ -783,6 +792,7 @@ namespace gs::visualizer {
 
         last_camview = event.cam_id;
     }
+
     // Helpers
     bool InputController::isInViewport(double x, double y) const {
         return x >= viewport_bounds_.x &&

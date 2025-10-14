@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/tensor.hpp"
 #include "geometry/euclidean_transform.hpp"
 #include <array>
 #include <expected>
@@ -11,12 +12,11 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <torch/types.h>
 #include <vector>
 
 namespace gs {
-    class SplatData;
-    class Camera;
+    class SplatDataNew;
+    class CameraNew;
 } // namespace gs
 
 namespace gs::rendering {
@@ -51,8 +51,8 @@ namespace gs::rendering {
     };
 
     struct RenderResult {
-        std::shared_ptr<torch::Tensor> image;
-        std::shared_ptr<torch::Tensor> depth;
+        std::shared_ptr<Tensor> image;
+        std::shared_ptr<Tensor> depth;
     };
 
     // Split view support
@@ -66,7 +66,7 @@ namespace gs::rendering {
         PanelContentType content_type = PanelContentType::Model3D;
 
         // For Model3D
-        const SplatData* model = nullptr;
+        const SplatDataNew* model = nullptr;
 
         // For Image2D or CachedRender
         unsigned int texture_id = 0;
@@ -161,8 +161,8 @@ namespace gs::rendering {
     };
 
     struct RenderingPipelineResult {
-        torch::Tensor image;
-        torch::Tensor depth;
+        Tensor image;
+        Tensor depth;
         bool valid = false;
     };
 
@@ -213,7 +213,7 @@ namespace gs::rendering {
 
         // Core rendering with error handling
         virtual Result<RenderResult> renderGaussians(
-            const SplatData& splat_data,
+            const SplatDataNew& splat_data,
             const RenderRequest& request) = 0;
 
         // Split view rendering
@@ -257,7 +257,7 @@ namespace gs::rendering {
 
         // Camera frustum rendering
         virtual Result<void> renderCameraFrustums(
-            const std::vector<std::shared_ptr<const Camera>>& cameras,
+            const std::vector<std::shared_ptr<const CameraNew>>& cameras,
             const ViewportData& viewport,
             float scale = 0.1f,
             const glm::vec3& train_color = glm::vec3(0.0f, 1.0f, 0.0f),
@@ -265,7 +265,7 @@ namespace gs::rendering {
 
         // Camera frustum rendering with highlighting
         virtual Result<void> renderCameraFrustumsWithHighlight(
-            const std::vector<std::shared_ptr<const Camera>>& cameras,
+            const std::vector<std::shared_ptr<const CameraNew>>& cameras,
             const ViewportData& viewport,
             float scale = 0.1f,
             const glm::vec3& train_color = glm::vec3(0.0f, 1.0f, 0.0f),
@@ -274,7 +274,7 @@ namespace gs::rendering {
 
         // Camera frustum picking
         virtual Result<int> pickCameraFrustum(
-            const std::vector<std::shared_ptr<const Camera>>& cameras,
+            const std::vector<std::shared_ptr<const CameraNew>>& cameras,
             const glm::vec2& mouse_pos,
             const glm::vec2& viewport_pos,
             const glm::vec2& viewport_size,
@@ -286,7 +286,7 @@ namespace gs::rendering {
 
         // Pipeline rendering (for visualizer compatibility)
         virtual RenderingPipelineResult renderWithPipeline(
-            const SplatData& model,
+            const SplatDataNew& model,
             const RenderingPipelineRequest& request) = 0;
 
         // Factory methods - now return Result

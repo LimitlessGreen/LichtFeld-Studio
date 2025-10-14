@@ -4,12 +4,12 @@
 
 #pragma once
 
-#include "core/splat_data.hpp"
+#include "core/splat_data_new.hpp"
+#include "core/tensor.hpp"
 #include "gl_resources.hpp"
 #include "shader_manager.hpp"
 #include <glm/glm.hpp>
 #include <span>
-#include <torch/torch.h>
 
 namespace gs::rendering {
 
@@ -21,7 +21,7 @@ namespace gs::rendering {
         Result<void> initialize();
 
         // Render point cloud - now returns Result
-        Result<void> render(const SplatData& splat_data,
+        Result<void> render(const SplatDataNew& splat_data,
                             const glm::mat4& view,
                             const glm::mat4& projection,
                             float voxel_size,
@@ -33,7 +33,7 @@ namespace gs::rendering {
     private:
         Result<void> createCubeGeometry();
         Result<void> uploadPointData(std::span<const float> positions, std::span<const float> colors);
-        static torch::Tensor extractRGBFromSH(const torch::Tensor& shs);
+        static Tensor extractRGBFromSH(const Tensor& shs);
 
         // OpenGL resources using RAII
         VAO cube_vao_;

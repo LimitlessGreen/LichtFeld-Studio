@@ -129,7 +129,7 @@ namespace gs::rendering {
     }
 
     Result<RenderResult> RenderingEngineImpl::renderGaussians(
-        const SplatData& splat_data,
+        const SplatDataNew& splat_data,
         const RenderRequest& request) {
 
         if (!isInitialized()) {
@@ -183,8 +183,8 @@ namespace gs::rendering {
 
         // Convert result
         RenderResult result{
-            .image = std::make_shared<torch::Tensor>(pipeline_result->image),
-            .depth = std::make_shared<torch::Tensor>(pipeline_result->depth)};
+            .image = std::make_shared<Tensor>(pipeline_result->image),
+            .depth = std::make_shared<Tensor>(pipeline_result->depth)};
 
         return result;
     }
@@ -228,7 +228,7 @@ namespace gs::rendering {
         // Convert back to internal result type
         RenderingPipeline::RenderResult internal_result;
         internal_result.image = *result.image;
-        internal_result.depth = result.depth ? *result.depth : torch::Tensor();
+        internal_result.depth = result.depth ? *result.depth : Tensor();
         internal_result.valid = true;
 
         if (auto upload_result = RenderingPipeline::uploadToScreen(internal_result, *screen_renderer_, viewport_size);
@@ -339,7 +339,7 @@ namespace gs::rendering {
     }
 
     Result<void> RenderingEngineImpl::renderCameraFrustums(
-        const std::vector<std::shared_ptr<const Camera>>& cameras,
+        const std::vector<std::shared_ptr<const CameraNew>>& cameras,
         const ViewportData& viewport,
         float scale,
         const glm::vec3& train_color,
@@ -356,7 +356,7 @@ namespace gs::rendering {
     }
 
     Result<void> RenderingEngineImpl::renderCameraFrustumsWithHighlight(
-        const std::vector<std::shared_ptr<const Camera>>& cameras,
+        const std::vector<std::shared_ptr<const CameraNew>>& cameras,
         const ViewportData& viewport,
         float scale,
         const glm::vec3& train_color,
@@ -377,7 +377,7 @@ namespace gs::rendering {
     }
 
     Result<int> RenderingEngineImpl::pickCameraFrustum(
-        const std::vector<std::shared_ptr<const Camera>>& cameras,
+        const std::vector<std::shared_ptr<const CameraNew>>& cameras,
         const glm::vec2& mouse_pos,
         const glm::vec2& viewport_pos,
         const glm::vec2& viewport_size,
@@ -400,7 +400,7 @@ namespace gs::rendering {
     }
 
     RenderingPipelineResult RenderingEngineImpl::renderWithPipeline(
-        const SplatData& model,
+        const SplatDataNew& model,
         const RenderingPipelineRequest& request) {
 
         LOG_TRACE("Rendering with pipeline");

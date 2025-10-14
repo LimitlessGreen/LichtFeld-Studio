@@ -121,7 +121,7 @@ namespace gs::rendering {
         return {};
     }
 
-    Result<void> ScreenQuadRenderer::uploadFromCUDA(const torch::Tensor& cuda_image, int width, int height) {
+    Result<void> ScreenQuadRenderer::uploadFromCUDA(const Tensor& cuda_image, int width, int height) {
 #ifdef CUDA_GL_INTEROP_ENABLED
         if (auto interop_fb = std::dynamic_pointer_cast<InteropFrameBuffer>(framebuffer)) {
             LOG_TRACE("Using CUDA interop for upload");
@@ -131,11 +131,11 @@ namespace gs::rendering {
         // Fallback to CPU upload
         LOG_TRACE("Using CPU fallback for CUDA image upload");
         auto cpu_image = cuda_image;
-        if (cpu_image.dtype() != torch::kUInt8) {
-            cpu_image = (cpu_image.clamp(0.0f, 1.0f) * 255.0f).to(torch::kUInt8);
+        if (cpu_image.dtype() != DataType::UInt8) {
+            cpu_image = (cpu_image.clamp(0.0f, 1.0f) * 255.0f).to(DataType::UInt8);
         }
-        cpu_image = cpu_image.to(torch::kCPU).contiguous();
-        return uploadData(cpu_image.data_ptr<unsigned char>(), width, height);
+        cpu_image = cpu_image.cpu().contiguous();
+        return uploadData(cpu_image.ptr<unsigned char>(), width, height);
     }
 
     bool ScreenQuadRenderer::isInteropEnabled() const {

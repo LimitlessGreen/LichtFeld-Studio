@@ -140,7 +140,7 @@ CameraNew::CameraNew(const Tensor& R,
     FoVy_ = focal2fov(focal_y_, camera_height_);
 
     // Create CUDA stream for async operations
-    cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
+    //cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
 
     LOG_DEBUG("Created CameraNew: uid={}, {}x{}, focal=({:.2f}, {:.2f})",
               uid_, camera_width_, camera_height_, focal_x_, focal_y_);
@@ -169,14 +169,14 @@ CameraNew::CameraNew(const CameraNew& other, const Tensor& transform)
       world_view_transform_(transform) {
 
     // Create new CUDA stream
-    cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
+    //cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
 }
 
 CameraNew::~CameraNew() {
-    if (stream_ != nullptr) {
-        cudaStreamDestroy(stream_);
-        stream_ = nullptr;
-    }
+    //if (stream_ != nullptr) {
+    //    cudaStreamDestroy(stream_);
+    //    stream_ = nullptr;
+    //}
 }
 
 // ========== INTRINSICS ==========

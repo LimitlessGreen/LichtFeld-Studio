@@ -426,7 +426,7 @@ namespace gs::training {
         const size_t val_dataset_size = val_dataset->size();
 
         // Use auto (not auto&) since the iterator returns by value
-        for (auto batch : *val_dataloader) {
+        /*for (auto batch : *val_dataloader) {
             // Access the camera and image directly from the batch
             auto& camera_with_image = batch[0]; // batch[0] returns CameraWithImage&
             Camera* cam = camera_with_image.camera;
@@ -507,7 +507,7 @@ namespace gs::training {
             image_idx++;
 
             // batch destructor automatically returns buffer to pool here
-        }
+        } */
 
         // Wait for all images to be saved before computing final timing
         if (_params.optimization.enable_save_eval_images) {

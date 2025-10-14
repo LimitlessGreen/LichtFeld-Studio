@@ -4,6 +4,7 @@
 
 #include "scene/scene_manager.hpp"
 #include "core/logger.hpp"
+#include "core/splat_data_new.hpp"
 #include "loader/loader.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "training/training_manager.hpp"
@@ -103,7 +104,7 @@ namespace gs {
                 throw std::runtime_error(load_result.error());
             }
 
-            auto* splat_data = std::get_if<std::shared_ptr<gs::SplatData>>(&load_result->data);
+            auto* splat_data = std::get_if<std::shared_ptr<gs::SplatDataNew>>(&load_result->data);
             if (!splat_data || !*splat_data) {
                 LOG_ERROR("Expected splat file but got different data type from: {}", path.string());
                 throw std::runtime_error("Expected splat file but got different data type");
@@ -114,7 +115,7 @@ namespace gs {
             size_t gaussian_count = (*splat_data)->size();
             LOG_DEBUG("Adding '{}' to scene with {} gaussians", name, gaussian_count);
 
-            scene_.addNode(name, std::make_unique<SplatData>(std::move(**splat_data)));
+            scene_.addNode(name, std::make_unique<SplatDataNew>(std::move(**splat_data)));
 
             // Update content state
             {
@@ -182,7 +183,7 @@ namespace gs {
                 throw std::runtime_error(load_result.error());
             }
 
-            auto* splat_data = std::get_if<std::shared_ptr<gs::SplatData>>(&load_result->data);
+            auto* splat_data = std::get_if<std::shared_ptr<gs::SplatDataNew>>(&load_result->data);
             if (!splat_data || !*splat_data) {
                 LOG_ERROR("Expected splat file from: {}", path.string());
                 throw std::runtime_error("Expected splat file");
@@ -201,7 +202,7 @@ namespace gs {
             size_t gaussian_count = (*splat_data)->size();
             LOG_DEBUG("Adding node '{}' with {} gaussians", name, gaussian_count);
 
-            scene_.addNode(name, std::make_unique<SplatData>(std::move(**splat_data)));
+            scene_.addNode(name, std::make_unique<SplatDataNew>(std::move(**splat_data)));
 
             // Update paths
             {
@@ -356,14 +357,15 @@ namespace gs {
         LOG_INFO("Scene cleared");
     }
 
-    const SplatData* SceneManager::getModelForRendering() const {
+    const SplatDataNew* SceneManager::getModelForRendering() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
 
         if (content_type_ == ContentType::SplatFiles) {
             return scene_.getCombinedModel();
         } else if (content_type_ == ContentType::Dataset) {
             if (trainer_manager_ && trainer_manager_->getTrainer()) {
-                return &trainer_manager_->getTrainer()->get_strategy().get_model();
+                throw std::runtime_error("getModelForRendering: Dataset rendering not yet implemented");
+                //return &trainer_manager_->getTrainer()->get_strategy().get_model();
             }
         }
 

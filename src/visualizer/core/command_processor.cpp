@@ -195,12 +195,12 @@ namespace gs {
             return "Usage: tensor_info <tensor_name>\nAvailable: means, scaling, rotation, shs, opacity";
         }
 
-        const SplatData* model = scene_manager_->getModelForRendering();
+        const SplatDataNew* model = scene_manager_->getModelForRendering();
         if (!model) {
             return "No model available";
         }
 
-        torch::Tensor tensor;
+        Tensor tensor;
         if (tensor_name == "means" || tensor_name == "positions") {
             tensor = model->get_means();
         } else if (tensor_name == "scales" || tensor_name == "scaling") {
@@ -218,28 +218,12 @@ namespace gs {
         std::ostringstream oss;
         oss << "Tensor '" << tensor_name << "' info:\n";
         oss << "  Shape: [";
-        for (int i = 0; i < tensor.dim(); i++) {
+        for (size_t i = 0; i < tensor.ndim(); i++) {
             if (i > 0)
                 oss << ", ";
             oss << tensor.size(i);
         }
         oss << "]\n";
-        oss << "  Device: " << tensor.device() << "\n";
-        oss << "  Dtype: " << tensor.dtype() << "\n";
-        oss << "  Requires grad: " << (tensor.requires_grad() ? "Yes" : "No") << "\n";
-
-        try {
-            auto cpu_tensor = tensor.cpu();
-            auto flat = cpu_tensor.flatten();
-            if (flat.numel() > 0) {
-                oss << "  Min: " << torch::min(flat).item<float>() << "\n";
-                oss << "  Max: " << torch::max(flat).item<float>() << "\n";
-                oss << "  Mean: " << torch::mean(flat).item<float>() << "\n";
-                oss << "  Std: " << torch::std(flat).item<float>();
-            }
-        } catch (...) {
-            oss << "  (Statistics unavailable)";
-        }
 
         return oss.str();
     }

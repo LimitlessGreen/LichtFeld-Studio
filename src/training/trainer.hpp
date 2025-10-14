@@ -7,7 +7,7 @@
 #include "components/bilateral_grid.hpp"
 #include "components/poseopt.hpp"
 #include "components/sparsity_optimizer.hpp"
-#include "core/events.hpp"
+#include "core/camera_new.hpp"
 #include "core/parameters.hpp"
 #include "cuda_memory.hpp"
 #include "dataset.hpp"
@@ -80,9 +80,9 @@ namespace gs::training {
 
         const param::TrainingParameters& getParams() const { return params_; }
 
-        std::shared_ptr<const Camera> getCamById(int camId) const;
+        std::shared_ptr<const CameraNew> getCamById(int camId) const;
 
-        std::vector<std::shared_ptr<const Camera>> getCamList() const;
+        std::vector<std::shared_ptr<const CameraNew>> getCamList() const;
 
         void setProject(std::shared_ptr<gs::management::Project> project) { lf_project_ = project; }
 
@@ -220,7 +220,7 @@ namespace gs::training {
         at::cuda::CUDAEvent callback_launch_event_;
 
         // camera id to cam
-        std::map<int, std::shared_ptr<const Camera>> m_cam_id_to_cam;
+        std::map<int, std::shared_ptr<const CameraNew>> m_cam_id_to_cam;
 
         // LichtFeld project
         std::shared_ptr<gs::management::Project> lf_project_ = nullptr;

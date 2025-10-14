@@ -4,6 +4,7 @@
 
 #include "ply.hpp"
 #include "core/logger.hpp"
+#include "core/tensor.hpp"
 #include <algorithm>
 #include <charconv>
 #include <chrono>
@@ -227,10 +228,8 @@ namespace gs::loader {
                 }
             }
 
-            if (!line_end) {
-                // No more complete lines
+            if (!line_end)
                 break;
-            }
 
             size_t line_len = line_end - line_start;
             lines_parsed++;
@@ -239,7 +238,6 @@ namespace gs::loader {
             if (line_len == 0 || (line_len > 0 && line_start[0] == '#'))
                 continue;
 
-            // Progress reporting for large headers
             if (lines_parsed % 1000 == 0) {
                 LOG_TRACE("Parsed {} header lines...", lines_parsed);
             }
@@ -262,15 +260,13 @@ namespace gs::loader {
                     name_len--;
                 }
 
-                // property recognition using first character + length
+                // Property recognition using first character + length
                 if (name_len == 1) {
                     switch (*prop_name) {
                     case 'x': layout.pos_x_offset = layout.vertex_stride; break;
                     case 'y': layout.pos_y_offset = layout.vertex_stride; break;
                     case 'z': layout.pos_z_offset = layout.vertex_stride; break;
-                    default:
-                        // Ignore unknown single-character properties
-                        break;
+                    default: break;
                     }
                 } else if (name_len == 7 && std::strncmp(prop_name, "opacity", 7) == 0) {
                     layout.opacity_offset = layout.vertex_stride;
@@ -329,7 +325,6 @@ namespace gs::loader {
         LOG_DEBUG("Position extraction using TBB + SIMD for {} Gaussians", count);
 
 #ifdef HAS_AVX2_SUPPORT
-        // Thread-safe AVX2 detection using std::once_flag
         static std::once_flag avx2_flag;
         static bool has_avx2 = false;
 
@@ -339,41 +334,37 @@ namespace gs::loader {
             __cpuid(cpuInfo, 7);
             has_avx2 = (cpuInfo[1] & (1 << 5)) != 0;
 #elif defined(__GNUC__) || defined(__clang__)
-                __builtin_cpu_init();
-                has_avx2 = __builtin_cpu_supports("avx2");
+            __builtin_cpu_init();
+            has_avx2 = __builtin_cpu_supports("avx2");
 #else
-                has_avx2 = false; // Fallback for other compilers
+            has_avx2 = false;
 #endif
         });
 
         if (has_avx2) {
             LOG_TRACE("Using AVX2 SIMD acceleration");
 
-            // TBB parallel SIMD processing with larger blocks to reduce overhead
             tbb::parallel_for(tbb::blocked_range<size_t>(0, count, ply_constants::BLOCK_SIZE_LARGE),
                               [&](const tbb::blocked_range<size_t>& range) {
                                   size_t start = range.begin();
                                   size_t end = range.end();
                                   size_t range_size = end - start;
-                                  size_t simd_end = start + (range_size & ~ply_constants::SIMD_WIDTH_MINUS_1); // 8-element aligned
+                                  size_t simd_end = start + (range_size & ~ply_constants::SIMD_WIDTH_MINUS_1);
 
                                   // C++23: [[assume]] for optimization
                                   [[assume(layout.pos_x_offset < stride)]];
                                   [[assume(layout.pos_y_offset < stride)]];
                                   [[assume(layout.pos_z_offset < stride)]];
 
-                                  // Process 8 vertices at a time with SIMD
                                   for (size_t i = start; i < simd_end; i += ply_constants::SIMD_WIDTH) {
-                    // Portable prefetch
 #ifdef _MSC_VER
                                       _mm_prefetch((const char*)(vertex_data + (i + 16) * stride), _MM_HINT_T0);
 #elif defined(__GNUC__) || defined(__clang__)
-                        __builtin_prefetch(vertex_data + (i + 16) * stride, 0, 1);
+                                      __builtin_prefetch(vertex_data + (i + 16) * stride, 0, 1);
 #endif
 
-                                      // Load 8 x-coordinates
                                       __m256 x_vals = _mm256_set_ps(
-                                          *reinterpret_cast<const float*>(vertex_data + (i + ply_constants::SIMD_WIDTH_MINUS_1) * stride + layout.pos_x_offset),
+                                          *reinterpret_cast<const float*>(vertex_data + (i + 7) * stride + layout.pos_x_offset),
                                           *reinterpret_cast<const float*>(vertex_data + (i + 6) * stride + layout.pos_x_offset),
                                           *reinterpret_cast<const float*>(vertex_data + (i + 5) * stride + layout.pos_x_offset),
                                           *reinterpret_cast<const float*>(vertex_data + (i + 4) * stride + layout.pos_x_offset),
@@ -383,7 +374,7 @@ namespace gs::loader {
                                           *reinterpret_cast<const float*>(vertex_data + i * stride + layout.pos_x_offset));
 
                                       __m256 y_vals = _mm256_set_ps(
-                                          *reinterpret_cast<const float*>(vertex_data + (i + ply_constants::SIMD_WIDTH_MINUS_1) * stride + layout.pos_y_offset),
+                                          *reinterpret_cast<const float*>(vertex_data + (i + 7) * stride + layout.pos_y_offset),
                                           *reinterpret_cast<const float*>(vertex_data + (i + 6) * stride + layout.pos_y_offset),
                                           *reinterpret_cast<const float*>(vertex_data + (i + 5) * stride + layout.pos_y_offset),
                                           *reinterpret_cast<const float*>(vertex_data + (i + 4) * stride + layout.pos_y_offset),
@@ -393,7 +384,7 @@ namespace gs::loader {
                                           *reinterpret_cast<const float*>(vertex_data + i * stride + layout.pos_y_offset));
 
                                       __m256 z_vals = _mm256_set_ps(
-                                          *reinterpret_cast<const float*>(vertex_data + (i + ply_constants::SIMD_WIDTH_MINUS_1) * stride + layout.pos_z_offset),
+                                          *reinterpret_cast<const float*>(vertex_data + (i + 7) * stride + layout.pos_z_offset),
                                           *reinterpret_cast<const float*>(vertex_data + (i + 6) * stride + layout.pos_z_offset),
                                           *reinterpret_cast<const float*>(vertex_data + (i + 5) * stride + layout.pos_z_offset),
                                           *reinterpret_cast<const float*>(vertex_data + (i + 4) * stride + layout.pos_z_offset),
@@ -402,22 +393,19 @@ namespace gs::loader {
                                           *reinterpret_cast<const float*>(vertex_data + (i + 1) * stride + layout.pos_z_offset),
                                           *reinterpret_cast<const float*>(vertex_data + i * stride + layout.pos_z_offset));
 
-                                      // Store efficiently with proper alignment
                                       alignas(32) float temp_x[8], temp_y[8], temp_z[8];
                                       _mm256_store_ps(temp_x, x_vals);
                                       _mm256_store_ps(temp_y, y_vals);
                                       _mm256_store_ps(temp_z, z_vals);
 
-                                      // Interleave XYZ (reverse order due to _mm256_set_ps)
                                       for (int j = 0; j < ply_constants::SIMD_WIDTH; ++j) {
-                                          const size_t idx = i + (ply_constants::SIMD_WIDTH_MINUS_1 - j);
-                                          output[idx * 3 + 0] = temp_x[ply_constants::SIMD_WIDTH_MINUS_1 - j];
-                                          output[idx * 3 + 1] = temp_y[ply_constants::SIMD_WIDTH_MINUS_1 - j];
-                                          output[idx * 3 + 2] = temp_z[ply_constants::SIMD_WIDTH_MINUS_1 - j];
+                                          const size_t idx = i + (7 - j);
+                                          output[idx * 3 + 0] = temp_x[7 - j];
+                                          output[idx * 3 + 1] = temp_y[7 - j];
+                                          output[idx * 3 + 2] = temp_z[7 - j];
                                       }
                                   }
 
-                                  // Handle remaining elements in this range
                                   for (size_t i = simd_end; i < end; ++i) {
                                       output[i * 3 + 0] = *reinterpret_cast<const float*>(vertex_data + i * stride + layout.pos_x_offset);
                                       output[i * 3 + 1] = *reinterpret_cast<const float*>(vertex_data + i * stride + layout.pos_y_offset);
@@ -429,7 +417,6 @@ namespace gs::loader {
         {
             LOG_TRACE("Using optimized scalar processing");
 
-            // TBB parallel scalar processing
             tbb::parallel_for(tbb::blocked_range<size_t>(0, count, ply_constants::BLOCK_SIZE_LARGE),
                               [&](const tbb::blocked_range<size_t>& range) {
                                   for (size_t i = range.begin(); i < range.end(); ++i) {
@@ -454,17 +441,14 @@ namespace gs::loader {
 
         LOG_TRACE("Extracting {} SH coefficients for {} vertices", coeff_count, count);
 
-        // Extract coefficients matching the original's stack -> reshape -> transpose pattern
         tbb::parallel_for(tbb::blocked_range<size_t>(0, count, ply_constants::BLOCK_SIZE_SMALL),
                           [&](const tbb::blocked_range<size_t>& range) {
                               for (size_t i = range.begin(); i < range.end(); ++i) {
-                                  // For each vertex, read f_dc_0, f_dc_1, ..., f_dc_(coeff_count-1)
                                   for (int j = 0; j < coeff_count; ++j) {
                                       float value = *reinterpret_cast<const float*>(vertex_data + i * stride + start_offset + j * 4);
 
-                                      // Reshape logic: j maps to (channel, b)
-                                      int channel = j / B; // Which color channel (0, 1, 2)
-                                      int b = j % B;       // Which basis function
+                                      int channel = j / B;
+                                      int b = j % B;
 
                                       // Store in [N, B, 3] layout
                                       output[i * B * channels + b * channels + channel] = value;
@@ -482,7 +466,6 @@ namespace gs::loader {
         const size_t count = layout.vertex_count;
         const size_t stride = layout.vertex_stride;
 
-        // Parallel extraction
         tbb::parallel_for(tbb::blocked_range<size_t>(0, count, ply_constants::BLOCK_SIZE_LARGE),
                           [&](const tbb::blocked_range<size_t>& range) {
                               for (size_t i = range.begin(); i < range.end(); ++i) {
@@ -491,11 +474,11 @@ namespace gs::loader {
                           });
     }
 
-    // Main function - torch-free version
-    [[nodiscard]] std::expected<internal::CudaSplatData, std::string>
-    load_ply_cuda(const std::filesystem::path& filepath) {
+    // Main function - returns SplatDataNew
+    [[nodiscard]] std::expected<SplatDataNew, std::string>
+    load_ply(const std::filesystem::path& filepath) {
         try {
-            LOG_TIMER("PLY File Loading (CUDA)");
+            LOG_TIMER("PLY File Loading");
             auto start_time = std::chrono::high_resolution_clock::now();
 
             if (!std::filesystem::exists(filepath)) {
@@ -526,61 +509,55 @@ namespace gs::loader {
 
             LOG_INFO("Extracting {} Gaussians from PLY", layout.vertex_count);
 
-            // Prepare result
-            internal::CudaSplatData result;
-            result.num_points = layout.vertex_count;
+            const size_t N = layout.vertex_count;
 
-            // Position extraction to host memory
-            std::vector<float> host_means(layout.vertex_count * 3);
+            // Extract positions to host memory
+            std::vector<float> host_means(N * 3);
             extract_positions_to_host(vertex_data, layout, host_means.data());
 
-            // SH coefficient extraction to host memory
+            // Determine SH dimensions
+            int sh0_dim1 = 1, sh0_dim2 = ply_constants::COLOR_CHANNELS;
+            int shN_dim1 = 0, shN_dim2 = ply_constants::COLOR_CHANNELS;
+
+            // Extract SH coefficients
             std::vector<float> host_sh0;
             std::vector<float> host_shN;
 
             if (layout.dc_count > 0 && layout.dc_count % ply_constants::COLOR_CHANNELS == 0) {
                 int B0 = layout.dc_count / ply_constants::COLOR_CHANNELS;
-                result.sh0_dim1 = B0;
-                result.sh0_dim2 = ply_constants::COLOR_CHANNELS;
-                host_sh0.resize(layout.vertex_count * B0 * ply_constants::COLOR_CHANNELS);
+                sh0_dim1 = B0;
+                host_sh0.resize(N * B0 * ply_constants::COLOR_CHANNELS);
                 extract_sh_coefficients_to_host(vertex_data, layout, layout.dc_start_offset,
                                                 layout.dc_count, ply_constants::COLOR_CHANNELS, host_sh0.data());
             } else {
-                result.sh0_dim1 = 1;
-                result.sh0_dim2 = ply_constants::COLOR_CHANNELS;
-                host_sh0.resize(layout.vertex_count * ply_constants::COLOR_CHANNELS, 0.0f);
+                host_sh0.resize(N * ply_constants::COLOR_CHANNELS, 0.0f);
             }
 
             if (layout.rest_count > 0 && layout.rest_count % ply_constants::COLOR_CHANNELS == 0) {
                 int Bn = layout.rest_count / ply_constants::COLOR_CHANNELS;
-                result.shN_dim1 = Bn;
-                result.shN_dim2 = ply_constants::COLOR_CHANNELS;
-                host_shN.resize(layout.vertex_count * Bn * ply_constants::COLOR_CHANNELS);
+                shN_dim1 = Bn;
+                host_shN.resize(N * Bn * ply_constants::COLOR_CHANNELS);
                 extract_sh_coefficients_to_host(vertex_data, layout, layout.rest_start_offset,
                                                 layout.rest_count, ply_constants::COLOR_CHANNELS, host_shN.data());
             } else {
-                result.shN_dim1 = ply_constants::SH_DEGREE_3_REST_COEFFS;
-                result.shN_dim2 = ply_constants::COLOR_CHANNELS;
-                host_shN.resize(layout.vertex_count * ply_constants::SH_DEGREE_3_REST_COEFFS * ply_constants::COLOR_CHANNELS, 0.0f);
+                shN_dim1 = ply_constants::SH_DEGREE_3_REST_COEFFS;
+                host_shN.resize(N * ply_constants::SH_DEGREE_3_REST_COEFFS * ply_constants::COLOR_CHANNELS, 0.0f);
             }
 
-            // Other property extraction to host memory
-            std::vector<float> host_opacity(layout.vertex_count, 0.0f);
+            // Extract other properties
+            std::vector<float> host_opacity(N, 0.0f);
             if (layout.has_opacity()) {
                 extract_property_to_host(vertex_data, layout, layout.opacity_offset, host_opacity.data());
             }
 
-            std::vector<float> host_scaling(layout.vertex_count * 3);
+            std::vector<float> host_scaling(N * 3);
             if (layout.has_scaling()) {
-                // Extract scale components individually then combine
-                std::vector<float> s0(layout.vertex_count), s1(layout.vertex_count), s2(layout.vertex_count);
-
+                std::vector<float> s0(N), s1(N), s2(N);
                 extract_property_to_host(vertex_data, layout, layout.scale_offsets[0], s0.data());
                 extract_property_to_host(vertex_data, layout, layout.scale_offsets[1], s1.data());
                 extract_property_to_host(vertex_data, layout, layout.scale_offsets[2], s2.data());
 
-                // Combine into final array
-                tbb::parallel_for(tbb::blocked_range<size_t>(0, layout.vertex_count, ply_constants::BLOCK_SIZE_SMALL),
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, N, ply_constants::BLOCK_SIZE_SMALL),
                                   [&](const tbb::blocked_range<size_t>& range) {
                                       for (size_t i = range.begin(); i < range.end(); ++i) {
                                           host_scaling[i * 3 + 0] = s0[i];
@@ -592,18 +569,15 @@ namespace gs::loader {
                 std::fill(host_scaling.begin(), host_scaling.end(), ply_constants::DEFAULT_LOG_SCALE);
             }
 
-            std::vector<float> host_rotation(layout.vertex_count * 4, 0.0f);
+            std::vector<float> host_rotation(N * 4, 0.0f);
             if (layout.has_rotation()) {
-                // Extract rotation components individually then combine
-                std::vector<float> r0(layout.vertex_count), r1(layout.vertex_count), r2(layout.vertex_count), r3(layout.vertex_count);
-
+                std::vector<float> r0(N), r1(N), r2(N), r3(N);
                 extract_property_to_host(vertex_data, layout, layout.rot_offsets[0], r0.data());
                 extract_property_to_host(vertex_data, layout, layout.rot_offsets[1], r1.data());
                 extract_property_to_host(vertex_data, layout, layout.rot_offsets[2], r2.data());
                 extract_property_to_host(vertex_data, layout, layout.rot_offsets[3], r3.data());
 
-                // Combine into final array
-                tbb::parallel_for(tbb::blocked_range<size_t>(0, layout.vertex_count, ply_constants::BLOCK_SIZE_SMALL),
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, N, ply_constants::BLOCK_SIZE_SMALL),
                                   [&](const tbb::blocked_range<size_t>& range) {
                                       for (size_t i = range.begin(); i < range.end(); ++i) {
                                           host_rotation[i * 4 + 0] = r0[i];
@@ -614,49 +588,47 @@ namespace gs::loader {
                                   });
             } else {
                 // Set identity quaternion
-                for (size_t i = 0; i < layout.vertex_count; ++i) {
+                for (size_t i = 0; i < N; ++i) {
                     host_rotation[i * 4 + 0] = ply_constants::IDENTITY_QUATERNION_W;
                 }
             }
 
-            LOG_DEBUG("Transferring data to CUDA");
+            LOG_DEBUG("Creating Tensor objects and uploading to CUDA");
 
-            // Upload all data to CUDA
-            result.means = internal::CudaBuffer<float>(layout.vertex_count * 3);
-            result.means.upload(host_means.data(), layout.vertex_count * 3);
-
-            result.sh0 = internal::CudaBuffer<float>(host_sh0.size());
-            result.sh0.upload(host_sh0.data(), host_sh0.size());
-
-            result.shN = internal::CudaBuffer<float>(host_shN.size());
-            result.shN.upload(host_shN.data(), host_shN.size());
-
-            result.scales = internal::CudaBuffer<float>(layout.vertex_count * 3);
-            result.scales.upload(host_scaling.data(), layout.vertex_count * 3);
-
-            result.rotations = internal::CudaBuffer<float>(layout.vertex_count * 4);
-            result.rotations.upload(host_rotation.data(), layout.vertex_count * 4);
-
-            result.opacity = internal::CudaBuffer<float>(layout.vertex_count);
-            result.opacity.upload(host_opacity.data(), layout.vertex_count);
+            // Create Tensors directly from vectors (uploads to CUDA)
+            Tensor means = Tensor::from_vector(host_means, TensorShape{N, 3}, Device::CUDA);
+            Tensor sh0 = Tensor::from_vector(host_sh0, TensorShape{N, static_cast<size_t>(sh0_dim1), static_cast<size_t>(sh0_dim2)}, Device::CUDA);
+            Tensor shN = Tensor::from_vector(host_shN, TensorShape{N, static_cast<size_t>(shN_dim1), static_cast<size_t>(shN_dim2)}, Device::CUDA);
+            Tensor scaling = Tensor::from_vector(host_scaling, TensorShape{N, 3}, Device::CUDA);
+            Tensor rotation = Tensor::from_vector(host_rotation, TensorShape{N, 4}, Device::CUDA);
+            Tensor opacity = Tensor::from_vector(host_opacity, TensorShape{N, 1}, Device::CUDA);
 
             // Calculate SH degree
-            int sh_degree = static_cast<int>(std::sqrt(result.shN_dim1 + ply_constants::SH_DEGREE_OFFSET)) - ply_constants::SH_DEGREE_OFFSET;
-            result.sh_degree = sh_degree;
-            result.scene_scale = ply_constants::SCENE_SCALE_FACTOR;
+            int sh_degree = static_cast<int>(std::sqrt(shN_dim1 + ply_constants::SH_DEGREE_OFFSET)) - ply_constants::SH_DEGREE_OFFSET;
+
+            // Create SplatDataNew
+            SplatDataNew splat_data(
+                sh_degree,
+                std::move(means),
+                std::move(sh0),
+                std::move(shN),
+                std::move(scaling),
+                std::move(rotation),
+                std::move(opacity),
+                ply_constants::SCENE_SCALE_FACTOR);
 
             auto end_time = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
             LOG_INFO("PLY loaded: {} MB, {} Gaussians with SH degree {} in {}ms",
-                     file_size / (1024 * 1024), layout.vertex_count, sh_degree, duration.count());
+                     file_size / (1024 * 1024), N, sh_degree, duration.count());
 
-            return result;
+            return splat_data;
 
         } catch (const std::exception& e) {
             std::string error_msg = std::format("Failed to load PLY file: {}", e.what());
             LOG_ERROR("{}", error_msg);
-            throw std::runtime_error(error_msg);
+            return std::unexpected(error_msg);
         }
     }
 

@@ -4,7 +4,7 @@
 
 #include "sogs_loader.hpp"
 #include "core/logger.hpp"
-#include "core/splat_data.hpp"
+#include "core/splat_data_new.hpp"
 #include "formats/sogs.hpp"
 #include <chrono>
 #include <filesystem>
@@ -75,8 +75,8 @@ namespace gs::loader {
 
             // Return empty result for validation only
             LoadResult result;
-            result.data = std::shared_ptr<SplatData>{}; // Empty shared_ptr
-            result.scene_center = torch::zeros({3});
+            result.data = std::shared_ptr<SplatDataNew>{}; // Empty shared_ptr
+            result.scene_center = Tensor::zeros({3}, Device::CPU);
             result.loader_used = name();
             result.load_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::high_resolution_clock::now() - start_time);
@@ -107,8 +107,8 @@ namespace gs::loader {
             end_time - start_time);
 
         LoadResult result{
-            .data = std::make_shared<SplatData>(std::move(*splat_result)),
-            .scene_center = torch::zeros({3}),
+            .data = std::make_shared<SplatDataNew>(std::move(*splat_result)),
+            .scene_center = Tensor::zeros({3}, Device::CPU),
             .loader_used = name(),
             .load_time = load_time,
             .warnings = {}};

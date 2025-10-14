@@ -4,10 +4,10 @@
 
 #pragma once
 
+#include "core/tensor.hpp"
 #include <cuda_runtime.h>
 #include <memory>
 #include <optional>
-#include <torch/torch.h>
 
 // Forward declare GLuint to avoid including OpenGL headers
 typedef unsigned int GLuint;
@@ -41,7 +41,7 @@ namespace gs::rendering {
 
         Result<void> init(int width, int height);
         Result<void> resize(int new_width, int new_height);
-        Result<void> updateFromTensor(const torch::Tensor& image);
+        Result<void> updateFromTensor(const Tensor& image);
         GLuint getTextureID() const { return texture_id_; }
 
     private:
@@ -63,7 +63,7 @@ namespace gs::rendering {
 
         Result<void> init(int width, int height);
         Result<void> resize(int new_width, int new_height);
-        Result<void> updateFromTensor(const torch::Tensor& image);
+        Result<void> updateFromTensor(const Tensor& image);
         GLuint getTextureID() const { return texture_id_; }
 
     private:
@@ -85,7 +85,7 @@ namespace gs::rendering {
     public:
         explicit InteropFrameBuffer(bool use_interop = true);
 
-        Result<void> uploadFromCUDA(const torch::Tensor& cuda_image);
+        Result<void> uploadFromCUDA(const Tensor& cuda_image);
 
         GLuint getInteropTexture() const {
             return use_interop_ && interop_texture_ ? interop_texture_->getTextureID() : getFrameTexture();

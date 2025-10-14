@@ -8,8 +8,7 @@
 
 #include "sogs.hpp"
 #include "core/logger.hpp"
-#include "loader/cuda_data.hpp"
-#include "loader/torch_converter.hpp"
+#include "core/tensor.hpp"
 #include <archive.h>
 #include <archive_entry.h>
 #include <cmath>
@@ -228,7 +227,7 @@ namespace gs::loader {
             }
         }
 
-        std::expected<internal::CudaSplatData, std::string> reconstruct_splat_data(
+        std::expected<SplatDataNew, std::string> reconstruct_splat_data(
             const SogMetadata& meta,
             const std::unordered_map<std::string, std::vector<uint8_t>>& images) {
 
@@ -319,7 +318,7 @@ namespace gs::loader {
                         quats[ti + 3]);
 
                     // unpack_quaternion returns [x, y, z, w]
-                    // Store as [w, x, y, z] for SplatData format
+                    // Store as [w, x, y, z] for SplatDataNew format
                     host_rotations[i * 4 + 0] = quat[3]; // w
                     host_rotations[i * 4 + 1] = quat[0]; // x
                     host_rotations[i * 4 + 2] = quat[1]; // y
@@ -469,43 +468,42 @@ namespace gs::loader {
                 }
             }
 
-            // Create CUDA splat data and upload
-            internal::CudaSplatData result;
-            result.num_points = num_splats;
-            result.sh_degree = meta.shN.has_value() ? meta.shN->bands : 0;
-            result.scene_scale = 1.0f;
-            result.sh0_dim1 = sh0_dim1;
-            result.sh0_dim2 = sh0_dim2;
-            result.shN_dim1 = shN_dim1;
-            result.shN_dim2 = shN_dim2;
+            // Create Tensors directly from host vectors (uploads to CUDA)
+            const size_t N = num_splats;
 
-            // Allocate and upload CUDA memory
-            result.means = internal::CudaBuffer<float>(num_splats * 3);
-            result.means.upload(host_means.data(), num_splats * 3);
+            Tensor means = Tensor::from_vector(host_means, TensorShape{N, 3}, Device::CUDA);
+            Tensor scales = Tensor::from_vector(host_scales, TensorShape{N, 3}, Device::CUDA);
+            Tensor rotations = Tensor::from_vector(host_rotations, TensorShape{N, 4}, Device::CUDA);
+            Tensor opacity = Tensor::from_vector(host_opacity, TensorShape{N, 1}, Device::CUDA);
+            Tensor sh0 = Tensor::from_vector(host_sh0, TensorShape{N, static_cast<size_t>(sh0_dim1), static_cast<size_t>(sh0_dim2)}, Device::CUDA);
 
-            result.scales = internal::CudaBuffer<float>(num_splats * 3);
-            result.scales.upload(host_scales.data(), num_splats * 3);
-
-            result.rotations = internal::CudaBuffer<float>(num_splats * 4);
-            result.rotations.upload(host_rotations.data(), num_splats * 4);
-
-            result.opacity = internal::CudaBuffer<float>(num_splats);
-            result.opacity.upload(host_opacity.data(), num_splats);
-
-            result.sh0 = internal::CudaBuffer<float>(num_splats * sh0_dim1 * sh0_dim2);
-            result.sh0.upload(host_sh0.data(), num_splats * sh0_dim1 * sh0_dim2);
-
+            Tensor shN;
             if (shN_dim1 > 0) {
-                result.shN = internal::CudaBuffer<float>(num_splats * shN_dim1 * shN_dim2);
-                result.shN.upload(host_shN.data(), num_splats * shN_dim1 * shN_dim2);
+                shN = Tensor::from_vector(host_shN, TensorShape{N, static_cast<size_t>(shN_dim1), static_cast<size_t>(shN_dim2)}, Device::CUDA);
+            } else {
+                shN = Tensor::zeros({N, 0, 3}, Device::CUDA);
             }
+
+            // Calculate SH degree
+            int sh_degree = meta.shN.has_value() ? meta.shN->bands : 0;
+
+            // Create SplatDataNew
+            SplatDataNew splat_data(
+                sh_degree,
+                std::move(means),
+                std::move(sh0),
+                std::move(shN),
+                std::move(scales),
+                std::move(rotations),
+                std::move(opacity),
+                1.0f); // scene_scale
 
             LOG_INFO("Successfully reconstructed {} splats", num_splats);
 
-            return result;
+            return splat_data;
         }
 
-        std::expected<internal::CudaSplatData, std::string> read_sog_bundle(
+        std::expected<SplatDataNew, std::string> read_sog_bundle(
             const std::filesystem::path& path) {
 
             LOG_INFO("Reading SOG bundle: {}", path.string());
@@ -565,11 +563,11 @@ namespace gs::loader {
                 return std::unexpected(meta_result.error());
             }
 
-            // Reconstruct SplatData
+            // Reconstruct SplatDataNew
             return reconstruct_splat_data(meta_result.value(), images);
         }
 
-        std::expected<internal::CudaSplatData, std::string> read_sog_directory(
+        std::expected<SplatDataNew, std::string> read_sog_directory(
             const std::filesystem::path& path) {
 
             LOG_INFO("Reading SOG from directory: {}", path.string());
@@ -665,44 +663,39 @@ namespace gs::loader {
                 }
             }
 
-            // Reconstruct SplatData
+            // Reconstruct SplatDataNew
             return reconstruct_splat_data(meta, images);
         }
 
     } // anonymous namespace
 
-    std::expected<SplatData, std::string> load_sog(const std::filesystem::path& path) {
+    std::expected<SplatDataNew, std::string> load_sog(const std::filesystem::path& path) {
         LOG_TIMER("SOG File Loading");
 
         if (!std::filesystem::exists(path)) {
             std::string error_msg = std::format("SOG file/directory does not exist: {}", path.string());
             LOG_ERROR("{}", error_msg);
-            throw std::runtime_error(error_msg);
+            return std::unexpected(error_msg);
         }
 
-        std::expected<internal::CudaSplatData, std::string> cuda_result;
+        std::expected<SplatDataNew, std::string> result;
 
         // Check if it's a .sog bundle
         if (path.extension() == ".sog") {
-            cuda_result = read_sog_bundle(path);
+            result = read_sog_bundle(path);
         }
         // Check if it's a meta.json file
         else if (path.filename() == "meta.json") {
-            cuda_result = read_sog_directory(path.parent_path());
+            result = read_sog_directory(path.parent_path());
         }
         // Check if it's a directory
         else if (std::filesystem::is_directory(path)) {
-            cuda_result = read_sog_directory(path);
+            result = read_sog_directory(path);
         } else {
             return std::unexpected(std::format("Unknown SOG format: {}", path.string()));
         }
 
-        if (!cuda_result) {
-            return std::unexpected(cuda_result.error());
-        }
-
-        // Convert to SplatData using the torch converter
-        return internal::cuda_to_splat_data(std::move(cuda_result.value()));
+        return result;
     }
 
 } // namespace gs::loader

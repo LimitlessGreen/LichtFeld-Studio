@@ -65,7 +65,7 @@ namespace gs::rendering {
         bool isInitialized() const override;
 
         Result<RenderResult> renderGaussians(
-            const SplatData& splat_data,
+            const SplatDataNew& splat_data,
             const RenderRequest& request) override;
 
         Result<RenderResult> renderSplitView(
@@ -103,14 +103,14 @@ namespace gs::rendering {
             float scale) override;
 
         Result<void> renderCameraFrustums(
-            const std::vector<std::shared_ptr<const Camera>>& cameras,
+            const std::vector<std::shared_ptr<const CameraNew>>& cameras,
             const ViewportData& viewport,
             float scale,
             const glm::vec3& train_color,
             const glm::vec3& eval_color) override;
 
         Result<void> renderCameraFrustumsWithHighlight(
-            const std::vector<std::shared_ptr<const Camera>>& cameras,
+            const std::vector<std::shared_ptr<const CameraNew>>& cameras,
             const ViewportData& viewport,
             float scale,
             const glm::vec3& train_color,
@@ -118,7 +118,7 @@ namespace gs::rendering {
             int highlight_index) override;
 
         Result<int> pickCameraFrustum(
-            const std::vector<std::shared_ptr<const Camera>>& cameras,
+            const std::vector<std::shared_ptr<const CameraNew>>& cameras,
             const glm::vec2& mouse_pos,
             const glm::vec2& viewport_pos,
             const glm::vec2& viewport_size,
@@ -129,7 +129,7 @@ namespace gs::rendering {
 
         // Pipeline compatibility
         RenderingPipelineResult renderWithPipeline(
-            const SplatData& model,
+            const SplatDataNew& model,
             const RenderingPipelineRequest& request) override;
 
         // Factory methods

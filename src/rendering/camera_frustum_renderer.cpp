@@ -177,7 +177,7 @@ namespace gs::rendering {
         return {};
     }
 
-    void CameraFrustumRenderer::prepareInstances(const std::vector<std::shared_ptr<const Camera>>& cameras,
+    void CameraFrustumRenderer::prepareInstances(const std::vector<std::shared_ptr<const CameraNew>>& cameras,
                                                  float scale,
                                                  const glm::vec3& train_color,
                                                  const glm::vec3& eval_color,
@@ -224,13 +224,17 @@ namespace gs::rendering {
             auto R_tensor = cam->R();
             auto T_tensor = cam->T();
 
-            if (!R_tensor.defined() || !T_tensor.defined()) {
+            if (!R_tensor.is_valid() || !T_tensor.is_valid()) {
                 continue;
             }
 
-            // Convert to CPU
-            R_tensor = R_tensor.to(torch::kCPU);
-            T_tensor = T_tensor.to(torch::kCPU);
+            // Convert to CPU if needed
+            if (R_tensor.device() != Device::CPU) {
+                R_tensor = R_tensor.cpu();
+            }
+            if (T_tensor.device() != Device::CPU) {
+                T_tensor = T_tensor.cpu();
+            }
 
             // Build world-to-camera matrix
             glm::mat4 w2c(1.0f);
@@ -239,9 +243,9 @@ namespace gs::rendering {
 
             for (int i = 0; i < 3; ++i) {
                 for (int j = 0; j < 3; ++j) {
-                    w2c[j][i] = R_acc[i][j]; // Column-major
+                    w2c[j][i] = R_acc(i, j); // Column-major
                 }
-                w2c[3][i] = T_acc[i];
+                w2c[3][i] = T_acc(i);
             }
 
             // Camera-to-world transform
@@ -327,7 +331,7 @@ namespace gs::rendering {
     }
 
     Result<void> CameraFrustumRenderer::render(
-        const std::vector<std::shared_ptr<const Camera>>& cameras,
+        const std::vector<std::shared_ptr<const CameraNew>>& cameras,
         const glm::mat4& view,
         const glm::mat4& projection,
         float scale,
@@ -501,7 +505,7 @@ namespace gs::rendering {
         return {};
     }
 
-    Result<int> CameraFrustumRenderer::pickCamera(const std::vector<std::shared_ptr<const Camera>>& cameras,
+    Result<int> CameraFrustumRenderer::pickCamera(const std::vector<std::shared_ptr<const CameraNew>>& cameras,
                                                   const glm::vec2& mouse_pos,
                                                   const glm::vec2& viewport_pos,
                                                   const glm::vec2& viewport_size,

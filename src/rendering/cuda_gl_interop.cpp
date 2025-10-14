@@ -77,7 +77,7 @@ namespace gs::rendering {
         return {};
     }
 
-    Result<void> CudaGLInteropTextureImpl<false>::updateFromTensor(const torch::Tensor& image) {
+    Result<void> CudaGLInteropTextureImpl<false>::updateFromTensor(const Tensor& image) {
         // CPU fallback - this should not be called for non-interop version
         LOG_ERROR("CUDA-GL interop not available - use regular framebuffer upload");
         return std::unexpected("CUDA-GL interop not available - use regular framebuffer upload");
@@ -173,7 +173,7 @@ namespace gs::rendering {
         return {};
     }
 
-    Result<void> CudaGLInteropTextureImpl<true>::updateFromTensor(const torch::Tensor& image) {
+    Result<void> CudaGLInteropTextureImpl<true>::updateFromTensor(const Tensor& image) {
         LOG_TIMER_TRACE("CudaGLInteropTextureImpl<true>::updateFromTensor");
 
         if (!is_registered_) {
@@ -182,12 +182,12 @@ namespace gs::rendering {
         }
 
         // Ensure tensor is CUDA, float32, and [H, W, C] format
-        if (!image.is_cuda()) {
+        if (image.device() != Device::CUDA) {
             LOG_ERROR("Image must be on CUDA");
             return std::unexpected("Image must be on CUDA");
         }
-        if (image.dim() != 3) {
-            LOG_ERROR("Image must be [H, W, C], got {} dimensions", image.dim());
+        if (image.ndim() != 3) {
+            LOG_ERROR("Image must be [H, W, C], got {} dimensions", image.ndim());
             return std::unexpected("Image must be [H, W, C]");
         }
         if (image.size(2) != 3 && image.size(2) != 4) {
@@ -236,31 +236,28 @@ namespace gs::rendering {
         }
 
         // Convert to RGBA uint8 if needed
-        torch::Tensor rgba_image;
+        Tensor rgba_image;
         if (c == 3) {
+            LOG_TIMER_TRACE("CudaGLInteropTextureImpl<true>::channels");
             // Add alpha channel
-            rgba_image = torch::cat({image,
-                                     torch::ones({h, w, 1}, image.options())},
-                                    2);
+            rgba_image = Tensor::cat({image, Tensor::ones({static_cast<size_t>(h), static_cast<size_t>(w), 1},
+                        image.device(), image.dtype())}, 2);
             LOG_TRACE("Added alpha channel to image");
         } else {
             rgba_image = image;
         }
 
         // Ensure proper format (uint8)
-        if (rgba_image.dtype() != torch::kUInt8) {
-            rgba_image = (rgba_image.clamp(0.0f, 1.0f) * 255.0f).to(torch::kUInt8);
-            LOG_TRACE("Converted image to uint8");
+        if (rgba_image.dtype() != DataType::UInt8) {
+            LOG_TIMER_TRACE("Converted image to uint8");
+            rgba_image = (rgba_image.clamp(0.0f, 1.0f) * 255.0f).to(DataType::UInt8);
         }
-
-        // Make contiguous
-        rgba_image = rgba_image.contiguous();
 
         // Copy to CUDA array
         err = cudaMemcpy2DToArray(
             cuda_array,
             0, 0, // offset
-            rgba_image.data_ptr<uint8_t>(),
+            rgba_image.ptr<uint8_t>(),
             w * 4, // pitch (RGBA = 4 bytes per pixel)
             w * 4, // width in bytes
             h,     // height
@@ -298,7 +295,7 @@ namespace gs::rendering {
         LOG_DEBUG("Creating InteropFrameBuffer with interop: {}", use_interop);
     }
 
-    Result<void> InteropFrameBuffer::uploadFromCUDA(const torch::Tensor& cuda_image) {
+    Result<void> InteropFrameBuffer::uploadFromCUDA(const Tensor& cuda_image) {
         LOG_TIMER_TRACE("InteropFrameBuffer::uploadFromCUDA");
 
         // Lazy initialization on first use with actual image dimensions
@@ -306,7 +303,7 @@ namespace gs::rendering {
             // Determine dimensions from the tensor
             int img_width, img_height;
 
-            if (cuda_image.dim() == 3) {
+            if (cuda_image.ndim() == 3) {
                 if (cuda_image.size(2) == 3 || cuda_image.size(2) == 4) {
                     // [H, W, C] format
                     img_height = cuda_image.size(0);
@@ -317,7 +314,7 @@ namespace gs::rendering {
                     img_width = cuda_image.size(2);
                 }
             } else {
-                LOG_ERROR("Unexpected tensor dimensions: {}", cuda_image.dim());
+                LOG_ERROR("Unexpected tensor dimensions: {}", cuda_image.ndim());
                 use_interop_ = false;
             }
 
@@ -337,14 +334,15 @@ namespace gs::rendering {
             // Fallback to CPU copy
             LOG_TRACE("Using CPU fallback for CUDA upload");
             auto cpu_image = cuda_image;
-            if (cuda_image.is_cuda()) {
-                cpu_image = cuda_image.to(torch::kCPU);
+            if (cuda_image.device() == Device::CUDA) {
+                cpu_image = cuda_image.cpu();
             }
             cpu_image = cpu_image.contiguous();
 
             // Handle both [H, W, C] and [C, H, W] formats
-            torch::Tensor formatted;
-            if (cpu_image.size(-1) == 3 || cpu_image.size(-1) == 4) {
+            Tensor formatted;
+            size_t last_dim_size = cpu_image.size(cpu_image.ndim() - 1);
+            if (last_dim_size == 3 || last_dim_size == 4) {
                 // Already [H, W, C]
                 formatted = cpu_image;
             } else {
@@ -353,11 +351,11 @@ namespace gs::rendering {
             }
 
             // Convert to uint8 if needed
-            if (formatted.dtype() != torch::kUInt8) {
-                formatted = (formatted.clamp(0.0f, 1.0f) * 255.0f).to(torch::kUInt8);
+            if (formatted.dtype() != DataType::UInt8) {
+                formatted = (formatted.clamp(0.0f, 1.0f) * 255.0f).to(DataType::UInt8);
             }
 
-            uploadImage(formatted.data_ptr<unsigned char>(),
+            uploadImage(formatted.ptr<unsigned char>(),
                         formatted.size(1), formatted.size(0));
             return {};
         }

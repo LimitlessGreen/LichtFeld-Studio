@@ -1,46 +1,53 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
- *
+*
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #pragma once
-#include "loader/cuda_data.hpp"
+
+#include "Common.h"
+#include "core/camera_new.hpp"
+#include "core/point_cloud_new.hpp"
+#include "core/tensor.hpp"
 #include <filesystem>
+#include <memory>
 #include <vector>
 
 namespace gs::loader {
 
-    enum class CAMERA_MODEL {
-        SIMPLE_PINHOLE = 0,
-        PINHOLE = 1,
-        SIMPLE_RADIAL = 2,
-        RADIAL = 3,
-        OPENCV = 4,
-        OPENCV_FISHEYE = 5,
-        FULL_OPENCV = 6,
-        FOV = 7,
-        SIMPLE_RADIAL_FISHEYE = 8,
-        RADIAL_FISHEYE = 9,
-        THIN_PRISM_FISHEYE = 10,
-        UNDEFINED = 11
-    };
-
-    // Structure to return camera data with scene center
-    struct ColmapCameraResult {
-        std::vector<internal::CudaCameraData> cameras;
-        float scene_center[3];
-    };
-
-    // CUDA-native versions
-    ColmapCameraResult read_colmap_cameras_and_images_cuda(
+    /**
+     * @brief Read COLMAP cameras and images
+     * @param base Base directory containing COLMAP data
+     * @param images_folder Folder containing images (default: "images")
+     * @return Tuple of (vector of CameraNew, scene_center tensor [3])
+     */
+    std::tuple<std::vector<std::shared_ptr<CameraNew>>, Tensor>
+    read_colmap_cameras_and_images(
         const std::filesystem::path& base,
         const std::string& images_folder = "images");
 
-    internal::CudaPointCloud read_colmap_point_cloud_cuda(const std::filesystem::path& filepath);
+    /**
+     * @brief Read COLMAP point cloud (binary format)
+     * @param filepath Base directory containing points3D.bin
+     * @return PointCloudNew
+     */
+    PointCloudNew read_colmap_point_cloud(const std::filesystem::path& filepath);
 
-    ColmapCameraResult read_colmap_cameras_and_images_text_cuda(
+    /**
+     * @brief Read COLMAP cameras and images from text files
+     * @param base Base directory containing COLMAP data
+     * @param images_folder Folder containing images (default: "images")
+     * @return Tuple of (vector of CameraNew, scene_center tensor [3])
+     */
+    std::tuple<std::vector<std::shared_ptr<CameraNew>>, Tensor>
+    read_colmap_cameras_and_images_text(
         const std::filesystem::path& base,
         const std::string& images_folder = "images");
 
-    internal::CudaPointCloud read_colmap_point_cloud_text_cuda(const std::filesystem::path& filepath);
+    /**
+     * @brief Read COLMAP point cloud from text file
+     * @param filepath Base directory containing points3D.txt
+     * @return PointCloudNew
+     */
+    PointCloudNew read_colmap_point_cloud_text(const std::filesystem::path& filepath);
 
 } // namespace gs::loader

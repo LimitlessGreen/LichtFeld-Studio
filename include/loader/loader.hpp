@@ -10,14 +10,14 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <torch/torch.h>
 #include <variant>
+#include "core/tensor.hpp"
 #include <vector>
 
 // Forward declarations only - hide implementation details
 namespace gs {
-    class SplatData;
-    struct PointCloud;
+    class SplatDataNew;
+    struct PointCloudNew;
 } // namespace gs
 
 namespace gs::training {
@@ -46,12 +46,12 @@ namespace gs::loader {
 
     struct LoadedScene {
         std::shared_ptr<gs::training::CameraDataset> cameras;
-        std::shared_ptr<PointCloud> point_cloud;
+        std::shared_ptr<PointCloudNew> point_cloud;
     };
 
     struct LoadResult {
-        std::variant<std::shared_ptr<SplatData>, LoadedScene> data;
-        torch::Tensor scene_center;
+        std::variant<std::shared_ptr<SplatDataNew>, LoadedScene> data;
+        Tensor scene_center;
         std::string loader_used;
         std::chrono::milliseconds load_time{0};
         std::vector<std::string> warnings;

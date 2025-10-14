@@ -1,15 +1,15 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
- *
+*
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #pragma once
 
+#include "core/tensor.hpp"
 #include "framebuffer_factory.hpp"
 #include "gl_resources.hpp"
 #include "shader.hpp"
 #include "shader_manager.hpp"
 #include <memory>
-#include <torch/torch.h>
 
 namespace gs::rendering {
     class ScreenQuadRenderer {
@@ -28,7 +28,7 @@ namespace gs::rendering {
         Result<void> render(ManagedShader& shader) const;
 
         virtual Result<void> uploadData(const unsigned char* image, int width_, int height_);
-        Result<void> uploadFromCUDA(const torch::Tensor& cuda_image, int width, int height);
+        Result<void> uploadFromCUDA(const Tensor& cuda_image, int width, int height);
 
         bool isInteropEnabled() const;
 

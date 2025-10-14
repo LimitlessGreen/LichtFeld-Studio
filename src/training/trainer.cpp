@@ -5,6 +5,7 @@
 #include "trainer.hpp"
 #include "components/bilateral_grid.hpp"
 #include "components/poseopt.hpp"
+#include "core/events.hpp"
 #include "components/sparsity_optimizer.hpp"
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
@@ -1027,7 +1028,8 @@ namespace gs::training {
                         auto train_cam = train_dataset_->get_camera_by_filename(img_name);
                         auto val_cam = val_dataset_ ? val_dataset_->get_camera_by_filename(img_name) : std::nullopt;
                         if (train_cam.has_value() || val_cam.has_value()) {
-                            Camera* cam_to_use = train_cam.has_value() ? train_cam.value() : val_cam.value();
+                            // TODO: fix this!
+                            Camera* cam_to_use; //= train_cam.has_value() ? train_cam.value() : val_cam.value();
 
                             if (cam_to_use->camera_height() == cam_to_use->image_height() && params_.dataset.resize_factor != 1) {
                                 cam_to_use->load_image_size(params_.dataset.resize_factor);
@@ -1055,8 +1057,9 @@ namespace gs::training {
                             auto output_path = params_.dataset.output_path / "timelapse" / folder_name;
                             std::filesystem::create_directories(output_path);
 
-                            image_io::save_image_async(output_path / std::format("{:06d}.jpg", iter),
-                                                       image_tensor);
+                            // TODO: fix this!
+                            //image_io::save_image_async(output_path / std::format("{:06d}.jpg", iter),
+                            //                           image_tensor);
 
                             check_memory("after timelapse save");
                         } else {
@@ -1158,7 +1161,8 @@ namespace gs::training {
                 // Get batch using our torch-free dataloader
                 auto batch = std::move(*loader_iter);
                 auto& camera_with_image = batch[0];
-                Camera* cam = camera_with_image.camera;
+                // TODO: fix this!
+                Camera* cam;// = camera_with_image.camera;
 
                 // Get raw image pointer and dimensions
                 const float* gt_image_ptr = camera_with_image.image_data();
@@ -1245,7 +1249,7 @@ namespace gs::training {
         }
     }
 
-    std::shared_ptr<const Camera> Trainer::getCamById(int camId) const {
+    std::shared_ptr<const CameraNew> Trainer::getCamById(int camId) const {
         const auto it = m_cam_id_to_cam.find(camId);
         if (it == m_cam_id_to_cam.end()) {
             LOG_ERROR("getCamById - could not find cam with cam id {}", camId);
@@ -1254,8 +1258,8 @@ namespace gs::training {
         return it->second;
     }
 
-    std::vector<std::shared_ptr<const Camera>> Trainer::getCamList() const {
-        std::vector<std::shared_ptr<const Camera>> cams;
+    std::vector<std::shared_ptr<const CameraNew>> Trainer::getCamList() const {
+        std::vector<std::shared_ptr<const CameraNew>> cams;
         cams.reserve(m_cam_id_to_cam.size());
         for (auto& [key, value] : m_cam_id_to_cam) {
             cams.push_back(value);

@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "core/splat_data.hpp"
+#include "core/splat_data_new.hpp"
 #include <glm/glm.hpp>
 #include <memory>
 #include <string>
@@ -17,7 +17,7 @@ namespace gs {
     public:
         struct Node {
             std::string name;
-            std::unique_ptr<SplatData> model;
+            std::unique_ptr<SplatDataNew> model;
             glm::mat4 transform{1.0f};
             bool visible = true;
             size_t gaussian_count = 0;
@@ -35,14 +35,14 @@ namespace gs {
         Scene& operator=(Scene&&) = default;
 
         // Node management
-        void addNode(const std::string& name, std::unique_ptr<SplatData> model);
+        void addNode(const std::string& name, std::unique_ptr<SplatDataNew> model);
         void removeNode(const std::string& name);
         void setNodeVisibility(const std::string& name, bool visible);
         void clear();
         std::pair<std::string, std::string> cycleVisibilityWithNames();
 
         // Get combined model for rendering
-        const SplatData* getCombinedModel() const;
+        const SplatDataNew* getCombinedModel() const;
 
         // Direct queries
         size_t getNodeCount() const { return nodes_.size(); }
@@ -59,7 +59,7 @@ namespace gs {
         std::vector<Node> nodes_;
 
         // Caching for combined model
-        mutable std::unique_ptr<SplatData> cached_combined_;
+        mutable std::unique_ptr<SplatDataNew> cached_combined_;
         mutable bool cache_valid_ = false;
 
         void invalidateCache() { cache_valid_ = false; }

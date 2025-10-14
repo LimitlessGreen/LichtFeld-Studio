@@ -4,11 +4,14 @@
 
 #pragma once
 
-#include "core/camera.hpp"
-#include "core/image_io.hpp"
+#include "core/camera_new.hpp"
+#include "core/image_io_new.hpp"
 #include "core/logger.hpp"
 #include "core/parameters.hpp"
+#include "core/splat_data_new.hpp"
+#include "core/tensor.hpp"
 #include "loader/loader.hpp"
+#include <iostream>
 #include <atomic>
 #include <condition_variable>
 #include <cuda_runtime.h>
@@ -95,7 +98,7 @@ namespace gs::training {
             // Load image using existing image_io
             unsigned char* cpu_data;
             int w, h, c;
-            std::tie(cpu_data, w, h, c) = load_image(path, resize_factor);
+            std::tie(cpu_data, w, h, c) = image_io::load_image(path, resize_factor);
 
             // Ensure buffer is right size
             ensure_size(w, h, c);
@@ -121,7 +124,7 @@ namespace gs::training {
                        cudaMemcpyHostToDevice);
 
             // Free CPU image
-            free_image(cpu_data);
+            image_io::free_image(cpu_data);
         }
 
         float* data() { return data_; }
@@ -185,7 +188,7 @@ namespace gs::training {
 
     // Wrapper for camera with raw image data
     struct CameraWithImage {
-        Camera* camera;
+        CameraNew* camera;
         CUDAImageBuffer* image_buffer; // Borrowed from pool
 
         // For compatibility - return raw pointer
@@ -207,11 +210,11 @@ namespace gs::training {
 
         // Raw pointer accessors for fast access
         const float* world_view_transform_ptr() const {
-            return camera->world_view_transform_cuda_ptr();
+            return camera->world_view_transform().ptr<float>();
         }
 
         const float* cam_position_ptr() const {
-            return camera->cam_position_cuda_ptr();
+            return camera->cam_position().ptr<float>();
         }
     };
 
@@ -227,7 +230,7 @@ namespace gs::training {
             ALL
         };
 
-        CameraDataset(std::vector<std::shared_ptr<Camera>> cameras,
+        CameraDataset(std::vector<std::shared_ptr<CameraNew>> cameras,
                       const gs::param::DatasetConfig& params,
                       Split split = Split::ALL)
             : _cameras(std::move(cameras)),
@@ -296,7 +299,7 @@ namespace gs::training {
             return _indices.size();
         }
 
-        const std::vector<std::shared_ptr<Camera>>& get_cameras() const {
+        const std::vector<std::shared_ptr<CameraNew>>& get_cameras() const {
             return _cameras;
         }
 
@@ -307,9 +310,9 @@ namespace gs::training {
                 return 0;
             }
             size_t total_bytes = 0;
-            for (const auto& cam : _cameras) {
-                total_bytes += cam->get_num_bytes_from_file();
-            }
+            //for (const auto& cam : _cameras) {
+            //    //total_bytes += cam->get_num_bytes_from_file();
+            //}
             // Adjust for resolution factor if specified
             if (_datasetConfig.resize_factor > 0) {
                 total_bytes /= _datasetConfig.resize_factor * _datasetConfig.resize_factor;
@@ -317,7 +320,7 @@ namespace gs::training {
             return total_bytes;
         }
 
-        [[nodiscard]] std::optional<Camera*> get_camera_by_filename(const std::string& filename) const {
+        [[nodiscard]] std::optional<CameraNew*> get_camera_by_filename(const std::string& filename) const {
             for (const auto& cam : _cameras) {
                 if (cam->image_name() == filename) {
                     return cam.get();
@@ -335,7 +338,7 @@ namespace gs::training {
         }
 
     private:
-        std::vector<std::shared_ptr<Camera>> _cameras;
+        std::vector<std::shared_ptr<CameraNew>> _cameras;
         gs::param::DatasetConfig _datasetConfig;
         Split _split;
         std::vector<size_t> _indices;
@@ -793,8 +796,8 @@ namespace gs::training {
         return std::make_unique<InfiniteDataLoader>(dataset, 1, num_workers);
     }
 
-    // Keep the existing create_dataset functions unchanged as they return CameraDataset
-    inline std::expected<std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor>, std::string>
+    // Keep the existing create_dataset
+    inline std::expected<std::tuple<std::shared_ptr<CameraDataset>, Tensor>, std::string>
     create_dataset_from_colmap(const gs::param::DatasetConfig& datasetConfig) {
         try {
             if (!std::filesystem::exists(datasetConfig.data_path)) {
@@ -820,17 +823,17 @@ namespace gs::training {
             // Handle the result
             return std::visit(
                 [&result, &datasetConfig](
-                    auto&& data) -> std::expected<std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor>, std::string> {
+                    auto&& data) -> std::expected<std::tuple<std::shared_ptr<CameraDataset>, Tensor>, std::string> {
                     using T = std::decay_t<decltype(data)>;
 
-                    if constexpr (std::is_same_v<T, std::shared_ptr<gs::SplatData>>) {
+                    if constexpr (std::is_same_v<T, std::shared_ptr<gs::SplatDataNew>>) {
                         return std::unexpected("Expected COLMAP dataset but got PLY file");
                     } else if constexpr (std::is_same_v<T, gs::loader::LoadedScene>) {
                         if (!data.cameras) {
                             return std::unexpected("Loaded scene has no cameras");
                         }
 
-                        // Create dataset with cameras that are internally torch-free
+                        // Create dataset with cameras that are torch-free
                         auto dataset = std::make_shared<CameraDataset>(
                             data.cameras->get_cameras(),
                             datasetConfig,
@@ -847,7 +850,7 @@ namespace gs::training {
         }
     }
 
-    inline std::expected<std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor>, std::string>
+    inline std::expected<std::tuple<std::shared_ptr<CameraDataset>, Tensor>, std::string>
     create_dataset_from_transforms(const gs::param::DatasetConfig& datasetConfig) {
         try {
             if (!std::filesystem::exists(datasetConfig.data_path)) {
@@ -873,17 +876,17 @@ namespace gs::training {
             // Handle the result
             return std::visit(
                 [&datasetConfig, &result](
-                    auto&& data) -> std::expected<std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor>, std::string> {
+                    auto&& data) -> std::expected<std::tuple<std::shared_ptr<CameraDataset>, Tensor>, std::string> {
                     using T = std::decay_t<decltype(data)>;
 
-                    if constexpr (std::is_same_v<T, std::shared_ptr<gs::SplatData>>) {
+                    if constexpr (std::is_same_v<T, std::shared_ptr<gs::SplatDataNew>>) {
                         return std::unexpected("Expected transforms.json dataset but got PLY file");
                     } else if constexpr (std::is_same_v<T, gs::loader::LoadedScene>) {
                         if (!data.cameras) {
                             return std::unexpected("Loaded scene has no cameras");
                         }
 
-                        // Create dataset with cameras that are internally torch-free
+                        // Create dataset with cameras that are torch-free
                         auto dataset = std::make_shared<CameraDataset>(
                             data.cameras->get_cameras(),
                             datasetConfig,
@@ -899,4 +902,5 @@ namespace gs::training {
             return std::unexpected(std::format("Failed to create dataset from transforms: {}", e.what()));
         }
     }
+
 } // namespace gs::training

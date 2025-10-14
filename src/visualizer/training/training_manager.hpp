@@ -5,6 +5,7 @@
 #pragma once
 
 #include "trainer.hpp"
+#include "core/camera_new.hpp"
 #include <atomic>
 #include <deque>
 #include <memory>
@@ -96,8 +97,8 @@ namespace gs {
         const std::string& getLastError() const { return last_error_; }
 
         // Camera access
-        std::shared_ptr<const Camera> getCamById(int camId) const;
-        std::vector<std::shared_ptr<const Camera>> getCamList() const;
+        std::shared_ptr<const CameraNew> getCamById(int camId) const;
+        std::vector<std::shared_ptr<const CameraNew>> getCamList() const;
 
         void setProject(std::shared_ptr<gs::management::Project> project);
 

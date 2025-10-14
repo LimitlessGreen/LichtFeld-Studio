@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "colmap.hpp"
-#include "core/image_io.hpp"
+#include "core/image_io_new.hpp"
 #include "core/logger.hpp"
 #include "loader/filesystem_utils.hpp"
 #include <algorithm>
@@ -22,44 +22,56 @@ namespace gs::loader {
     namespace fs = std::filesystem;
 
     // -----------------------------------------------------------------------------
-    //  Quaternion to rotation matrix (CUDA version)
+    //  Quaternion to rotation matrix (torch-free)
     // -----------------------------------------------------------------------------
-    inline void qvec2rotmat_cuda(const float qraw[4], float R[9]) {
-        // Normalize quaternion
-        float norm = std::sqrt(qraw[0] * qraw[0] + qraw[1] * qraw[1] +
-                               qraw[2] * qraw[2] + qraw[3] * qraw[3]);
-        float q[4];
-        for (int i = 0; i < 4; ++i) {
-            q[i] = qraw[i] / norm;
+    inline Tensor qvec2rotmat(const std::vector<float>& q_raw) {
+        if (q_raw.size() != 4) {
+            LOG_ERROR("Quaternion must have 4 elements");
+            throw std::runtime_error("Invalid quaternion size");
         }
 
-        float w = q[0], x = q[1], y = q[2], z = q[3];
+        // Normalize quaternion
+        float len = std::sqrt(q_raw[0] * q_raw[0] + q_raw[1] * q_raw[1] +
+                             q_raw[2] * q_raw[2] + q_raw[3] * q_raw[3]);
+        if (len < 1e-8f) {
+            LOG_ERROR("Quaternion has zero length");
+            throw std::runtime_error("Zero-length quaternion");
+        }
 
-        R[0] = 1 - 2 * (y * y + z * z);
-        R[1] = 2 * (x * y - z * w);
-        R[2] = 2 * (x * z + y * w);
+        float w = q_raw[0] / len;
+        float x = q_raw[1] / len;
+        float y = q_raw[2] / len;
+        float z = q_raw[3] / len;
 
-        R[3] = 2 * (x * y + z * w);
-        R[4] = 1 - 2 * (x * x + z * z);
-        R[5] = 2 * (y * z - x * w);
+        // Build rotation matrix [3, 3]
+        std::vector<float> R_data = {
+            1.0f - 2.0f * (y * y + z * z), 2.0f * (x * y - z * w), 2.0f * (x * z + y * w),
+            2.0f * (x * y + z * w), 1.0f - 2.0f * (x * x + z * z), 2.0f * (y * z - x * w),
+            2.0f * (x * z - y * w), 2.0f * (y * z + x * w), 1.0f - 2.0f * (x * x + y * y)};
 
-        R[6] = 2 * (x * z - y * w);
-        R[7] = 2 * (y * z + x * w);
-        R[8] = 1 - 2 * (x * x + y * y);
+        return Tensor::from_vector(R_data, TensorShape{3, 3}, Device::CPU);
     }
 
-    class Image {
-    public:
-        Image() = default;
-        explicit Image(uint32_t id) : _image_ID(id) {}
+    // -----------------------------------------------------------------------------
+    //  Image data structure
+    // -----------------------------------------------------------------------------
+    struct ImageData {
+        uint32_t image_id = 0;
+        uint32_t camera_id = 0;
+        std::string name;
+        std::vector<float> qvec = {1.0f, 0.0f, 0.0f, 0.0f}; // [w, x, y, z]
+        std::vector<float> tvec = {0.0f, 0.0f, 0.0f};
+    };
 
-        uint32_t _camera_id = 0;
-        std::string _name;
-        float _qvec[4] = {1.f, 0.f, 0.f, 0.f};
-        float _tvec[3] = {0.f, 0.f, 0.f};
-
-    private:
-        uint32_t _image_ID = 0;
+    // -----------------------------------------------------------------------------
+    //  Camera data structure (intermediate)
+    // -----------------------------------------------------------------------------
+    struct CameraDataIntermediate {
+        uint32_t camera_id = 0;
+        int model_id = 0;
+        int width = 0;
+        int height = 0;
+        std::vector<float> params;
     };
 
     // -----------------------------------------------------------------------------
@@ -93,6 +105,21 @@ namespace gs::loader {
     // -----------------------------------------------------------------------------
     //  COLMAP camera-model map
     // -----------------------------------------------------------------------------
+    enum class CAMERA_MODEL {
+        SIMPLE_PINHOLE = 0,
+        PINHOLE = 1,
+        SIMPLE_RADIAL = 2,
+        RADIAL = 3,
+        OPENCV = 4,
+        OPENCV_FISHEYE = 5,
+        FULL_OPENCV = 6,
+        FOV = 7,
+        SIMPLE_RADIAL_FISHEYE = 8,
+        RADIAL_FISHEYE = 9,
+        THIN_PRISM_FISHEYE = 10,
+        UNDEFINED = 11
+    };
+
     static const std::unordered_map<int, std::pair<CAMERA_MODEL, int32_t>> camera_model_ids = {
         {0, {CAMERA_MODEL::SIMPLE_PINHOLE, 3}},
         {1, {CAMERA_MODEL::PINHOLE, 4}},
@@ -146,7 +173,7 @@ namespace gs::loader {
     }
 
     // -----------------------------------------------------------------------------
-    //  Helper to scale camera intrinsics based on model
+    //  Helper to scale camera intrinsics
     // -----------------------------------------------------------------------------
     static void scale_camera_intrinsics(CAMERA_MODEL model, std::vector<float>& params, float factor) {
         switch (model) {
@@ -155,55 +182,53 @@ namespace gs::loader {
             params[1] /= factor; // cx
             params[2] /= factor; // cy
             break;
+
         case CAMERA_MODEL::PINHOLE:
             params[0] /= factor; // fx
             params[1] /= factor; // fy
             params[2] /= factor; // cx
             params[3] /= factor; // cy
             break;
+
         case CAMERA_MODEL::SIMPLE_RADIAL:
-            params[0] /= factor; // f
-            params[1] /= factor; // cx
-            params[2] /= factor; // cy
-            break;
         case CAMERA_MODEL::RADIAL:
             params[0] /= factor; // f
             params[1] /= factor; // cx
             params[2] /= factor; // cy
             break;
+
         case CAMERA_MODEL::OPENCV:
         case CAMERA_MODEL::OPENCV_FISHEYE:
-            params[0] /= factor; // fx
-            params[1] /= factor; // fy
-            params[2] /= factor; // cx
-            params[3] /= factor; // cy
-            break;
         case CAMERA_MODEL::FULL_OPENCV:
             params[0] /= factor; // fx
             params[1] /= factor; // fy
             params[2] /= factor; // cx
             params[3] /= factor; // cy
             break;
+
         case CAMERA_MODEL::SIMPLE_RADIAL_FISHEYE:
         case CAMERA_MODEL::RADIAL_FISHEYE:
             params[0] /= factor; // f
             params[1] /= factor; // cx
             params[2] /= factor; // cy
             break;
+
         case CAMERA_MODEL::FOV:
             params[0] /= factor; // fx
             params[1] /= factor; // fy
             params[2] /= factor; // cx
             params[3] /= factor; // cy
             break;
+
         case CAMERA_MODEL::THIN_PRISM_FISHEYE:
             params[0] /= factor; // fx
             params[1] /= factor; // fy
             params[2] /= factor; // cx
             params[3] /= factor; // cy
             break;
+
         default:
-            LOG_WARN("Unknown camera model for scaling: {}", static_cast<int>(model));
+            LOG_WARN("Unknown camera model for scaling");
             if (params.size() >= 4) {
                 params[2] /= factor; // cx
                 params[3] /= factor; // cy
@@ -232,23 +257,9 @@ namespace gs::loader {
     }
 
     // -----------------------------------------------------------------------------
-    //  Helper to apply dimension correction to camera
+    //  images.bin
     // -----------------------------------------------------------------------------
-    static void apply_dimension_correction(internal::CudaCameraData& cam, float scale_x, float scale_y,
-                                           int actual_w, int actual_h) {
-        cam.width = actual_w;
-        cam.height = actual_h;
-        cam.focal_x *= scale_x;
-        cam.focal_y *= scale_y;
-        cam.center_x *= scale_x;
-        cam.center_y *= scale_y;
-        LOG_TRACE("Applied dimension correction to camera: scale_x={:.3f}, scale_y={:.3f}", scale_x, scale_y);
-    }
-
-    // -----------------------------------------------------------------------------
-    //  images.bin (CUDA version)
-    // -----------------------------------------------------------------------------
-    std::vector<Image> read_images_binary_cuda(const std::filesystem::path& file_path) {
+    std::vector<ImageData> read_images_binary(const std::filesystem::path& file_path) {
         LOG_TIMER_TRACE("Read images.bin");
         auto buf_owner = read_binary(file_path);
         const char* cur = buf_owner->data();
@@ -256,26 +267,34 @@ namespace gs::loader {
 
         uint64_t n_images = read_u64(cur);
         LOG_DEBUG("Reading {} images from binary file", n_images);
-        std::vector<Image> images;
+        std::vector<ImageData> images;
         images.reserve(n_images);
 
         for (uint64_t i = 0; i < n_images; ++i) {
-            uint32_t id = read_u32(cur);
-            auto& img = images.emplace_back(id);
+            ImageData img;
+            img.image_id = read_u32(cur);
 
-            for (int k = 0; k < 4; ++k)
-                img._qvec[k] = static_cast<float>(read_f64(cur));
+            // Read quaternion [w, x, y, z]
+            for (int k = 0; k < 4; ++k) {
+                img.qvec[k] = static_cast<float>(read_f64(cur));
+            }
 
-            for (int k = 0; k < 3; ++k)
-                img._tvec[k] = static_cast<float>(read_f64(cur));
+            // Read translation [x, y, z]
+            for (int k = 0; k < 3; ++k) {
+                img.tvec[k] = static_cast<float>(read_f64(cur));
+            }
 
-            img._camera_id = read_u32(cur);
-            img._name.assign(cur);
-            cur += img._name.size() + 1;
+            img.camera_id = read_u32(cur);
+
+            img.name.assign(cur);
+            cur += img.name.size() + 1;
 
             uint64_t npts = read_u64(cur);
             cur += npts * (sizeof(double) * 2 + sizeof(uint64_t));
+
+            images.push_back(std::move(img));
         }
+
         if (cur != end) {
             LOG_ERROR("images.bin has trailing bytes");
             throw std::runtime_error("images.bin: trailing bytes");
@@ -284,10 +303,10 @@ namespace gs::loader {
     }
 
     // -----------------------------------------------------------------------------
-    //  cameras.bin (CUDA version)
+    //  cameras.bin
     // -----------------------------------------------------------------------------
-    std::unordered_map<uint32_t, internal::CudaCameraData>
-    read_cameras_binary_cuda(const std::filesystem::path& file_path, float scale_factor = 1.0f) {
+    std::unordered_map<uint32_t, CameraDataIntermediate>
+    read_cameras_binary(const std::filesystem::path& file_path, float scale_factor = 1.0f) {
         LOG_TIMER_TRACE("Read cameras.bin");
         auto buf_owner = read_binary(file_path);
         const char* cur = buf_owner->data();
@@ -296,33 +315,31 @@ namespace gs::loader {
         uint64_t n_cams = read_u64(cur);
         LOG_DEBUG("Reading {} cameras from binary file{}", n_cams,
                   scale_factor != 1.0f ? std::format(" with scale factor {}", scale_factor) : "");
-        std::unordered_map<uint32_t, internal::CudaCameraData> cams;
+
+        std::unordered_map<uint32_t, CameraDataIntermediate> cams;
         cams.reserve(n_cams);
 
         for (uint64_t i = 0; i < n_cams; ++i) {
-            internal::CudaCameraData cam;
+            CameraDataIntermediate cam;
             cam.camera_id = read_u32(cur);
-
-            int32_t model_id = read_i32(cur);
-            cam.width = read_u64(cur);
-            cam.height = read_u64(cur);
+            cam.model_id = read_i32(cur);
+            cam.width = static_cast<int>(read_u64(cur));
+            cam.height = static_cast<int>(read_u64(cur));
 
             if (scale_factor != 1.0f) {
-                cam.width = static_cast<uint64_t>(cam.width / scale_factor);
-                cam.height = static_cast<uint64_t>(cam.height / scale_factor);
-                LOG_TRACE("Scaled camera {} dimensions to {}x{}", cam.camera_id, cam.width, cam.height);
+                cam.width = static_cast<int>(cam.width / scale_factor);
+                cam.height = static_cast<int>(cam.height / scale_factor);
             }
 
-            auto it = camera_model_ids.find(model_id);
+            auto it = camera_model_ids.find(cam.model_id);
             if (it == camera_model_ids.end() || it->second.second < 0) {
-                LOG_ERROR("Unsupported camera-model id: {}", model_id);
-                throw std::runtime_error("Unsupported camera-model id " + std::to_string(model_id));
+                LOG_ERROR("Unsupported camera-model id: {}", cam.model_id);
+                throw std::runtime_error("Unsupported camera-model id");
             }
 
-            cam.camera_model = static_cast<int>(it->second.first);
             int32_t param_cnt = it->second.second;
-
             cam.params.resize(param_cnt);
+
             for (int j = 0; j < param_cnt; j++) {
                 cam.params[j] = static_cast<float>(read_f64(cur));
             }
@@ -333,6 +350,7 @@ namespace gs::loader {
 
             cams.emplace(cam.camera_id, std::move(cam));
         }
+
         if (cur != end) {
             LOG_ERROR("cameras.bin has trailing bytes");
             throw std::runtime_error("cameras.bin: trailing bytes");
@@ -341,9 +359,9 @@ namespace gs::loader {
     }
 
     // -----------------------------------------------------------------------------
-    //  points3D.bin (CUDA version)
+    //  points3D.bin
     // -----------------------------------------------------------------------------
-    internal::CudaPointCloud read_point3D_binary_cuda(const std::filesystem::path& file_path) {
+    PointCloudNew read_point3D_binary(const std::filesystem::path& file_path) {
         LOG_TIMER_TRACE("Read points3D.bin");
         auto buf_owner = read_binary(file_path);
         const char* cur = buf_owner->data();
@@ -352,20 +370,20 @@ namespace gs::loader {
         uint64_t N = read_u64(cur);
         LOG_DEBUG("Reading {} 3D points from binary file", N);
 
-        // Allocate host memory
-        std::vector<float> host_positions(N * 3);
-        std::vector<uint8_t> host_colors(N * 3);
+        std::vector<float> positions(N * 3);
+        std::vector<float> colors(N * 3);
 
         for (uint64_t i = 0; i < N; ++i) {
             cur += 8; // skip point ID
 
-            host_positions[i * 3 + 0] = static_cast<float>(read_f64(cur));
-            host_positions[i * 3 + 1] = static_cast<float>(read_f64(cur));
-            host_positions[i * 3 + 2] = static_cast<float>(read_f64(cur));
+            positions[i * 3 + 0] = static_cast<float>(read_f64(cur));
+            positions[i * 3 + 1] = static_cast<float>(read_f64(cur));
+            positions[i * 3 + 2] = static_cast<float>(read_f64(cur));
 
-            host_colors[i * 3 + 0] = *cur++;
-            host_colors[i * 3 + 1] = *cur++;
-            host_colors[i * 3 + 2] = *cur++;
+            // Convert uint8 [0,255] to float [0,1]
+            colors[i * 3 + 0] = (*cur++) / 255.0f;
+            colors[i * 3 + 1] = (*cur++) / 255.0f;
+            colors[i * 3 + 2] = (*cur++) / 255.0f;
 
             cur += 8;                                    // skip reprojection error
             cur += read_u64(cur) * sizeof(uint32_t) * 2; // skip track
@@ -376,16 +394,14 @@ namespace gs::loader {
             throw std::runtime_error("points3D.bin: trailing bytes");
         }
 
-        // Upload to CUDA
-        internal::CudaPointCloud result(N);
-        result.positions.upload(host_positions.data(), N * 3);
-        result.colors.upload(host_colors.data(), N * 3);
+        Tensor means = Tensor::from_vector(positions, TensorShape{N, 3}, Device::CUDA);
+        Tensor colors_tensor = Tensor::from_vector(colors, TensorShape{N, 3}, Device::CUDA);
 
-        return result;
+        return PointCloudNew(std::move(means), std::move(colors_tensor));
     }
 
     // -----------------------------------------------------------------------------
-    //  Text-file loader helpers
+    //  Text-file helpers
     // -----------------------------------------------------------------------------
     std::vector<std::string> read_text_file(const std::filesystem::path& file_path) {
         LOG_TRACE("Reading text file: {}", file_path.string());
@@ -394,32 +410,31 @@ namespace gs::loader {
             LOG_ERROR("Failed to open text file: {}", file_path.string());
             throw std::runtime_error("Failed to open " + file_path.string());
         }
+
         std::vector<std::string> lines;
         std::string line;
         while (std::getline(file, line)) {
-            if (line.starts_with("#")) {
+            if (line.starts_with("#"))
                 continue;
-            }
-            if (!line.empty() && line.back() == '\r') {
+            if (!line.empty() && line.back() == '\r')
                 line.pop_back();
-            }
             lines.push_back(line);
         }
-        file.close();
+
         if (lines.empty()) {
-            LOG_ERROR("File is empty or contains no valid lines: {}", file_path.string());
-            throw std::runtime_error("File " + file_path.string() + " is empty or contains no valid lines");
+            LOG_ERROR("File is empty: {}", file_path.string());
+            throw std::runtime_error("File is empty");
         }
-        if (lines.back().empty()) {
+
+        if (lines.back().empty())
             lines.pop_back();
-        }
+
         LOG_TRACE("Read {} lines from text file", lines.size());
         return lines;
     }
 
     std::vector<std::string> split_string(const std::string& s, char delimiter) {
         std::vector<std::string> tokens;
-        std::string token;
         size_t start = 0;
         size_t end = s.find(delimiter);
 
@@ -434,102 +449,108 @@ namespace gs::loader {
     }
 
     // -----------------------------------------------------------------------------
-    //  images.txt (CUDA version)
+    //  images.txt
     // -----------------------------------------------------------------------------
-    std::vector<Image> read_images_text_cuda(const std::filesystem::path& file_path) {
+    std::vector<ImageData> read_images_text(const std::filesystem::path& file_path) {
         LOG_TIMER_TRACE("Read images.txt");
         auto lines = read_text_file(file_path);
-        std::vector<Image> images;
+
         if (lines.size() % 2 != 0) {
             LOG_ERROR("images.txt should have an even number of lines");
             throw std::runtime_error("images.txt should have an even number of lines");
         }
+
         uint64_t n_images = lines.size() / 2;
         LOG_DEBUG("Reading {} images from text file", n_images);
+        std::vector<ImageData> images;
+        images.reserve(n_images);
 
         for (uint64_t i = 0; i < n_images; ++i) {
             const auto& line = lines[i * 2];
             const auto tokens = split_string(line, ' ');
+
             if (tokens.size() != 10) {
                 LOG_ERROR("Invalid format in images.txt line {}", i * 2 + 1);
-                throw std::runtime_error("Invalid format in images.txt line " + std::to_string(i * 2 + 1));
+                throw std::runtime_error("Invalid format in images.txt");
             }
 
-            auto& img = images.emplace_back(std::stoul(tokens[0]));
-            img._qvec[0] = std::stof(tokens[1]);
-            img._qvec[1] = std::stof(tokens[2]);
-            img._qvec[2] = std::stof(tokens[3]);
-            img._qvec[3] = std::stof(tokens[4]);
+            ImageData img;
+            img.image_id = std::stoul(tokens[0]);
+            img.qvec = {std::stof(tokens[1]), std::stof(tokens[2]),
+                        std::stof(tokens[3]), std::stof(tokens[4])};
+            img.tvec = {std::stof(tokens[5]), std::stof(tokens[6]), std::stof(tokens[7])};
+            img.camera_id = std::stoul(tokens[8]);
+            img.name = tokens[9];
 
-            img._tvec[0] = std::stof(tokens[5]);
-            img._tvec[1] = std::stof(tokens[6]);
-            img._tvec[2] = std::stof(tokens[7]);
-
-            img._camera_id = std::stoul(tokens[8]);
-            img._name = tokens[9];
+            images.push_back(std::move(img));
         }
+
         return images;
     }
 
     // -----------------------------------------------------------------------------
-    //  cameras.txt (CUDA version)
+    //  cameras.txt
     // -----------------------------------------------------------------------------
-    std::unordered_map<uint32_t, internal::CudaCameraData>
-    read_cameras_text_cuda(const std::filesystem::path& file_path, float scale_factor = 1.0f) {
+    std::unordered_map<uint32_t, CameraDataIntermediate>
+    read_cameras_text(const std::filesystem::path& file_path, float scale_factor = 1.0f) {
         LOG_TIMER_TRACE("Read cameras.txt");
         auto lines = read_text_file(file_path);
-        std::unordered_map<uint32_t, internal::CudaCameraData> cams;
+
         LOG_DEBUG("Reading {} cameras from text file{}", lines.size(),
                   scale_factor != 1.0f ? std::format(" with scale factor {}", scale_factor) : "");
+
+        std::unordered_map<uint32_t, CameraDataIntermediate> cams;
 
         for (const auto& line : lines) {
             const auto tokens = split_string(line, ' ');
             if (tokens.size() < 4) {
                 LOG_ERROR("Invalid format in cameras.txt: {}", line);
-                throw std::runtime_error("Invalid format in cameras.txt: " + line);
+                throw std::runtime_error("Invalid format in cameras.txt");
             }
 
-            internal::CudaCameraData cam;
+            CameraDataIntermediate cam;
             cam.camera_id = std::stoul(tokens[0]);
+
             if (!camera_model_names.contains(tokens[1])) {
-                LOG_ERROR("Unknown camera model in cameras.txt: {}", tokens[1]);
-                throw std::runtime_error("Invalid format in cameras.txt: " + line);
+                LOG_ERROR("Unknown camera model: {}", tokens[1]);
+                throw std::runtime_error("Unknown camera model");
             }
-            cam.camera_model = static_cast<int>(camera_model_names.at(tokens[1]));
+
+            cam.model_id = static_cast<int>(camera_model_names.at(tokens[1]));
             cam.width = std::stoi(tokens[2]);
             cam.height = std::stoi(tokens[3]);
 
             if (scale_factor != 1.0f) {
-                cam.width = static_cast<uint64_t>(cam.width / scale_factor);
-                cam.height = static_cast<uint64_t>(cam.height / scale_factor);
-                LOG_TRACE("Scaled camera {} dimensions to {}x{}", cam.camera_id, cam.width, cam.height);
+                cam.width = static_cast<int>(cam.width / scale_factor);
+                cam.height = static_cast<int>(cam.height / scale_factor);
             }
 
-            cam.params.resize(tokens.size() - 4);
-            for (uint64_t j = 4; j < tokens.size(); ++j) {
-                cam.params[j - 4] = std::stof(tokens[j]);
+            for (size_t j = 4; j < tokens.size(); ++j) {
+                cam.params.push_back(std::stof(tokens[j]));
             }
 
-            if (scale_factor != 1.0f) {
-                scale_camera_intrinsics(static_cast<CAMERA_MODEL>(cam.camera_model), cam.params, scale_factor);
+            auto it = camera_model_ids.find(cam.model_id);
+            if (it != camera_model_ids.end() && scale_factor != 1.0f) {
+                scale_camera_intrinsics(it->second.first, cam.params, scale_factor);
             }
 
             cams.emplace(cam.camera_id, std::move(cam));
         }
+
         return cams;
     }
 
     // -----------------------------------------------------------------------------
-    //  point3D.txt (CUDA version)
+    //  points3D.txt
     // -----------------------------------------------------------------------------
-    internal::CudaPointCloud read_point3D_text_cuda(const std::filesystem::path& file_path) {
+    PointCloudNew read_point3D_text(const std::filesystem::path& file_path) {
         LOG_TIMER_TRACE("Read points3D.txt");
         auto lines = read_text_file(file_path);
         uint64_t N = lines.size();
         LOG_DEBUG("Reading {} 3D points from text file", N);
 
-        std::vector<float> host_positions(N * 3);
-        std::vector<uint8_t> host_colors(N * 3);
+        std::vector<float> positions(N * 3);
+        std::vector<float> colors(N * 3);
 
         for (uint64_t i = 0; i < N; ++i) {
             const auto& line = lines[i];
@@ -537,215 +558,227 @@ namespace gs::loader {
 
             if (tokens.size() < 8) {
                 LOG_ERROR("Invalid format in points3D.txt: {}", line);
-                throw std::runtime_error("Invalid format in point3D.txt: " + line);
+                throw std::runtime_error("Invalid format in points3D.txt");
             }
 
-            host_positions[i * 3 + 0] = std::stof(tokens[1]);
-            host_positions[i * 3 + 1] = std::stof(tokens[2]);
-            host_positions[i * 3 + 2] = std::stof(tokens[3]);
+            positions[i * 3 + 0] = std::stof(tokens[1]);
+            positions[i * 3 + 1] = std::stof(tokens[2]);
+            positions[i * 3 + 2] = std::stof(tokens[3]);
 
-            host_colors[i * 3 + 0] = std::stoi(tokens[4]);
-            host_colors[i * 3 + 1] = std::stoi(tokens[5]);
-            host_colors[i * 3 + 2] = std::stoi(tokens[6]);
+            // Convert uint8 [0,255] to float [0,1]
+            colors[i * 3 + 0] = std::stoi(tokens[4]) / 255.0f;
+            colors[i * 3 + 1] = std::stoi(tokens[5]) / 255.0f;
+            colors[i * 3 + 2] = std::stoi(tokens[6]) / 255.0f;
         }
 
-        internal::CudaPointCloud result(N);
-        result.positions.upload(host_positions.data(), N * 3);
-        result.colors.upload(host_colors.data(), N * 3);
+        Tensor means = Tensor::from_vector(positions, TensorShape{N, 3}, Device::CUDA);
+        Tensor colors_tensor = Tensor::from_vector(colors, TensorShape{N, 3}, Device::CUDA);
 
-        return result;
+        return PointCloudNew(std::move(means), std::move(colors_tensor));
     }
 
     // -----------------------------------------------------------------------------
-    //  Assemble per-image camera information (CUDA version)
+    //  Assemble cameras with dimension verification
     // -----------------------------------------------------------------------------
-    ColmapCameraResult
-    read_colmap_cameras_cuda(const std::filesystem::path base_path,
-                             const std::unordered_map<uint32_t, internal::CudaCameraData>& cams,
-                             const std::vector<Image>& images,
-                             const std::string& images_folder = "images") {
+    std::tuple<std::vector<std::shared_ptr<CameraNew>>, Tensor>
+    assemble_colmap_cameras(const std::filesystem::path& base_path,
+                           const std::unordered_map<uint32_t, CameraDataIntermediate>& cam_map,
+                           const std::vector<ImageData>& images,
+                           const std::string& images_folder) {
+
         LOG_TIMER_TRACE("Assemble COLMAP cameras");
-        std::vector<internal::CudaCameraData> out(images.size());
 
         std::filesystem::path images_path = base_path / images_folder;
 
         if (!std::filesystem::exists(images_path)) {
             LOG_ERROR("Images folder does not exist: {}", images_path.string());
-            throw std::runtime_error("Images folder does not exist: " + images_path.string());
+            throw std::runtime_error("Images folder does not exist");
         }
 
+        std::vector<std::shared_ptr<CameraNew>> cameras;
+        cameras.reserve(images.size());
+
+        // Accumulate camera positions for scene center
+        std::vector<float> camera_positions;
+        camera_positions.reserve(images.size() * 3);
+
         for (size_t i = 0; i < images.size(); ++i) {
-            const Image& img = images[i];
-            auto it = cams.find(img._camera_id);
-            if (it == cams.end()) {
-                LOG_ERROR("Camera ID {} not found", img._camera_id);
-                throw std::runtime_error("Camera ID " + std::to_string(img._camera_id) + " not found");
+            const ImageData& img = images[i];
+
+            auto it = cam_map.find(img.camera_id);
+            if (it == cam_map.end()) {
+                LOG_ERROR("Camera ID {} not found", img.camera_id);
+                throw std::runtime_error("Camera ID not found");
             }
 
-            out[i] = it->second;
-            out[i].image_path = images_path / img._name;
-            out[i].image_name = img._name;
+            const auto& cam_data = it->second;
 
-            qvec2rotmat_cuda(img._qvec, out[i].R);
-            std::memcpy(out[i].T, img._tvec, 3 * sizeof(float));
+            // Convert quaternion to rotation matrix
+            Tensor R = qvec2rotmat(img.qvec);
 
-            // Process camera model
-            CAMERA_MODEL model = static_cast<CAMERA_MODEL>(out[i].camera_model);
+            // Create translation tensor
+            Tensor T = Tensor::from_vector(img.tvec, TensorShape{3}, Device::CPU);
+
+            // Calculate camera position: -R^T * T
+            auto R_cpu = R.cpu();
+            auto T_cpu = T.cpu();
+
+            float RT[9];
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    RT[r * 3 + c] = R_cpu.ptr<float>()[c * 3 + r]; // Transpose
+                }
+            }
+
+            float cam_pos[3] = {0, 0, 0};
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    cam_pos[r] -= RT[r * 3 + c] * T_cpu.ptr<float>()[c];
+                }
+            }
+
+            camera_positions.push_back(cam_pos[0]);
+            camera_positions.push_back(cam_pos[1]);
+            camera_positions.push_back(cam_pos[2]);
+
+            // Extract camera parameters based on model
+            auto model_it = camera_model_ids.find(cam_data.model_id);
+            if (model_it == camera_model_ids.end()) {
+                LOG_ERROR("Invalid camera model ID: {}", cam_data.model_id);
+                throw std::runtime_error("Invalid camera model ID");
+            }
+
+            CAMERA_MODEL model = model_it->second.first;
+            const auto& params = cam_data.params;
+
+            float focal_x = 0, focal_y = 0, center_x = 0, center_y = 0;
+            Tensor radial_dist, tangential_dist;
+            gsplat::CameraModelType camera_model_type = gsplat::CameraModelType::PINHOLE;
+
             switch (model) {
-            case CAMERA_MODEL::SIMPLE_PINHOLE: {
-                float fx = out[i].params[0];
-                out[i].focal_x = fx;
-                out[i].focal_y = fx;
-                out[i].center_x = out[i].params[1];
-                out[i].center_y = out[i].params[2];
-                out[i].camera_model_type = 0; // PINHOLE
+            case CAMERA_MODEL::SIMPLE_PINHOLE:
+                focal_x = focal_y = params[0];
+                center_x = params[1];
+                center_y = params[2];
+                radial_dist = Tensor::empty({0}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
                 break;
-            }
-            case CAMERA_MODEL::PINHOLE: {
-                out[i].focal_x = out[i].params[0];
-                out[i].focal_y = out[i].params[1];
-                out[i].center_x = out[i].params[2];
-                out[i].center_y = out[i].params[3];
-                out[i].camera_model_type = 0; // PINHOLE
+
+            case CAMERA_MODEL::PINHOLE:
+                focal_x = params[0];
+                focal_y = params[1];
+                center_x = params[2];
+                center_y = params[3];
+                radial_dist = Tensor::empty({0}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
                 break;
-            }
-            case CAMERA_MODEL::SIMPLE_RADIAL: {
-                float fx = out[i].params[0];
-                out[i].focal_x = fx;
-                out[i].focal_y = fx;
-                out[i].center_x = out[i].params[1];
-                out[i].center_y = out[i].params[2];
-                out[i].radial_distortion.push_back(out[i].params[3]);
-                out[i].camera_model_type = 0; // PINHOLE
+
+            case CAMERA_MODEL::SIMPLE_RADIAL:
+                focal_x = focal_y = params[0];
+                center_x = params[1];
+                center_y = params[2];
+                radial_dist = Tensor::from_vector({params[3]}, TensorShape{1}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
                 break;
-            }
-            case CAMERA_MODEL::RADIAL: {
-                float fx = out[i].params[0];
-                out[i].focal_x = fx;
-                out[i].focal_y = fx;
-                out[i].center_x = out[i].params[1];
-                out[i].center_y = out[i].params[2];
-                out[i].radial_distortion.push_back(out[i].params[3]);
-                out[i].radial_distortion.push_back(out[i].params[4]);
-                out[i].camera_model_type = 0; // PINHOLE
+
+            case CAMERA_MODEL::RADIAL:
+                focal_x = focal_y = params[0];
+                center_x = params[1];
+                center_y = params[2];
+                radial_dist = Tensor::from_vector({params[3], params[4]}, TensorShape{2}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
                 break;
-            }
-            case CAMERA_MODEL::OPENCV: {
-                out[i].focal_x = out[i].params[0];
-                out[i].focal_y = out[i].params[1];
-                out[i].center_x = out[i].params[2];
-                out[i].center_y = out[i].params[3];
-                out[i].radial_distortion.push_back(out[i].params[4]);
-                out[i].radial_distortion.push_back(out[i].params[5]);
-                out[i].tangential_distortion.push_back(out[i].params[6]);
-                out[i].tangential_distortion.push_back(out[i].params[7]);
-                out[i].camera_model_type = 0; // PINHOLE
+
+            case CAMERA_MODEL::OPENCV:
+                focal_x = params[0];
+                focal_y = params[1];
+                center_x = params[2];
+                center_y = params[3];
+                radial_dist = Tensor::from_vector({params[4], params[5]}, TensorShape{2}, Device::CPU);
+                tangential_dist = Tensor::from_vector({params[6], params[7]}, TensorShape{2}, Device::CPU);
                 break;
-            }
-            case CAMERA_MODEL::FULL_OPENCV: {
-                out[i].focal_x = out[i].params[0];
-                out[i].focal_y = out[i].params[1];
-                out[i].center_x = out[i].params[2];
-                out[i].center_y = out[i].params[3];
-                for (size_t j = 4; j <= 11 && j < out[i].params.size(); ++j) {
-                    if (j <= 5 || j >= 8) {
-                        out[i].radial_distortion.push_back(out[i].params[j]);
-                    } else {
-                        out[i].tangential_distortion.push_back(out[i].params[j]);
-                    }
-                }
-                out[i].camera_model_type = 0; // PINHOLE
+
+            case CAMERA_MODEL::FULL_OPENCV:
+                focal_x = params[0];
+                focal_y = params[1];
+                center_x = params[2];
+                center_y = params[3];
+                radial_dist = Tensor::from_vector({params[4], params[5], params[8], params[9], params[10], params[11]}, TensorShape{6}, Device::CPU);
+                tangential_dist = Tensor::from_vector({params[6], params[7]}, TensorShape{2}, Device::CPU);
                 break;
-            }
-            case CAMERA_MODEL::OPENCV_FISHEYE: {
-                out[i].focal_x = out[i].params[0];
-                out[i].focal_y = out[i].params[1];
-                out[i].center_x = out[i].params[2];
-                out[i].center_y = out[i].params[3];
-                for (size_t j = 4; j <= 7 && j < out[i].params.size(); ++j) {
-                    out[i].radial_distortion.push_back(out[i].params[j]);
-                }
-                out[i].camera_model_type = 1; // FISHEYE
+
+            case CAMERA_MODEL::OPENCV_FISHEYE:
+                focal_x = params[0];
+                focal_y = params[1];
+                center_x = params[2];
+                center_y = params[3];
+                radial_dist = Tensor::from_vector({params[4], params[5], params[6], params[7]}, TensorShape{4}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
+                camera_model_type = gsplat::CameraModelType::FISHEYE;
                 break;
-            }
-            case CAMERA_MODEL::RADIAL_FISHEYE: {
-                float fx = out[i].params[0];
-                out[i].focal_x = fx;
-                out[i].focal_y = fx;
-                out[i].center_x = out[i].params[1];
-                out[i].center_y = out[i].params[2];
-                out[i].radial_distortion.push_back(out[i].params[3]);
-                out[i].radial_distortion.push_back(out[i].params[4]);
-                out[i].camera_model_type = 1; // FISHEYE
+
+            case CAMERA_MODEL::RADIAL_FISHEYE:
+                focal_x = focal_y = params[0];
+                center_x = params[1];
+                center_y = params[2];
+                radial_dist = Tensor::from_vector({params[3], params[4]}, TensorShape{2}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
+                camera_model_type = gsplat::CameraModelType::FISHEYE;
                 break;
-            }
-            case CAMERA_MODEL::SIMPLE_RADIAL_FISHEYE: {
-                float fx = out[i].params[0];
-                out[i].focal_x = fx;
-                out[i].focal_y = fx;
-                out[i].center_x = out[i].params[1];
-                out[i].center_y = out[i].params[2];
-                out[i].radial_distortion.push_back(out[i].params[3]);
-                out[i].camera_model_type = 1; // FISHEYE
+
+            case CAMERA_MODEL::SIMPLE_RADIAL_FISHEYE:
+                focal_x = focal_y = params[0];
+                center_x = params[1];
+                center_y = params[2];
+                radial_dist = Tensor::from_vector({params[3]}, TensorShape{1}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
+                camera_model_type = gsplat::CameraModelType::FISHEYE;
                 break;
-            }
-            case CAMERA_MODEL::THIN_PRISM_FISHEYE: {
-                throw std::runtime_error("THIN_PRISM_FISHEYE camera model is not supported");
-            }
-            case CAMERA_MODEL::FOV: {
-                throw std::runtime_error("FOV camera model is not supported");
-            }
+
+            case CAMERA_MODEL::THIN_PRISM_FISHEYE:
+                LOG_ERROR("THIN_PRISM_FISHEYE not supported");
+                throw std::runtime_error("THIN_PRISM_FISHEYE not supported");
+
+            case CAMERA_MODEL::FOV:
+                LOG_ERROR("FOV camera model not supported");
+                throw std::runtime_error("FOV camera model not supported");
+
             default:
                 LOG_ERROR("Unsupported camera model");
                 throw std::runtime_error("Unsupported camera model");
             }
+
+            // Create CameraNew
+            auto camera = std::make_shared<CameraNew>(
+                R,
+                T,
+                focal_x, focal_y,
+                center_x, center_y,
+                radial_dist,
+                tangential_dist,
+                camera_model_type,
+                img.name,
+                images_path / img.name,
+                cam_data.width,
+                cam_data.height,
+                static_cast<int>(i));
+
+            cameras.push_back(std::move(camera));
         }
 
-        // Verify actual image dimensions and apply correction if needed
-        if (!out.empty() && std::filesystem::exists(out[0].image_path)) {
-            LOG_DEBUG("Verifying actual image dimensions against COLMAP database");
+        // Compute scene center as mean of camera positions
+        Tensor scene_center_tensor = Tensor::from_vector(camera_positions, TensorShape{images.size(), 3}, Device::CPU);
+        Tensor scene_center = scene_center_tensor.mean({0}, false);
 
-            auto [img_data, actual_w, actual_h, channels] = load_image(out[0].image_path);
+        LOG_INFO("Training with {} images", cameras.size());
 
-            int expected_w = out[0].width;
-            int expected_h = out[0].height;
-
-            float scale_x = static_cast<float>(actual_w) / expected_w;
-            float scale_y = static_cast<float>(actual_h) / expected_h;
-
-            if (std::abs(scale_x - 1.0f) > 1e-5 || std::abs(scale_y - 1.0f) > 1e-5) {
-                LOG_WARN("Image dimension mismatch detected!");
-                LOG_INFO("  Expected (from COLMAP): {}x{}", expected_w, expected_h);
-                LOG_INFO("  Actual (from image file): {}x{}", actual_w, actual_h);
-                LOG_INFO("  Applying correction scale: {:.3f}x{:.3f}", scale_x, scale_y);
-
-                for (auto& cam : out) {
-                    apply_dimension_correction(cam, scale_x, scale_y, actual_w, actual_h);
-                }
-            } else {
-                LOG_DEBUG("Image dimensions match COLMAP database ({}x{})", actual_w, actual_h);
-            }
-
-            free_image(img_data);
-        }
-
-        // Compute scene center
-        float scene_center[3];
-        internal::compute_scene_center(out, scene_center);
-
-        ColmapCameraResult result;
-        result.cameras = std::move(out);
-        result.scene_center[0] = scene_center[0];
-        result.scene_center[1] = scene_center[1];
-        result.scene_center[2] = scene_center[2];
-
-        LOG_INFO("Training with {} images", result.cameras.size());
-        return result;
+        return {std::move(cameras), scene_center};
     }
 
     // -----------------------------------------------------------------------------
-    //  Helper to get sparse file path
+    //  Public API
     // -----------------------------------------------------------------------------
+
     static fs::path get_sparse_file_path(const fs::path& base, const std::string& filename) {
         auto search_paths = get_colmap_search_paths(base);
         auto found = find_file_in_paths(search_paths, filename);
@@ -755,28 +788,20 @@ namespace gs::loader {
             return found;
         }
 
-        std::string error_msg = std::format("Cannot find '{}' in any of these locations:\n", filename);
-        for (const auto& dir : search_paths) {
-            error_msg += std::format("  - {}\n", (dir / filename).string());
-        }
-        error_msg += "Searched case-insensitively for: " + filename;
-
+        std::string error_msg = std::format("Cannot find '{}' in any location", filename);
         LOG_ERROR("{}", error_msg);
         throw std::runtime_error(error_msg);
     }
 
-    // -----------------------------------------------------------------------------
-    //  Public API functions (CUDA versions)
-    // -----------------------------------------------------------------------------
-    internal::CudaPointCloud read_colmap_point_cloud_cuda(const std::filesystem::path& filepath) {
+    PointCloudNew read_colmap_point_cloud(const std::filesystem::path& filepath) {
         LOG_TIMER_TRACE("Read COLMAP point cloud");
         fs::path points3d_file = get_sparse_file_path(filepath, "points3D.bin");
-        return read_point3D_binary_cuda(points3d_file);
+        return read_point3D_binary(points3d_file);
     }
 
-    ColmapCameraResult read_colmap_cameras_and_images_cuda(
-        const std::filesystem::path& base,
-        const std::string& images_folder) {
+    std::tuple<std::vector<std::shared_ptr<CameraNew>>, Tensor>
+    read_colmap_cameras_and_images(const std::filesystem::path& base,
+                                   const std::string& images_folder) {
 
         LOG_TIMER_TRACE("Read COLMAP cameras and images");
 
@@ -785,23 +810,23 @@ namespace gs::loader {
         fs::path cams_file = get_sparse_file_path(base, "cameras.bin");
         fs::path images_file = get_sparse_file_path(base, "images.bin");
 
-        auto cams = read_cameras_binary_cuda(cams_file, scale_factor);
-        auto images = read_images_binary_cuda(images_file);
+        auto cam_map = read_cameras_binary(cams_file, scale_factor);
+        auto images = read_images_binary(images_file);
 
-        LOG_INFO("Read {} cameras and {} images from COLMAP", cams.size(), images.size());
+        LOG_INFO("Read {} cameras and {} images from COLMAP", cam_map.size(), images.size());
 
-        return read_colmap_cameras_cuda(base, cams, images, images_folder);
+        return assemble_colmap_cameras(base, cam_map, images, images_folder);
     }
 
-    internal::CudaPointCloud read_colmap_point_cloud_text_cuda(const std::filesystem::path& filepath) {
+    PointCloudNew read_colmap_point_cloud_text(const std::filesystem::path& filepath) {
         LOG_TIMER_TRACE("Read COLMAP point cloud (text)");
         fs::path points3d_file = get_sparse_file_path(filepath, "points3D.txt");
-        return read_point3D_text_cuda(points3d_file);
+        return read_point3D_text(points3d_file);
     }
 
-    ColmapCameraResult read_colmap_cameras_and_images_text_cuda(
-        const std::filesystem::path& base,
-        const std::string& images_folder) {
+    std::tuple<std::vector<std::shared_ptr<CameraNew>>, Tensor>
+    read_colmap_cameras_and_images_text(const std::filesystem::path& base,
+                                       const std::string& images_folder) {
 
         LOG_TIMER_TRACE("Read COLMAP cameras and images (text)");
 
@@ -810,12 +835,12 @@ namespace gs::loader {
         fs::path cams_file = get_sparse_file_path(base, "cameras.txt");
         fs::path images_file = get_sparse_file_path(base, "images.txt");
 
-        auto cams = read_cameras_text_cuda(cams_file, scale_factor);
-        auto images = read_images_text_cuda(images_file);
+        auto cam_map = read_cameras_text(cams_file, scale_factor);
+        auto images = read_images_text(images_file);
 
-        LOG_INFO("Read {} cameras and {} images from COLMAP text files", cams.size(), images.size());
+        LOG_INFO("Read {} cameras and {} images from COLMAP text files", cam_map.size(), images.size());
 
-        return read_colmap_cameras_cuda(base, cams, images, images_folder);
+        return assemble_colmap_cameras(base, cam_map, images, images_folder);
     }
 
 } // namespace gs::loader

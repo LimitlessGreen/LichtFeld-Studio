@@ -4,14 +4,12 @@
 
 #include "ply_loader.hpp"
 #include "core/logger.hpp"
-#include "core/splat_data.hpp"
+#include "core/splat_data_new.hpp"
 #include "formats/ply.hpp"
-#include "loader/torch_converter.hpp"
 #include <chrono>
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <torch/torch.h>
 
 namespace gs::loader {
 
@@ -31,12 +29,13 @@ namespace gs::loader {
         if (!std::filesystem::exists(path)) {
             std::string error_msg = std::format("PLY file does not exist: {}", path.string());
             LOG_ERROR("{}", error_msg);
-            throw std::runtime_error(error_msg);
+            return std::unexpected(error_msg);
         }
 
         if (!std::filesystem::is_regular_file(path)) {
-            LOG_ERROR("Path is not a regular file: {}", path.string());
-            throw std::runtime_error("Path is not a regular file");
+            std::string error_msg = std::format("Path is not a regular file: {}", path.string());
+            LOG_ERROR("{}", error_msg);
+            return std::unexpected(error_msg);
         }
 
         // Validation only mode
@@ -45,15 +44,17 @@ namespace gs::loader {
             // Basic validation - check if it's a PLY file
             std::ifstream file(path, std::ios::binary);
             if (!file) {
-                LOG_ERROR("Cannot open file for reading: {}", path.string());
-                throw std::runtime_error("Cannot open file for reading");
+                std::string error_msg = std::format("Cannot open file for reading: {}", path.string());
+                LOG_ERROR("{}", error_msg);
+                return std::unexpected(error_msg);
             }
 
             std::string header;
             std::getline(file, header);
             if (header != "ply" && header != "ply\r") {
-                LOG_ERROR("File does not start with 'ply' header: {}", path.string());
-                throw std::runtime_error("File does not start with 'ply' header");
+                std::string error_msg = std::format("File does not start with 'ply' header: {}", path.string());
+                LOG_ERROR("{}", error_msg);
+                return std::unexpected(error_msg);
             }
 
             if (options.progress) {
@@ -64,8 +65,8 @@ namespace gs::loader {
 
             // Return empty result for validation only
             LoadResult result;
-            result.data = std::shared_ptr<SplatData>{}; // Empty shared_ptr
-            result.scene_center = torch::zeros({3});
+            result.data = std::shared_ptr<SplatDataNew>{}; // Empty shared_ptr
+            result.scene_center = Tensor::zeros({3}, Device::CPU);
             result.loader_used = name();
             result.load_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::high_resolution_clock::now() - start_time);
@@ -74,25 +75,18 @@ namespace gs::loader {
             return result;
         }
 
-        // Load the PLY file using torch-free implementation
+        // Load the PLY file using the new tensor-based implementation
         if (options.progress) {
             options.progress(50.0f, "Parsing PLY data...");
         }
 
         LOG_INFO("Loading PLY file: {}", path.string());
-        auto cuda_result = load_ply_cuda(path);
-        if (!cuda_result) {
-            std::string error_msg = cuda_result.error();
+        auto splat_result = load_ply(path);
+        if (!splat_result) {
+            std::string error_msg = splat_result.error();
             LOG_ERROR("Failed to load PLY: {}", error_msg);
-            throw std::runtime_error(error_msg);
+            return std::unexpected(error_msg);
         }
-
-        if (options.progress) {
-            options.progress(90.0f, "Converting to SplatData...");
-        }
-
-        // Convert CUDA data to SplatData with torch tensors
-        auto splat_data = internal::cuda_to_splat_data(std::move(*cuda_result));
 
         if (options.progress) {
             options.progress(100.0f, "PLY loading complete");
@@ -103,8 +97,8 @@ namespace gs::loader {
             end_time - start_time);
 
         LoadResult result{
-            .data = std::make_shared<SplatData>(std::move(splat_data)),
-            .scene_center = torch::zeros({3}),
+            .data = std::make_shared<SplatDataNew>(std::move(*splat_result)),
+            .scene_center = Tensor::zeros({3}, Device::CPU),
             .loader_used = name(),
             .load_time = load_time,
             .warnings = {}};

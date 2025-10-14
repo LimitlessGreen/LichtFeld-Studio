@@ -4,6 +4,7 @@
 
 #include "training/training_manager.hpp"
 #include "core/logger.hpp"
+#include "core/events.hpp"
 #include "training/training_setup.hpp"
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <stdexcept>
@@ -425,7 +426,7 @@ namespace gs {
         });
     }
 
-    std::shared_ptr<const Camera> TrainerManager::getCamById(int camId) const {
+    std::shared_ptr<const CameraNew> TrainerManager::getCamById(int camId) const {
         if (trainer_) {
             LOG_TRACE("Retrieving camera with ID: {}", camId);
             return trainer_->getCamById(camId);
@@ -434,7 +435,7 @@ namespace gs {
         return nullptr;
     }
 
-    std::vector<std::shared_ptr<const Camera>> TrainerManager::getCamList() const {
+    std::vector<std::shared_ptr<const CameraNew>> TrainerManager::getCamList() const {
         if (trainer_) {
             auto cams = trainer_->getCamList();
             LOG_TRACE("Retrieved {} cameras from trainer", cams.size());

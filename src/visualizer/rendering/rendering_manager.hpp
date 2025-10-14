@@ -17,6 +17,7 @@
 
 namespace gs {
     class SceneManager;
+    class SplatDataNew;
 } // namespace gs
 
 namespace gs::visualizer {
@@ -177,10 +178,10 @@ namespace gs::visualizer {
         int getHoveredCameraId() const { return hovered_camera_id_; }
 
     private:
-        void doFullRender(const RenderContext& context, SceneManager* scene_manager, const SplatData* model);
+        void doFullRender(const RenderContext& context, SceneManager* scene_manager, const SplatDataNew* model);
         void renderOverlays(const RenderContext& context);
         void setupEventHandlers();
-        void renderToTexture(const RenderContext& context, SceneManager* scene_manager, const SplatData* model);
+        void renderToTexture(const RenderContext& context, SceneManager* scene_manager, const SplatDataNew* model);
 
         std::optional<gs::rendering::SplitViewRequest> createSplitViewRequest(
             const RenderContext& context,

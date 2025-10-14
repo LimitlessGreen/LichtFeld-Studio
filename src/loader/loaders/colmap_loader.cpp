@@ -3,19 +3,17 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "loader/loaders/colmap_loader.hpp"
-#include "core/camera.hpp"
+#include "core/camera_new.hpp"
 #include "core/logger.hpp"
-#include "core/point_cloud.hpp"
+#include "core/point_cloud_new.hpp"
 #include "formats/colmap.hpp"
 #include "loader/filesystem_utils.hpp"
-#include "loader/torch_converter.hpp"
 #include "training/dataset.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <format>
-#include <torch/torch.h>
 
 namespace gs::loader {
 
@@ -30,12 +28,13 @@ namespace gs::loader {
         if (!std::filesystem::exists(path)) {
             std::string error_msg = std::format("Path does not exist: {}", path.string());
             LOG_ERROR("{}", error_msg);
-            throw std::runtime_error(error_msg);
+            return std::unexpected(error_msg);
         }
 
         if (!std::filesystem::is_directory(path)) {
-            LOG_ERROR("COLMAP dataset must be a directory: {}", path.string());
-            throw std::runtime_error("COLMAP dataset must be a directory");
+            std::string error_msg = std::format("COLMAP dataset must be a directory: {}", path.string());
+            LOG_ERROR("{}", error_msg);
+            return std::unexpected(error_msg);
         }
 
         // Report initial progress
@@ -71,39 +70,35 @@ namespace gs::loader {
         bool trying_text = !(has_cameras && has_images) && (has_cameras_text && has_images_text);
         LOG_INFO("Loading COLMAP in {} format", trying_text ? "text" : "binary");
 
-        // If you don't have binary cameras or images AND you are not trying text: error
+        // Validate we have required files
         if ((!has_cameras || !has_images) && !trying_text) {
             std::string error_msg = std::format(
                 "Missing required COLMAP files. cameras.bin: {}, images.bin: {}",
                 has_cameras ? "found" : "missing",
                 has_images ? "found" : "missing");
             LOG_ERROR("{}", error_msg);
-            throw std::runtime_error(error_msg);
+            return std::unexpected(error_msg);
         }
 
-        // If you don't have text cameras or images AND you trying text: error
         if ((!has_cameras_text || !has_images_text) && trying_text) {
             std::string error_msg = std::format(
                 "Missing required COLMAP text files. cameras.txt: {}, images.txt: {}",
                 has_cameras_text ? "found" : "missing",
                 has_images_text ? "found" : "missing");
             LOG_ERROR("{}", error_msg);
-            throw std::runtime_error(error_msg);
+            return std::unexpected(error_msg);
         }
 
-        // First check if the requested images folder exists
+        // Determine images folder
         std::string actual_images_folder = options.images_folder;
         std::filesystem::path image_dir = path / actual_images_folder;
 
-        // If the specified images folder doesn't exist, check if we're in a flat structure
+        // If specified folder doesn't exist, check for flat structure
         if (!std::filesystem::exists(image_dir)) {
-            // Check if COLMAP files are in the root (flat structure)
             bool is_flat_structure = (!cameras_txt.empty() && cameras_txt.parent_path() == path) ||
                                      (!cameras_bin.empty() && cameras_bin.parent_path() == path);
 
             if (is_flat_structure) {
-                // In flat structure, images are typically in the root directory
-                // Check if there are image files in the root
                 bool has_images_in_root = false;
                 for (const auto& entry : std::filesystem::directory_iterator(path)) {
                     if (entry.is_regular_file() && is_image_file(entry.path())) {
@@ -113,7 +108,6 @@ namespace gs::loader {
                 }
 
                 if (has_images_in_root) {
-                    // Use root directory as images folder for flat structure
                     actual_images_folder = ".";
                     image_dir = path;
                     LOG_INFO("Detected flat structure - using root directory for images");
@@ -121,13 +115,13 @@ namespace gs::loader {
                     std::string error_msg = std::format(
                         "Images directory '{}' not found and no images in root", options.images_folder);
                     LOG_ERROR("{}", error_msg);
-                    throw std::runtime_error(error_msg);
+                    return std::unexpected(error_msg);
                 }
             } else {
                 std::string error_msg = std::format(
                     "Images directory '{}' not found", options.images_folder);
                 LOG_ERROR("{}", error_msg);
-                throw std::runtime_error(error_msg);
+                return std::unexpected(error_msg);
             }
         }
 
@@ -144,7 +138,7 @@ namespace gs::loader {
                 .data = LoadedScene{
                     .cameras = nullptr,
                     .point_cloud = nullptr},
-                .scene_center = torch::zeros({3}),
+                .scene_center = Tensor::zeros({3}, Device::CPU),
                 .loader_used = name(),
                 .load_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time),
                 .warnings = (has_points || has_points_text) ? std::vector<std::string>{} : std::vector<std::string>{"No sparse point cloud found (points3D.bin|txt) - will use random initialization"}};
@@ -156,47 +150,34 @@ namespace gs::loader {
         }
 
         try {
-            std::vector<internal::CudaCameraData> cuda_camera_infos;
-            float scene_center[3];
+            std::vector<std::shared_ptr<CameraNew>> cameras;
+            Tensor scene_center;
 
             if (has_cameras && has_images) {
                 LOG_DEBUG("Reading binary COLMAP data");
-                // Read binary COLMAP data with actual images folder
-                auto result = read_colmap_cameras_and_images_cuda(path, actual_images_folder);
-                cuda_camera_infos = std::move(result.cameras);
-                std::memcpy(scene_center, result.scene_center, 3 * sizeof(float));
+                std::tie(cameras, scene_center) = read_colmap_cameras_and_images(path, actual_images_folder);
             } else if (has_cameras_text && has_images_text) {
                 LOG_DEBUG("Reading text COLMAP data");
-                // Read text-based COLMAP data with actual images folder
-                auto result = read_colmap_cameras_and_images_text_cuda(path, actual_images_folder);
-                cuda_camera_infos = std::move(result.cameras);
-                std::memcpy(scene_center, result.scene_center, 3 * sizeof(float));
+                std::tie(cameras, scene_center) = read_colmap_cameras_and_images_text(path, actual_images_folder);
             } else {
-                LOG_ERROR("No valid COLMAP camera and image data found");
-                throw std::runtime_error("No valid COLMAP camera and image data found");
+                std::string error_msg = "No valid COLMAP camera and image data found";
+                LOG_ERROR("{}", error_msg);
+                return std::unexpected(error_msg);
             }
 
             if (options.progress) {
-                options.progress(40.0f, std::format("Creating {} cameras...", cuda_camera_infos.size()));
+                options.progress(40.0f, std::format("Creating {} cameras...", cameras.size()));
             }
 
-            LOG_DEBUG("Creating {} camera objects", cuda_camera_infos.size());
+            LOG_DEBUG("Creating {} camera objects", cameras.size());
 
-            // Convert CUDA cameras to torch-based Camera objects
-            std::vector<std::shared_ptr<Camera>> cameras;
-            cameras.reserve(cuda_camera_infos.size());
-
-            for (size_t i = 0; i < cuda_camera_infos.size(); ++i) {
-                cameras.push_back(internal::cuda_to_camera(cuda_camera_infos[i], static_cast<int>(i)));
-            }
-
-            // Create dataset configuration with actual images folder
+            // Create dataset configuration
             gs::param::DatasetConfig dataset_config;
             dataset_config.data_path = path;
             dataset_config.images = actual_images_folder;
             dataset_config.resize_factor = options.resize_factor;
 
-            // Create dataset with ALL images - use correct namespace
+            // Create dataset with ALL images
             auto dataset = std::make_shared<gs::training::CameraDataset>(
                 std::move(cameras), dataset_config, gs::training::CameraDataset::Split::ALL);
 
@@ -205,22 +186,20 @@ namespace gs::loader {
             }
 
             // Load point cloud if it exists
-            std::shared_ptr<PointCloud> point_cloud;
+            std::shared_ptr<PointCloudNew> point_cloud;
             if (has_points) {
                 LOG_DEBUG("Loading binary point cloud");
-                auto cuda_pc = read_colmap_point_cloud_cuda(path);
-                auto loaded_pc = internal::cuda_to_point_cloud(cuda_pc);
-                point_cloud = std::make_shared<PointCloud>(std::move(loaded_pc));
+                auto loaded_pc = read_colmap_point_cloud(path);
+                point_cloud = std::make_shared<PointCloudNew>(std::move(loaded_pc));
                 LOG_INFO("Loaded {} points from COLMAP", point_cloud->size());
             } else if (has_points_text) {
                 LOG_DEBUG("Loading text point cloud");
-                auto cuda_pc = read_colmap_point_cloud_text_cuda(path);
-                auto loaded_pc = internal::cuda_to_point_cloud(cuda_pc);
-                point_cloud = std::make_shared<PointCloud>(std::move(loaded_pc));
+                auto loaded_pc = read_colmap_point_cloud_text(path);
+                point_cloud = std::make_shared<PointCloudNew>(std::move(loaded_pc));
                 LOG_INFO("Loaded {} points from COLMAP text file", point_cloud->size());
             } else {
                 LOG_WARN("No point cloud found - will use random initialization");
-                point_cloud = std::make_shared<PointCloud>();
+                point_cloud = std::make_shared<PointCloudNew>();
             }
 
             if (options.progress) {
@@ -231,27 +210,30 @@ namespace gs::loader {
             auto load_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                 end_time - start_time);
 
-            // Create result with shared_ptr
+            // Get scene center values for logging
+            auto scene_center_cpu = scene_center.cpu();
+            const float* sc_ptr = scene_center_cpu.ptr<float>();
+
             LoadResult result{
                 .data = LoadedScene{
                     .cameras = std::move(dataset),
                     .point_cloud = std::move(point_cloud)},
-                .scene_center = internal::array_to_tensor(scene_center),
+                .scene_center = scene_center,
                 .loader_used = name(),
                 .load_time = load_time,
                 .warnings = (has_points || has_points_text) ? std::vector<std::string>{} : std::vector<std::string>{"No sparse point cloud found - using random initialization"}};
 
             LOG_INFO("COLMAP dataset loaded successfully in {}ms", load_time.count());
-            LOG_INFO("  - {} cameras", cuda_camera_infos.size());
+            LOG_INFO("  - {} cameras", dataset->size());
             LOG_DEBUG("  - Scene center: [{:.3f}, {:.3f}, {:.3f}]",
-                      scene_center[0], scene_center[1], scene_center[2]);
+                      sc_ptr[0], sc_ptr[1], sc_ptr[2]);
 
             return result;
 
         } catch (const std::exception& e) {
             std::string error_msg = std::format("Failed to load COLMAP dataset: {}", e.what());
             LOG_ERROR("{}", error_msg);
-            throw std::runtime_error(error_msg);
+            return std::unexpected(error_msg);
         }
     }
 
@@ -287,4 +269,5 @@ namespace gs::loader {
     int ColmapLoader::priority() const {
         return 5; // Medium priority
     }
+
 } // namespace gs::loader

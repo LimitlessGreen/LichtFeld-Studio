@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "rendering_manager.hpp"
-#include "core/image_io.hpp" // Use existing image_io utilities
+#include "core/image_io_new.hpp"
 #include "core/logger.hpp"
-#include "core/splat_data.hpp"
+#include "core/splat_data_new.hpp"
 #include "geometry/euclidean_transform.hpp"
 #include "rendering/rendering.hpp"
 #include "scene/scene_manager.hpp"
@@ -90,7 +90,7 @@ namespace gs::visualizer {
 
         try {
             // Use image_io to load the image
-            auto [data, width, height, channels] = load_image(path);
+            auto [data, width, height, channels] = image_io::load_image(path);
 
             if (!data) {
                 LOG_ERROR("Failed to load image data: {}", path.string());
@@ -148,7 +148,7 @@ namespace gs::visualizer {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 
             // Free image data
-            free_image(data);
+            image_io::free_image(data);
 
             LOG_DEBUG("Created GL texture {} for image: {} ({}x{})",
                       texture, path.filename().string(), width, height);
@@ -439,7 +439,7 @@ namespace gs::visualizer {
         return hovered_camera_id_; // Return current value
     }
 
-    void RenderingManager::renderToTexture(const RenderContext& context, SceneManager* scene_manager, const SplatData* model) {
+    void RenderingManager::renderToTexture(const RenderContext& context, SceneManager* scene_manager, const SplatDataNew* model) {
         if (!model || model->size() == 0) {
             render_texture_valid_ = false;
             return;
@@ -604,7 +604,7 @@ namespace gs::visualizer {
         }
 
         // Get current model
-        const SplatData* model = scene_manager ? scene_manager->getModelForRendering() : nullptr;
+        const SplatDataNew* model = scene_manager ? scene_manager->getModelForRendering() : nullptr;
         size_t model_ptr = reinterpret_cast<size_t>(model);
 
         // Detect model switch
@@ -684,7 +684,7 @@ namespace gs::visualizer {
         framerate_controller_.endFrame();
     }
 
-    void RenderingManager::doFullRender(const RenderContext& context, SceneManager* scene_manager, const SplatData* model) {
+    void RenderingManager::doFullRender(const RenderContext& context, SceneManager* scene_manager, const SplatDataNew* model) {
         LOG_TIMER_TRACE("Full render pass");
 
         render_count_++;
@@ -832,7 +832,7 @@ namespace gs::visualizer {
             // Make sure we have a valid render texture
             if (!render_texture_valid_) {
                 // Force a render to texture
-                const SplatData* model = scene_manager->getModelForRendering();
+                const SplatDataNew* model = scene_manager->getModelForRendering();
                 if (model) {
                     renderToTexture(context, scene_manager, model);
                 }
@@ -889,18 +889,20 @@ namespace gs::visualizer {
 
             return gs::rendering::SplitViewRequest{
                 .panels = {
-                    {.content_type = gs::rendering::PanelContentType::Model3D,
-                     .model = visible_nodes[left_idx]->model.get(),
-                     .texture_id = 0,
-                     .label = visible_nodes[left_idx]->name,
-                     .start_position = 0.0f,
-                     .end_position = settings_.split_position},
-                    {.content_type = gs::rendering::PanelContentType::Model3D,
-                     .model = visible_nodes[right_idx]->model.get(),
-                     .texture_id = 0,
-                     .label = visible_nodes[right_idx]->name,
-                     .start_position = settings_.split_position,
-                     .end_position = 1.0f}},
+                    gs::rendering::SplitViewPanel{
+                        .content_type = gs::rendering::PanelContentType::Model3D,
+                        .model = visible_nodes[left_idx]->model.get(),
+                        .texture_id = 0,
+                        .label = visible_nodes[left_idx]->name,
+                        .start_position = 0.0f,
+                        .end_position = settings_.split_position},
+                    gs::rendering::SplitViewPanel{
+                        .content_type = gs::rendering::PanelContentType::Model3D,
+                        .model = visible_nodes[right_idx]->model.get(),
+                        .texture_id = 0,
+                        .label = visible_nodes[right_idx]->name,
+                        .start_position = settings_.split_position,
+                        .end_position = 1.0f}},
                 .viewport = viewport_data,
                 .scaling_modifier = settings_.scaling_modifier,
                 .antialiasing = settings_.antialiasing,
@@ -980,7 +982,7 @@ namespace gs::visualizer {
             }
 
             // Get cameras from scene manager's trainer
-            std::vector<std::shared_ptr<const Camera>> cameras;
+            std::vector<std::shared_ptr<const CameraNew>> cameras;
             auto* trainer_manager = context.scene_manager->getTrainerManager();
 
             if (!trainer_manager) {

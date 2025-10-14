@@ -4,9 +4,9 @@
 
 #include "split_view_renderer.hpp"
 #include "core/logger.hpp"
-#include "core/splat_data.hpp"
 #include "gl_state_guard.hpp"
 #include <glad/glad.h>
+#include "core/tensor.hpp"
 
 namespace gs::rendering {
 
@@ -385,14 +385,15 @@ namespace gs::rendering {
         glBindFramebuffer(GL_FRAMEBUFFER, current_fbo);
 
         // Return a dummy result
-        torch::Tensor dummy_image = torch::zeros({3, request.viewport.size.y, request.viewport.size.x},
-                                                 torch::kFloat32)
-                                        .to(torch::kCUDA);
-        torch::Tensor dummy_depth = torch::empty({0}, torch::kFloat32);
+        const size_t height = static_cast<size_t>(request.viewport.size.y);
+        const size_t width = static_cast<size_t>(request.viewport.size.x);
+
+        auto dummy_image = Tensor::zeros({3, height, width}, Device::CUDA, DataType::Float32);
+        auto dummy_depth = Tensor::empty({0}, Device::CUDA, DataType::Float32);
 
         return RenderResult{
-            .image = std::make_shared<torch::Tensor>(std::move(dummy_image)),
-            .depth = std::make_shared<torch::Tensor>(std::move(dummy_depth))};
+            .image = std::make_shared<Tensor>(std::move(dummy_image)),
+            .depth = std::make_shared<Tensor>(std::move(dummy_depth))};
     }
 
     Result<void> SplitViewRenderer::compositeSplitView(

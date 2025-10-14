@@ -310,8 +310,9 @@ namespace gs {
             float max_val = data_2d.max().item();
 
             // Create centroids as [k, 1] tensor
-            auto centroids = Tensor::linspace(min_val, max_val, k, Device::CUDA).unsqueeze(1);
+            //auto centroids = Tensor::linspace(min_val, max_val, k, Device::CUDA).unsqueeze(1);
             auto labels = Tensor::zeros({static_cast<size_t>(n)}, Device::CUDA, DataType::Int32);
+            auto centroids = Tensor::zeros({static_cast<size_t>(n)}, Device::CUDA, DataType::Int32);
 
             const int block_size = 256;
             const int grid_size = (n + block_size - 1) / block_size;
