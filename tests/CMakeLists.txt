@@ -57,6 +57,7 @@ set(OPTIONAL_TEST_FILES
     test_splatdata.cpp
     test_camera.cpp
     test_image_io_comparison.cpp
+    test_tensor_benchmark.cpp
     #test_sogs_comparison.cpp
 )
 

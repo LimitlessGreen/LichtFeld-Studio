@@ -38,6 +38,15 @@ namespace gs::tensor_ops {
     void launch_binary_scalar_inplace(void* data, float scalar, size_t n,
                                       BinaryOp op, cudaStream_t stream);
 
+    // ============= Unified Binary Operation Dispatcher =============
+    template<typename SrcT, typename DstT = SrcT>
+    void launch_binary_operation(
+        const void* a, const void* b, void* c,
+        const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+        size_t a_rank, size_t b_rank, size_t c_rank,
+        size_t c_elements, BinaryOp op,
+        cudaStream_t stream = 0);
+
     void launch_reduce_op(const void* input, void* output,
                           const size_t* shape, size_t rank,
                           const int* axes, size_t num_axes,
@@ -53,11 +62,9 @@ namespace gs::tensor_ops {
                         LoadOp op, const void* args,
                         DataType dtype, cudaStream_t stream);
 
-    // ============= Type Conversions =============
-    void launch_bool_to_float(const unsigned char* src, float* dst, size_t n, cudaStream_t stream);
-    void launch_float_to_bool(const float* src, unsigned char* dst, size_t n, cudaStream_t stream);
-    void launch_float_to_int(const float* src, int* dst, size_t n, cudaStream_t stream);
-    void launch_int_to_float(const int* src, float* dst, size_t n, cudaStream_t stream);
+    // Unified Type Conversion Template
+    template<typename SrcT, typename DstT>
+    void launch_convert_type(const SrcT* src, DstT* dst, size_t n, cudaStream_t stream);
 
     // ============= Broadcasting =============
     void launch_broadcast(const float* src, float* dst,
@@ -70,7 +77,7 @@ namespace gs::tensor_ops {
                                size_t src_rank, size_t dst_rank,
                                size_t dst_elements, cudaStream_t stream);
 
-    // ============= Broadcasting Binary Operations - NEW UNIFIED INTERFACE =============
+    // ============= Broadcasting Binary Operations - UNIFIED INTERFACE =============
 
     // Forward declare operation functors
     template<typename T> struct add_op { __device__ T operator()(T a, T b) const { return a + b; } };
@@ -210,5 +217,12 @@ namespace gs::tensor_ops {
     void launch_sort_2d(float* values, int64_t* indices,
                         size_t outer_size, size_t dim_size, size_t inner_size,
                         int dim, bool descending, cudaStream_t stream);
+
+    // ============= Concatenation Operations =============
+    void launch_cat_last_dim(void* output, const std::vector<Tensor>& tensors, size_t num_rows,
+        size_t row_size, size_t element_size, cudaStream_t stream);
+
+    void launch_cat_middle_dim(void* output, const std::vector<Tensor>& tensors, size_t outer_size, size_t inner_size,
+        int resolved_dim, size_t element_size, cudaStream_t stream);
 
 } // namespace gs::tensor_ops

@@ -197,171 +197,124 @@ namespace gs {
         return t;
     }
 
-    template<typename SrcT, typename DstT>
-  static Tensor convert_dtype_impl(const Tensor& src, DataType dst_dtype,
-                                    const std::function<DstT(SrcT)>& converter) {
-        auto result = Tensor::empty(src.shape(), src.device(), dst_dtype);
-        if (src.numel() == 0) return result;
+    // ============= Type Conversion =============
+    Tensor Tensor::to(DataType dtype) const {
+    if (!is_valid()) {
+        LOG_ERROR("Cannot convert invalid tensor to different dtype");
+        return Tensor();
+    }
 
-        if (src.device() == Device::CUDA) {
-            auto cpu_src = src.to(Device::CPU);
-            const SrcT* src_data = cpu_src.ptr<SrcT>();
-            std::vector<DstT> temp(src.numel());
-            for (size_t i = 0; i < src.numel(); ++i) {
-                temp[i] = converter(src_data[i]);
-            }
-            cudaMemcpy(result.raw_ptr(), temp.data(),
-                       src.numel() * sizeof(DstT), cudaMemcpyHostToDevice);
+    if (dtype_ == dtype) {
+        return clone();
+    }
+
+    // Macro for type conversions using launch_convert_type
+    #define CONVERT_DTYPE_CUDA(FROM_TYPE, TO_TYPE, FROM_DTYPE, TO_DTYPE) \
+        if (dtype_ == FROM_DTYPE && dtype == TO_DTYPE) { \
+            auto result = empty(shape_, device_, TO_DTYPE); \
+            if (numel() == 0) return result; \
+            if (device_ == Device::CUDA) { \
+                tensor_ops::launch_convert_type<FROM_TYPE, TO_TYPE>( \
+                    ptr<FROM_TYPE>(), result.ptr<TO_TYPE>(), numel(), 0); \
+                CHECK_CUDA(cudaDeviceSynchronize()); \
+                return result; \
+            } \
+            /* CPU fallback */ \
+            const FROM_TYPE* src = ptr<FROM_TYPE>(); \
+            TO_TYPE* dst = result.ptr<TO_TYPE>(); \
+            for (size_t i = 0; i < numel(); ++i) { \
+                if constexpr (std::is_same_v<FROM_TYPE, float> && std::is_same_v<TO_TYPE, uint8_t>) { \
+                    dst[i] = static_cast<uint8_t>(std::round(std::clamp(static_cast<float>(src[i]), 0.0f, 255.0f))); \
+                } else if constexpr (std::is_same_v<FROM_TYPE, int> && std::is_same_v<TO_TYPE, uint8_t>) { \
+                    dst[i] = static_cast<uint8_t>(std::clamp(static_cast<int>(src[i]), 0, 255)); \
+                } else if constexpr (std::is_same_v<FROM_TYPE, int64_t> && std::is_same_v<TO_TYPE, uint8_t>) { \
+                    dst[i] = static_cast<uint8_t>(std::clamp(static_cast<int64_t>(src[i]), static_cast<int64_t>(0), static_cast<int64_t>(255))); \
+                } else { \
+                    dst[i] = static_cast<TO_TYPE>(src[i]); \
+                } \
+            } \
+            return result; \
+        }
+
+    // Bool <-> Float32 (manual - can't use launch_convert_type due to uint8_t conflict)
+    if (dtype_ == DataType::Bool && dtype == DataType::Float32) {
+        auto result = empty(shape_, device_, DataType::Float32);
+        if (numel() == 0) return result;
+
+        if (device_ == Device::CUDA) {
+            // Use generic conversion (unsigned char -> float)
+            tensor_ops::launch_convert_type<unsigned char, float>(
+                ptr<unsigned char>(), result.ptr<float>(), numel(), 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
         } else {
-            const SrcT* src_data = src.ptr<SrcT>();
-            DstT* dst_data = result.ptr<DstT>();
-            for (size_t i = 0; i < src.numel(); ++i) {
-                dst_data[i] = converter(src_data[i]);
+            const unsigned char* src = ptr<unsigned char>();
+            float* dst = result.ptr<float>();
+            for (size_t i = 0; i < numel(); ++i) {
+                dst[i] = static_cast<float>(src[i]);
             }
         }
         return result;
     }
 
+    if (dtype_ == DataType::Float32 && dtype == DataType::Bool) {
+        auto result = empty(shape_, device_, DataType::Bool);
+        if (numel() == 0) return result;
 
-    // ============= Type Conversion =============
-    Tensor Tensor::to(DataType dtype) const {
-        if (!is_valid()) {
-            LOG_ERROR("Cannot convert invalid tensor to different dtype");
-            return Tensor();
-        }
+        if (device_ == Device::CUDA) {
+            // Can't use launch_convert_type - need custom != 0 logic
+            auto result_cpu = empty(shape_, Device::CPU, DataType::Bool);
+            std::vector<float> temp(numel());
+            CHECK_CUDA(cudaMemcpy(temp.data(), ptr<float>(), bytes(), cudaMemcpyDeviceToHost));
 
-        if (dtype_ == dtype) {
-            return clone();
-        }
-
-        // ========== KEPT AS-IS: Bool <-> Float32 (use CUDA kernels) ==========
-        if (dtype_ == DataType::Bool && dtype == DataType::Float32) {
-            auto result = empty(shape_, device_, DataType::Float32);
-            if (numel() == 0) return result;
-
-            if (device_ == Device::CUDA) {
-                tensor_ops::launch_bool_to_float(ptr<unsigned char>(), result.ptr<float>(), numel(), 0);
-                CHECK_CUDA(cudaDeviceSynchronize());
-            } else {
-                const unsigned char* src = ptr<unsigned char>();
-                float* dst = result.ptr<float>();
-                for (size_t i = 0; i < numel(); ++i) dst[i] = src[i] ? 1.0f : 0.0f;
+            unsigned char* dst_cpu = result_cpu.ptr<unsigned char>();
+            for (size_t i = 0; i < numel(); ++i) {
+                dst_cpu[i] = (temp[i] != 0.0f) ? 1 : 0;
             }
-            return result;
-        }
 
-        if (dtype_ == DataType::Float32 && dtype == DataType::Bool) {
-            auto result = empty(shape_, device_, DataType::Bool);
-            if (numel() == 0) return result;
-
-            if (device_ == Device::CUDA) {
-                tensor_ops::launch_float_to_bool(ptr<float>(), result.ptr<unsigned char>(), numel(), 0);
-                CHECK_CUDA(cudaDeviceSynchronize());
-            } else {
-                const float* src = ptr<float>();
-                unsigned char* dst = result.ptr<unsigned char>();
-                for (size_t i = 0; i < numel(); ++i) dst[i] = (src[i] != 0.0f) ? 1 : 0;
+            CHECK_CUDA(cudaMemcpy(result.ptr<unsigned char>(), dst_cpu, numel(), cudaMemcpyHostToDevice));
+        } else {
+            const float* src = ptr<float>();
+            unsigned char* dst = result.ptr<unsigned char>();
+            for (size_t i = 0; i < numel(); ++i) {
+                dst[i] = (src[i] != 0.0f) ? 1 : 0;
             }
-            return result;
         }
-
-        // ========== KEPT AS-IS: Float32 <-> Int32 (use CUDA kernels) ==========
-        if (dtype_ == DataType::Float32 && dtype == DataType::Int32) {
-            auto result = empty(shape_, device_, DataType::Int32);
-            if (numel() == 0) return result;
-
-            if (device_ == Device::CUDA) {
-                tensor_ops::launch_float_to_int(ptr<float>(), result.ptr<int>(), numel(), 0);
-                CHECK_CUDA(cudaDeviceSynchronize());
-            } else {
-                const float* src = ptr<float>();
-                int* dst = result.ptr<int>();
-                for (size_t i = 0; i < numel(); ++i) dst[i] = static_cast<int>(src[i]);
-            }
-            return result;
-        }
-
-        if (dtype_ == DataType::Int32 && dtype == DataType::Float32) {
-            auto result = empty(shape_, device_, DataType::Float32);
-            if (numel() == 0) return result;
-
-            if (device_ == Device::CUDA) {
-                tensor_ops::launch_int_to_float(ptr<int>(), result.ptr<float>(), numel(), 0);
-                CHECK_CUDA(cudaDeviceSynchronize());
-            } else {
-                const int* src = ptr<int>();
-                float* dst = result.ptr<float>();
-                for (size_t i = 0; i < numel(); ++i) dst[i] = static_cast<float>(src[i]);
-            }
-            return result;
-        }
-
-        // ========== COMPACT: UInt8 Conversions (8 conversions in ~40 lines) ==========
-        if (dtype_ == DataType::Float32 && dtype == DataType::UInt8) {
-            return convert_dtype_impl<float, uint8_t>(*this, DataType::UInt8,
-                [](float v) { return static_cast<uint8_t>(std::round(std::clamp(v, 0.0f, 255.0f))); });
-        }
-
-        if (dtype_ == DataType::UInt8 && dtype == DataType::Float32) {
-            return convert_dtype_impl<uint8_t, float>(*this, DataType::Float32,
-                [](uint8_t v) { return static_cast<float>(v); });
-        }
-
-        if (dtype_ == DataType::Int32 && dtype == DataType::UInt8) {
-            return convert_dtype_impl<int, uint8_t>(*this, DataType::UInt8,
-                [](int v) { return static_cast<uint8_t>(std::clamp(v, 0, 255)); });
-        }
-
-        if (dtype_ == DataType::UInt8 && dtype == DataType::Int32) {
-            return convert_dtype_impl<uint8_t, int>(*this, DataType::Int32,
-                [](uint8_t v) { return static_cast<int>(v); });
-        }
-
-        if (dtype_ == DataType::Bool && dtype == DataType::UInt8) {
-            return convert_dtype_impl<unsigned char, uint8_t>(*this, DataType::UInt8,
-                [](unsigned char v) { return v ? 1 : 0; });
-        }
-
-        if (dtype_ == DataType::UInt8 && dtype == DataType::Bool) {
-            return convert_dtype_impl<uint8_t, unsigned char>(*this, DataType::Bool,
-                [](uint8_t v) { return v != 0 ? 1 : 0; });
-        }
-
-        if (dtype_ == DataType::Int64 && dtype == DataType::UInt8) {
-            return convert_dtype_impl<int64_t, uint8_t>(*this, DataType::UInt8,
-                [](int64_t v) { return static_cast<uint8_t>(std::clamp(v, static_cast<int64_t>(0), static_cast<int64_t>(255))); });
-        }
-
-        if (dtype_ == DataType::UInt8 && dtype == DataType::Int64) {
-            return convert_dtype_impl<uint8_t, int64_t>(*this, DataType::Int64,
-                [](uint8_t v) { return static_cast<int64_t>(v); });
-        }
-
-        // ========== COMPACT: Int64 Conversions (4 conversions in ~20 lines) ==========
-        if (dtype_ == DataType::Int64 && dtype == DataType::Float32) {
-            return convert_dtype_impl<int64_t, float>(*this, DataType::Float32,
-                [](int64_t v) { return static_cast<float>(v); });
-        }
-
-        if (dtype_ == DataType::Float32 && dtype == DataType::Int64) {
-            return convert_dtype_impl<float, int64_t>(*this, DataType::Int64,
-                [](float v) { return static_cast<int64_t>(v); });
-        }
-
-        if (dtype_ == DataType::Int32 && dtype == DataType::Int64) {
-            return convert_dtype_impl<int, int64_t>(*this, DataType::Int64,
-                [](int v) { return static_cast<int64_t>(v); });
-        }
-
-        if (dtype_ == DataType::Int64 && dtype == DataType::Int32) {
-            return convert_dtype_impl<int64_t, int>(*this, DataType::Int32,
-                [](int64_t v) { return static_cast<int>(v); });
-        }
-
-        LOG_ERROR("Type conversion from {} to {} not implemented",
-                  dtype_name(dtype_), dtype_name(dtype));
-        return Tensor();
+        return result;
     }
+
+    // Float32 <-> Int32
+    CONVERT_DTYPE_CUDA(float, int, DataType::Float32, DataType::Int32)
+    CONVERT_DTYPE_CUDA(int, float, DataType::Int32, DataType::Float32)
+
+    // UInt8 conversions
+    CONVERT_DTYPE_CUDA(float, uint8_t, DataType::Float32, DataType::UInt8)
+    CONVERT_DTYPE_CUDA(uint8_t, float, DataType::UInt8, DataType::Float32)
+    CONVERT_DTYPE_CUDA(int, uint8_t, DataType::Int32, DataType::UInt8)
+    CONVERT_DTYPE_CUDA(uint8_t, int, DataType::UInt8, DataType::Int32)
+
+    // Bool <-> UInt8: Same underlying type (unsigned char), just clone
+    if (dtype_ == DataType::Bool && dtype == DataType::UInt8) {
+        return clone();
+    }
+    if (dtype_ == DataType::UInt8 && dtype == DataType::Bool) {
+        return clone();
+    }
+
+    CONVERT_DTYPE_CUDA(int64_t, uint8_t, DataType::Int64, DataType::UInt8)
+    CONVERT_DTYPE_CUDA(uint8_t, int64_t, DataType::UInt8, DataType::Int64)
+
+    // Int64 conversions
+    CONVERT_DTYPE_CUDA(int64_t, float, DataType::Int64, DataType::Float32)
+    CONVERT_DTYPE_CUDA(float, int64_t, DataType::Float32, DataType::Int64)
+    CONVERT_DTYPE_CUDA(int, int64_t, DataType::Int32, DataType::Int64)
+    CONVERT_DTYPE_CUDA(int64_t, int, DataType::Int64, DataType::Int32)
+
+    #undef CONVERT_DTYPE_CUDA
+
+    LOG_ERROR("Type conversion from {} to {} not implemented",
+              dtype_name(dtype_), dtype_name(dtype));
+    return Tensor();
+}
 
 
     // ============= In-place Operations =============
@@ -870,7 +823,7 @@ namespace gs {
             return float_tensor.to_vector();
         }
 
-        // Handle UInt8 dtype by converting to float (NEW)
+        // Handle UInt8 dtype by converting to float
         if (dtype_ == DataType::UInt8) {
             auto float_tensor = to(DataType::Float32);
             return float_tensor.to_vector();

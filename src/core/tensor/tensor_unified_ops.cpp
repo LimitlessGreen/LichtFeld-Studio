@@ -270,8 +270,8 @@ namespace gs {
                     tensor_ops::launch_randint(temp_buffer, result.numel(), low, high,
                                                RandomGenerator::instance().get_next_cuda_seed(), 0);
 
-                    tensor_ops::launch_int_to_float(temp_buffer, result.ptr<float>(),
-                                                    result.numel(), 0);
+                    tensor_ops::launch_convert_type<int, float>(temp_buffer, result.ptr<float>(),
+                                            result.numel(), 0);
                     cudaDeviceSynchronize();
 
                     cudaFree(temp_buffer);
@@ -1602,115 +1602,182 @@ namespace gs {
 
     // ============= STATIC CAT OPERATION =============
 
-    Tensor Tensor::cat(const std::vector<Tensor>& tensors, int dim) {
-        if (tensors.empty()) {
-            LOG_ERROR("Cannot concatenate empty vector of tensors");
+    // ============= STATIC CAT OPERATION =============
+
+Tensor Tensor::cat(const std::vector<Tensor>& tensors, int dim) {
+    if (tensors.empty()) {
+        LOG_ERROR("Cannot concatenate empty vector of tensors");
+        return Tensor();
+    }
+
+    if (tensors.size() == 1) {
+        return tensors[0].clone();
+    }
+
+    int resolved_dim = dim;
+    if (resolved_dim < 0) {
+        resolved_dim = tensors[0].shape().rank() + resolved_dim;
+    }
+
+    if (resolved_dim < 0 || resolved_dim >= static_cast<int>(tensors[0].shape().rank())) {
+        LOG_ERROR("Invalid dimension for cat: {}", dim);
+        return Tensor();
+    }
+
+    const auto& first_shape = tensors[0].shape();
+    const auto first_device = tensors[0].device();
+    const auto first_dtype = tensors[0].dtype();
+
+    size_t total_size_along_dim = first_shape[resolved_dim];
+
+    // Validate all tensors
+    for (size_t i = 1; i < tensors.size(); ++i) {
+        const auto& shape = tensors[i].shape();
+
+        if (shape.rank() != first_shape.rank()) {
+            LOG_ERROR("All tensors must have the same number of dimensions");
             return Tensor();
         }
 
-        if (tensors.size() == 1) {
-            return tensors[0].clone();
+        for (size_t d = 0; d < shape.rank(); ++d) {
+            if (d != static_cast<size_t>(resolved_dim) && shape[d] != first_shape[d]) {
+                LOG_ERROR("All dimensions except dim={} must match", dim);
+                return Tensor();
+            }
         }
 
-        int resolved_dim = dim;
-        if (resolved_dim < 0) {
-            resolved_dim = tensors[0].shape().rank() + resolved_dim;
-        }
-
-        if (resolved_dim < 0 || resolved_dim >= static_cast<int>(tensors[0].shape().rank())) {
-            LOG_ERROR("Invalid dimension for cat: {}", dim);
+        if (tensors[i].device() != first_device) {
+            LOG_ERROR("All tensors must be on the same device");
             return Tensor();
         }
 
-        const auto& first_shape = tensors[0].shape();
-        const auto first_device = tensors[0].device();
-        const auto first_dtype = tensors[0].dtype();
-
-        size_t total_size_along_dim = first_shape[resolved_dim];
-
-        for (size_t i = 1; i < tensors.size(); ++i) {
-            const auto& shape = tensors[i].shape();
-
-            if (shape.rank() != first_shape.rank()) {
-                LOG_ERROR("All tensors must have the same number of dimensions");
-                return Tensor();
-            }
-
-            for (size_t d = 0; d < shape.rank(); ++d) {
-                if (d != static_cast<size_t>(resolved_dim) && shape[d] != first_shape[d]) {
-                    LOG_ERROR("All dimensions except dim={} must match", dim);
-                    return Tensor();
-                }
-            }
-
-            if (tensors[i].device() != first_device) {
-                LOG_ERROR("All tensors must be on the same device");
-                return Tensor();
-            }
-
-            if (tensors[i].dtype() != first_dtype) {
-                LOG_ERROR("All tensors must have the same dtype");
-                return Tensor();
-            }
-
-            total_size_along_dim += shape[resolved_dim];
+        if (tensors[i].dtype() != first_dtype) {
+            LOG_ERROR("All tensors must have the same dtype");
+            return Tensor();
         }
 
-        std::vector<size_t> result_dims = first_shape.dims();
-        result_dims[resolved_dim] = total_size_along_dim;
+        total_size_along_dim += shape[resolved_dim];
+    }
 
-        auto result = Tensor::empty(TensorShape(result_dims), first_device, first_dtype);
+    // Build result shape
+    std::vector<size_t> result_dims = first_shape.dims();
+    result_dims[resolved_dim] = total_size_along_dim;
+    auto result = Tensor::empty(TensorShape(result_dims), first_device, first_dtype);
 
-        size_t outer_size = 1;
-        for (int i = 0; i < resolved_dim; ++i) {
-            outer_size *= first_shape[i];
-        }
+    size_t element_size = dtype_size(first_dtype);
 
-        size_t inner_size = 1;
-        for (size_t i = resolved_dim + 1; i < first_shape.rank(); ++i) {
-            inner_size *= first_shape[i];
-        }
-
-        size_t element_size = dtype_size(first_dtype);
-
+    // ============= OPTIMIZED PATH: First dimension =============
+    if (resolved_dim == 0) {
+        // Concatenating along first dimension - completely contiguous
         if (first_device == Device::CUDA) {
-            for (size_t outer = 0; outer < outer_size; ++outer) {
-                size_t result_offset = outer * total_size_along_dim * inner_size;
-
-                for (const auto& t : tensors) {
-                    size_t tensor_dim_size = t.shape()[resolved_dim];
-                    size_t src_offset = outer * tensor_dim_size * inner_size;
-                    size_t copy_size = tensor_dim_size * inner_size * element_size;
-
-                    void* dst = static_cast<char*>(result.raw_ptr()) + (result_offset * element_size);
-                    const void* src = static_cast<const char*>(t.raw_ptr()) + (src_offset * element_size);
-
-                    cudaMemcpy(dst, src, copy_size, cudaMemcpyDeviceToDevice);
-
-                    result_offset += tensor_dim_size * inner_size;
-                }
+            size_t offset = 0;
+            for (const auto& t : tensors) {
+                size_t bytes = t.bytes();
+                cudaMemcpy(
+                    static_cast<char*>(result.raw_ptr()) + offset,
+                    t.raw_ptr(),
+                    bytes,
+                    cudaMemcpyDeviceToDevice);
+                offset += bytes;
             }
         } else {
-            for (size_t outer = 0; outer < outer_size; ++outer) {
-                size_t result_offset = outer * total_size_along_dim * inner_size;
-
-                for (const auto& t : tensors) {
-                    size_t tensor_dim_size = t.shape()[resolved_dim];
-                    size_t src_offset = outer * tensor_dim_size * inner_size;
-                    size_t copy_size = tensor_dim_size * inner_size * element_size;
-
-                    void* dst = static_cast<char*>(result.raw_ptr()) + (result_offset * element_size);
-                    const void* src = static_cast<const char*>(t.raw_ptr()) + (src_offset * element_size);
-
-                    std::memcpy(dst, src, copy_size);
-
-                    result_offset += tensor_dim_size * inner_size;
-                }
+            size_t offset = 0;
+            for (const auto& t : tensors) {
+                size_t bytes = t.bytes();
+                std::memcpy(
+                    static_cast<char*>(result.raw_ptr()) + offset,
+                    t.raw_ptr(),
+                    bytes);
+                offset += bytes;
             }
         }
 
         return result;
     }
+
+    // ============= OPTIMIZED PATH: Last dimension (most common case) =============
+    if (resolved_dim == static_cast<int>(first_shape.rank()) - 1) {
+        // Concatenating along last dimension - can do bulk copies per "row"
+        size_t row_size = total_size_along_dim;
+        size_t num_rows = 1;
+        for (int i = 0; i < resolved_dim; ++i) {
+            num_rows *= first_shape[i];
+        }
+
+        if (first_device == Device::CUDA) {
+            tensor_ops::launch_cat_last_dim(
+                result.raw_ptr(),
+                tensors,
+                num_rows,
+                row_size,
+                element_size,
+                nullptr);
+            cudaDeviceSynchronize();
+        } else {
+            // CPU: Simple memcpy per row
+            size_t result_offset = 0;
+            for (const auto& t : tensors) {
+                size_t tensor_dim_size = t.shape()[resolved_dim];
+
+                for (size_t row = 0; row < num_rows; ++row) {
+                    const void* src = static_cast<const char*>(t.raw_ptr()) +
+                                     row * tensor_dim_size * element_size;
+                    void* dst = static_cast<char*>(result.raw_ptr()) +
+                               row * row_size * element_size + result_offset * element_size;
+
+                    std::memcpy(dst, src, tensor_dim_size * element_size);
+                }
+
+                result_offset += tensor_dim_size;
+            }
+        }
+
+        return result;
+    }
+
+    // ============= GENERAL PATH: Middle dimensions =============
+    size_t outer_size = 1;
+    for (int i = 0; i < resolved_dim; ++i) {
+        outer_size *= first_shape[i];
+    }
+
+    size_t inner_size = 1;
+    for (size_t i = resolved_dim + 1; i < first_shape.rank(); ++i) {
+        inner_size *= first_shape[i];
+    }
+
+    if (first_device == Device::CUDA) {
+        tensor_ops::launch_cat_middle_dim(
+            result.raw_ptr(),
+            tensors,
+            outer_size,
+            inner_size,
+            resolved_dim,
+            element_size,
+            nullptr);
+        cudaDeviceSynchronize();
+    } else {
+        // CPU fallback
+        for (size_t outer = 0; outer < outer_size; ++outer) {
+            size_t result_offset = 0;
+
+            for (const auto& t : tensors) {
+                size_t tensor_dim_size = t.shape()[resolved_dim];
+                size_t copy_size = tensor_dim_size * inner_size * element_size;
+
+                const void* src = static_cast<const char*>(t.raw_ptr()) +
+                                 outer * tensor_dim_size * inner_size * element_size;
+                void* dst = static_cast<char*>(result.raw_ptr()) +
+                           (outer * total_size_along_dim * inner_size + result_offset) * element_size;
+
+                std::memcpy(dst, src, copy_size);
+                result_offset += tensor_dim_size * inner_size;
+            }
+        }
+    }
+
+    return result;
+}
 
     // ============= STATIC STACK OPERATION =============
 
