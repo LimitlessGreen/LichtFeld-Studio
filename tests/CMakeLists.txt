@@ -61,6 +61,13 @@ set(OPTIONAL_TEST_FILES
     test_memory_pool_benchmark.cpp
     test_broadcast_benchmark.cpp
     test_reduction_benchmark.cpp
+    test_expression_templates.cpp
+    test_fusion_benchmark.cpp
+    test_gather_benchmark.cpp
+    test_zip_gather_benchmark.cpp
+    test_transform_iterator_benchmark.cpp
+    test_cub_reduction_benchmark.cpp
+    benchmark_strided_tensors.cpp
     #test_sogs_comparison.cpp
 )
 

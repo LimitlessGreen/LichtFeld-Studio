@@ -11,6 +11,7 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <cub/device/device_segmented_reduce.cuh>
+#include <cub/device/device_reduce.cuh>
 #include <limits>
 
 // Thrust headers
@@ -31,63 +32,12 @@
 
 namespace gs::tensor_ops {
 
-    // ============= THRUST POLICY HELPER =============
-
-    template<typename Func>
-    void run_with_thrust_policy(cudaStream_t stream, Func&& func) {
-        if (stream) {
-            func(thrust::cuda::par.on(stream));
-        } else {
-            func(thrust::cuda::par);
-        }
-    }
-
-    // ============= GENERIC OPERATIONS (ZERO ENUM OVERHEAD) =============
-
-    // Binary operation: supports different input/output types (e.g. float -> bool for comparisons)
-    template<typename InT, typename OutT, typename Op>
-    void launch_binary_op_generic(const InT* a, const InT* b, OutT* c, size_t n,
-                                  Op op, cudaStream_t stream) {
-        if (n == 0) return;
-        auto a_ptr = thrust::device_pointer_cast(a);
-        auto b_ptr = thrust::device_pointer_cast(b);
-        auto c_ptr = thrust::device_pointer_cast(c);
-
-        run_with_thrust_policy(stream, [&](auto policy) {
-            thrust::transform(policy, a_ptr, a_ptr + n, b_ptr, c_ptr, op);
-        });
-    }
-
-    // Unary operation: supports different input/output types
-    template<typename InT, typename OutT, typename Op>
-    void launch_unary_op_generic(const InT* input, OutT* output, size_t n,
-                                 Op op, cudaStream_t stream) {
-        if (n == 0) return;
-        auto in_ptr = thrust::device_pointer_cast(input);
-        auto out_ptr = thrust::device_pointer_cast(output);
-
-        run_with_thrust_policy(stream, [&](auto policy) {
-            thrust::transform(policy, in_ptr, in_ptr + n, out_ptr, op);
-        });
-    }
-
-    // NOTE: No explicit instantiations needed! Templates instantiate automatically on use.
-
-    // Scalar operation: applies binary operation with scalar on right side
-    template<typename T, typename OutputT, typename Op>
-    void launch_scalar_op_generic(const T* data, T scalar, OutputT* result, size_t n,
-                                  Op op, cudaStream_t stream) {
-        if (n == 0) return;
-        auto data_ptr = thrust::device_pointer_cast(data);
-        auto result_ptr = thrust::device_pointer_cast(result);
-
-        // Use scalar_right_op to bind scalar to the right side of the binary operation
-        auto scalar_op = ops::scalar_right_op<Op, T>(scalar);
-
-        run_with_thrust_policy(stream, [&](auto policy) {
-            thrust::transform(policy, data_ptr, data_ptr + n, result_ptr, scalar_op);
-        });
-    }
+    // ============= GENERIC OPERATIONS - NOW IN HEADER =============
+    // Template implementations moved to include/core/tensor_generic_ops.cuh for:
+    // - Better inlining and optimization
+    // - Support for expression template fusion (composed functors)
+    // - No need for explicit instantiations
+    // - Faster compilation (no separable compilation needed for these)
 
     // ============= CLAMP OPERATIONS (USING FUNCTORS) =============
 
@@ -198,92 +148,9 @@ namespace gs::tensor_ops {
         });
     }
 
-    // ============= BROADCASTING BINARY OPERATIONS (USING FUNCTORS) =============
-
-    template<typename SrcT, typename DstT, typename Op>
-    __global__ void broadcast_binary_kernel(
-        const SrcT* __restrict__ a,
-        const SrcT* __restrict__ b,
-        DstT* __restrict__ c,
-        const size_t* __restrict__ a_shape,
-        const size_t* __restrict__ b_shape,
-        const size_t* __restrict__ c_shape,
-        size_t a_rank, size_t b_rank, size_t c_rank,
-        size_t total_elements,
-        Op op)
-    {
-        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= total_elements) return;
-
-        // Compute c coordinates
-        size_t c_coords[10];
-        size_t temp = idx;
-        for (int i = c_rank - 1; i >= 0; --i) {
-            c_coords[i] = temp % c_shape[i];
-            temp /= c_shape[i];
-        }
-
-        // Map to a coordinates
-        size_t a_idx = 0;
-        size_t a_stride = 1;
-        int a_offset = static_cast<int>(c_rank) - static_cast<int>(a_rank);
-        for (int i = a_rank - 1; i >= 0; --i) {
-            int c_dim_idx = i + a_offset;
-            size_t coord = (c_dim_idx >= 0 && c_dim_idx < static_cast<int>(c_rank)) ? c_coords[c_dim_idx] : 0;
-            if (a_shape[i] == 1) {
-                coord = 0;
-            }
-            a_idx += coord * a_stride;
-            a_stride *= a_shape[i];
-        }
-
-        // Map to b coordinates
-        size_t b_idx = 0;
-        size_t b_stride = 1;
-        int b_offset = static_cast<int>(c_rank) - static_cast<int>(b_rank);
-        for (int i = b_rank - 1; i >= 0; --i) {
-            int c_dim_idx = i + b_offset;
-            size_t coord = (c_dim_idx >= 0 && c_dim_idx < static_cast<int>(c_rank)) ? c_coords[c_dim_idx] : 0;
-            if (b_shape[i] == 1) {
-                coord = 0;
-            }
-            b_idx += coord * b_stride;
-            b_stride *= b_shape[i];
-        }
-
-        // Apply operation using functor
-        c[idx] = op(a[a_idx], b[b_idx]);
-    }
-
-    template<typename SrcT, typename DstT, typename Op>
-    void launch_broadcast_binary(
-        const SrcT* a, const SrcT* b, DstT* c,
-        const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
-        size_t a_rank, size_t b_rank, size_t c_rank,
-        size_t total_elements,
-        Op op,
-        cudaStream_t stream)
-    {
-        if (total_elements == 0) return;
-
-        thrust::device_vector<size_t> d_a_shape(a_shape, a_shape + a_rank);
-        thrust::device_vector<size_t> d_b_shape(b_shape, b_shape + b_rank);
-        thrust::device_vector<size_t> d_c_shape(c_shape, c_shape + c_rank);
-
-        int block_size = 256;
-        int grid_size = (total_elements + block_size - 1) / block_size;
-
-        broadcast_binary_kernel<<<grid_size, block_size, 0, stream>>>(
-            a, b, c,
-            thrust::raw_pointer_cast(d_a_shape.data()),
-            thrust::raw_pointer_cast(d_b_shape.data()),
-            thrust::raw_pointer_cast(d_c_shape.data()),
-            a_rank, b_rank, c_rank,
-            total_elements,
-            op
-        );
-    }
-
+    // ============= BROADCASTING BINARY OPERATIONS =============
+    // NOTE: launch_broadcast_binary is now defined in tensor_broadcast_ops.cuh
+    // CUDA kernels and host function template are inlined for correct instantiation
 
     // ============= OPTIMIZED SEGMENTED REDUCTION =============
 
@@ -545,31 +412,66 @@ namespace gs::tensor_ops {
         auto input_ptr = thrust::device_pointer_cast(static_cast<const float*>(input));
         auto output_ptr = thrust::device_pointer_cast(static_cast<float*>(output));
 
-        // Full reduction to scalar
+        // Full reduction to scalar - OPTIMIZED with CUB DeviceReduce
         if (num_axes == 0 || num_axes == rank) {
-            float result = 0.0f;
-            run_with_thrust_policy(stream, [&](auto policy) {
-                switch (op) {
-                case ReduceOp::Sum:
-                    result = thrust::reduce(policy, input_ptr, input_ptr + n, 0.0f, ops::add_op{});
-                    break;
-                case ReduceOp::Mean:
-                    result = thrust::reduce(policy, input_ptr, input_ptr + n, 0.0f, ops::add_op{}) / static_cast<float>(n);
-                    break;
-                case ReduceOp::Max:
-                    result = thrust::reduce(policy, input_ptr, input_ptr + n, -std::numeric_limits<float>::infinity(), ops::maximum_op{});
-                    break;
-                case ReduceOp::Min:
-                    result = thrust::reduce(policy, input_ptr, input_ptr + n, std::numeric_limits<float>::infinity(), ops::minimum_op{});
-                    break;
-                case ReduceOp::Prod:
-                    result = thrust::reduce(policy, input_ptr, input_ptr + n, 1.0f, ops::mul_op{});
-                    break;
-                default:
-                    result = 0.0f;
+            const float* d_in = static_cast<const float*>(input);
+            float* d_out = static_cast<float*>(output);
+
+            // Determine temp storage requirements
+            void* d_temp_storage = nullptr;
+            size_t temp_storage_bytes = 0;
+
+            switch (op) {
+            case ReduceOp::Sum:
+                // Two-phase CUB pattern: 1) Query temp storage size, 2) Perform reduction
+                cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+                cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaFreeAsync(d_temp_storage, stream);
+                break;
+            case ReduceOp::Mean: {
+                // Sum then divide by count
+                cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+                cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaFreeAsync(d_temp_storage, stream);
+                // Divide result by n
+                auto out_ptr = thrust::device_pointer_cast(d_out);
+                run_with_thrust_policy(stream, [&](auto policy) {
+                    thrust::transform(policy, out_ptr, out_ptr + 1, out_ptr,
+                                    DivideByFunctor(static_cast<float>(n)));
+                });
+                break;
+            }
+            case ReduceOp::Max:
+                cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+                cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaFreeAsync(d_temp_storage, stream);
+                break;
+            case ReduceOp::Min:
+                cub::DeviceReduce::Min(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+                cub::DeviceReduce::Min(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaFreeAsync(d_temp_storage, stream);
+                break;
+            case ReduceOp::Prod:
+                // CUB doesn't have built-in Prod, use Thrust for this rare operation
+                {
+                    float result = 0.0f;
+                    run_with_thrust_policy(stream, [&](auto policy) {
+                        result = thrust::reduce(policy, input_ptr, input_ptr + n, 1.0f, ops::mul_op{});
+                    });
+                    cudaMemcpyAsync(output, &result, sizeof(float), cudaMemcpyHostToDevice, stream);
                 }
-            });
-            cudaMemcpyAsync(output, &result, sizeof(float), cudaMemcpyHostToDevice, stream);
+                break;
+            default:
+                {
+                    float zero = 0.0f;
+                    cudaMemcpyAsync(output, &zero, sizeof(float), cudaMemcpyHostToDevice, stream);
+                }
+                break;
+            }
             return;
         }
 
@@ -1240,198 +1142,258 @@ namespace gs::tensor_ops {
     template void launch_convert_type<float, int>(const float*, int*, size_t, cudaStream_t);
 
 
-    // ============= EXPLICIT UNARY OPERATION INSTANTIATIONS =============
-    // Float -> Float operations
-    template void launch_unary_op_generic<float, float, ops::neg_op>(const float*, float*, size_t, ops::neg_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::abs_op>(const float*, float*, size_t, ops::abs_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::sign_op>(const float*, float*, size_t, ops::sign_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::reciprocal_op>(const float*, float*, size_t, ops::reciprocal_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::exp_op>(const float*, float*, size_t, ops::exp_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::exp2_op>(const float*, float*, size_t, ops::exp2_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::log_op>(const float*, float*, size_t, ops::log_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::log2_op>(const float*, float*, size_t, ops::log2_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::log10_op>(const float*, float*, size_t, ops::log10_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::log1p_op>(const float*, float*, size_t, ops::log1p_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::sqrt_op>(const float*, float*, size_t, ops::sqrt_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::rsqrt_op>(const float*, float*, size_t, ops::rsqrt_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::square_op>(const float*, float*, size_t, ops::square_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::sin_op>(const float*, float*, size_t, ops::sin_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::cos_op>(const float*, float*, size_t, ops::cos_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::tan_op>(const float*, float*, size_t, ops::tan_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::asin_op>(const float*, float*, size_t, ops::asin_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::acos_op>(const float*, float*, size_t, ops::acos_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::atan_op>(const float*, float*, size_t, ops::atan_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::sinh_op>(const float*, float*, size_t, ops::sinh_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::cosh_op>(const float*, float*, size_t, ops::cosh_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::tanh_op>(const float*, float*, size_t, ops::tanh_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::sigmoid_op>(const float*, float*, size_t, ops::sigmoid_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::relu_op>(const float*, float*, size_t, ops::relu_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::gelu_op>(const float*, float*, size_t, ops::gelu_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::swish_op>(const float*, float*, size_t, ops::swish_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::floor_op>(const float*, float*, size_t, ops::floor_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::ceil_op>(const float*, float*, size_t, ops::ceil_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::round_op>(const float*, float*, size_t, ops::round_op, cudaStream_t);
-    template void launch_unary_op_generic<float, float, ops::trunc_op>(const float*, float*, size_t, ops::trunc_op, cudaStream_t);
+    // ============= EXPLICIT INSTANTIATIONS FOR C++ FILES =============
+    // C++ files (not CUDA) can't see tensor_generic_ops.cuh (which is #ifdef __CUDACC__),
+    // so we need explicit instantiations for functors used by C++ expression templates.
 
-    // Float -> Bool operations (predicates)
-    template void launch_unary_op_generic<float, unsigned char, ops::isnan_op>(const float*, unsigned char*, size_t, ops::isnan_op, cudaStream_t);
-    template void launch_unary_op_generic<float, unsigned char, ops::isinf_op>(const float*, unsigned char*, size_t, ops::isinf_op, cudaStream_t);
-    template void launch_unary_op_generic<float, unsigned char, ops::isfinite_op>(const float*, unsigned char*, size_t, ops::isfinite_op, cudaStream_t);
-    template void launch_unary_op_generic<float, unsigned char, ops::logical_not_op>(const float*, unsigned char*, size_t, ops::logical_not_op, cudaStream_t);
+    // Basic unary operations (comprehensive list)
+    template void launch_unary_op_generic<float, float, ops::log_op>(
+        const float*, float*, size_t, ops::log_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::log_op>(
+        const int*, int*, size_t, ops::log_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::exp_op>(
+        const float*, float*, size_t, ops::exp_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::exp_op>(
+        const int*, int*, size_t, ops::exp_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::abs_op>(
+        const float*, float*, size_t, ops::abs_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::abs_op>(
+        const int*, int*, size_t, ops::abs_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::sqrt_op>(
+        const float*, float*, size_t, ops::sqrt_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::sqrt_op>(
+        const int*, int*, size_t, ops::sqrt_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::square_op>(
+        const float*, float*, size_t, ops::square_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::square_op>(
+        const int*, int*, size_t, ops::square_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::relu_op>(
+        const float*, float*, size_t, ops::relu_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::relu_op>(
+        const int*, int*, size_t, ops::relu_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::sigmoid_op>(
+        const float*, float*, size_t, ops::sigmoid_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::sigmoid_op>(
+        const int*, int*, size_t, ops::sigmoid_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::neg_op>(
+        const float*, float*, size_t, ops::neg_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::neg_op>(
+        const int*, int*, size_t, ops::neg_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::floor_op>(
+        const float*, float*, size_t, ops::floor_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::floor_op>(
+        const int*, int*, size_t, ops::floor_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::ceil_op>(
+        const float*, float*, size_t, ops::ceil_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::ceil_op>(
+        const int*, int*, size_t, ops::ceil_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::round_op>(
+        const float*, float*, size_t, ops::round_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::round_op>(
+        const int*, int*, size_t, ops::round_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::sin_op>(
+        const float*, float*, size_t, ops::sin_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::sin_op>(
+        const int*, int*, size_t, ops::sin_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::cos_op>(
+        const float*, float*, size_t, ops::cos_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::cos_op>(
+        const int*, int*, size_t, ops::cos_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::tan_op>(
+        const float*, float*, size_t, ops::tan_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::tan_op>(
+        const int*, int*, size_t, ops::tan_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::tanh_op>(
+        const float*, float*, size_t, ops::tanh_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::tanh_op>(
+        const int*, int*, size_t, ops::tanh_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::sign_op>(
+        const float*, float*, size_t, ops::sign_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::sign_op>(
+        const int*, int*, size_t, ops::sign_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::reciprocal_op>(
+        const float*, float*, size_t, ops::reciprocal_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::reciprocal_op>(
+        const int*, int*, size_t, ops::reciprocal_op, cudaStream_t);
+    template void launch_unary_op_generic<float, unsigned char, ops::logical_not_op>(
+        const float*, unsigned char*, size_t, ops::logical_not_op, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::logical_not_op>(
+        const int*, unsigned char*, size_t, ops::logical_not_op, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::logical_not_op>(
+        const unsigned char*, unsigned char*, size_t, ops::logical_not_op, cudaStream_t);
 
-    // Bool -> Bool operations
-    template void launch_unary_op_generic<unsigned char, unsigned char, ops::logical_not_op>(const unsigned char*, unsigned char*, size_t, ops::logical_not_op, cudaStream_t);
+    // Basic binary operations (same input/output type - comprehensive list)
+    template void launch_binary_op_generic<float, float, ops::add_op>(
+        const float*, const float*, float*, size_t, ops::add_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::add_op>(
+        const int*, const int*, int*, size_t, ops::add_op, cudaStream_t);
+    template void launch_binary_op_generic<float, float, ops::sub_op>(
+        const float*, const float*, float*, size_t, ops::sub_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::sub_op>(
+        const int*, const int*, int*, size_t, ops::sub_op, cudaStream_t);
+    template void launch_binary_op_generic<float, float, ops::mul_op>(
+        const float*, const float*, float*, size_t, ops::mul_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::mul_op>(
+        const int*, const int*, int*, size_t, ops::mul_op, cudaStream_t);
+    template void launch_binary_op_generic<float, float, ops::div_op>(
+        const float*, const float*, float*, size_t, ops::div_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::div_op>(
+        const int*, const int*, int*, size_t, ops::div_op, cudaStream_t);
+    template void launch_binary_op_generic<float, float, ops::minimum_op>(
+        const float*, const float*, float*, size_t, ops::minimum_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::minimum_op>(
+        const int*, const int*, int*, size_t, ops::minimum_op, cudaStream_t);
+    template void launch_binary_op_generic<float, float, ops::maximum_op>(
+        const float*, const float*, float*, size_t, ops::maximum_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::maximum_op>(
+        const int*, const int*, int*, size_t, ops::maximum_op, cudaStream_t);
+    template void launch_binary_op_generic<float, float, ops::pow_op>(
+        const float*, const float*, float*, size_t, ops::pow_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::pow_op>(
+        const int*, const int*, int*, size_t, ops::pow_op, cudaStream_t);
 
-    // ============= EXPLICIT BINARY OPERATION INSTANTIATIONS =============
-    // Float -> Float arithmetic operations
-    template void launch_binary_op_generic<float, float, ops::add_op>(const float*, const float*, float*, size_t, ops::add_op, cudaStream_t);
-    template void launch_broadcast_binary<float, float, ops::add_op>(const float*, const float*, float*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::add_op, cudaStream_t);
+    // Comparison operations (input T -> output unsigned char/bool)
+    template void launch_binary_op_generic<float, unsigned char, ops::greater_op>(
+        const float*, const float*, unsigned char*, size_t, ops::greater_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::greater_op>(
+        const int*, const int*, unsigned char*, size_t, ops::greater_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::greater_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::greater_op, cudaStream_t);
 
-    template void launch_binary_op_generic<float, float, ops::sub_op>(const float*, const float*, float*, size_t, ops::sub_op, cudaStream_t);
-    template void launch_broadcast_binary<float, float, ops::sub_op>(const float*, const float*, float*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::sub_op, cudaStream_t);
+    template void launch_binary_op_generic<float, unsigned char, ops::greater_equal_op>(
+        const float*, const float*, unsigned char*, size_t, ops::greater_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::greater_equal_op>(
+        const int*, const int*, unsigned char*, size_t, ops::greater_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::greater_equal_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::greater_equal_op, cudaStream_t);
 
-    template void launch_binary_op_generic<float, float, ops::mul_op>(const float*, const float*, float*, size_t, ops::mul_op, cudaStream_t);
-    template void launch_broadcast_binary<float, float, ops::mul_op>(const float*, const float*, float*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::mul_op, cudaStream_t);
+    template void launch_binary_op_generic<float, unsigned char, ops::less_equal_op>(
+        const float*, const float*, unsigned char*, size_t, ops::less_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::less_equal_op>(
+        const int*, const int*, unsigned char*, size_t, ops::less_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::less_equal_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::less_equal_op, cudaStream_t);
 
-    template void launch_binary_op_generic<float, float, ops::div_op>(const float*, const float*, float*, size_t, ops::div_op, cudaStream_t);
-    template void launch_broadcast_binary<float, float, ops::div_op>(const float*, const float*, float*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::div_op, cudaStream_t);
+    // Logical operations (bool/unsigned char -> unsigned char)
+    template void launch_binary_op_generic<float, unsigned char, ops::logical_and_op>(
+        const float*, const float*, unsigned char*, size_t, ops::logical_and_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::logical_and_op>(
+        const int*, const int*, unsigned char*, size_t, ops::logical_and_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::logical_and_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::logical_and_op, cudaStream_t);
 
-    template void launch_binary_op_generic<float, float, ops::pow_op>(const float*, const float*, float*, size_t, ops::pow_op, cudaStream_t);
-    template void launch_broadcast_binary<float, float, ops::pow_op>(const float*, const float*, float*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::pow_op, cudaStream_t);
+    template void launch_binary_op_generic<float, unsigned char, ops::logical_or_op>(
+        const float*, const float*, unsigned char*, size_t, ops::logical_or_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::logical_or_op>(
+        const int*, const int*, unsigned char*, size_t, ops::logical_or_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::logical_or_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::logical_or_op, cudaStream_t);
 
-    template void launch_binary_op_generic<float, float, ops::mod_op>(const float*, const float*, float*, size_t, ops::mod_op, cudaStream_t);
-    template void launch_broadcast_binary<float, float, ops::mod_op>(const float*, const float*, float*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::mod_op, cudaStream_t);
+    template void launch_binary_op_generic<float, unsigned char, ops::less_op>(
+        const float*, const float*, unsigned char*, size_t, ops::less_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::less_op>(
+        const int*, const int*, unsigned char*, size_t, ops::less_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::less_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::less_op, cudaStream_t);
 
-    template void launch_binary_op_generic<float, float, ops::maximum_op>(const float*, const float*, float*, size_t, ops::maximum_op, cudaStream_t);
-    template void launch_broadcast_binary<float, float, ops::maximum_op>(const float*, const float*, float*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::maximum_op, cudaStream_t);
+    template void launch_binary_op_generic<float, unsigned char, ops::equal_op>(
+        const float*, const float*, unsigned char*, size_t, ops::equal_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::equal_op>(
+        const int*, const int*, unsigned char*, size_t, ops::equal_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::equal_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::equal_op, cudaStream_t);
 
-    template void launch_binary_op_generic<float, float, ops::minimum_op>(const float*, const float*, float*, size_t, ops::minimum_op, cudaStream_t);
-    template void launch_broadcast_binary<float, float, ops::minimum_op>(const float*, const float*, float*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::minimum_op, cudaStream_t);
+    template void launch_binary_op_generic<float, unsigned char, ops::not_equal_op>(
+        const float*, const float*, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::not_equal_op>(
+        const int*, const int*, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::not_equal_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
 
-    // Float -> Bool comparison operations
-    template void launch_binary_op_generic<float, unsigned char, ops::equal_op>(const float*, const float*, unsigned char*, size_t, ops::equal_op, cudaStream_t);
-    template void launch_broadcast_binary<float, unsigned char, ops::equal_op>(const float*, const float*, unsigned char*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::equal_op, cudaStream_t);
+    // Scalar operations (uses constant_iterator, different from scalar_right_op!)
+    template void launch_scalar_op_generic<float, float, ops::add_op>(
+        const float*, float, float*, size_t, ops::add_op, cudaStream_t);
+    template void launch_scalar_op_generic<float, float, ops::sub_op>(
+        const float*, float, float*, size_t, ops::sub_op, cudaStream_t);
+    template void launch_scalar_op_generic<float, float, ops::mul_op>(
+        const float*, float, float*, size_t, ops::mul_op, cudaStream_t);
 
-    template void launch_binary_op_generic<float, unsigned char, ops::not_equal_op>(const float*, const float*, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
-    template void launch_broadcast_binary<float, unsigned char, ops::not_equal_op>(const float*, const float*, unsigned char*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::not_equal_op, cudaStream_t);
+    // scalar_right_op instantiations for various operations (comprehensive list)
+    template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::add_op, float>>(
+        const float*, float*, size_t, ops::scalar_right_op<ops::add_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::scalar_right_op<ops::add_op, float>>(
+        const int*, int*, size_t, ops::scalar_right_op<ops::add_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::sub_op, float>>(
+        const float*, float*, size_t, ops::scalar_right_op<ops::sub_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::scalar_right_op<ops::sub_op, float>>(
+        const int*, int*, size_t, ops::scalar_right_op<ops::sub_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::mul_op, float>>(
+        const float*, float*, size_t, ops::scalar_right_op<ops::mul_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::scalar_right_op<ops::mul_op, float>>(
+        const int*, int*, size_t, ops::scalar_right_op<ops::mul_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::div_op, float>>(
+        const float*, float*, size_t, ops::scalar_right_op<ops::div_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::scalar_right_op<ops::div_op, float>>(
+        const int*, int*, size_t, ops::scalar_right_op<ops::div_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::pow_op, float>>(
+        const float*, float*, size_t, ops::scalar_right_op<ops::pow_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::scalar_right_op<ops::pow_op, float>>(
+        const int*, int*, size_t, ops::scalar_right_op<ops::pow_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<float, unsigned char, ops::scalar_right_op<ops::not_equal_op, float>>(
+        const float*, unsigned char*, size_t, ops::scalar_right_op<ops::not_equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::scalar_right_op<ops::not_equal_op, float>>(
+        const int*, unsigned char*, size_t, ops::scalar_right_op<ops::not_equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::scalar_right_op<ops::not_equal_op, float>>(
+        const unsigned char*, unsigned char*, size_t, ops::scalar_right_op<ops::not_equal_op, float>, cudaStream_t);
 
-    template void launch_binary_op_generic<float, unsigned char, ops::less_op>(const float*, const float*, unsigned char*, size_t, ops::less_op, cudaStream_t);
-    template void launch_broadcast_binary<float, unsigned char, ops::less_op>(const float*, const float*, unsigned char*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::less_op, cudaStream_t);
+    template void launch_unary_op_generic<float, unsigned char, ops::scalar_right_op<ops::equal_op, float>>(
+        const float*, unsigned char*, size_t, ops::scalar_right_op<ops::equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::scalar_right_op<ops::equal_op, float>>(
+        const int*, unsigned char*, size_t, ops::scalar_right_op<ops::equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::scalar_right_op<ops::equal_op, float>>(
+        const unsigned char*, unsigned char*, size_t, ops::scalar_right_op<ops::equal_op, float>, cudaStream_t);
 
-    template void launch_binary_op_generic<float, unsigned char, ops::less_equal_op>(const float*, const float*, unsigned char*, size_t, ops::less_equal_op, cudaStream_t);
-    template void launch_broadcast_binary<float, unsigned char, ops::less_equal_op>(const float*, const float*, unsigned char*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::less_equal_op, cudaStream_t);
+    template void launch_unary_op_generic<float, unsigned char, ops::scalar_right_op<ops::greater_op, float>>(
+        const float*, unsigned char*, size_t, ops::scalar_right_op<ops::greater_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::scalar_right_op<ops::greater_op, float>>(
+        const int*, unsigned char*, size_t, ops::scalar_right_op<ops::greater_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::scalar_right_op<ops::greater_op, float>>(
+        const unsigned char*, unsigned char*, size_t, ops::scalar_right_op<ops::greater_op, float>, cudaStream_t);
 
-    template void launch_binary_op_generic<float, unsigned char, ops::greater_op>(const float*, const float*, unsigned char*, size_t, ops::greater_op, cudaStream_t);
-    template void launch_broadcast_binary<float, unsigned char, ops::greater_op>(const float*, const float*, unsigned char*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::greater_op, cudaStream_t);
+    template void launch_unary_op_generic<float, unsigned char, ops::scalar_right_op<ops::less_op, float>>(
+        const float*, unsigned char*, size_t, ops::scalar_right_op<ops::less_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::scalar_right_op<ops::less_op, float>>(
+        const int*, unsigned char*, size_t, ops::scalar_right_op<ops::less_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::scalar_right_op<ops::less_op, float>>(
+        const unsigned char*, unsigned char*, size_t, ops::scalar_right_op<ops::less_op, float>, cudaStream_t);
 
-    template void launch_binary_op_generic<float, unsigned char, ops::greater_equal_op>(const float*, const float*, unsigned char*, size_t, ops::greater_equal_op, cudaStream_t);
-    template void launch_broadcast_binary<float, unsigned char, ops::greater_equal_op>(const float*, const float*, unsigned char*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::greater_equal_op, cudaStream_t);
+    template void launch_unary_op_generic<float, unsigned char, ops::scalar_right_op<ops::greater_equal_op, float>>(
+        const float*, unsigned char*, size_t, ops::scalar_right_op<ops::greater_equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::scalar_right_op<ops::greater_equal_op, float>>(
+        const int*, unsigned char*, size_t, ops::scalar_right_op<ops::greater_equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::scalar_right_op<ops::greater_equal_op, float>>(
+        const unsigned char*, unsigned char*, size_t, ops::scalar_right_op<ops::greater_equal_op, float>, cudaStream_t);
 
-    // Bool -> Bool logical operations
-    template void launch_binary_op_generic<unsigned char, unsigned char, ops::logical_and_op>(const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::logical_and_op, cudaStream_t);
-    template void launch_broadcast_binary<unsigned char, unsigned char, ops::logical_and_op>(const unsigned char*, const unsigned char*, unsigned char*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::logical_and_op, cudaStream_t);
+    template void launch_unary_op_generic<float, unsigned char, ops::scalar_right_op<ops::less_equal_op, float>>(
+        const float*, unsigned char*, size_t, ops::scalar_right_op<ops::less_equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::scalar_right_op<ops::less_equal_op, float>>(
+        const int*, unsigned char*, size_t, ops::scalar_right_op<ops::less_equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::scalar_right_op<ops::less_equal_op, float>>(
+        const unsigned char*, unsigned char*, size_t, ops::scalar_right_op<ops::less_equal_op, float>, cudaStream_t);
 
-    template void launch_binary_op_generic<unsigned char, unsigned char, ops::logical_or_op>(const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::logical_or_op, cudaStream_t);
-    template void launch_broadcast_binary<unsigned char, unsigned char, ops::logical_or_op>(const unsigned char*, const unsigned char*, unsigned char*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::logical_or_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::mod_op, float>>(
+        const float*, float*, size_t, ops::scalar_right_op<ops::mod_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::scalar_right_op<ops::mod_op, float>>(
+        const int*, int*, size_t, ops::scalar_right_op<ops::mod_op, float>, cudaStream_t);
 
-    template void launch_binary_op_generic<unsigned char, unsigned char, ops::logical_xor_op>(const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::logical_xor_op, cudaStream_t);
-    template void launch_broadcast_binary<unsigned char, unsigned char, ops::logical_xor_op>(const unsigned char*, const unsigned char*, unsigned char*,
-                                const size_t*, const size_t*, const size_t*,
-                                size_t, size_t, size_t, size_t, ops::logical_xor_op, cudaStream_t);
+    // Composed unary operations (expression template fusion) - test-specific
+    template void launch_unary_op_generic<float, float, ops::composed_unary_op<ops::exp_op, ops::scalar_right_op<ops::mul_op, float>>>(
+        const float*, float*, size_t, ops::composed_unary_op<ops::exp_op, ops::scalar_right_op<ops::mul_op, float>>, cudaStream_t);
 
-    // ============= EXPLICIT SCALAR OPERATION INSTANTIATIONS =============
-    // Float -> Float arithmetic operations
-    template void launch_scalar_op_generic<float, float, ops::add_op>(const float*, float, float*, size_t, ops::add_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::sub_op>(const float*, float, float*, size_t, ops::sub_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::mul_op>(const float*, float, float*, size_t, ops::mul_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::div_op>(const float*, float, float*, size_t, ops::div_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::pow_op>(const float*, float, float*, size_t, ops::pow_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::mod_op>(const float*, float, float*, size_t, ops::mod_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::maximum_op>(const float*, float, float*, size_t, ops::maximum_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::minimum_op>(const float*, float, float*, size_t, ops::minimum_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::composed_unary_op<ops::scalar_right_op<ops::mul_op, float>, ops::abs_op>>(
+        const float*, float*, size_t, ops::composed_unary_op<ops::scalar_right_op<ops::mul_op, float>, ops::abs_op>, cudaStream_t);
 
-    // Float -> Bool comparison operations
-    template void launch_scalar_op_generic<float, unsigned char, ops::equal_op>(const float*, float, unsigned char*, size_t, ops::equal_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, unsigned char, ops::not_equal_op>(const float*, float, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, unsigned char, ops::less_op>(const float*, float, unsigned char*, size_t, ops::less_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, unsigned char, ops::less_equal_op>(const float*, float, unsigned char*, size_t, ops::less_equal_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, unsigned char, ops::greater_op>(const float*, float, unsigned char*, size_t, ops::greater_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, unsigned char, ops::greater_equal_op>(const float*, float, unsigned char*, size_t, ops::greater_equal_op, cudaStream_t);
-
-    // Float -> Float comparison operations (when output dtype is not Bool)
-    template void launch_scalar_op_generic<float, float, ops::equal_op>(const float*, float, float*, size_t, ops::equal_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::not_equal_op>(const float*, float, float*, size_t, ops::not_equal_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::less_op>(const float*, float, float*, size_t, ops::less_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::less_equal_op>(const float*, float, float*, size_t, ops::less_equal_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::greater_op>(const float*, float, float*, size_t, ops::greater_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::greater_equal_op>(const float*, float, float*, size_t, ops::greater_equal_op, cudaStream_t);
-
-    // Other mixed-type operations
-    template void launch_scalar_op_generic<float, unsigned char, ops::add_op>(const float*, float, unsigned char*, size_t, ops::add_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, unsigned char, ops::sub_op>(const float*, float, unsigned char*, size_t, ops::sub_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, unsigned char, ops::mul_op>(const float*, float, unsigned char*, size_t, ops::mul_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, unsigned char, ops::pow_op>(const float*, float, unsigned char*, size_t, ops::pow_op, cudaStream_t);
-
-    // ============= Int32 SCALAR OPERATION INSTANTIATIONS =============
-    // Int32 -> Int32 arithmetic operations
-    template void launch_scalar_op_generic<int, int, ops::add_op>(const int*, int, int*, size_t, ops::add_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, int, ops::sub_op>(const int*, int, int*, size_t, ops::sub_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, int, ops::mul_op>(const int*, int, int*, size_t, ops::mul_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, int, ops::div_op>(const int*, int, int*, size_t, ops::div_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, int, ops::maximum_op>(const int*, int, int*, size_t, ops::maximum_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, int, ops::minimum_op>(const int*, int, int*, size_t, ops::minimum_op, cudaStream_t);
-
-    // Int32 -> Bool comparison operations
-    template void launch_scalar_op_generic<int, unsigned char, ops::equal_op>(const int*, int, unsigned char*, size_t, ops::equal_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, unsigned char, ops::not_equal_op>(const int*, int, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, unsigned char, ops::less_op>(const int*, int, unsigned char*, size_t, ops::less_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, unsigned char, ops::less_equal_op>(const int*, int, unsigned char*, size_t, ops::less_equal_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, unsigned char, ops::greater_op>(const int*, int, unsigned char*, size_t, ops::greater_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, unsigned char, ops::greater_equal_op>(const int*, int, unsigned char*, size_t, ops::greater_equal_op, cudaStream_t);
-
-    // Int32 -> Int32 comparison operations (when output dtype is not Bool)
-    template void launch_scalar_op_generic<int, int, ops::equal_op>(const int*, int, int*, size_t, ops::equal_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, int, ops::not_equal_op>(const int*, int, int*, size_t, ops::not_equal_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, int, ops::less_op>(const int*, int, int*, size_t, ops::less_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, int, ops::less_equal_op>(const int*, int, int*, size_t, ops::less_equal_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, int, ops::greater_op>(const int*, int, int*, size_t, ops::greater_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, int, ops::greater_equal_op>(const int*, int, int*, size_t, ops::greater_equal_op, cudaStream_t);
-
-    // Int32 mixed-type operations
-    template void launch_scalar_op_generic<int, unsigned char, ops::add_op>(const int*, int, unsigned char*, size_t, ops::add_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, unsigned char, ops::sub_op>(const int*, int, unsigned char*, size_t, ops::sub_op, cudaStream_t);
-    template void launch_scalar_op_generic<int, unsigned char, ops::mul_op>(const int*, int, unsigned char*, size_t, ops::mul_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::composed_unary_op<ops::scalar_right_op<ops::mul_op, float>, ops::relu_op>>(
+        const float*, float*, size_t, ops::composed_unary_op<ops::scalar_right_op<ops::mul_op, float>, ops::relu_op>, cudaStream_t);
 
 } // namespace gs::tensor_ops

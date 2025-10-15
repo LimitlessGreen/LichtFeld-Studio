@@ -63,6 +63,9 @@ namespace gs {
         switch (op) {
             case LoadOp::Empty: {
                 result.shape_ = args.shape;
+                result.strides_ = args.shape.strides();  // Initialize to contiguous strides
+                result.storage_offset_ = 0;
+                result.is_contiguous_ = true;
                 result.device_ = args.device;
                 result.dtype_ = args.dtype;
                 result.id_ = next_id_++;
@@ -175,6 +178,9 @@ namespace gs {
             size_t count = static_cast<size_t>(std::ceil((end - start) / step));
 
             result.shape_ = TensorShape{count};
+            result.strides_ = result.shape_.strides();  // Initialize to contiguous strides
+            result.storage_offset_ = 0;
+            result.is_contiguous_ = true;
             result.device_ = args.device;
             result.dtype_ = args.dtype;
             result.id_ = next_id_++;

@@ -216,16 +216,38 @@ namespace gs {
             return {};
         }
 
-        std::vector<std::pair<int, int>> ranges;
-        for (size_t i = 0; i < shape_.rank(); ++i) {
-            if (i == dim) {
-                ranges.push_back({static_cast<int>(start), static_cast<int>(end)});
-            } else {
-                ranges.push_back({0, static_cast<int>(shape_[i])});
-            }
-        }
+        // ZERO-COPY SLICE: Adjust offset and shape - NO DATA COPYING!
+        Tensor view;
+        view.data_ = data_;
+        view.data_owner_ = data_owner_;  // Share ownership
+        view.strides_ = strides_;  // Keep same strides
+        view.device_ = device_;
+        view.dtype_ = dtype_;
+        view.is_view_ = true;
+        view.id_ = next_id_++;
 
-        return slice(ranges);
+        // Adjust offset to point to slice start (in elements)
+        view.storage_offset_ = storage_offset_ + start * strides_[dim];
+
+        // Adjust shape for the sliced dimension
+        std::vector<size_t> new_dims = shape_.dims();
+        new_dims[dim] = end - start;
+        view.shape_ = TensorShape(new_dims);
+
+        // Check if strides match the new shape's expected contiguous layout
+        // A sliced tensor is contiguous if its strides match row-major order for its shape
+        size_t expected_stride = 1;
+        bool still_contiguous = true;
+        for (int i = static_cast<int>(view.shape_.rank()) - 1; i >= 0; --i) {
+            if (view.strides_[i] != expected_stride) {
+                still_contiguous = false;
+                break;
+            }
+            expected_stride *= view.shape_[i];
+        }
+        view.is_contiguous_ = still_contiguous;
+
+        return view;
     }
 
     bool Tensor::is_contiguous_slice(const std::vector<size_t>& starts,

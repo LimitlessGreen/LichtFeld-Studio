@@ -16,15 +16,7 @@
 
 namespace gs::tensor_ops {
 
-    // Helper template to execute Thrust operations with correct policy
-    template<typename Func>
-    void run_with_thrust_policy(cudaStream_t stream, Func&& func) {
-        if (stream) {
-            func(thrust::cuda::par.on(stream));
-        } else {
-            func(thrust::cuda::par);
-        }
-    }
+    // Note: run_with_thrust_policy is now in include/core/tensor_generic_ops.cuh
 
     // ============= Random Operations Kernels =============
 

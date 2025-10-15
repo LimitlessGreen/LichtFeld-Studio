@@ -115,7 +115,7 @@ TEST_F(BroadcastBenchmarkTest, BroadcastAddition) {
             // Custom
             {
                 Timer timer;
-                auto result = a_custom + b_custom;
+                Tensor result = a_custom + b_custom;  // Force evaluation!
                 cudaDeviceSynchronize();
                 total_custom += timer.elapsed_ms();
             }

@@ -60,6 +60,10 @@ namespace gs {
             return Tensor();
         }
 
+        // Ensure contiguous for cuBLAS/CPU operations
+        const Tensor& a = is_contiguous() ? *this : contiguous();
+        const Tensor& b = other.is_contiguous() ? other : other.contiguous();
+
         size_t m = shape_[0];
         size_t k = shape_[1];
         size_t n = other.shape_[1];
@@ -79,21 +83,21 @@ namespace gs {
                 CUBLAS_OP_N, CUBLAS_OP_N,
                 n, m, k,
                 &alpha,
-                other.ptr<float>(), n,
-                ptr<float>(), k,
+                b.ptr<float>(), n,
+                a.ptr<float>(), k,
                 &beta,
                 result.ptr<float>(), n));
         } else {
             // CPU implementation
-            const float* a = ptr<float>();
-            const float* b = other.ptr<float>();
+            const float* a_ptr = a.ptr<float>();
+            const float* b_ptr = b.ptr<float>();
             float* c = result.ptr<float>();
 
             for (size_t i = 0; i < m; ++i) {
                 for (size_t j = 0; j < n; ++j) {
                     float sum = 0.0f;
                     for (size_t l = 0; l < k; ++l) {
-                        sum += a[i * k + l] * b[l * n + j];
+                        sum += a_ptr[i * k + l] * b_ptr[l * n + j];
                     }
                     c[i * n + j] = sum;
                 }
@@ -133,6 +137,10 @@ namespace gs {
             return Tensor();
         }
 
+        // Ensure contiguous for cuBLAS/CPU operations
+        const Tensor& a = is_contiguous() ? *this : contiguous();
+        const Tensor& b = other.is_contiguous() ? other : other.contiguous();
+
         size_t batch_size = shape_[0];
         size_t m = shape_[1];
         size_t k = shape_[2];
@@ -157,8 +165,8 @@ namespace gs {
             size_t c_stride = m * n;
 
             for (size_t i = 0; i < batch_size; ++i) {
-                a_ptrs[i] = ptr<float>() + i * a_stride;
-                b_ptrs[i] = other.ptr<float>() + i * b_stride;
+                a_ptrs[i] = a.ptr<float>() + i * a_stride;
+                b_ptrs[i] = b.ptr<float>() + i * b_stride;
                 c_ptrs[i] = result.ptr<float>() + i * c_stride;
             }
 
@@ -194,8 +202,8 @@ namespace gs {
 
         } else {
             // CPU implementation
-            const float* a_data = ptr<float>();
-            const float* b_data = other.ptr<float>();
+            const float* a_data = a.ptr<float>();
+            const float* b_data = b.ptr<float>();
             float* c_data = result.ptr<float>();
 
             for (size_t b = 0; b < batch_size; ++b) {
@@ -226,98 +234,102 @@ namespace gs {
             return Tensor();
         }
 
+        // Ensure contiguous for cuBLAS/CPU operations
+        const Tensor& a = is_contiguous() ? *this : contiguous();
+        const Tensor& b = other.is_contiguous() ? other : other.contiguous();
+
         // Determine dimensions for matrix multiplication
         size_t m, k, n;
         std::vector<size_t> result_shape;
 
         // Handle different dimension cases
-        if (shape_.rank() == 1 && other.shape_.rank() == 1) {
+        if (a.shape_.rank() == 1 && b.shape_.rank() == 1) {
             // Vector dot product - returns scalar (rank 0)
-            if (shape_[0] != other.shape_[0]) {
+            if (a.shape_[0] != b.shape_[0]) {
                 LOG_ERROR("Vector dimensions don't match for dot product");
                 return Tensor();
             }
-            return dot(other);
-        } else if (shape_.rank() == 1 && other.shape_.rank() == 2) {
+            return a.dot(b);
+        } else if (a.shape_.rank() == 1 && b.shape_.rank() == 2) {
             // Vector-matrix multiplication (1D @ 2D)
-            if (shape_[0] != other.shape_[0]) {
+            if (a.shape_[0] != b.shape_[0]) {
                 LOG_ERROR("Dimension mismatch for vector-matrix multiplication");
                 return Tensor();
             }
             m = 1;
-            k = shape_[0];
-            n = other.shape_[1];
+            k = a.shape_[0];
+            n = b.shape_[1];
             result_shape = {n};
-        } else if (shape_.rank() == 2 && other.shape_.rank() == 1) {
+        } else if (a.shape_.rank() == 2 && b.shape_.rank() == 1) {
             // Matrix-vector multiplication (2D @ 1D)
-            if (shape_[1] != other.shape_[0]) {
+            if (a.shape_[1] != b.shape_[0]) {
                 LOG_ERROR("Dimension mismatch for matrix-vector multiplication");
                 return Tensor();
             }
-            m = shape_[0];
-            k = shape_[1];
+            m = a.shape_[0];
+            k = a.shape_[1];
             n = 1;
             result_shape = {m};
-        } else if (shape_.rank() == 2 && other.shape_.rank() == 2) {
+        } else if (a.shape_.rank() == 2 && b.shape_.rank() == 2) {
             // Matrix-matrix multiplication (2D @ 2D)
-            if (shape_[1] != other.shape_[0]) {
+            if (a.shape_[1] != b.shape_[0]) {
                 LOG_ERROR("Matrix dimensions don't match for multiplication: {}x{} @ {}x{}",
-                          shape_[0], shape_[1], other.shape_[0], other.shape_[1]);
+                          a.shape_[0], a.shape_[1], b.shape_[0], b.shape_[1]);
                 return Tensor();
             }
-            m = shape_[0];
-            k = shape_[1];
-            n = other.shape_[1];
+            m = a.shape_[0];
+            k = a.shape_[1];
+            n = b.shape_[1];
             result_shape = {m, n};
-        } else if (shape_.rank() == 3 && other.shape_.rank() == 3) {
+        } else if (a.shape_.rank() == 3 && b.shape_.rank() == 3) {
             // Batch matrix multiplication
-            if (shape_[0] != other.shape_[0]) {
+            if (a.shape_[0] != b.shape_[0]) {
                 LOG_ERROR("Batch dimensions must match for matmul");
                 return Tensor();
             }
-            return bmm(other);
-        } else if (shape_.rank() == 2 && other.shape_.rank() == 3) {
+            return a.bmm(b);
+        } else if (a.shape_.rank() == 2 && b.shape_.rank() == 3) {
             // 2D @ 3D: broadcast 2D to match batch dimension
             // (M, K) @ (B, K, N) -> (B, M, N)
-            if (shape_[1] != other.shape_[1]) {
+            if (a.shape_[1] != b.shape_[1]) {
                 LOG_ERROR("Dimension mismatch for 2D @ 3D matmul: {}x{} @ {}x{}x{}",
-                          shape_[0], shape_[1], other.shape_[0], other.shape_[1], other.shape_[2]);
+                          a.shape_[0], a.shape_[1], b.shape_[0], b.shape_[1], b.shape_[2]);
                 return Tensor();
             }
 
-            size_t batch_size = other.shape_[0];
-            size_t M = shape_[0];
-            size_t K = shape_[1];
-            size_t N = other.shape_[2];
+            size_t batch_size = b.shape_[0];
+            size_t M = a.shape_[0];
+            size_t K = a.shape_[1];
+            size_t N = b.shape_[2];
 
             // Expand 2D tensor to 3D by adding batch dimension
-            auto expanded_a = unsqueeze(0).expand({static_cast<int>(batch_size),
+            auto expanded_a = a.unsqueeze(0).expand({static_cast<int>(batch_size),
                                                    static_cast<int>(M),
                                                    static_cast<int>(K)});
-            return expanded_a.bmm(other);
+            return expanded_a.bmm(b);
 
-        } else if (shape_.rank() == 3 && other.shape_.rank() == 2) {
+        } else if (a.shape_.rank() == 3 && b.shape_.rank() == 2) {
             // 3D @ 2D: broadcast 2D to match batch dimension
             // (B, M, K) @ (K, N) -> (B, M, N)
-            if (shape_[2] != other.shape_[0]) {
+            if (a.shape_[2] != b.shape_[0]) {
                 LOG_ERROR("Dimension mismatch for 3D @ 2D matmul: {}x{}x{} @ {}x{}",
-                          shape_[0], shape_[1], shape_[2], other.shape_[0], other.shape_[1]);
+                          a.shape_[0], a.shape_[1], a.shape_[2], b.shape_[0], b.shape_[1]);
                 return Tensor();
             }
 
-            size_t batch_size = shape_[0];
-            size_t M = shape_[1];
-            size_t K = shape_[2];
-            size_t N = other.shape_[1];
+            size_t batch_size = a.shape_[0];
+            size_t M = a.shape_[1];
+            size_t K = a.shape_[2];
+            size_t N = b.shape_[1];
 
             // Expand 2D tensor to 3D by adding batch dimension
-            auto expanded_b = other.unsqueeze(0).expand({static_cast<int>(batch_size),
+            auto expanded_b = b.unsqueeze(0).expand({static_cast<int>(batch_size),
                                                          static_cast<int>(K),
                                                          static_cast<int>(N)});
-            return bmm(expanded_b);
+            return a.bmm(expanded_b);
 
         } else {
-            LOG_ERROR("MatMul not implemented for {}D @ {}D", shape_.rank(), other.shape_.rank());
+            LOG_ERROR("MatMul not implemented for {}D @ {}D", a.shape_.rank(), b.shape_.rank());
             return Tensor();
         }
 
@@ -333,16 +345,16 @@ namespace gs {
             // Create temporary reshaped views for matrix multiplication
             Tensor a_2d, b_2d;
 
-            if (shape_.rank() == 1) {
-                a_2d = view({1, static_cast<int>(shape_[0])});
+            if (a.shape_.rank() == 1) {
+                a_2d = a.view({1, static_cast<int>(a.shape_[0])});
             } else {
-                a_2d = view(shape_);
+                a_2d = a.view(a.shape_);
             }
 
-            if (other.shape_.rank() == 1) {
-                b_2d = other.view({static_cast<int>(other.shape_[0]), 1});
+            if (b.shape_.rank() == 1) {
+                b_2d = b.view({static_cast<int>(b.shape_[0]), 1});
             } else {
-                b_2d = other.view(other.shape_);
+                b_2d = b.view(b.shape_);
             }
 
             // cuBLAS uses column-major, we have row-major
@@ -351,17 +363,17 @@ namespace gs {
                 CUBLAS_OP_N, CUBLAS_OP_N,
                 n, m, k,
                 &alpha,
-                b_2d.ptr<float>(), (other.shape_.rank() == 1) ? 1 : n,
+                b_2d.ptr<float>(), (b.shape_.rank() == 1) ? 1 : n,
                 a_2d.ptr<float>(), k,
                 &beta,
-                result.ptr<float>(), (result_shape.size() == 1 && shape_.rank() == 2) ? 1 : n));
+                result.ptr<float>(), (result_shape.size() == 1 && a.shape_.rank() == 2) ? 1 : n));
         } else {
             // CPU implementation
-            const float* a_data = ptr<float>();
-            const float* b_data = other.ptr<float>();
+            const float* a_data = a.ptr<float>();
+            const float* b_data = b.ptr<float>();
             float* c_data = result.ptr<float>();
 
-            if (shape_.rank() == 1 && other.shape_.rank() == 2) {
+            if (a.shape_.rank() == 1 && b.shape_.rank() == 2) {
                 // Vector-matrix: [k] @ [k, n] -> [n]
                 for (size_t j = 0; j < n; ++j) {
                     float sum = 0.0f;
@@ -370,7 +382,7 @@ namespace gs {
                     }
                     c_data[j] = sum;
                 }
-            } else if (shape_.rank() == 2 && other.shape_.rank() == 1) {
+            } else if (a.shape_.rank() == 2 && b.shape_.rank() == 1) {
                 // Matrix-vector: [m, k] @ [k] -> [m]
                 for (size_t i = 0; i < m; ++i) {
                     float sum = 0.0f;
@@ -417,6 +429,10 @@ namespace gs {
             return Tensor();
         }
 
+        // Ensure contiguous for cuBLAS/CPU operations
+        const Tensor& a = is_contiguous() ? *this : contiguous();
+        const Tensor& b = other.is_contiguous() ? other : other.contiguous();
+
         // Create result with shape {1} first
         auto result = empty({1}, device_, dtype_);
 
@@ -425,16 +441,16 @@ namespace gs {
 
             CHECK_CUBLAS(cublasSdot(
                 handle,
-                shape_[0],
-                ptr<float>(), 1,
-                other.ptr<float>(), 1,
+                a.shape_[0],
+                a.ptr<float>(), 1,
+                b.ptr<float>(), 1,
                 result.ptr<float>()));
         } else {
-            const float* a_data = ptr<float>();
-            const float* b_data = other.ptr<float>();
+            const float* a_data = a.ptr<float>();
+            const float* b_data = b.ptr<float>();
             float sum = 0.0f;
 
-            for (size_t i = 0; i < shape_[0]; ++i) {
+            for (size_t i = 0; i < a.shape_[0]; ++i) {
                 sum += a_data[i] * b_data[i];
             }
 

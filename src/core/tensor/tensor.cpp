@@ -26,12 +26,31 @@ namespace gs {
 
     std::atomic<size_t> Tensor::next_id_{1};
 
+    // ============= Helper Functions =============
+
+    // Check if strides represent contiguous memory layout (row-major)
+    static bool check_contiguous(const TensorShape& shape, const std::vector<size_t>& strides) {
+        if (strides.empty()) return true;
+        if (strides.size() != shape.rank()) return false;
+
+        // Check if strides match row-major contiguous layout
+        size_t expected_stride = 1;
+        for (int i = static_cast<int>(shape.rank()) - 1; i >= 0; --i) {
+            if (strides[i] != expected_stride) return false;
+            expected_stride *= shape[i];
+        }
+        return true;
+    }
+
     // ============= Constructors & Destructor =============
 
     Tensor::Tensor(void* data, TensorShape shape, Device device, DataType dtype)
         : data_(data),
           data_owner_(nullptr),  // Non-owning
           shape_(shape),
+          strides_(shape.strides()),  // Initialize to contiguous strides
+          storage_offset_(0),
+          is_contiguous_(true),
           device_(device),
           dtype_(dtype),
           is_view_(true),  // This is a view
@@ -48,6 +67,9 @@ namespace gs {
         : data_(other.data_),                    // Share the pointer
           data_owner_(other.data_owner_),        // Share ownership via shared_ptr!
           shape_(other.shape_),
+          strides_(other.strides_),              // Copy stride information
+          storage_offset_(other.storage_offset_),
+          is_contiguous_(other.is_contiguous_),
           device_(other.device_),
           dtype_(other.dtype_),
           is_view_(other.is_view_),
@@ -70,6 +92,9 @@ namespace gs {
         data_ = other.data_;
         data_owner_ = other.data_owner_;  // shared_ptr handles refcounting automatically
         shape_ = other.shape_;
+        strides_ = other.strides_;        // Copy stride information
+        storage_offset_ = other.storage_offset_;
+        is_contiguous_ = other.is_contiguous_;
         device_ = other.device_;
         dtype_ = other.dtype_;
         is_view_ = other.is_view_;
@@ -89,6 +114,9 @@ namespace gs {
         : data_(std::exchange(other.data_, nullptr)),
           data_owner_(std::move(other.data_owner_)),
           shape_(std::move(other.shape_)),
+          strides_(std::move(other.strides_)),
+          storage_offset_(std::exchange(other.storage_offset_, 0)),
+          is_contiguous_(std::exchange(other.is_contiguous_, true)),
           device_(other.device_),
           dtype_(other.dtype_),
           is_view_(std::exchange(other.is_view_, false)),
@@ -105,6 +133,9 @@ namespace gs {
             data_ = std::exchange(other.data_, nullptr);
             data_owner_ = std::move(other.data_owner_);
             shape_ = std::move(other.shape_);
+            strides_ = std::move(other.strides_);
+            storage_offset_ = std::exchange(other.storage_offset_, 0);
+            is_contiguous_ = std::exchange(other.is_contiguous_, true);
             device_ = other.device_;
             dtype_ = other.dtype_;
             is_view_ = std::exchange(other.is_view_, false);
@@ -138,20 +169,26 @@ namespace gs {
             return empty(shape_, device_, dtype_);
         }
 
+        // If not contiguous, materialize first then clone
+        if (!is_contiguous_) {
+            return contiguous();
+        }
+
         // Create new tensor with same properties
         auto result = empty(shape_, device_, dtype_);
 
-        // Copy data
+        // Copy data (accounting for storage offset)
         size_t bytes = this->bytes();
+        const char* src = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
 
         if (device_ == Device::CUDA) {
-            cudaError_t err = cudaMemcpy(result.data_, data_, bytes, cudaMemcpyDeviceToDevice);
+            cudaError_t err = cudaMemcpy(result.data_, src, bytes, cudaMemcpyDeviceToDevice);
             if (err != cudaSuccess) {
                 LOG_ERROR("CUDA memcpy failed in clone(): {}", cudaGetErrorString(err));
                 return Tensor();
             }
         } else {
-            std::memcpy(result.data_, data_, bytes);
+            std::memcpy(result.data_, src, bytes);
         }
 
         if (profiling_enabled_) {
@@ -162,14 +199,82 @@ namespace gs {
         return result;
     }
 
-    // ============= Contiguous (only copies if view) =============
+    // ============= Contiguous (materializes non-contiguous tensors) =============
     Tensor Tensor::contiguous() const {
-        if (!is_view_) {
-            // Already contiguous and not a view - return shallow copy
+        if (!is_valid()) {
+            LOG_ERROR("Cannot make invalid tensor contiguous");
+            return Tensor();
+        }
+
+        // Already contiguous? Just return shallow copy
+        if (is_contiguous_) {
             return *this;
         }
-        // Is a view - need to make a contiguous deep copy
-        return clone();
+
+        // Need to materialize strided view into contiguous layout
+        auto result = empty(shape_, device_, dtype_);
+
+        if (numel() == 0) {
+            return result;
+        }
+
+        if (device_ == Device::CUDA) {
+            // Launch strided copy kernel for CUDA tensors
+            const char* src_base = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
+
+            // Allocate device memory for shape and strides
+            size_t* d_shape;
+            size_t* d_strides;
+            cudaMalloc(&d_shape, shape_.rank() * sizeof(size_t));
+            cudaMalloc(&d_strides, shape_.rank() * sizeof(size_t));
+
+            cudaMemcpy(d_shape, shape_.dims().data(), shape_.rank() * sizeof(size_t), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_strides, strides_.data(), shape_.rank() * sizeof(size_t), cudaMemcpyHostToDevice);
+
+            tensor_ops::launch_strided_copy(
+                src_base,
+                result.data_,
+                d_shape,
+                d_strides,
+                shape_.rank(),
+                numel(),
+                dtype_,
+                nullptr
+            );
+
+            cudaDeviceSynchronize();
+            cudaFree(d_shape);
+            cudaFree(d_strides);
+        } else {
+            // CPU strided copy
+            const char* src_base = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
+            char* dst = static_cast<char*>(result.data_);
+
+            size_t elem_size = dtype_size(dtype_);
+            std::vector<size_t> indices(shape_.rank(), 0);
+
+            for (size_t i = 0; i < numel(); ++i) {
+                // Calculate source offset using strides
+                size_t src_offset = 0;
+                for (size_t d = 0; d < shape_.rank(); ++d) {
+                    src_offset += indices[d] * strides_[d];
+                }
+
+                // Copy element
+                std::memcpy(dst + i * elem_size, src_base + src_offset * elem_size, elem_size);
+
+                // Increment indices (row-major)
+                for (int d = static_cast<int>(shape_.rank()) - 1; d >= 0; --d) {
+                    indices[d]++;
+                    if (indices[d] < shape_[d]) {
+                        break;
+                    }
+                    indices[d] = 0;
+                }
+            }
+        }
+
+        return result;
     }
 
     // ============= Device Transfer =============
@@ -183,15 +288,26 @@ namespace gs {
             return clone();
         }
 
+        // If not contiguous, materialize first
+        if (!is_contiguous_) {
+            return contiguous().to(device);
+        }
+
         auto t = empty(shape_, device, dtype_);
         if (numel() == 0) {
             return t;
         }
 
+        // Account for storage offset
+        const char* src = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
+
+        LOG_DEBUG("to(Device): storage_offset_={}, dtype_size={}, src_offset_bytes={}, bytes_to_copy={}",
+                  storage_offset_, dtype_size(dtype_), storage_offset_ * dtype_size(dtype_), bytes());
+
         if (device_ == Device::CPU && device == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(t.data_, data_, bytes(), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(t.data_, src, bytes(), cudaMemcpyHostToDevice));
         } else if (device_ == Device::CUDA && device == Device::CPU) {
-            CHECK_CUDA(cudaMemcpy(t.data_, data_, bytes(), cudaMemcpyDeviceToHost));
+            CHECK_CUDA(cudaMemcpy(t.data_, src, bytes(), cudaMemcpyDeviceToHost));
         }
 
         return t;
@@ -206,6 +322,11 @@ namespace gs {
 
     if (dtype_ == dtype) {
         return clone();
+    }
+
+    // If not contiguous, materialize first
+    if (!is_contiguous_) {
+        return contiguous().to(dtype);
     }
 
     // Macro for type conversions using launch_convert_type
@@ -324,10 +445,13 @@ namespace gs {
             return *this;
         }
 
+        // Account for storage offset
+        char* dest = static_cast<char*>(data_) + storage_offset_ * dtype_size(dtype_);
+
         if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemset(data_, 0, bytes()));
+            CHECK_CUDA(cudaMemset(dest, 0, bytes()));
         } else {
-            std::memset(data_, 0, bytes());
+            std::memset(dest, 0, bytes());
         }
 
         return *this;
@@ -338,11 +462,14 @@ namespace gs {
             return *this;
         }
 
+        // Account for storage offset
+        void* dest = static_cast<char*>(data_) + storage_offset_ * dtype_size(dtype_);
+
         if (device_ == Device::CUDA) {
             std::vector<float> temp(numel(), value);
-            CHECK_CUDA(cudaMemcpy(data_, temp.data(), bytes(), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(dest, temp.data(), bytes(), cudaMemcpyHostToDevice));
         } else {
-            float* data = ptr<float>();
+            float* data = static_cast<float*>(dest);
             std::fill(data, data + numel(), value);
         }
 
@@ -748,10 +875,13 @@ namespace gs {
         }
 
         float value = 0.0f;
+        // Account for storage offset (important for sliced tensors)
+        const char* data_ptr = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
+
         if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(&value, data_, sizeof(float), cudaMemcpyDeviceToHost));
+            CHECK_CUDA(cudaMemcpy(&value, data_ptr, sizeof(float), cudaMemcpyDeviceToHost));
         } else {
-            value = *static_cast<const float*>(data_);
+            value = *static_cast<const float*>(static_cast<const void*>(data_ptr));
         }
 
         return value;
@@ -790,6 +920,11 @@ namespace gs {
             return {};
         }
 
+        // If tensor is not contiguous, materialize it first
+        if (!is_contiguous_) {
+            return contiguous().to_vector();
+        }
+
         // Handle Bool dtype by converting to float
         if (dtype_ == DataType::Bool) {
             auto float_tensor = to(DataType::Float32);
@@ -822,10 +957,13 @@ namespace gs {
 
         std::vector<float> result(numel());
 
+        // Account for storage offset
+        const char* src = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
+
         if (device_ == Device::CUDA) {
-            CHECK_CUDA(cudaMemcpy(result.data(), data_, bytes(), cudaMemcpyDeviceToHost));
+            CHECK_CUDA(cudaMemcpy(result.data(), src, bytes(), cudaMemcpyDeviceToHost));
         } else {
-            std::memcpy(result.data(), data_, bytes());
+            std::memcpy(result.data(), src, bytes());
         }
 
         return result;

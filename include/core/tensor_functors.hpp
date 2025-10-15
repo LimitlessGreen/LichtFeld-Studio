@@ -1096,6 +1096,119 @@ namespace ops {
         }
     };
 
+    // ============= FUNCTOR COMPOSITION (for kernel fusion) =============
+
+    // Compose two unary functors: g(f(x))
+    template<typename F, typename G>
+    struct composed_unary_op {
+        F f;  // First operation
+        G g;  // Second operation
+
+        HOST_DEVICE constexpr composed_unary_op() : f(), g() {}
+        HOST_DEVICE constexpr composed_unary_op(F f_, G g_) : f(f_), g(g_) {}
+
+        template<typename T>
+        HOST_DEVICE constexpr auto operator()(const T& x) const {
+            return g(f(x));  // Apply f, then g
+        }
+    };
+
+    // Helper to create composed operations
+    template<typename F, typename G>
+    HOST_DEVICE constexpr auto compose(F f, G g) {
+        return composed_unary_op<F, G>{f, g};
+    }
+
+    // Compose three unary functors: h(g(f(x)))
+    template<typename F, typename G, typename H>
+    struct composed_unary_op_3 {
+        F f;
+        G g;
+        H h;
+
+        HOST_DEVICE constexpr composed_unary_op_3() : f(), g(), h() {}
+        HOST_DEVICE constexpr composed_unary_op_3(F f_, G g_, H h_) : f(f_), g(g_), h(h_) {}
+
+        template<typename T>
+        HOST_DEVICE constexpr auto operator()(const T& x) const {
+            return h(g(f(x)));
+        }
+    };
+
+    // Helper to create 3-way compositions
+    template<typename F, typename G, typename H>
+    HOST_DEVICE constexpr auto compose(F f, G g, H h) {
+        return composed_unary_op_3<F, G, H>{f, g, h};
+    }
+
+    // Compose four unary functors: k(h(g(f(x))))
+    template<typename F, typename G, typename H, typename K>
+    struct composed_unary_op_4 {
+        F f;
+        G g;
+        H h;
+        K k;
+
+        HOST_DEVICE constexpr composed_unary_op_4() : f(), g(), h(), k() {}
+        HOST_DEVICE constexpr composed_unary_op_4(F f_, G g_, H h_, K k_) : f(f_), g(g_), h(h_), k(k_) {}
+
+        template<typename T>
+        HOST_DEVICE constexpr auto operator()(const T& x) const {
+            return k(h(g(f(x))));
+        }
+    };
+
+    // Helper to create 4-way compositions
+    template<typename F, typename G, typename H, typename K>
+    HOST_DEVICE constexpr auto compose(F f, G g, H h, K k) {
+        return composed_unary_op_4<F, G, H, K>{f, g, h, k};
+    }
+
+    // ============= TYPE TRAITS FOR BOOL-RETURNING OPERATIONS =============
+
+    // Default: operations return the same type as input
+    template<typename Op>
+    struct returns_bool : std::false_type {};
+
+    // Specialize for Bool-returning unary operations
+    template<> struct returns_bool<isnan_op> : std::true_type {};
+    template<> struct returns_bool<isinf_op> : std::true_type {};
+    template<> struct returns_bool<isfinite_op> : std::true_type {};
+    template<> struct returns_bool<logical_not_op> : std::true_type {};
+
+    // Specialize for Bool-returning comparison operations (binary)
+    template<> struct returns_bool<equal_op> : std::true_type {};
+    template<> struct returns_bool<not_equal_op> : std::true_type {};
+    template<> struct returns_bool<less_op> : std::true_type {};
+    template<> struct returns_bool<less_equal_op> : std::true_type {};
+    template<> struct returns_bool<greater_op> : std::true_type {};
+    template<> struct returns_bool<greater_equal_op> : std::true_type {};
+
+    // Specialize for Bool-returning logical operations (binary)
+    template<> struct returns_bool<logical_and_op> : std::true_type {};
+    template<> struct returns_bool<logical_or_op> : std::true_type {};
+    template<> struct returns_bool<logical_xor_op> : std::true_type {};
+    template<> struct returns_bool<bitwise_or_op> : std::true_type {};
+
+    // Specialize for scalar comparison operations
+    template<typename T> struct returns_bool<equal_scalar_op<T>> : std::true_type {};
+    template<typename T> struct returns_bool<not_equal_scalar_op<T>> : std::true_type {};
+    template<typename T> struct returns_bool<less_scalar_op<T>> : std::true_type {};
+    template<typename T> struct returns_bool<less_equal_scalar_op<T>> : std::true_type {};
+    template<typename T> struct returns_bool<greater_scalar_op<T>> : std::true_type {};
+    template<typename T> struct returns_bool<greater_equal_scalar_op<T>> : std::true_type {};
+
+    // Specialize for scalar_right_op wrapping Bool-returning operations
+    template<typename BinOp, typename T>
+    struct returns_bool<scalar_right_op<BinOp, T>> : returns_bool<BinOp> {};
+
+    template<typename BinOp, typename T>
+    struct returns_bool<scalar_left_op<BinOp, T>> : returns_bool<BinOp> {};
+
+    // Helper variable template (C++17)
+    template<typename Op>
+    inline constexpr bool returns_bool_v = returns_bool<Op>::value;
+
 } // namespace ops
 } // namespace gs
 

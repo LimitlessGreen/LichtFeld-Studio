@@ -17,9 +17,14 @@ namespace gs {
     enum class LoadOp : uint8_t;
 }
 
+// ============= Generic CUDA Operations =============
+// Include template implementation for inline instantiation
+// Only include in CUDA compilation units - C++ files will link to .cu implementations
+#ifdef __CUDACC__
+#include "core/tensor_generic_ops.cuh"
+#else
+// Forward declaration for C++ files - implementation in tensor_ops.cu
 namespace gs::tensor_ops {
-
-    // ============= Generic CUDA Operations =============
     template<typename InT, typename OutT, typename Op>
     void launch_binary_op_generic(const InT* a, const InT* b, OutT* c, size_t n,
                                   Op op, cudaStream_t stream = nullptr);
@@ -31,8 +36,8 @@ namespace gs::tensor_ops {
     template<typename T, typename OutputT, typename Op>
     void launch_scalar_op_generic(const T* data, T scalar, OutputT* result, size_t n,
                                   Op op, cudaStream_t stream = nullptr);
-
 } // namespace gs::tensor_ops
+#endif
 
 // ============= CPU Helpers (Generic, Header-Only) =============
 namespace gs {
@@ -105,12 +110,24 @@ namespace gs::tensor_ops {
     struct logical_or_op { __device__ unsigned char operator()(unsigned char a, unsigned char b) const { return (a || b) ? 1 : 0; } };
     struct logical_xor_op { __device__ unsigned char operator()(unsigned char a, unsigned char b) const { return (a != b) ? 1 : 0; } };
 
-    // Single unified template for all broadcast binary operations
+} // namespace gs::tensor_ops
+
+// Include template implementation for inline instantiation
+// Only include in CUDA compilation units - C++ files will link to .cu implementations
+#ifdef __CUDACC__
+#include "core/tensor_broadcast_ops.cuh"
+#else
+// Forward declaration for C++ files - implementation in tensor_broadcast_ops.cu
+namespace gs::tensor_ops {
     template<typename T, typename OutputT, typename BinaryOp>
     void launch_broadcast_binary(const T* a, const T* b, OutputT* c,
-                                const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
-                                size_t a_rank, size_t b_rank, size_t c_rank,
-                                size_t c_elements, BinaryOp op, cudaStream_t stream = 0);
+                                 const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
+                                 size_t a_rank, size_t b_rank, size_t c_rank,
+                                 size_t c_elements, BinaryOp op, cudaStream_t stream);
+}
+#endif
+
+namespace gs::tensor_ops {
 
     // ============= Matrix Operations =============
     void launch_matmul(const float* a, const float* b, float* c,
@@ -186,6 +203,28 @@ namespace gs::tensor_ops {
     void launch_take(const float* input, const int* indices, float* output,
                      size_t input_size, size_t index_size, cudaStream_t stream);
 
+    // Fused gather + unary operation using thrust::permutation_iterator for zero-copy
+    template<typename UnaryOp>
+    void launch_gather_fused_unary(const float* input, const int* indices, float* output,
+                                    size_t input_size, size_t index_size,
+                                    UnaryOp op, cudaStream_t stream = nullptr);
+
+    // Multi-tensor gather using zip_iterator - gather from multiple tensors with same indices
+    // Perfect for: gather positions AND colors, or gather multiple Gaussian properties
+    void launch_zip_gather_2(const float* input1, const float* input2,
+                             const int* indices,
+                             float* output1, float* output2,
+                             size_t input_size, size_t index_size,
+                             size_t stride1, size_t stride2,
+                             cudaStream_t stream = nullptr);
+
+    void launch_zip_gather_3(const float* input1, const float* input2, const float* input3,
+                             const int* indices,
+                             float* output1, float* output2, float* output3,
+                             size_t input_size, size_t index_size,
+                             size_t stride1, size_t stride2, size_t stride3,
+                             cudaStream_t stream = nullptr);
+
     void launch_scatter(float* output, const int* indices, const float* src,
                         const size_t* output_shape, const size_t* index_shape,
                         size_t rank, int dim, size_t total_elements,
@@ -234,5 +273,17 @@ namespace gs::tensor_ops {
 
     void launch_cat_middle_dim(void* output, const std::vector<Tensor>& tensors, size_t outer_size, size_t inner_size,
         int resolved_dim, size_t element_size, cudaStream_t stream);
+
+    // ============= Strided Tensor Operations =============
+    void launch_strided_copy(
+        const void* input,
+        void* output,
+        const size_t* shape,
+        const size_t* strides,
+        size_t rank,
+        size_t total_elements,
+        DataType dtype,
+        cudaStream_t stream = nullptr
+    );
 
 } // namespace gs::tensor_ops
