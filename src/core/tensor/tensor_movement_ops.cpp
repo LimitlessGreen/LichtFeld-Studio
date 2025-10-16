@@ -43,6 +43,20 @@ namespace gs {
         return result;
     }
 
+    // ============= Helper: Check contiguity =============
+    static bool check_contiguous(const TensorShape& shape, const std::vector<size_t>& strides) {
+        if (strides.empty()) return true;
+        if (strides.size() != shape.rank()) return false;
+
+        // Check if strides match row-major contiguous layout
+        size_t expected_stride = 1;
+        for (int i = static_cast<int>(shape.rank()) - 1; i >= 0; --i) {
+            if (strides[i] != expected_stride) return false;
+            expected_stride *= shape[i];
+        }
+        return true;
+    }
+
     // ============= Unified Movement Operation =============
     Tensor Tensor::movement(MovementOp op, const MovementArgs& args) const {
         if (!is_valid())
@@ -102,11 +116,31 @@ namespace gs {
                     return {};
                 }
 
-                std::vector<int> perm(shape_.rank());
-                std::iota(perm.begin(), perm.end(), 0);
-                std::swap(perm[dim1], perm[dim2]);
+                // ZERO-COPY TRANSPOSE: Just swap stride metadata!
+                Tensor view;
+                view.data_ = data_;
+                view.data_owner_ = data_owner_;  // Share ownership
+                view.device_ = device_;
+                view.dtype_ = dtype_;
+                view.is_view_ = true;
+                view.id_ = next_id_++;
 
-                return permute(perm);
+                // Create new shape with swapped dimensions
+                std::vector<size_t> new_dims = shape_.dims();
+                std::swap(new_dims[dim1], new_dims[dim2]);
+                view.shape_ = TensorShape(new_dims);
+
+                // Swap strides (metadata-only operation!)
+                view.strides_ = strides_;
+                std::swap(view.strides_[dim1], view.strides_[dim2]);
+
+                // Copy storage offset
+                view.storage_offset_ = storage_offset_;
+
+                // After transpose, usually non-contiguous
+                view.is_contiguous_ = check_contiguous(view.shape_, view.strides_);
+
+                return view;
             }
             if (shape_.rank() < 2)
                 return clone();

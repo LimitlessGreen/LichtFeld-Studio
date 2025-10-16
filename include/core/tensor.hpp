@@ -24,6 +24,9 @@
 #include <variant>
 #include <vector>
 
+#include "core/tensor_functors.hpp"
+#include "core/tensor_ops.hpp"
+
 namespace gs {
 
     // Forward declarations
@@ -75,47 +78,6 @@ namespace gs {
         return device == Device::CPU ? "cpu" : "cuda";
     }
 
-    inline DataType promote_types(DataType a, DataType b) {
-        if (a == b)
-            return a;
-
-        if (a == DataType::Bool) {
-            if (b == DataType::Float32 || b == DataType::Float16)
-                return b;
-            if (b == DataType::Int32 || b == DataType::Int64)
-                return b;
-            return DataType::Float32;
-        }
-        if (b == DataType::Bool) {
-            if (a == DataType::Float32 || a == DataType::Float16)
-                return a;
-            if (a == DataType::Int32 || a == DataType::Int64)
-                return a;
-            return DataType::Float32;
-        }
-
-        if ((a == DataType::Int32 || a == DataType::Int64) &&
-            (b == DataType::Float32 || b == DataType::Float16)) {
-            return (b == DataType::Float16) ? DataType::Float16 : DataType::Float32;
-        }
-        if ((b == DataType::Int32 || b == DataType::Int64) &&
-            (a == DataType::Float32 || a == DataType::Float16)) {
-            return (a == DataType::Float16) ? DataType::Float16 : DataType::Float32;
-        }
-
-        if ((a == DataType::Int32 && b == DataType::Int64) ||
-            (a == DataType::Int64 && b == DataType::Int32)) {
-            return DataType::Int64;
-        }
-
-        if ((a == DataType::Float16 && b == DataType::Float32) ||
-            (a == DataType::Float32 && b == DataType::Float16)) {
-            return DataType::Float32;
-        }
-
-        return DataType::Float32;
-    }
-
     enum class BoundaryMode : uint8_t {
         Assert = 0,
         Clamp = 1,
@@ -128,70 +90,6 @@ namespace gs {
         Multiply = 2,
         Max = 3,
         Min = 4
-    };
-
-    enum class BinaryOp : uint8_t {
-        Add = 0,
-        Sub = 1,
-        Mul = 2,
-        Div = 3,
-        Pow = 4,
-        Mod = 5,
-        Equal = 6,
-        NotEqual = 7,
-        Less = 8,
-        LessEqual = 9,
-        Greater = 10,
-        GreaterEqual = 11,
-        LogicalAnd = 12,
-        LogicalOr = 13,
-        LogicalXor = 14,
-        Maximum = 15,
-        Minimum = 16,
-        BitwiseAnd = 17,
-        BitwiseOr = 18,
-        BitwiseXor = 19,
-        LeftShift = 20,
-        RightShift = 21
-    };
-
-    enum class UnaryOp : uint8_t {
-        Neg = 0,
-        Abs = 1,
-        Sign = 2,
-        Reciprocal = 3,
-        Exp = 4,
-        Exp2 = 5,
-        Log = 6,
-        Log2 = 7,
-        Log10 = 8,
-        Log1p = 9,
-        Sqrt = 10,
-        Rsqrt = 11,
-        Square = 12,
-        Sin = 13,
-        Cos = 14,
-        Tan = 15,
-        Asin = 16,
-        Acos = 17,
-        Atan = 18,
-        Sinh = 19,
-        Cosh = 20,
-        Tanh = 21,
-        Sigmoid = 22,
-        Relu = 23,
-        Gelu = 24,
-        Swish = 25,
-        Floor = 26,
-        Ceil = 27,
-        Round = 28,
-        Trunc = 29,
-        IsNan = 30,
-        IsInf = 31,
-        IsFinite = 32,
-        LogicalNot = 33,
-        Normalize = 34,
-        Logit = 35
     };
 
     enum class ReduceOp : uint8_t {
@@ -208,12 +106,6 @@ namespace gs {
         Argmin = 10,
         CountNonzero = 11,
         Norm = 12
-    };
-
-    enum class TernaryOp : uint8_t {
-        Where = 0,
-        MulAdd = 1,
-        Clamp = 2
     };
 
     enum class MovementOp : uint8_t {
@@ -245,105 +137,6 @@ namespace gs {
         Bernoulli = 9,
         Multinomial = 10
     };
-
-    // ============= Compile-Time Operation Tables =============
-    namespace op_tables {
-        template<typename T>
-        using UnaryFunc = T(*)(T);
-
-        template<typename T>
-        using BinaryFunc = T(*)(T, T);
-
-        template<typename T>
-        using CompareFunc = bool(*)(T, T);
-
-        template<typename T>
-        consteval auto make_unary_ops() {
-            std::array<UnaryFunc<T>, 36> ops{};
-
-            ops[int(UnaryOp::Neg)] = [](T x) { return -x; };
-            ops[int(UnaryOp::Abs)] = [](T x) { return std::abs(x); };
-            ops[int(UnaryOp::Sign)] = [](T x) { return T((x > T(0)) - (x < T(0))); };
-            ops[int(UnaryOp::Reciprocal)] = [](T x) { return T(1) / x; };
-            ops[int(UnaryOp::Exp)] = [](T x) { return std::exp(x); };
-            ops[int(UnaryOp::Exp2)] = [](T x) { return std::exp2(x); };
-            ops[int(UnaryOp::Log)] = [](T x) { return std::log(std::max(x, T(1e-45))); };
-            ops[int(UnaryOp::Log2)] = [](T x) { return std::log2(std::max(x, T(1e-45))); };
-            ops[int(UnaryOp::Log10)] = [](T x) { return std::log10(std::max(x, T(1e-45))); };
-            ops[int(UnaryOp::Log1p)] = [](T x) { return std::log1p(x); };
-            ops[int(UnaryOp::Sqrt)] = [](T x) { return std::sqrt(std::max(x, T(0))); };
-            ops[int(UnaryOp::Rsqrt)] = [](T x) { return T(1) / std::sqrt(std::max(x, T(1e-45))); };
-            ops[int(UnaryOp::Square)] = [](T x) { return x * x; };
-            ops[int(UnaryOp::Sin)] = [](T x) { return std::sin(x); };
-            ops[int(UnaryOp::Cos)] = [](T x) { return std::cos(x); };
-            ops[int(UnaryOp::Tan)] = [](T x) { return std::tan(x); };
-            ops[int(UnaryOp::Asin)] = [](T x) { return std::asin(x); };
-            ops[int(UnaryOp::Acos)] = [](T x) { return std::acos(x); };
-            ops[int(UnaryOp::Atan)] = [](T x) { return std::atan(x); };
-            ops[int(UnaryOp::Sinh)] = [](T x) { return std::sinh(x); };
-            ops[int(UnaryOp::Cosh)] = [](T x) { return std::cosh(x); };
-            ops[int(UnaryOp::Tanh)] = [](T x) { return std::tanh(x); };
-            ops[int(UnaryOp::Sigmoid)] = [](T x) { return T(1) / (T(1) + std::exp(-x)); };
-            ops[int(UnaryOp::Relu)] = [](T x) { return std::max(x, T(0)); };
-            ops[int(UnaryOp::Floor)] = [](T x) { return std::floor(x); };
-            ops[int(UnaryOp::Ceil)] = [](T x) { return std::ceil(x); };
-            ops[int(UnaryOp::Round)] = [](T x) { return std::round(x); };
-            ops[int(UnaryOp::Trunc)] = [](T x) { return std::trunc(x); };
-
-            return ops;
-        }
-
-        template<typename T>
-        consteval auto make_binary_ops() {
-            std::array<BinaryFunc<T>, 22> ops{};
-
-            ops[int(BinaryOp::Add)] = [](T a, T b) { return a + b; };
-            ops[int(BinaryOp::Sub)] = [](T a, T b) { return a - b; };
-            ops[int(BinaryOp::Mul)] = [](T a, T b) { return a * b; };
-            ops[int(BinaryOp::Div)] = [](T a, T b) { return a / b; };
-            ops[int(BinaryOp::Pow)] = [](T a, T b) { return static_cast<T>(std::pow(a, b)); };
-            ops[int(BinaryOp::Maximum)] = [](T a, T b) { return std::max(a, b); };
-            ops[int(BinaryOp::Minimum)] = [](T a, T b) { return std::min(a, b); };
-
-            return ops;
-        }
-
-        template<typename T>
-        consteval auto make_compare_ops() {
-            std::array<CompareFunc<T>, 22> ops{};
-
-            ops[int(BinaryOp::Equal)] = [](T a, T b) { return a == b; };
-            ops[int(BinaryOp::NotEqual)] = [](T a, T b) { return a != b; };
-            ops[int(BinaryOp::Less)] = [](T a, T b) { return a < b; };
-            ops[int(BinaryOp::LessEqual)] = [](T a, T b) { return a <= b; };
-            ops[int(BinaryOp::Greater)] = [](T a, T b) { return a > b; };
-            ops[int(BinaryOp::GreaterEqual)] = [](T a, T b) { return a >= b; };
-
-            return ops;
-        }
-
-        template<typename T>
-        consteval auto make_logical_ops() {
-            std::array<CompareFunc<T>, 22> ops{};
-
-            ops[int(BinaryOp::LogicalAnd)] = [](T a, T b) { return (a != T(0)) && (b != T(0)); };
-            ops[int(BinaryOp::LogicalOr)] = [](T a, T b) { return (a != T(0)) || (b != T(0)); };
-            ops[int(BinaryOp::LogicalXor)] = [](T a, T b) { return (a != T(0)) != (b != T(0)); };
-            ops[int(BinaryOp::BitwiseOr)] = [](T a, T b) { return (a != T(0)) || (b != T(0)); };
-
-            return ops;
-        }
-
-        // Compile-time constants
-        inline constexpr auto float_unary_ops = make_unary_ops<float>();
-        inline constexpr auto float_binary_ops = make_binary_ops<float>();
-        inline constexpr auto float_compare_ops = make_compare_ops<float>();
-        inline constexpr auto float_logical_ops = make_logical_ops<float>();
-
-        inline constexpr auto int_binary_ops = make_binary_ops<int>();
-
-        inline constexpr auto bool_logical_ops = make_logical_ops<unsigned char>();
-    } // namespace op_tables
 
     class TensorShape {
     private:
@@ -430,14 +223,6 @@ namespace gs {
             args;
     };
 
-    struct UnaryArgs {
-        std::variant<
-            std::monostate,
-            float,
-            int>
-            args;
-    };
-
     struct ReduceArgs {
         std::vector<int> axes;
         bool keepdim = false;
@@ -468,11 +253,21 @@ namespace gs {
         RandomGenerator& operator=(const RandomGenerator&) = delete;
     };
 
+} // namespace gs
+
+// Include expression template declarations (forward declarations only)
+#include "core/tensor_expr.hpp"
+
+namespace gs {
+
     class Tensor {
     private:
         void* data_ = nullptr;
         std::shared_ptr<void> data_owner_;
         TensorShape shape_;
+        std::vector<size_t> strides_;       // Stride for each dimension (in elements)
+        size_t storage_offset_ = 0;         // Offset from data_ (in elements)
+        bool is_contiguous_ = true;         // True if memory layout is C-contiguous
         Device device_ = Device::CPU;
         DataType dtype_ = DataType::Float32;
         bool is_view_ = false;
@@ -481,10 +276,183 @@ namespace gs {
         static std::atomic<size_t> next_id_;
         static inline bool profiling_enabled_ = false;
 
-        Tensor binary_op_impl(const Tensor& other, BinaryOp op) const;
-        Tensor binary_op_scalar(float scalar, BinaryOp op) const;
-        Tensor& binary_op_inplace_impl(const Tensor& other, BinaryOp op);
-        Tensor& binary_op_inplace_scalar(float scalar, BinaryOp op);
+        // Generic functor-based binary operation (zero enum overhead)
+        template<typename SrcT, typename OutT, typename Op>
+        Tensor binary_op_generic(const Tensor& other, Op op) const {
+            if (!validate_binary_op(other, false, true)) {
+                return Tensor();
+            }
+
+            auto broadcast_shape = this->broadcast_shape(other.shape());
+            if (broadcast_shape.rank() == 0) {
+                LOG_ERROR("Incompatible shapes for broadcasting: {} vs {}",
+                          shape_.str(), other.shape_.str());
+                return Tensor();
+            }
+
+            // Determine output dtype from template parameter
+            DataType out_dtype;
+            if constexpr (std::is_same_v<OutT, unsigned char>) {
+                out_dtype = DataType::Bool;
+            } else if constexpr (std::is_same_v<OutT, float>) {
+                out_dtype = DataType::Float32;
+            } else if constexpr (std::is_same_v<OutT, int>) {
+                out_dtype = DataType::Int32;
+            } else {
+                out_dtype = DataType::Float32; // fallback
+            }
+
+            auto result = Tensor::empty(broadcast_shape, device_, out_dtype);
+
+            bool a_needs_broadcast = (shape_ != broadcast_shape);
+            bool b_needs_broadcast = (other.shape() != broadcast_shape);
+
+            if (!a_needs_broadcast && !b_needs_broadcast) {
+                // Element-wise operation without broadcasting
+                if (device_ == Device::CUDA) {
+                    tensor_ops::launch_binary_op_generic(
+                        ptr<SrcT>(), other.ptr<SrcT>(), result.ptr<OutT>(),
+                        result.numel(), op, nullptr);
+                    cudaDeviceSynchronize();
+                } else {
+                    apply_binary_cpu(ptr<SrcT>(), other.ptr<SrcT>(), result.ptr<OutT>(),
+                                    result.numel(), op);
+                }
+            } else {
+                // Broadcasting needed
+                auto a_shape = shape_.dims();
+                auto b_shape = other.shape().dims();
+                auto c_shape = broadcast_shape.dims();
+
+                if (device_ == Device::CUDA) {
+                    tensor_ops::launch_broadcast_binary(
+                        ptr<SrcT>(), other.ptr<SrcT>(), result.ptr<OutT>(),
+                        a_shape.data(), b_shape.data(), c_shape.data(),
+                        a_shape.size(), b_shape.size(), c_shape.size(),
+                        result.numel(), op, nullptr);
+                    cudaDeviceSynchronize();
+                } else {
+                    // CPU broadcasting: materialize broadcasts first
+                    auto a_broadcast = a_needs_broadcast ? broadcast_to(broadcast_shape) : clone();
+                    auto b_broadcast = b_needs_broadcast ? other.broadcast_to(broadcast_shape) : other.clone();
+                    apply_binary_cpu(a_broadcast.ptr<SrcT>(), b_broadcast.ptr<SrcT>(),
+                                    result.ptr<OutT>(), result.numel(), op);
+                }
+            }
+
+            return result;
+        }
+
+        // Generic functor-based scalar operation (zero enum overhead)
+        template<typename Op>
+        Tensor scalar_op_generic(float scalar, Op op, DataType out_dtype = DataType::Float32) const {
+            if (!validate_unary_op()) {
+                return Tensor();
+            }
+
+            auto result = Tensor::empty(shape_, device_, out_dtype);
+
+            if (device_ == Device::CUDA) {
+                // Handle different input tensor dtypes
+                if (dtype_ == DataType::Int32) {
+                    int scalar_int = static_cast<int>(scalar);
+                    if (out_dtype == DataType::Bool) {
+                        tensor_ops::launch_scalar_op_generic(
+                            ptr<int>(), scalar_int, result.ptr<unsigned char>(),
+                            numel(), op, nullptr);
+                    } else if (out_dtype == DataType::Int32) {
+                        tensor_ops::launch_scalar_op_generic(
+                            ptr<int>(), scalar_int, result.ptr<int>(),
+                            numel(), op, nullptr);
+                    }
+                } else { // Float32
+                    if (out_dtype == DataType::Bool) {
+                        tensor_ops::launch_scalar_op_generic(
+                            ptr<float>(), scalar, result.ptr<unsigned char>(),
+                            numel(), op, nullptr);
+                    } else {
+                        tensor_ops::launch_scalar_op_generic(
+                            ptr<float>(), scalar, result.ptr<float>(),
+                            numel(), op, nullptr);
+                    }
+                }
+                // No sync needed - operations are async
+            } else {
+                // CPU implementation
+                if (dtype_ == DataType::Int32) {
+                    const int* src = ptr<int>();
+                    int scalar_int = static_cast<int>(scalar);
+                    if (out_dtype == DataType::Bool) {
+                        unsigned char* dst = result.ptr<unsigned char>();
+                        for (size_t i = 0; i < numel(); ++i) {
+                            dst[i] = op(src[i], scalar_int);
+                        }
+                    } else {
+                        int* dst = result.ptr<int>();
+                        for (size_t i = 0; i < numel(); ++i) {
+                            dst[i] = op(src[i], scalar_int);
+                        }
+                    }
+                } else { // Float32
+                    const float* src = ptr<float>();
+                    if (out_dtype == DataType::Bool) {
+                        unsigned char* dst = result.ptr<unsigned char>();
+                        for (size_t i = 0; i < numel(); ++i) {
+                            dst[i] = op(src[i], scalar);
+                        }
+                    } else {
+                        float* dst = result.ptr<float>();
+                        apply_unary_cpu(src, dst, numel(), ops::scalar_right_op<Op, float>(scalar));
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        // Generic functor-based in-place scalar operation (zero enum overhead)
+        template<typename Op>
+        Tensor& scalar_op_inplace_generic(float scalar, Op op) {
+            if (!validate_unary_op()) {
+                return *this;
+            }
+
+            if (device_ == Device::CUDA) {
+                tensor_ops::launch_scalar_op_generic(
+                    ptr<float>(), scalar, ptr<float>(),
+                    numel(), op, nullptr);
+                cudaDeviceSynchronize();
+            } else {
+                // CPU implementation
+                float* dst = ptr<float>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = op(dst[i], scalar);
+                }
+            }
+
+            return *this;
+        }
+
+        // Generic functor-based in-place binary operation (zero enum overhead)
+        template<typename SrcT = float, typename Op>
+        Tensor& binary_op_inplace_generic(const Tensor& other, Op op) {
+            if (!validate_binary_op(other, true)) {
+                return *this;
+            }
+
+            if (device_ == Device::CUDA) {
+                tensor_ops::launch_binary_op_generic(
+                    ptr<SrcT>(), other.ptr<SrcT>(), ptr<SrcT>(),
+                    numel(), op, nullptr);
+                cudaDeviceSynchronize();
+            } else {
+                // CPU implementation
+                apply_binary_cpu(ptr<SrcT>(), other.ptr<SrcT>(), ptr<SrcT>(),
+                                numel(), op);
+            }
+
+            return *this;
+        }
 
         std::pair<Tensor, Tensor> _broadcasted(const Tensor& other, bool match_dtype = true) const;
 
@@ -506,6 +474,15 @@ namespace gs {
             if (require_same_shape && shape_ != other.shape()) {
                 LOG_ERROR("Shape mismatch: {} vs {}", shape_.str(), other.shape_.str());
                 return false;
+            }
+            // Check if broadcasting is valid (even when require_same_shape is false)
+            if (!require_same_shape && shape_ != other.shape()) {
+                // Compute broadcast shape and validate
+                auto bcast_shape = broadcast_shape(other.shape());
+                if (bcast_shape.rank() == 0 || bcast_shape.elements() == 0) {
+                    LOG_ERROR("Incompatible shapes for broadcasting: {} vs {}", shape_.str(), other.shape_.str());
+                    return false;
+                }
             }
             return true;
         }
@@ -537,9 +514,20 @@ namespace gs {
 
         // Helper to create view with shared ownership
         Tensor create_view(const TensorShape& new_shape) const {
+            // If tensor is not contiguous, we cannot create a simple reshape view
+            // We must materialize it first
+            if (!is_contiguous_) {
+                // Make contiguous copy, then reshape
+                return contiguous().create_view(new_shape);
+            }
+
+            // For contiguous tensors, we can create a view with the new shape
             Tensor view(data_, new_shape, device_, dtype_);
             view.data_owner_ = data_owner_;
+            view.storage_offset_ = storage_offset_;  // Preserve storage offset
             view.is_view_ = true;
+            view.is_contiguous_ = true;  // Reshaped contiguous tensor is still contiguous
+            // Strides are automatically set to contiguous by constructor
             return view;
         }
 
@@ -550,33 +538,6 @@ namespace gs {
         Tensor copy_slice(const std::vector<size_t>& starts,
                           const std::vector<size_t>& ends,
                           const std::vector<size_t>& new_shape) const;
-
-        // Unified template for binary operations
-        template<typename T>
-        Tensor binary_op(const T& rhs, BinaryOp op) const {
-            if constexpr (std::is_same_v<T, Tensor>) {
-                return binary_op_impl(rhs, op);
-            } else if constexpr (std::is_arithmetic_v<T>) {
-                return binary_op_scalar(static_cast<float>(rhs), op);
-            } else {
-                static_assert(std::is_same_v<T, Tensor> || std::is_arithmetic_v<T>,
-                             "Binary operations only support Tensor or arithmetic types");
-                return Tensor();
-            }
-        }
-
-        template<typename T>
-        Tensor& binary_op_inplace(const T& rhs, BinaryOp op) {
-            if constexpr (std::is_same_v<T, Tensor>) {
-                return binary_op_inplace_impl(rhs, op);
-            } else if constexpr (std::is_arithmetic_v<T>) {
-                return binary_op_inplace_scalar(static_cast<float>(rhs), op);
-            } else {
-                static_assert(std::is_same_v<T, Tensor> || std::is_arithmetic_v<T>,
-                             "Binary operations only support Tensor or arithmetic types");
-                return *this;
-            }
-        }
 
     public:
         Tensor() = default;
@@ -652,11 +613,9 @@ namespace gs {
         // ============= CORE UNIFIED OPERATIONS =============
         static Tensor load(LoadOp op, const LoadArgs& args);
         Tensor movement(MovementOp op, const MovementArgs& args) const;
-        Tensor unary(UnaryOp op, const UnaryArgs& args = {}) const;
-        Tensor binary(const Tensor& other, BinaryOp op) const { return binary_op_impl(other, op); }
-        Tensor binary(float scalar, BinaryOp op) const { return binary_op_scalar(scalar, op); }
         Tensor reduce(ReduceOp op, const ReduceArgs& args = {}) const;
-        Tensor ternary(const Tensor& b, const Tensor& c, TernaryOp op) const;
+        // Internal helper for where() operation
+        Tensor ternary(const Tensor& b, const Tensor& c) const;
 
         // ============= FACTORY METHODS =============
         static Tensor empty(TensorShape shape, Device device = Device::CUDA,
@@ -900,7 +859,9 @@ namespace gs {
             if (!is_valid()) {
                 return nullptr;
             }
-            return static_cast<T*>(data_);
+            // Account for storage offset (important for sliced/strided tensors)
+            char* data_ptr = static_cast<char*>(data_) + storage_offset_ * dtype_size(dtype_);
+            return static_cast<T*>(static_cast<void*>(data_ptr));
         }
 
         template <typename T>
@@ -908,7 +869,9 @@ namespace gs {
             if (!is_valid()) {
                 return nullptr;
             }
-            return static_cast<const T*>(data_);
+            // Account for storage offset (important for sliced/strided tensors)
+            const char* data_ptr = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
+            return static_cast<const T*>(static_cast<const void*>(data_ptr));
         }
 
         void* raw_ptr() { return data_; }
@@ -951,10 +914,18 @@ namespace gs {
 
         // Memory operations
         Tensor clone() const;  // Deep copy
-        Tensor contiguous() const;
+        Tensor contiguous() const;  // Materialize to contiguous if strided
         Tensor to(Device device) const;
         Tensor to(DataType dtype) const;
-        bool is_contiguous() const { return true; }
+        bool is_contiguous() const { return is_contiguous_; }
+
+        // Stride operations (Phase 4: Zero-copy views)
+        const std::vector<size_t>& strides() const { return strides_; }
+        size_t stride(size_t dim) const {
+            if (dim >= strides_.size()) return 0;
+            return strides_[dim];
+        }
+        size_t storage_offset() const { return storage_offset_; }
 
         Tensor cpu() const { return to(Device::CPU); }
         Tensor cuda() const { return to(Device::CUDA); }
@@ -1033,41 +1004,312 @@ namespace gs {
         bool can_broadcast_to(const TensorShape& target) const;
         TensorShape broadcast_shape(const TensorShape& other) const;
 
-        // ============= UNARY OPERATIONS =============
-        Tensor neg() const { return unary(UnaryOp::Neg); }
-        Tensor abs() const { return unary(UnaryOp::Abs); }
-        Tensor sign() const { return unary(UnaryOp::Sign); }
-        Tensor reciprocal() const { return unary(UnaryOp::Reciprocal); }
-        Tensor exp() const { return unary(UnaryOp::Exp); }
-        Tensor exp2() const { return unary(UnaryOp::Exp2); }
-        Tensor log() const { return unary(UnaryOp::Log); }
-        Tensor log2() const { return unary(UnaryOp::Log2); }
-        Tensor log10() const { return unary(UnaryOp::Log10); }
-        Tensor log1p() const { return unary(UnaryOp::Log1p); }
-        Tensor sqrt() const { return unary(UnaryOp::Sqrt); }
-        Tensor rsqrt() const { return unary(UnaryOp::Rsqrt); }
-        Tensor square() const { return unary(UnaryOp::Square); }
-        Tensor sin() const { return unary(UnaryOp::Sin); }
-        Tensor cos() const { return unary(UnaryOp::Cos); }
-        Tensor tan() const { return unary(UnaryOp::Tan); }
-        Tensor asin() const { return unary(UnaryOp::Asin); }
-        Tensor acos() const { return unary(UnaryOp::Acos); }
-        Tensor atan() const { return unary(UnaryOp::Atan); }
-        Tensor sinh() const { return unary(UnaryOp::Sinh); }
-        Tensor cosh() const { return unary(UnaryOp::Cosh); }
-        Tensor tanh() const { return unary(UnaryOp::Tanh); }
-        Tensor sigmoid() const { return unary(UnaryOp::Sigmoid); }
-        Tensor relu() const { return unary(UnaryOp::Relu); }
-        Tensor gelu() const { return unary(UnaryOp::Gelu); }
-        Tensor swish() const { return unary(UnaryOp::Swish); }
-        Tensor floor() const { return unary(UnaryOp::Floor); }
-        Tensor ceil() const { return unary(UnaryOp::Ceil); }
-        Tensor round() const { return unary(UnaryOp::Round); }
-        Tensor trunc() const { return unary(UnaryOp::Trunc); }
-        Tensor isnan() const { return unary(UnaryOp::IsNan); }
-        Tensor isinf() const { return unary(UnaryOp::IsInf); }
-        Tensor isfinite() const { return unary(UnaryOp::IsFinite); }
-        Tensor logical_not() const { return unary(UnaryOp::LogicalNot); }
+        // ============= UNARY OPERATIONS (LAZY EVALUATION) =============
+        Tensor neg() const {
+            // Edge cases: return eager Tensor for invalid or empty tensors
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            // Lazy evaluation: return expression template (implicitly converts to Tensor)
+            return UnaryExpr<TensorLeaf, ops::neg_op>(
+                TensorLeaf(*this), ops::neg_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor abs() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::abs_op>(
+                TensorLeaf(*this), ops::abs_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor sign() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::sign_op>(
+                TensorLeaf(*this), ops::sign_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor reciprocal() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::reciprocal_op>(
+                TensorLeaf(*this), ops::reciprocal_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor exp() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::exp_op>(
+                TensorLeaf(*this), ops::exp_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor exp2() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::exp2_op>(
+                TensorLeaf(*this), ops::exp2_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor log() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::log_op>(
+                TensorLeaf(*this), ops::log_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor log2() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::log2_op>(
+                TensorLeaf(*this), ops::log2_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor log10() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::log10_op>(
+                TensorLeaf(*this), ops::log10_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor log1p() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::log1p_op>(
+                TensorLeaf(*this), ops::log1p_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor sqrt() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::sqrt_op>(
+                TensorLeaf(*this), ops::sqrt_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor rsqrt() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::rsqrt_op>(
+                TensorLeaf(*this), ops::rsqrt_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor square() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::square_op>(
+                TensorLeaf(*this), ops::square_op{}, shape_, device_, dtype_);
+        }
+        Tensor sin() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::sin_op>(
+                TensorLeaf(*this), ops::sin_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor cos() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::cos_op>(
+                TensorLeaf(*this), ops::cos_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor tan() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::tan_op>(
+                TensorLeaf(*this), ops::tan_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor asin() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::asin_op>(
+                TensorLeaf(*this), ops::asin_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor acos() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::acos_op>(
+                TensorLeaf(*this), ops::acos_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor atan() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::atan_op>(
+                TensorLeaf(*this), ops::atan_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor sinh() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::sinh_op>(
+                TensorLeaf(*this), ops::sinh_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor cosh() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::cosh_op>(
+                TensorLeaf(*this), ops::cosh_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor tanh() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::tanh_op>(
+                TensorLeaf(*this), ops::tanh_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor sigmoid() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::sigmoid_op>(
+                TensorLeaf(*this), ops::sigmoid_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor relu() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::relu_op>(
+                TensorLeaf(*this), ops::relu_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor gelu() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::gelu_op>(
+                TensorLeaf(*this), ops::gelu_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor swish() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::swish_op>(
+                TensorLeaf(*this), ops::swish_op{}, shape_, device_, dtype_);
+        }
+        Tensor floor() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::floor_op>(
+                TensorLeaf(*this), ops::floor_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor ceil() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::ceil_op>(
+                TensorLeaf(*this), ops::ceil_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor round() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::round_op>(
+                TensorLeaf(*this), ops::round_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor trunc() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::trunc_op>(
+                TensorLeaf(*this), ops::trunc_op{}, shape_, device_, dtype_);
+        }
+
+        Tensor isnan() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            return UnaryExpr<TensorLeaf, ops::isnan_op>(
+                TensorLeaf(*this), ops::isnan_op{}, shape_, device_, DataType::Bool);
+        }
+
+        Tensor isinf() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            return UnaryExpr<TensorLeaf, ops::isinf_op>(
+                TensorLeaf(*this), ops::isinf_op{}, shape_, device_, DataType::Bool);
+        }
+
+        Tensor isfinite() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            return UnaryExpr<TensorLeaf, ops::isfinite_op>(
+                TensorLeaf(*this), ops::isfinite_op{}, shape_, device_, DataType::Bool);
+        }
+
+        Tensor logical_not() const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            return UnaryExpr<TensorLeaf, ops::logical_not_op>(
+                TensorLeaf(*this), ops::logical_not_op{}, shape_, device_, DataType::Bool);
+        }
 
         Tensor normalize(int dim = -1, float eps = 1e-12f) const;
         Tensor logit(float eps = 1e-7f) const;
@@ -1075,53 +1317,350 @@ namespace gs {
         // ============= BINARY OPERATIONS (Template-based) =============
 
         // Arithmetic operations
-        template<typename T>
-        Tensor add(const T& other) const { return binary_op(other, BinaryOp::Add); }
 
-        template<typename T>
-        Tensor sub(const T& other) const { return binary_op(other, BinaryOp::Sub); }
+        // New functor-based overloads for Tensor (zero enum overhead, lazy evaluation)
+        Tensor add(const Tensor& other) const {
+            if (!validate_binary_op(other, false, true)) {
+                return Tensor();
+            }
+            auto broadcast_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::add_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::add_op{},
+                broadcast_shape, device_, dtype_);
+        }
 
-        template<typename T>
-        Tensor mul(const T& other) const { return binary_op(other, BinaryOp::Mul); }
+        Tensor sub(const Tensor& other) const {
+            if (!validate_binary_op(other, false, true)) {
+                return Tensor();
+            }
+            auto broadcast_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::sub_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::sub_op{},
+                broadcast_shape, device_, dtype_);
+        }
 
-        template<typename T>
-        Tensor div(const T& other) const { return binary_op(other, BinaryOp::Div); }
+        Tensor mul(const Tensor& other) const {
+            if (!validate_binary_op(other, false, true)) {
+                return Tensor();
+            }
+            auto broadcast_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::mul_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::mul_op{},
+                broadcast_shape, device_, dtype_);
+        }
 
-        template<typename T>
-        Tensor pow(const T& other) const { return binary_op(other, BinaryOp::Pow); }
+        Tensor div(const Tensor& other) const {
+            if (!validate_binary_op(other, false, true)) {
+                return Tensor();
+            }
+            auto broadcast_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::div_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::div_op{},
+                broadcast_shape, device_, dtype_);
+        }
 
-        template<typename T>
-        Tensor mod(const T& other) const { return binary_op(other, BinaryOp::Mod); }
+        Tensor pow(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::pow_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::pow_op{},
+                result_shape, device_, dtype_);
+        }
 
-        template<typename T>
-        Tensor maximum(const T& other) const { return binary_op(other, BinaryOp::Maximum); }
+        Tensor mod(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::mod_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::mod_op{},
+                result_shape, device_, dtype_);
+        }
 
-        template<typename T>
-        Tensor minimum(const T& other) const { return binary_op(other, BinaryOp::Minimum); }
+        Tensor maximum(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::maximum_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::maximum_op{},
+                result_shape, device_, dtype_);
+        }
 
-        // Comparison operations
-        template<typename T>
-        Tensor eq(const T& other) const { return binary_op(other, BinaryOp::Equal); }
+        Tensor minimum(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::minimum_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::minimum_op{},
+                result_shape, device_, dtype_);
+        }
 
-        template<typename T>
-        Tensor ne(const T& other) const { return binary_op(other, BinaryOp::NotEqual); }
+        // Template versions for scalars (lazy evaluation with scalar_right_op)
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor add(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::add_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::add_op, float>(static_cast<float>(other)),
+                shape_, device_, dtype_);
+        }
 
-        template<typename T>
-        Tensor lt(const T& other) const { return binary_op(other, BinaryOp::Less); }
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor sub(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::sub_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::sub_op, float>(static_cast<float>(other)),
+                shape_, device_, dtype_);
+        }
 
-        template<typename T>
-        Tensor le(const T& other) const { return binary_op(other, BinaryOp::LessEqual); }
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor mul(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::mul_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::mul_op, float>(static_cast<float>(other)),
+                shape_, device_, dtype_);
+        }
 
-        template<typename T>
-        Tensor gt(const T& other) const { return binary_op(other, BinaryOp::Greater); }
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor div(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::div_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::div_op, float>(static_cast<float>(other)),
+                shape_, device_, dtype_);
+        }
 
-        template<typename T>
-        Tensor ge(const T& other) const { return binary_op(other, BinaryOp::GreaterEqual); }
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor pow(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::pow_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::pow_op, float>(static_cast<float>(other)),
+                shape_, device_, dtype_);
+        }
 
-        // Logical operations (Tensor only)
-        Tensor logical_and(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LogicalAnd); }
-        Tensor logical_or(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LogicalOr); }
-        Tensor logical_xor(const Tensor& other) const { return binary_op_impl(other, BinaryOp::LogicalXor); }
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor mod(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::mod_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::mod_op, float>(static_cast<float>(other)),
+                shape_, device_, dtype_);
+        }
+
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor maximum(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::maximum_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::maximum_op, float>(static_cast<float>(other)),
+                shape_, device_, dtype_);
+        }
+
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor minimum(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, dtype_);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::minimum_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::minimum_op, float>(static_cast<float>(other)),
+                shape_, device_, dtype_);
+        }
+
+        // Comparison operations (return Bool tensors)
+
+        // Functor-based overloads for Tensor (zero enum overhead)
+        Tensor eq(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::equal_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::equal_op{},
+                result_shape, device_, DataType::Bool);
+        }
+
+        Tensor ne(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::not_equal_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::not_equal_op{},
+                result_shape, device_, DataType::Bool);
+        }
+
+        Tensor lt(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::less_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::less_op{},
+                result_shape, device_, DataType::Bool);
+        }
+
+        Tensor le(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::less_equal_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::less_equal_op{},
+                result_shape, device_, DataType::Bool);
+        }
+
+        Tensor gt(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::greater_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::greater_op{},
+                result_shape, device_, DataType::Bool);
+        }
+
+        Tensor ge(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::greater_equal_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::greater_equal_op{},
+                result_shape, device_, DataType::Bool);
+        }
+
+        // Template versions for scalars (direct functor calls - zero enum overhead!)
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor eq(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::equal_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::equal_op, float>(static_cast<float>(other)),
+                shape_, device_, DataType::Bool);
+        }
+
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor ne(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::not_equal_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::not_equal_op, float>(static_cast<float>(other)),
+                shape_, device_, DataType::Bool);
+        }
+
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor lt(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::less_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::less_op, float>(static_cast<float>(other)),
+                shape_, device_, DataType::Bool);
+        }
+
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor le(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::less_equal_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::less_equal_op, float>(static_cast<float>(other)),
+                shape_, device_, DataType::Bool);
+        }
+
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor gt(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::greater_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::greater_op, float>(static_cast<float>(other)),
+                shape_, device_, DataType::Bool);
+        }
+
+        template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+        Tensor ge(const T& other) const {
+            if (!is_valid() || numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::greater_equal_op, float>>(
+                TensorLeaf(*this), ops::scalar_right_op<ops::greater_equal_op, float>(static_cast<float>(other)),
+                shape_, device_, DataType::Bool);
+        }
+
+        // Logical operations (Tensor only, Bool -> Bool)
+        Tensor logical_and(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::logical_and_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::logical_and_op{},
+                result_shape, device_, DataType::Bool);
+        }
+
+        Tensor logical_or(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::logical_or_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::logical_or_op{},
+                result_shape, device_, DataType::Bool);
+        }
+
+        Tensor logical_xor(const Tensor& other) const {
+            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
+                if (!is_valid()) return Tensor();
+                return Tensor::empty(shape_, device_, DataType::Bool);
+            }
+            auto result_shape = this->broadcast_shape(other.shape());
+            return BinaryExpr<TensorLeaf, TensorLeaf, ops::logical_xor_op>(
+                TensorLeaf(*this), TensorLeaf(other), ops::logical_xor_op{},
+                result_shape, device_, DataType::Bool);
+        }
 
         // ============= REDUCE OPERATIONS =============
         Tensor sum(std::span<const int> axes = {}, bool keepdim = false) const {
@@ -1299,10 +1838,13 @@ namespace gs {
             }
 
             T value{};
+            // Account for storage offset (important for sliced tensors)
+            const char* data_ptr = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
+
             if (device_ == Device::CUDA) {
-                cudaMemcpy(&value, data_, sizeof(T), cudaMemcpyDeviceToHost);
+                cudaMemcpy(&value, data_ptr, sizeof(T), cudaMemcpyDeviceToHost);
             } else {
-                value = *static_cast<const T*>(data_);
+                value = *static_cast<const T*>(static_cast<const void*>(data_ptr));
             }
             return value;
         }
@@ -1311,22 +1853,10 @@ namespace gs {
 
         // ============= TERNARY OPERATIONS =============
         Tensor where(const Tensor& condition, const Tensor& other) const {
-            return condition.ternary(*this, other, TernaryOp::Where);
+            return condition.ternary(*this, other);
         }
 
-        Tensor clamp(float min_val, float max_val) const {
-            if (!is_valid()) {
-                return Tensor();
-            }
-
-            if (numel() == 0) {
-                return empty(shape_, device_, dtype_);
-            }
-
-            auto min_t = full(shape_, min_val, device_, dtype_);
-            auto max_t = full(shape_, max_val, device_, dtype_);
-            return ternary(min_t, max_t, TernaryOp::Clamp);
-        }
+        Tensor clamp(float min_val, float max_val) const;
 
         Tensor clamp_min(float min) const {
             return clamp(min, std::numeric_limits<float>::max());
@@ -1340,18 +1870,42 @@ namespace gs {
         Tensor& clamp_min_(float min);
         Tensor& clamp_max_(float max);
 
-        // In-place operations (Template-based)
+        // In-place operations (Template-based, direct functor dispatch - zero enum overhead!)
         template<typename T>
-        Tensor& add_(const T& other) { return binary_op_inplace(other, BinaryOp::Add); }
+        Tensor& add_(const T& other) {
+            if constexpr (std::is_same_v<T, Tensor>) {
+                return binary_op_inplace_generic(other, ops::add_op{});
+            } else {
+                return scalar_op_inplace_generic(static_cast<float>(other), ops::add_op{});
+            }
+        }
 
         template<typename T>
-        Tensor& sub_(const T& other) { return binary_op_inplace(other, BinaryOp::Sub); }
+        Tensor& sub_(const T& other) {
+            if constexpr (std::is_same_v<T, Tensor>) {
+                return binary_op_inplace_generic(other, ops::sub_op{});
+            } else {
+                return scalar_op_inplace_generic(static_cast<float>(other), ops::sub_op{});
+            }
+        }
 
         template<typename T>
-        Tensor& mul_(const T& other) { return binary_op_inplace(other, BinaryOp::Mul); }
+        Tensor& mul_(const T& other) {
+            if constexpr (std::is_same_v<T, Tensor>) {
+                return binary_op_inplace_generic(other, ops::mul_op{});
+            } else {
+                return scalar_op_inplace_generic(static_cast<float>(other), ops::mul_op{});
+            }
+        }
 
         template<typename T>
-        Tensor& div_(const T& other) { return binary_op_inplace(other, BinaryOp::Div); }
+        Tensor& div_(const T& other) {
+            if constexpr (std::is_same_v<T, Tensor>) {
+                return binary_op_inplace_generic(other, ops::div_op{});
+            } else {
+                return scalar_op_inplace_generic(static_cast<float>(other), ops::div_op{});
+            }
+        }
 
         // Matrix operations
         Tensor mm(const Tensor& other) const;
@@ -1368,6 +1922,9 @@ namespace gs {
         Tensor index_select(int dim, const Tensor& indices) const;
         Tensor gather(int dim, const Tensor& indices) const;
         Tensor take(const Tensor& indices) const;
+
+        // Lazy indexing operations (returns expression template)
+        auto gather_lazy(const Tensor& indices) const -> PermutationExpr<TensorLeaf, TensorLeaf>;
 
         Tensor nonzero() const;
         std::vector<Tensor> nonzero_split() const;
@@ -1428,26 +1985,26 @@ namespace gs {
 
         // Addition
         template<typename T>
-        Tensor operator+(const T& other) const { return add(other); }
+        auto operator+(const T& other) const { return add(other); }
 
         // Subtraction
         template<typename T>
-        Tensor operator-(const T& other) const { return sub(other); }
+        auto operator-(const T& other) const { return sub(other); }
 
         // Multiplication
         template<typename T>
-        Tensor operator*(const T& other) const { return mul(other); }
+        auto operator*(const T& other) const { return mul(other); }
 
         // Division
         template<typename T>
-        Tensor operator/(const T& other) const { return div(other); }
+        auto operator/(const T& other) const { return div(other); }
 
         // Modulo
         template<typename T>
         Tensor operator%(const T& other) const { return mod(other); }
 
         // Negation
-        Tensor operator-() const { return neg(); }
+        auto operator-() const { return neg(); }
 
         // Comparison operators
         template<typename T>
@@ -2157,16 +2714,6 @@ public:
         std::string tensor_info_;
     };
 
-    // ============= UTILITY NAMESPACES =============
-
-    // Safe operations namespace
-    namespace SafeOps {
-        using Tensor = gs::Tensor;
-        Tensor divide(const Tensor& a, const Tensor& b, float epsilon = 1e-6f);
-        Tensor log(const Tensor& input, float epsilon = 1e-6f);
-        Tensor sqrt(const Tensor& input, float epsilon = 0.0f);
-    } // namespace SafeOps
-
     // Memory info
     class MemoryInfo {
     public:
@@ -2181,20 +2728,27 @@ public:
         void log() const;
     };
 
-    // Functional operations namespace
-    namespace functional {
-        Tensor map(const Tensor& input, std::function<float(float)> func);
-        float reduce(const Tensor& input, float init, std::function<float(float, float)> func);
-        Tensor filter(const Tensor& input, std::function<bool(float)> predicate);
+    // ========================================================================
+    // Inline implementation of lazy gather operation
+    // ========================================================================
 
-        template <typename... Funcs>
-        auto pipe(Funcs... funcs) {
-            return [=](const Tensor& input) -> Tensor {
-                Tensor result = input;  // Shallow copy
-                ((result = funcs(std::move(result))), ...);
-                return result;
-            };
+    inline auto Tensor::gather_lazy(const Tensor& indices) const -> PermutationExpr<TensorLeaf, TensorLeaf> {
+        if (!is_valid() || !indices.is_valid()) {
+            throw std::runtime_error("gather_lazy: invalid tensor or indices");
         }
-    } // namespace functional
+
+        // Create expression that will lazily gather elements
+        return PermutationExpr<TensorLeaf, TensorLeaf>(
+            TensorLeaf(*this),
+            TensorLeaf(indices),
+            indices.shape(),  // Output shape matches indices shape
+            device_,
+            dtype_
+        );
+    }
 
 } // namespace gs
+
+// Include expression template implementations at the very end
+// This ensures all Tensor definitions are complete before templates are instantiated
+#include "core/tensor_expr_impl.hpp"

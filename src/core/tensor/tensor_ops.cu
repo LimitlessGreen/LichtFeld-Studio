@@ -3,10 +3,15 @@
 
 #include "core/tensor.hpp"
 #include "core/tensor_ops.hpp"
+#include "core/tensor_functors.hpp"
+#include "core/memory_pool.hpp"
+#include "core/logger.hpp"
 #include <cfloat>
 #include <cmath>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include <cub/device/device_segmented_reduce.cuh>
+#include <cub/device/device_reduce.cuh>
 #include <limits>
 
 // Thrust headers
@@ -27,366 +32,125 @@
 
 namespace gs::tensor_ops {
 
-    // Helper template to execute Thrust operations with correct policy
-    template<typename Func>
-    void run_with_thrust_policy(cudaStream_t stream, Func&& func) {
-        if (stream) {
-            func(thrust::cuda::par.on(stream));
-        } else {
-            func(thrust::cuda::par);
+    // ============= GENERIC OPERATIONS - NOW IN HEADER =============
+    // Template implementations moved to include/core/tensor_generic_ops.cuh for:
+    // - Better inlining and optimization
+    // - Support for expression template fusion (composed functors)
+    // - No need for explicit instantiations
+    // - Faster compilation (no separable compilation needed for these)
+
+    // ============= CLAMP OPERATIONS (USING FUNCTORS) =============
+
+    // Optimized clamp kernel with perfect memory coalescing
+    __global__ void clamp_kernel_optimized(float* __restrict__ data, float min_val, float max_val, size_t n) {
+        // Sequential access pattern for perfect coalescing within warps
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        size_t stride = blockDim.x * gridDim.x;
+
+        // Grid-stride loop for any array size
+        for (size_t i = idx; i < n; i += stride) {
+            // Single precision math, no NaN check (PyTorch doesn't check either)
+            float val = data[i];
+            val = fmaxf(val, min_val);  // max(val, min)
+            val = fminf(val, max_val);  // min(result, max)
+            data[i] = val;
         }
     }
 
-    // ============= CLAMP SCALAR OPERATIONS =============
-
-    struct ClampScalarFunctor {
-        float min_val;
-        float max_val;
-
-        ClampScalarFunctor(float min, float max) : min_val(min), max_val(max) {}
-
-        __device__ float operator()(float x) const {
-            if (isnan(x)) return x;
-            return fmax(min_val, fmin(max_val, x));
-        }
-    };
-
-    struct ClampScalarIntFunctor {
-        int min_val;
-        int max_val;
-
-        ClampScalarIntFunctor(int min, int max) : min_val(min), max_val(max) {}
-
-        __device__ int operator()(int x) const {
-            return max(min_val, min(max_val, x));
-        }
-    };
-
     void launch_clamp_scalar(float* data, float min_val, float max_val, size_t n, cudaStream_t stream) {
         if (n == 0) return;
-        auto data_ptr = thrust::device_pointer_cast(data);
-        run_with_thrust_policy(stream, [&](auto policy) {
-            thrust::transform(policy, data_ptr, data_ptr + n, data_ptr,
-                            ClampScalarFunctor(min_val, max_val));
-        });
+
+        // Optimized launch configuration for maximum occupancy
+        constexpr int BLOCK_SIZE = 256;
+        int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+        // Cap grid_size for better performance on small arrays
+        grid_size = min(grid_size, 2048);
+
+        clamp_kernel_optimized<<<grid_size, BLOCK_SIZE, 0, stream>>>(data, min_val, max_val, n);
+    }
+
+    // Fused clamp kernel - reads from src, writes clamped to dst (non-in-place)
+    __global__ void clamp_kernel_fused(const float* __restrict__ src, float* __restrict__ dst,
+                                       float min_val, float max_val, size_t n) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        size_t stride = blockDim.x * gridDim.x;
+
+        for (size_t i = idx; i < n; i += stride) {
+            float val = src[i];
+            val = fmaxf(val, min_val);
+            val = fminf(val, max_val);
+            dst[i] = val;
+        }
+    }
+
+    void launch_clamp_fused(const float* src, float* dst, float min_val, float max_val,
+                           size_t n, cudaStream_t stream) {
+        if (n == 0) return;
+
+        constexpr int BLOCK_SIZE = 256;
+        int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        grid_size = min(grid_size, 2048);
+
+        clamp_kernel_fused<<<grid_size, BLOCK_SIZE, 0, stream>>>(src, dst, min_val, max_val, n);
     }
 
     void launch_clamp_scalar_int(int* data, int min_val, int max_val, size_t n, cudaStream_t stream) {
         if (n == 0) return;
         auto data_ptr = thrust::device_pointer_cast(data);
+
         run_with_thrust_policy(stream, [&](auto policy) {
             thrust::transform(policy, data_ptr, data_ptr + n, data_ptr,
-                            ClampScalarIntFunctor(min_val, max_val));
+                              ops::clamp_range_op<int>(min_val, max_val));
         });
     }
 
-    // ============= UNARY OPERATION FUNCTORS =============
 
-    template <typename T>
-    struct UnaryOpFunctor {
-        UnaryOp op;
-        UnaryOpFunctor(UnaryOp op_) : op(op_) {}
+    // ============= TYPE CONVERSIONS (USING FUNCTORS) =============
 
-        __device__ T operator()(T x) const {
-            switch (op) {
-            case UnaryOp::Neg: return -x;
-            case UnaryOp::Abs: return abs(x);
-            case UnaryOp::Sign: return (x > T(0)) - (x < T(0));
-            case UnaryOp::Reciprocal: return T(1) / (x + T(1e-8));
-            case UnaryOp::Exp: return exp(x);
-            case UnaryOp::Exp2: return exp2(x);
-            case UnaryOp::Log: return log(fmax(x, T(1e-10)));
-            case UnaryOp::Log2: return log2(fmax(x, T(1e-10)));
-            case UnaryOp::Log10: return log10(fmax(x, T(1e-10)));
-            case UnaryOp::Log1p: return log1p(x);
-            case UnaryOp::Sqrt: return sqrt(fmax(x, T(0)));
-            case UnaryOp::Rsqrt: return rsqrt(fmax(x, T(1e-10)));
-            case UnaryOp::Square: return x * x;
-            case UnaryOp::Sin: return sin(x);
-            case UnaryOp::Cos: return cos(x);
-            case UnaryOp::Tan: return tan(x);
-            case UnaryOp::Asin: return asin(fmin(fmax(x, T(-1)), T(1)));
-            case UnaryOp::Acos: return acos(fmin(fmax(x, T(-1)), T(1)));
-            case UnaryOp::Atan: return atan(x);
-            case UnaryOp::Sinh: return sinh(x);
-            case UnaryOp::Cosh: return cosh(x);
-            case UnaryOp::Tanh: return tanh(x);
-            case UnaryOp::Sigmoid: return T(1) / (T(1) + exp(-x));
-            case UnaryOp::Relu: return fmax(x, T(0));
-            case UnaryOp::Gelu: {
-                T inner = sqrt(T(2) / T(M_PI)) * (x + T(0.044715) * x * x * x);
-                return T(0.5) * x * (T(1) + tanh(inner));
-            }
-            case UnaryOp::Swish: return x / (T(1) + exp(-x));
-            case UnaryOp::Floor: return floor(x);
-            case UnaryOp::Ceil: return ceil(x);
-            case UnaryOp::Round: return round(x);
-            case UnaryOp::Trunc: return trunc(x);
-            default: return x;
-            }
+    template<typename SrcT, typename DstT>
+    struct ConvertFunctor {
+        __device__ DstT operator()(SrcT x) const {
+            return static_cast<DstT>(x);
         }
     };
 
-    struct LogicalNotFunctor {
-        __device__ unsigned char operator()(unsigned char x) const {
-            return !x;
+    // Specializations for clamping conversions
+    template<>
+    struct ConvertFunctor<float, uint8_t> {
+        __device__ uint8_t operator()(float x) const {
+            return static_cast<uint8_t>(fminf(fmaxf(roundf(x), 0.0f), 255.0f));
         }
     };
 
-    void launch_unary_op(const void* input, void* output, size_t n, UnaryOp op,
-                         DataType dtype, cudaStream_t stream) {
+    template<>
+    struct ConvertFunctor<int, uint8_t> {
+        __device__ uint8_t operator()(int x) const {
+            return static_cast<uint8_t>(max(0, min(255, x)));
+        }
+    };
+
+    template<>
+    struct ConvertFunctor<int64_t, uint8_t> {
+        __device__ uint8_t operator()(int64_t x) const {
+            return static_cast<uint8_t>(max(static_cast<int64_t>(0),
+                                            min(static_cast<int64_t>(255), x)));
+        }
+    };
+
+    template<typename SrcT, typename DstT>
+    void launch_convert_type(const SrcT* src, DstT* dst, size_t n, cudaStream_t stream) {
         if (n == 0) return;
-
-        if (dtype == DataType::Float32) {
-            auto in_ptr = thrust::device_pointer_cast(static_cast<const float*>(input));
-            auto out_ptr = thrust::device_pointer_cast(static_cast<float*>(output));
-            run_with_thrust_policy(stream, [&](auto policy) {
-                thrust::transform(policy, in_ptr, in_ptr + n, out_ptr, UnaryOpFunctor<float>(op));
-            });
-        } else if (dtype == DataType::Bool && op == UnaryOp::LogicalNot) {
-            auto in_ptr = thrust::device_pointer_cast(static_cast<const unsigned char*>(input));
-            auto out_ptr = thrust::device_pointer_cast(static_cast<unsigned char*>(output));
-            run_with_thrust_policy(stream, [&](auto policy) {
-                thrust::transform(policy, in_ptr, in_ptr + n, out_ptr, LogicalNotFunctor());
-            });
-        }
-    }
-
-    void launch_unary_op_inplace(void* data, size_t n, UnaryOp op, DataType dtype, cudaStream_t stream) {
-        launch_unary_op(data, data, n, op, dtype, stream);
-    }
-
-    // ============= BINARY OPERATION FUNCTORS =============
-
-    template <typename T>
-    struct BinaryOpFunctor {
-        BinaryOp op;
-        BinaryOpFunctor(BinaryOp op_) : op(op_) {}
-
-        __device__ T operator()(T a, T b) const {
-            switch (op) {
-                case BinaryOp::Add: return a + b;
-                case BinaryOp::Sub: return a - b;
-                case BinaryOp::Mul: return a * b;
-                case BinaryOp::Div: return a / b;
-                case BinaryOp::Pow: return powf(a, b);
-                case BinaryOp::Mod: return fmodf(a, b);
-                case BinaryOp::Maximum: return fmaxf(a, b);
-                case BinaryOp::Minimum: return fminf(a, b);
-                default: return T(0);
-            }
-        }
-    };
-
-    template <typename T>
-    struct ComparisonOpFunctor {
-        BinaryOp op;
-        ComparisonOpFunctor(BinaryOp op_) : op(op_) {}
-
-        __device__ unsigned char operator()(T a, T b) const {
-            bool result = false;
-            switch (op) {
-            case BinaryOp::Equal: result = (a == b); break;
-            case BinaryOp::NotEqual: result = (a != b); break;
-            case BinaryOp::Less: result = (a < b); break;
-            case BinaryOp::LessEqual: result = (a <= b); break;
-            case BinaryOp::Greater: result = (a > b); break;
-            case BinaryOp::GreaterEqual: result = (a >= b); break;
-            default: result = false; break;
-            }
-            return result ? 1 : 0;
-        }
-    };
-
-    struct LogicalOpFunctor {
-        BinaryOp op;
-        LogicalOpFunctor(BinaryOp op_) : op(op_) {}
-
-        __device__ unsigned char operator()(unsigned char a, unsigned char b) const {
-            bool result = false;
-            switch (op) {
-            case BinaryOp::LogicalAnd: result = (a && b); break;
-            case BinaryOp::LogicalOr: result = (a || b); break;
-            case BinaryOp::LogicalXor: result = (a != b); break;
-            case BinaryOp::BitwiseOr: result = (a || b); break;
-            default: result = false; break;
-            }
-            return result ? 1 : 0;
-        }
-    };
-
-    void launch_binary_op(const void* a, const void* b, void* c, size_t n, BinaryOp op,
-                          DataType a_dtype, DataType b_dtype, DataType c_dtype,
-                          cudaStream_t stream) {
-        if (n == 0) return;
-
-        if (c_dtype == DataType::Bool && a_dtype == DataType::Int32 && b_dtype == DataType::Int32) {
-            auto a_ptr = thrust::device_pointer_cast(static_cast<const int*>(a));
-            auto b_ptr = thrust::device_pointer_cast(static_cast<const int*>(b));
-            auto c_ptr = thrust::device_pointer_cast(static_cast<unsigned char*>(c));
-            run_with_thrust_policy(stream, [&](auto policy) {
-                thrust::transform(policy, a_ptr, a_ptr + n, b_ptr, c_ptr, ComparisonOpFunctor<int>(op));
-            });
-        }
-        else if (c_dtype == DataType::Bool && a_dtype == DataType::Float32 && b_dtype == DataType::Float32) {
-            auto a_ptr = thrust::device_pointer_cast(static_cast<const float*>(a));
-            auto b_ptr = thrust::device_pointer_cast(static_cast<const float*>(b));
-            auto c_ptr = thrust::device_pointer_cast(static_cast<unsigned char*>(c));
-            run_with_thrust_policy(stream, [&](auto policy) {
-                thrust::transform(policy, a_ptr, a_ptr + n, b_ptr, c_ptr, ComparisonOpFunctor<float>(op));
-            });
-        }
-        else if (a_dtype == DataType::Bool && b_dtype == DataType::Bool) {
-            auto a_ptr = thrust::device_pointer_cast(static_cast<const unsigned char*>(a));
-            auto b_ptr = thrust::device_pointer_cast(static_cast<const unsigned char*>(b));
-            auto c_ptr = thrust::device_pointer_cast(static_cast<unsigned char*>(c));
-            run_with_thrust_policy(stream, [&](auto policy) {
-                thrust::transform(policy, a_ptr, a_ptr + n, b_ptr, c_ptr, LogicalOpFunctor(op));
-            });
-        }
-        else if (a_dtype == DataType::Float32 && b_dtype == DataType::Float32 && c_dtype == DataType::Float32) {
-            auto a_ptr = thrust::device_pointer_cast(static_cast<const float*>(a));
-            auto b_ptr = thrust::device_pointer_cast(static_cast<const float*>(b));
-            auto c_ptr = thrust::device_pointer_cast(static_cast<float*>(c));
-            run_with_thrust_policy(stream, [&](auto policy) {
-                thrust::transform(policy, a_ptr, a_ptr + n, b_ptr, c_ptr, BinaryOpFunctor<float>(op));
-            });
-        }
-        else if (a_dtype == DataType::Int32 && b_dtype == DataType::Int32 && c_dtype == DataType::Int32) {
-            auto a_ptr = thrust::device_pointer_cast(static_cast<const int*>(a));
-            auto b_ptr = thrust::device_pointer_cast(static_cast<const int*>(b));
-            auto c_ptr = thrust::device_pointer_cast(static_cast<int*>(c));
-            run_with_thrust_policy(stream, [&](auto policy) {
-                thrust::transform(policy, a_ptr, a_ptr + n, b_ptr, c_ptr, BinaryOpFunctor<int>(op));
-            });
-        }
-    }
-
-    // ============= BINARY SCALAR OPERATIONS =============
-
-    template <typename T>
-    struct BinaryScalarOpFunctor {
-        T scalar;
-        BinaryOp op;
-        BinaryScalarOpFunctor(T scalar_, BinaryOp op_) : scalar(scalar_), op(op_) {}
-
-        __device__ T operator()(T a) const {
-            switch (op) {
-                case BinaryOp::Add: return a + scalar;
-                case BinaryOp::Sub: return a - scalar;
-                case BinaryOp::Mul: return a * scalar;
-                case BinaryOp::Div: return a / scalar;
-                case BinaryOp::Pow: {
-                    if (scalar == 2.0f) return a * a;
-                    if (scalar == 0.5f) return sqrtf(fabsf(a));
-                    if (scalar == 1.0f) return a;
-                    if (scalar == 0.0f) return 1.0f;
-                    return powf(a, scalar);
-                }
-                case BinaryOp::Mod: return fmodf(a, scalar);
-                case BinaryOp::Maximum: return fmaxf(a, scalar);
-                case BinaryOp::Minimum: return fminf(a, scalar);
-                default: return T(0);
-            }
-        }
-    };
-
-    template <typename T>
-    struct ComparisonScalarOpFunctor {
-        T scalar;
-        BinaryOp op;
-        ComparisonScalarOpFunctor(T scalar_, BinaryOp op_) : scalar(scalar_), op(op_) {}
-
-        __device__ unsigned char operator()(T a) const {
-            bool result = false;
-            switch (op) {
-            case BinaryOp::Equal: result = (a == scalar); break;
-            case BinaryOp::NotEqual: result = (a != scalar); break;
-            case BinaryOp::Less: result = (a < scalar); break;
-            case BinaryOp::LessEqual: result = (a <= scalar); break;
-            case BinaryOp::Greater: result = (a > scalar); break;
-            case BinaryOp::GreaterEqual: result = (a >= scalar); break;
-            default: result = false; break;
-            }
-            return result ? 1 : 0;
-        }
-    };
-
-    void launch_binary_scalar(const void* data, float scalar, void* result, size_t n, BinaryOp op,
-                              DataType src_dtype, DataType dst_dtype, cudaStream_t stream) {
-        if (n == 0) return;
-
-        if (dst_dtype == DataType::Bool && src_dtype == DataType::Int32) {
-            auto data_ptr = thrust::device_pointer_cast(static_cast<const int*>(data));
-            auto result_ptr = thrust::device_pointer_cast(static_cast<unsigned char*>(result));
-            int scalar_int = static_cast<int>(scalar);
-            run_with_thrust_policy(stream, [&](auto policy) {
-                thrust::transform(policy, data_ptr, data_ptr + n, result_ptr,
-                                ComparisonScalarOpFunctor<int>(scalar_int, op));
-            });
-        }
-        else if (dst_dtype == DataType::Bool && src_dtype == DataType::Float32) {
-            auto data_ptr = thrust::device_pointer_cast(static_cast<const float*>(data));
-            auto result_ptr = thrust::device_pointer_cast(static_cast<unsigned char*>(result));
-            run_with_thrust_policy(stream, [&](auto policy) {
-                thrust::transform(policy, data_ptr, data_ptr + n, result_ptr,
-                                ComparisonScalarOpFunctor<float>(scalar, op));
-            });
-        }
-        else if (src_dtype == DataType::Float32 && dst_dtype == DataType::Float32) {
-            auto data_ptr = thrust::device_pointer_cast(static_cast<const float*>(data));
-            auto result_ptr = thrust::device_pointer_cast(static_cast<float*>(result));
-            run_with_thrust_policy(stream, [&](auto policy) {
-                thrust::transform(policy, data_ptr, data_ptr + n, result_ptr,
-                                BinaryScalarOpFunctor<float>(scalar, op));
-            });
-        }
-        else if (src_dtype == DataType::Int32 && dst_dtype == DataType::Int32) {
-            auto data_ptr = thrust::device_pointer_cast(static_cast<const int*>(data));
-            auto result_ptr = thrust::device_pointer_cast(static_cast<int*>(result));
-            int scalar_int = static_cast<int>(scalar);
-            run_with_thrust_policy(stream, [&](auto policy) {
-                thrust::transform(policy, data_ptr, data_ptr + n, result_ptr,
-                                BinaryScalarOpFunctor<int>(scalar_int, op));
-            });
-        }
-    }
-
-    void launch_binary_op_inplace(void* a, const void* b, size_t n, BinaryOp op, cudaStream_t stream) {
-        if (n == 0) return;
-        auto a_ptr = thrust::device_pointer_cast(static_cast<float*>(a));
-        auto b_ptr = thrust::device_pointer_cast(static_cast<const float*>(b));
+        auto src_ptr = thrust::device_pointer_cast(src);
+        auto dst_ptr = thrust::device_pointer_cast(dst);
         run_with_thrust_policy(stream, [&](auto policy) {
-            thrust::transform(policy, a_ptr, a_ptr + n, b_ptr, a_ptr, BinaryOpFunctor<float>(op));
+            thrust::transform(policy, src_ptr, src_ptr + n, dst_ptr, ConvertFunctor<SrcT, DstT>());
         });
     }
 
-    void launch_binary_scalar_inplace(void* data, float scalar, size_t n, BinaryOp op, cudaStream_t stream) {
-        if (n == 0) return;
-        auto data_ptr = thrust::device_pointer_cast(static_cast<float*>(data));
-        run_with_thrust_policy(stream, [&](auto policy) {
-            thrust::transform(policy, data_ptr, data_ptr + n, data_ptr,
-                            BinaryScalarOpFunctor<float>(scalar, op));
-        });
-    }
-
-    // ============= REDUCE OPERATION FUNCTORS =============
-
-    struct ReduceSumFunctor {
-        __device__ float operator()(float a, float b) const { return a + b; }
-    };
-
-    struct ReduceMaxFunctor {
-        __device__ float operator()(float a, float b) const { return fmax(a, b); }
-    };
-
-    struct ReduceMinFunctor {
-        __device__ float operator()(float a, float b) const { return fmin(a, b); }
-    };
-
-    struct ReduceProdFunctor {
-        __device__ float operator()(float a, float b) const { return a * b; }
-    };
+    // ============= BROADCASTING BINARY OPERATIONS =============
+    // NOTE: launch_broadcast_binary is now defined in tensor_broadcast_ops.cuh
+    // CUDA kernels and host function template are inlined for correct instantiation
 
     // ============= OPTIMIZED SEGMENTED REDUCTION =============
 
@@ -400,103 +164,129 @@ namespace gs::tensor_ops {
 
         size_t output_size = outer_size * inner_size;
 
+        // Special case: no reduction needed
         if (reduce_size == 1) {
             auto in_ptr = thrust::device_pointer_cast(input);
             auto out_ptr = thrust::device_pointer_cast(output);
             if (stream) {
-                thrust::copy(thrust::cuda::par.on(stream), in_ptr, in_ptr + output_size, out_ptr);
+                thrust::copy(thrust::cuda::par.on(stream),
+                            in_ptr, in_ptr + output_size, out_ptr);
             } else {
-                thrust::copy(thrust::cuda::par, in_ptr, in_ptr + output_size, out_ptr);
+                thrust::copy(thrust::cuda::par,
+                            in_ptr, in_ptr + output_size, out_ptr);
             }
             return;
         }
 
-        auto out_ptr = thrust::device_pointer_cast(output);
-        auto counting = thrust::counting_iterator<size_t>(0);
+        // OPTIMIZED PATH: Contiguous segments - use CUB's segmented reduce
+        if (inner_size == 1) {
+            // begin_offsets: [0, N, 2N, 3N, ...]
+            auto begin_offsets = thrust::make_transform_iterator(
+                thrust::counting_iterator<int>(0),
+                [reduce_size] __host__ __device__ (int i) -> int {
+                    return i * static_cast<int>(reduce_size);
+                }
+            );
 
+            // end_offsets: [N, 2N, 3N, 4N, ...]
+            auto end_offsets = thrust::make_transform_iterator(
+                thrust::counting_iterator<int>(1),
+                [reduce_size] __host__ __device__ (int i) -> int {
+                    return i * static_cast<int>(reduce_size);
+                }
+            );
+
+            void* d_temp_storage = nullptr;
+            size_t temp_storage_bytes = 0;
+
+            // First call to determine temp storage size needed
+            cub::DeviceSegmentedReduce::Reduce(
+                d_temp_storage,
+                temp_storage_bytes,
+                input,
+                output,
+                static_cast<int>(outer_size),
+                begin_offsets,
+                end_offsets,
+                op,
+                init_value,
+                stream
+            );
+
+            // Allocate temp storage from memory pool (fast!)
+            d_temp_storage = CudaMemoryPool::instance().allocate(temp_storage_bytes, stream);
+            if (!d_temp_storage) {
+                LOG_ERROR("Failed to allocate {} bytes for CUB temp storage from memory pool",
+                         temp_storage_bytes);
+                return;
+            }
+
+            // Actual reduction with temp storage
+            cub::DeviceSegmentedReduce::Reduce(
+                d_temp_storage,
+                temp_storage_bytes,
+                input,
+                output,
+                static_cast<int>(outer_size),
+                begin_offsets,
+                end_offsets,
+                op,
+                init_value,
+                stream
+            );
+
+            // Return temp storage to memory pool (instant, cached for reuse)
+            CudaMemoryPool::instance().deallocate(d_temp_storage, stream);
+            return;
+        }
+
+        // STRIDED PATH: Non-contiguous segments
         if (stream) {
-            thrust::transform(thrust::cuda::par.on(stream), counting, counting + output_size, out_ptr,
-                [=] __device__ (size_t out_idx) -> T {
+            thrust::for_each(thrust::cuda::par.on(stream),
+                thrust::counting_iterator<size_t>(0),
+                thrust::counting_iterator<size_t>(output_size),
+                [=] __device__ (size_t out_idx) {
                     size_t outer_idx = out_idx / inner_size;
                     size_t inner_idx = out_idx % inner_size;
-                    size_t base = outer_idx * reduce_size * inner_size + inner_idx;
 
                     T result = init_value;
-                    if (reduce_size <= 8) {
-                        #pragma unroll
-                        for (size_t r = 0; r < reduce_size; ++r) {
-                            result = op(result, input[base + r * inner_size]);
-                        }
-                    } else {
-                        for (size_t r = 0; r < reduce_size; ++r) {
-                            result = op(result, input[base + r * inner_size]);
-                        }
+                    for (size_t r = 0; r < reduce_size; ++r) {
+                        size_t in_idx = (outer_idx * reduce_size + r) * inner_size + inner_idx;
+                        result = op(result, input[in_idx]);
                     }
-                    return result;
+                    output[out_idx] = result;
                 }
             );
         } else {
-            thrust::transform(thrust::cuda::par, counting, counting + output_size, out_ptr,
-                [=] __device__ (size_t out_idx) -> T {
+            thrust::for_each(thrust::cuda::par,
+                thrust::counting_iterator<size_t>(0),
+                thrust::counting_iterator<size_t>(output_size),
+                [=] __device__ (size_t out_idx) {
                     size_t outer_idx = out_idx / inner_size;
                     size_t inner_idx = out_idx % inner_size;
-                    size_t base = outer_idx * reduce_size * inner_size + inner_idx;
 
                     T result = init_value;
-                    if (reduce_size <= 8) {
-                        #pragma unroll
-                        for (size_t r = 0; r < reduce_size; ++r) {
-                            result = op(result, input[base + r * inner_size]);
-                        }
-                    } else {
-                        for (size_t r = 0; r < reduce_size; ++r) {
-                            result = op(result, input[base + r * inner_size]);
-                        }
+                    for (size_t r = 0; r < reduce_size; ++r) {
+                        size_t in_idx = (outer_idx * reduce_size + r) * inner_size + inner_idx;
+                        result = op(result, input[in_idx]);
                     }
-                    return result;
+                    output[out_idx] = result;
                 }
             );
         }
     }
 
-    // ============= MULTI-AXIS REDUCTION HELPER =============
+    // ============= MULTI-AXIS REDUCTION (USING FUNCTORS) =============
 
-    // Template-based approach to avoid device function pointer issues
-    template<int OpType>
-    struct MultiAxisReduceOp {
-        __device__ float operator()(float a, float b) const;
-    };
-
-    template<>
-    struct MultiAxisReduceOp<0> { // Sum
-        __device__ float operator()(float a, float b) const { return a + b; }
-    };
-
-    template<>
-    struct MultiAxisReduceOp<1> { // Max
-        __device__ float operator()(float a, float b) const { return fmax(a, b); }
-    };
-
-    template<>
-    struct MultiAxisReduceOp<2> { // Min
-        __device__ float operator()(float a, float b) const { return fmin(a, b); }
-    };
-
-    template<>
-    struct MultiAxisReduceOp<3> { // Prod
-        __device__ float operator()(float a, float b) const { return a * b; }
-    };
-
-    template<int OpType>
+    template<typename Op>
     __global__ void multi_axis_reduce_kernel(
         const float* input, float* output,
         const size_t* input_shape, const bool* is_reduced_dim,
-        size_t input_rank, size_t output_elements, float init_val)
+        size_t input_rank, size_t output_elements, float init_val,
+        Op op)
     {
         size_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (out_idx >= output_elements) return;
-
-        MultiAxisReduceOp<OpType> op;
 
         size_t input_strides[10];
         input_strides[input_rank - 1] = 1;
@@ -569,7 +359,6 @@ namespace gs::tensor_ops {
         output[out_idx] = result;
     }
 
-    // Helper to launch the correct template
     void launch_multi_axis_reduce(
         const float* input, float* output,
         const size_t* input_shape, const bool* is_reduced_dim,
@@ -581,29 +370,28 @@ namespace gs::tensor_ops {
         switch (op) {
             case ReduceOp::Sum:
             case ReduceOp::Mean:
-                multi_axis_reduce_kernel<0><<<blocks, 256, 0, stream>>>(
+                multi_axis_reduce_kernel<<<blocks, 256, 0, stream>>>(
                     input, output, input_shape, is_reduced_dim,
-                    input_rank, output_elements, init_val);
+                    input_rank, output_elements, init_val, ops::add_op{});
                 break;
             case ReduceOp::Max:
-                multi_axis_reduce_kernel<1><<<blocks, 256, 0, stream>>>(
+                multi_axis_reduce_kernel<<<blocks, 256, 0, stream>>>(
                     input, output, input_shape, is_reduced_dim,
-                    input_rank, output_elements, init_val);
+                    input_rank, output_elements, init_val, ops::maximum_op{});
                 break;
             case ReduceOp::Min:
-                multi_axis_reduce_kernel<2><<<blocks, 256, 0, stream>>>(
+                multi_axis_reduce_kernel<<<blocks, 256, 0, stream>>>(
                     input, output, input_shape, is_reduced_dim,
-                    input_rank, output_elements, init_val);
+                    input_rank, output_elements, init_val, ops::minimum_op{});
                 break;
             case ReduceOp::Prod:
-                multi_axis_reduce_kernel<3><<<blocks, 256, 0, stream>>>(
+                multi_axis_reduce_kernel<<<blocks, 256, 0, stream>>>(
                     input, output, input_shape, is_reduced_dim,
-                    input_rank, output_elements, init_val);
+                    input_rank, output_elements, init_val, ops::mul_op{});
                 break;
         }
     }
 
-    // Functor for division (to avoid nested lambda)
     struct DivideByFunctor {
         float divisor;
         DivideByFunctor(float d) : divisor(d) {}
@@ -624,35 +412,70 @@ namespace gs::tensor_ops {
         auto input_ptr = thrust::device_pointer_cast(static_cast<const float*>(input));
         auto output_ptr = thrust::device_pointer_cast(static_cast<float*>(output));
 
-        // Full reduction to scalar
+        // Full reduction to scalar - OPTIMIZED with CUB DeviceReduce
         if (num_axes == 0 || num_axes == rank) {
-            float result = 0.0f;
-            run_with_thrust_policy(stream, [&](auto policy) {
-                switch (op) {
-                case ReduceOp::Sum:
-                    result = thrust::reduce(policy, input_ptr, input_ptr + n, 0.0f, ReduceSumFunctor());
-                    break;
-                case ReduceOp::Mean:
-                    result = thrust::reduce(policy, input_ptr, input_ptr + n, 0.0f, ReduceSumFunctor()) / static_cast<float>(n);
-                    break;
-                case ReduceOp::Max:
-                    result = thrust::reduce(policy, input_ptr, input_ptr + n, -std::numeric_limits<float>::infinity(), ReduceMaxFunctor());
-                    break;
-                case ReduceOp::Min:
-                    result = thrust::reduce(policy, input_ptr, input_ptr + n, std::numeric_limits<float>::infinity(), ReduceMinFunctor());
-                    break;
-                case ReduceOp::Prod:
-                    result = thrust::reduce(policy, input_ptr, input_ptr + n, 1.0f, ReduceProdFunctor());
-                    break;
-                default:
-                    result = 0.0f;
+            const float* d_in = static_cast<const float*>(input);
+            float* d_out = static_cast<float*>(output);
+
+            // Determine temp storage requirements
+            void* d_temp_storage = nullptr;
+            size_t temp_storage_bytes = 0;
+
+            switch (op) {
+            case ReduceOp::Sum:
+                // Two-phase CUB pattern: 1) Query temp storage size, 2) Perform reduction
+                cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+                cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaFreeAsync(d_temp_storage, stream);
+                break;
+            case ReduceOp::Mean: {
+                // Sum then divide by count
+                cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+                cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaFreeAsync(d_temp_storage, stream);
+                // Divide result by n
+                auto out_ptr = thrust::device_pointer_cast(d_out);
+                run_with_thrust_policy(stream, [&](auto policy) {
+                    thrust::transform(policy, out_ptr, out_ptr + 1, out_ptr,
+                                    DivideByFunctor(static_cast<float>(n)));
+                });
+                break;
+            }
+            case ReduceOp::Max:
+                cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+                cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaFreeAsync(d_temp_storage, stream);
+                break;
+            case ReduceOp::Min:
+                cub::DeviceReduce::Min(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+                cub::DeviceReduce::Min(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaFreeAsync(d_temp_storage, stream);
+                break;
+            case ReduceOp::Prod:
+                // CUB doesn't have built-in Prod, use Thrust for this rare operation
+                {
+                    float result = 0.0f;
+                    run_with_thrust_policy(stream, [&](auto policy) {
+                        result = thrust::reduce(policy, input_ptr, input_ptr + n, 1.0f, ops::mul_op{});
+                    });
+                    cudaMemcpyAsync(output, &result, sizeof(float), cudaMemcpyHostToDevice, stream);
                 }
-            });
-            cudaMemcpyAsync(output, &result, sizeof(float), cudaMemcpyHostToDevice, stream);
+                break;
+            default:
+                {
+                    float zero = 0.0f;
+                    cudaMemcpyAsync(output, &zero, sizeof(float), cudaMemcpyHostToDevice, stream);
+                }
+                break;
+            }
             return;
         }
 
-        // Single-axis reduction - optimized path
+        // Single-axis reduction
         if (num_axes == 1) {
             int dim = axes[0];
             size_t outer_size = 1;
@@ -669,12 +492,12 @@ namespace gs::tensor_ops {
                 case ReduceOp::Sum:
                     init_val = 0.0f;
                     launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
-                                          init_val, thrust::plus<float>(), stream);
+                                          init_val, ops::add_op{}, stream);
                     break;
                 case ReduceOp::Mean:
                     init_val = 0.0f;
                     launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
-                                          init_val, thrust::plus<float>(), stream);
+                                          init_val, ops::add_op{}, stream);
                     {
                         auto out_ptr = thrust::device_pointer_cast(output_f);
                         size_t output_size = outer_size * inner_size;
@@ -687,17 +510,17 @@ namespace gs::tensor_ops {
                 case ReduceOp::Max:
                     init_val = -std::numeric_limits<float>::infinity();
                     launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
-                                          init_val, thrust::maximum<float>(), stream);
+                                          init_val, ops::maximum_op{}, stream);
                     break;
                 case ReduceOp::Min:
                     init_val = std::numeric_limits<float>::infinity();
                     launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
-                                          init_val, thrust::minimum<float>(), stream);
+                                          init_val, ops::minimum_op{}, stream);
                     break;
                 case ReduceOp::Prod:
                     init_val = 1.0f;
                     launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
-                                          init_val, thrust::multiplies<float>(), stream);
+                                          init_val, ops::mul_op{}, stream);
                     break;
                 default:
                     break;
@@ -737,7 +560,6 @@ namespace gs::tensor_ops {
                 break;
         }
 
-        // Use the template-based launcher
         launch_multi_axis_reduce(
             static_cast<const float*>(input),
             static_cast<float*>(output),
@@ -755,95 +577,13 @@ namespace gs::tensor_ops {
             run_with_thrust_policy(stream, [&](auto policy) {
                 thrust::transform(policy, output_ptr, output_ptr + output_elements,
                                 thrust::make_constant_iterator(scale), output_ptr,
-                                thrust::multiplies<float>());
+                                ops::mul_op{});
             });
         }
     }
 
     // ============= TERNARY OPERATIONS =============
 
-    struct ClampFunctor {
-        __device__ float operator()(const thrust::tuple<float, float, float>& t) const {
-            float val = thrust::get<0>(t);
-            if (isnan(val)) return val;
-            float min_val = thrust::get<1>(t);
-            float max_val = thrust::get<2>(t);
-            return fmax(min_val, fmin(max_val, val));
-        }
-    };
-
-    void launch_ternary_op(const void* a, const void* b, const void* c, void* output,
-                           size_t n, TernaryOp op, DataType dtype, cudaStream_t stream) {
-        if (n == 0 || dtype != DataType::Float32) return;
-
-        if (op == TernaryOp::Clamp) {
-            auto a_ptr = thrust::device_pointer_cast(static_cast<const float*>(a));
-            auto b_ptr = thrust::device_pointer_cast(static_cast<const float*>(b));
-            auto c_ptr = thrust::device_pointer_cast(static_cast<const float*>(c));
-            auto out_ptr = thrust::device_pointer_cast(static_cast<float*>(output));
-
-            auto begin = thrust::make_zip_iterator(thrust::make_tuple(a_ptr, b_ptr, c_ptr));
-            auto end = thrust::make_zip_iterator(thrust::make_tuple(a_ptr + n, b_ptr + n, c_ptr + n));
-
-            run_with_thrust_policy(stream, [&](auto policy) {
-                thrust::transform(policy, begin, end, out_ptr, ClampFunctor());
-            });
-        }
-    }
-
-    // ============= TYPE CONVERSION =============
-
-    struct BoolToFloatFunctor {
-        __device__ float operator()(unsigned char x) const { return x ? 1.0f : 0.0f; }
-    };
-
-    struct FloatToBoolFunctor {
-        __device__ unsigned char operator()(float x) const { return (x != 0.0f) ? 1 : 0; }
-    };
-
-    struct FloatToIntFunctor {
-        __device__ int operator()(float x) const { return static_cast<int>(x); }
-    };
-
-    struct IntToFloatFunctor {
-        __device__ float operator()(int x) const { return static_cast<float>(x); }
-    };
-
-    void launch_bool_to_float(const unsigned char* src, float* dst, size_t n, cudaStream_t stream) {
-        if (n == 0) return;
-        auto src_ptr = thrust::device_pointer_cast(src);
-        auto dst_ptr = thrust::device_pointer_cast(dst);
-        run_with_thrust_policy(stream, [&](auto policy) {
-            thrust::transform(policy, src_ptr, src_ptr + n, dst_ptr, BoolToFloatFunctor());
-        });
-    }
-
-    void launch_float_to_bool(const float* src, unsigned char* dst, size_t n, cudaStream_t stream) {
-        if (n == 0) return;
-        auto src_ptr = thrust::device_pointer_cast(src);
-        auto dst_ptr = thrust::device_pointer_cast(dst);
-        run_with_thrust_policy(stream, [&](auto policy) {
-            thrust::transform(policy, src_ptr, src_ptr + n, dst_ptr, FloatToBoolFunctor());
-        });
-    }
-
-    void launch_float_to_int(const float* src, int* dst, size_t n, cudaStream_t stream) {
-        if (n == 0) return;
-        auto src_ptr = thrust::device_pointer_cast(src);
-        auto dst_ptr = thrust::device_pointer_cast(dst);
-        run_with_thrust_policy(stream, [&](auto policy) {
-            thrust::transform(policy, src_ptr, src_ptr + n, dst_ptr, FloatToIntFunctor());
-        });
-    }
-
-    void launch_int_to_float(const int* src, float* dst, size_t n, cudaStream_t stream) {
-        if (n == 0) return;
-        auto src_ptr = thrust::device_pointer_cast(src);
-        auto dst_ptr = thrust::device_pointer_cast(dst);
-        run_with_thrust_policy(stream, [&](auto policy) {
-            thrust::transform(policy, src_ptr, src_ptr + n, dst_ptr, IntToFloatFunctor());
-        });
-    }
 
     // ============= LOAD OPERATIONS =============
 
@@ -868,7 +608,6 @@ namespace gs::tensor_ops {
 
     template<typename T>
     __global__ void cumsum_noncontiguous_kernel(T* data, size_t outer_size, size_t dim_size, size_t inner_size) {
-        // Each thread handles one scan line
         size_t scan_idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (scan_idx >= outer_size * inner_size) return;
 
@@ -896,7 +635,6 @@ namespace gs::tensor_ops {
             size_t total_elements = outer_size * dim_size;
             thrust::device_vector<int> keys(total_elements);
 
-            // Generate keys: 0,0,0,1,1,1,2,2,2,... (each segment gets same key)
             if (stream) {
                 thrust::transform(thrust::cuda::par.on(stream),
                     thrust::counting_iterator<size_t>(0),
@@ -927,7 +665,7 @@ namespace gs::tensor_ops {
                 );
             }
         } else {
-            // Non-contiguous OR single element - use custom kernel
+            // Non-contiguous - use custom kernel
             size_t total_scans = outer_size * inner_size;
             int blocks = (total_scans + 255) / 256;
             cumsum_noncontiguous_kernel<<<blocks, 256, 0, stream>>>(data, outer_size, dim_size, inner_size);
@@ -974,209 +712,195 @@ namespace gs::tensor_ops {
         }
     }
 
-    // ============= HIGHLY OPTIMIZED PAIRWISE DISTANCE =============
+    // ============= OPTIMIZED PAIRWISE DISTANCE =============
 
-// Optimized L2 distance using shared memory and tiling
-template<int BLOCK_SIZE = 16>
-__global__ void cdist_l2_optimized_kernel(
-    const float* __restrict__ a,
-    const float* __restrict__ b,
-    float* __restrict__ out,
-    size_t N, size_t M, size_t D)
-{
-    __shared__ float tile_a[BLOCK_SIZE][BLOCK_SIZE + 1]; // +1 to avoid bank conflicts
-    __shared__ float tile_b[BLOCK_SIZE][BLOCK_SIZE + 1];
+    template<int BLOCK_SIZE = 16>
+    __global__ void cdist_l2_optimized_kernel(
+        const float* __restrict__ a,
+        const float* __restrict__ b,
+        float* __restrict__ out,
+        size_t N, size_t M, size_t D)
+    {
+        __shared__ float tile_a[BLOCK_SIZE][BLOCK_SIZE + 1];
+        __shared__ float tile_b[BLOCK_SIZE][BLOCK_SIZE + 1];
 
-    size_t row = blockIdx.y * BLOCK_SIZE + threadIdx.y;
-    size_t col = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+        size_t row = blockIdx.y * BLOCK_SIZE + threadIdx.y;
+        size_t col = blockIdx.x * BLOCK_SIZE + threadIdx.x;
 
-    float sum = 0.0f;
+        float sum = 0.0f;
 
-    // Tile over dimension D
-    size_t num_tiles = (D + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    for (size_t tile = 0; tile < num_tiles; ++tile) {
-        // Load tiles into shared memory with coalescing
-        size_t d_idx = tile * BLOCK_SIZE + threadIdx.x;
-        if (row < N && d_idx < D) {
-            tile_a[threadIdx.y][threadIdx.x] = a[row * D + d_idx];
-        } else {
-            tile_a[threadIdx.y][threadIdx.x] = 0.0f;
-        }
-
-        d_idx = tile * BLOCK_SIZE + threadIdx.y;
-        if (col < M && d_idx < D) {
-            tile_b[threadIdx.y][threadIdx.x] = b[col * D + d_idx];
-        } else {
-            tile_b[threadIdx.y][threadIdx.x] = 0.0f;
-        }
-
-        __syncthreads();
-
-        // Compute partial distance for this tile
-        size_t d_start = tile * BLOCK_SIZE;
-        size_t d_end = (d_start + BLOCK_SIZE < D) ? (d_start + BLOCK_SIZE) : D;
-        size_t tile_size = d_end - d_start;
-
-        #pragma unroll
-        for (size_t k = 0; k < BLOCK_SIZE; ++k) {
-            if (k < tile_size) {
-                float diff = tile_a[threadIdx.y][k] - tile_b[k][threadIdx.x];
-                sum += diff * diff;
+        size_t num_tiles = (D + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        for (size_t tile = 0; tile < num_tiles; ++tile) {
+            size_t d_idx = tile * BLOCK_SIZE + threadIdx.x;
+            if (row < N && d_idx < D) {
+                tile_a[threadIdx.y][threadIdx.x] = a[row * D + d_idx];
+            } else {
+                tile_a[threadIdx.y][threadIdx.x] = 0.0f;
             }
-        }
 
-        __syncthreads();
-    }
-
-    if (row < N && col < M) {
-        out[row * M + col] = sqrtf(sum);
-    }
-}
-
-// Vectorized L2 for large D using float4
-__global__ void cdist_l2_vectorized_kernel(
-    const float* __restrict__ a,
-    const float* __restrict__ b,
-    float* __restrict__ out,
-    size_t N, size_t M, size_t D)
-{
-    size_t i = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t j = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (i >= N || j >= M) return;
-
-    float sum = 0.0f;
-    const float4* a_vec = reinterpret_cast<const float4*>(a + i * D);
-    const float4* b_vec = reinterpret_cast<const float4*>(b + j * D);
-
-    size_t vec_d = D / 4;
-
-    // Vectorized loop - process 4 elements at a time
-    for (size_t d = 0; d < vec_d; ++d) {
-        float4 va = a_vec[d];
-        float4 vb = b_vec[d];
-
-        float diff_x = va.x - vb.x;
-        float diff_y = va.y - vb.y;
-        float diff_z = va.z - vb.z;
-        float diff_w = va.w - vb.w;
-
-        sum += diff_x * diff_x + diff_y * diff_y + diff_z * diff_z + diff_w * diff_w;
-    }
-
-    // Handle remaining elements
-    for (size_t d = vec_d * 4; d < D; ++d) {
-        float diff = a[i * D + d] - b[j * D + d];
-        sum += diff * diff;
-    }
-
-    out[i * M + j] = sqrtf(sum);
-}
-
-// Optimized L1 distance
-template<int BLOCK_SIZE = 16>
-__global__ void cdist_l1_optimized_kernel(
-    const float* __restrict__ a,
-    const float* __restrict__ b,
-    float* __restrict__ out,
-    size_t N, size_t M, size_t D)
-{
-    __shared__ float tile_a[BLOCK_SIZE][BLOCK_SIZE + 1];
-    __shared__ float tile_b[BLOCK_SIZE][BLOCK_SIZE + 1];
-
-    size_t row = blockIdx.y * BLOCK_SIZE + threadIdx.y;
-    size_t col = blockIdx.x * BLOCK_SIZE + threadIdx.x;
-
-    float sum = 0.0f;
-
-    size_t num_tiles = (D + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    for (size_t tile = 0; tile < num_tiles; ++tile) {
-        size_t d_idx = tile * BLOCK_SIZE + threadIdx.x;
-        if (row < N && d_idx < D) {
-            tile_a[threadIdx.y][threadIdx.x] = a[row * D + d_idx];
-        } else {
-            tile_a[threadIdx.y][threadIdx.x] = 0.0f;
-        }
-
-        d_idx = tile * BLOCK_SIZE + threadIdx.y;
-        if (col < M && d_idx < D) {
-            tile_b[threadIdx.y][threadIdx.x] = b[col * D + d_idx];
-        } else {
-            tile_b[threadIdx.y][threadIdx.x] = 0.0f;
-        }
-
-        __syncthreads();
-
-        size_t d_start = tile * BLOCK_SIZE;
-        size_t d_end = (d_start + BLOCK_SIZE < D) ? (d_start + BLOCK_SIZE) : D;
-        size_t tile_size = d_end - d_start;
-
-        #pragma unroll
-        for (size_t k = 0; k < BLOCK_SIZE; ++k) {
-            if (k < tile_size) {
-                sum += fabsf(tile_a[threadIdx.y][k] - tile_b[k][threadIdx.x]);
+            d_idx = tile * BLOCK_SIZE + threadIdx.y;
+            if (col < M && d_idx < D) {
+                tile_b[threadIdx.y][threadIdx.x] = b[col * D + d_idx];
+            } else {
+                tile_b[threadIdx.y][threadIdx.x] = 0.0f;
             }
+
+            __syncthreads();
+
+            size_t d_start = tile * BLOCK_SIZE;
+            size_t d_end = (d_start + BLOCK_SIZE < D) ? (d_start + BLOCK_SIZE) : D;
+            size_t tile_size = d_end - d_start;
+
+            #pragma unroll
+            for (size_t k = 0; k < BLOCK_SIZE; ++k) {
+                if (k < tile_size) {
+                    float diff = tile_a[threadIdx.y][k] - tile_b[k][threadIdx.x];
+                    sum += diff * diff;
+                }
+            }
+
+            __syncthreads();
         }
 
-        __syncthreads();
+        if (row < N && col < M) {
+            out[row * M + col] = sqrtf(sum);
+        }
     }
 
-    if (row < N && col < M) {
-        out[row * M + col] = sum;
+    __global__ void cdist_l2_vectorized_kernel(
+        const float* __restrict__ a,
+        const float* __restrict__ b,
+        float* __restrict__ out,
+        size_t N, size_t M, size_t D)
+    {
+        size_t i = blockIdx.y * blockDim.y + threadIdx.y;
+        size_t j = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (i >= N || j >= M) return;
+
+        float sum = 0.0f;
+        const float4* a_vec = reinterpret_cast<const float4*>(a + i * D);
+        const float4* b_vec = reinterpret_cast<const float4*>(b + j * D);
+
+        size_t vec_d = D / 4;
+
+        for (size_t d = 0; d < vec_d; ++d) {
+            float4 va = a_vec[d];
+            float4 vb = b_vec[d];
+
+            float diff_x = va.x - vb.x;
+            float diff_y = va.y - vb.y;
+            float diff_z = va.z - vb.z;
+            float diff_w = va.w - vb.w;
+
+            sum += diff_x * diff_x + diff_y * diff_y + diff_z * diff_z + diff_w * diff_w;
+        }
+
+        for (size_t d = vec_d * 4; d < D; ++d) {
+            float diff = a[i * D + d] - b[j * D + d];
+            sum += diff * diff;
+        }
+
+        out[i * M + j] = sqrtf(sum);
     }
-}
 
-// General Lp distance kernel (fallback)
-__global__ void cdist_lp_kernel(
-    const float* __restrict__ a,
-    const float* __restrict__ b,
-    float* __restrict__ out,
-    size_t N, size_t M, size_t D, float p)
-{
-    size_t i = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t j = blockIdx.x * blockDim.x + threadIdx.x;
+    template<int BLOCK_SIZE = 16>
+    __global__ void cdist_l1_optimized_kernel(
+        const float* __restrict__ a,
+        const float* __restrict__ b,
+        float* __restrict__ out,
+        size_t N, size_t M, size_t D)
+    {
+        __shared__ float tile_a[BLOCK_SIZE][BLOCK_SIZE + 1];
+        __shared__ float tile_b[BLOCK_SIZE][BLOCK_SIZE + 1];
 
-    if (i >= N || j >= M) return;
+        size_t row = blockIdx.y * BLOCK_SIZE + threadIdx.y;
+        size_t col = blockIdx.x * BLOCK_SIZE + threadIdx.x;
 
-    float dist = 0.0f;
-    for (size_t d = 0; d < D; ++d) {
-        float diff = fabsf(a[i * D + d] - b[j * D + d]);
-        dist += powf(diff, p);
+        float sum = 0.0f;
+
+        size_t num_tiles = (D + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        for (size_t tile = 0; tile < num_tiles; ++tile) {
+            size_t d_idx = tile * BLOCK_SIZE + threadIdx.x;
+            if (row < N && d_idx < D) {
+                tile_a[threadIdx.y][threadIdx.x] = a[row * D + d_idx];
+            } else {
+                tile_a[threadIdx.y][threadIdx.x] = 0.0f;
+            }
+
+            d_idx = tile * BLOCK_SIZE + threadIdx.y;
+            if (col < M && d_idx < D) {
+                tile_b[threadIdx.y][threadIdx.x] = b[col * D + d_idx];
+            } else {
+                tile_b[threadIdx.y][threadIdx.x] = 0.0f;
+            }
+
+            __syncthreads();
+
+            size_t d_start = tile * BLOCK_SIZE;
+            size_t d_end = (d_start + BLOCK_SIZE < D) ? (d_start + BLOCK_SIZE) : D;
+            size_t tile_size = d_end - d_start;
+
+            #pragma unroll
+            for (size_t k = 0; k < BLOCK_SIZE; ++k) {
+                if (k < tile_size) {
+                    sum += fabsf(tile_a[threadIdx.y][k] - tile_b[k][threadIdx.x]);
+                }
+            }
+
+            __syncthreads();
+        }
+
+        if (row < N && col < M) {
+            out[row * M + col] = sum;
+        }
     }
-    out[i * M + j] = powf(dist, 1.0f / p);
-}
 
-void launch_cdist(const float* a, const float* b, float* out,
-                  size_t N, size_t M, size_t D, float p, cudaStream_t stream) {
-    if (N == 0 || M == 0) return;
+    __global__ void cdist_lp_kernel(
+        const float* __restrict__ a,
+        const float* __restrict__ b,
+        float* __restrict__ out,
+        size_t N, size_t M, size_t D, float p)
+    {
+        size_t i = blockIdx.y * blockDim.y + threadIdx.y;
+        size_t j = blockIdx.x * blockDim.x + threadIdx.x;
 
-    constexpr int BLOCK_SIZE = 16;
+        if (i >= N || j >= M) return;
 
-    if (p == 2.0f) {
-        // L2 distance - choose best kernel based on D
-        if (D >= 128 && D % 4 == 0) {
-            // Use vectorized kernel for large, aligned dimensions
+        float dist = 0.0f;
+        for (size_t d = 0; d < D; ++d) {
+            float diff = fabsf(a[i * D + d] - b[j * D + d]);
+            dist += powf(diff, p);
+        }
+        out[i * M + j] = powf(dist, 1.0f / p);
+    }
+
+    void launch_cdist(const float* a, const float* b, float* out,
+                      size_t N, size_t M, size_t D, float p, cudaStream_t stream) {
+        if (N == 0 || M == 0) return;
+
+        constexpr int BLOCK_SIZE = 16;
+
+        if (p == 2.0f) {
+            if (D >= 128 && D % 4 == 0) {
+                dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+                dim3 grid((M + BLOCK_SIZE - 1) / BLOCK_SIZE, (N + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                cdist_l2_vectorized_kernel<<<grid, block, 0, stream>>>(a, b, out, N, M, D);
+            } else {
+                dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+                dim3 grid((M + BLOCK_SIZE - 1) / BLOCK_SIZE, (N + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                cdist_l2_optimized_kernel<BLOCK_SIZE><<<grid, block, 0, stream>>>(a, b, out, N, M, D);
+            }
+        } else if (p == 1.0f) {
             dim3 block(BLOCK_SIZE, BLOCK_SIZE);
             dim3 grid((M + BLOCK_SIZE - 1) / BLOCK_SIZE, (N + BLOCK_SIZE - 1) / BLOCK_SIZE);
-            cdist_l2_vectorized_kernel<<<grid, block, 0, stream>>>(a, b, out, N, M, D);
+            cdist_l1_optimized_kernel<BLOCK_SIZE><<<grid, block, 0, stream>>>(a, b, out, N, M, D);
         } else {
-            // Use tiled shared memory kernel
-            dim3 block(BLOCK_SIZE, BLOCK_SIZE);
-            dim3 grid((M + BLOCK_SIZE - 1) / BLOCK_SIZE, (N + BLOCK_SIZE - 1) / BLOCK_SIZE);
-            cdist_l2_optimized_kernel<BLOCK_SIZE><<<grid, block, 0, stream>>>(a, b, out, N, M, D);
+            dim3 block(16, 16);
+            dim3 grid((M + 15) / 16, (N + 15) / 16);
+            cdist_lp_kernel<<<grid, block, 0, stream>>>(a, b, out, N, M, D, p);
         }
-    } else if (p == 1.0f) {
-        // L1 distance with tiling
-        dim3 block(BLOCK_SIZE, BLOCK_SIZE);
-        dim3 grid((M + BLOCK_SIZE - 1) / BLOCK_SIZE, (N + BLOCK_SIZE - 1) / BLOCK_SIZE);
-        cdist_l1_optimized_kernel<BLOCK_SIZE><<<grid, block, 0, stream>>>(a, b, out, N, M, D);
-    } else {
-        // General Lp distance - fall back to simple kernel
-        dim3 block(16, 16);
-        dim3 grid((M + 15) / 16, (N + 15) / 16);
-        cdist_lp_kernel<<<grid, block, 0, stream>>>(a, b, out, N, M, D, p);
     }
-}
 
     // ============= SORTING =============
 
@@ -1271,143 +995,405 @@ void launch_cdist(const float* a, const float* b, float* out,
         if (stream) cudaStreamSynchronize(stream);
     }
 
-    // Add at the end of tensor_ops.cu, before the closing namespace
+    // ============= CONCATENATION OPERATIONS =============
 
-// ============= CONCATENATION OPERATIONS =============
+    template<typename T>
+    __global__ void cat_last_dim_kernel(
+        T* output,
+        const T** input_ptrs,
+        const size_t* input_sizes,
+        size_t num_tensors,
+        size_t num_rows,
+        size_t row_size)
+    {
+        size_t row = blockIdx.x * blockDim.x + threadIdx.x;
+        if (row >= num_rows) return;
 
-// Optimized kernel for last dimension concatenation
-template<typename T>
-__global__ void cat_last_dim_kernel(
-    T* output,
-    const T** input_ptrs,
-    const size_t* input_sizes,
-    size_t num_tensors,
-    size_t num_rows,
-    size_t row_size)
-{
-    size_t row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= num_rows) return;
+        size_t result_offset = 0;
+        for (size_t t = 0; t < num_tensors; ++t) {
+            size_t tensor_dim_size = input_sizes[t];
 
-    size_t result_offset = 0;
-    for (size_t t = 0; t < num_tensors; ++t) {
-        size_t tensor_dim_size = input_sizes[t];
+            const T* src = input_ptrs[t] + row * tensor_dim_size;
+            T* dst = output + row * row_size + result_offset;
 
-        // Copy this tensor's chunk for this row
-        const T* src = input_ptrs[t] + row * tensor_dim_size;
-        T* dst = output + row * row_size + result_offset;
+            for (size_t i = 0; i < tensor_dim_size; ++i) {
+                dst[i] = src[i];
+            }
 
-        for (size_t i = 0; i < tensor_dim_size; ++i) {
-            dst[i] = src[i];
+            result_offset += tensor_dim_size;
+        }
+    }
+
+    void launch_cat_last_dim(
+        void* output,
+        const std::vector<Tensor>& tensors,
+        size_t num_rows,
+        size_t row_size,
+        size_t element_size,
+        cudaStream_t stream)
+    {
+        size_t num_tensors = tensors.size();
+
+        thrust::device_vector<const float*> d_input_ptrs(num_tensors);
+        thrust::device_vector<size_t> d_input_sizes(num_tensors);
+
+        for (size_t i = 0; i < num_tensors; ++i) {
+            d_input_ptrs[i] = static_cast<const float*>(tensors[i].raw_ptr());
+            d_input_sizes[i] = tensors[i].shape()[tensors[i].shape().rank() - 1];
         }
 
-        result_offset += tensor_dim_size;
-    }
-}
+        int block_size = 256;
+        int grid_size = (num_rows + block_size - 1) / block_size;
 
-void launch_cat_last_dim(
-    void* output,
-    const std::vector<Tensor>& tensors,
-    size_t num_rows,
-    size_t row_size,
-    size_t element_size,
-    cudaStream_t stream)
-{
-    size_t num_tensors = tensors.size();
-
-    // Prepare device arrays
-    thrust::device_vector<const float*> d_input_ptrs(num_tensors);
-    thrust::device_vector<size_t> d_input_sizes(num_tensors);
-
-    for (size_t i = 0; i < num_tensors; ++i) {
-        d_input_ptrs[i] = static_cast<const float*>(tensors[i].raw_ptr());
-        d_input_sizes[i] = tensors[i].shape()[tensors[i].shape().rank() - 1];
+        cat_last_dim_kernel<<<grid_size, block_size, 0, stream>>>(
+            static_cast<float*>(output),
+            thrust::raw_pointer_cast(d_input_ptrs.data()),
+            thrust::raw_pointer_cast(d_input_sizes.data()),
+            num_tensors,
+            num_rows,
+            row_size);
     }
 
-    int block_size = 256;
-    int grid_size = (num_rows + block_size - 1) / block_size;
+    template<typename T>
+    __global__ void cat_middle_dim_kernel(
+        T* output,
+        const T** input_ptrs,
+        const size_t* input_sizes,
+        size_t num_tensors,
+        size_t outer_size,
+        size_t inner_size,
+        size_t total_dim_size)
+    {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        size_t total = outer_size * total_dim_size * inner_size;
 
-    cat_last_dim_kernel<<<grid_size, block_size, 0, stream>>>(
-        static_cast<float*>(output),
-        thrust::raw_pointer_cast(d_input_ptrs.data()),
-        thrust::raw_pointer_cast(d_input_sizes.data()),
-        num_tensors,
-        num_rows,
-        row_size);
-}
+        if (idx >= total) return;
 
-// General kernel for middle dimension concatenation
-template<typename T>
-__global__ void cat_middle_dim_kernel(
-    T* output,
-    const T** input_ptrs,
-    const size_t* input_sizes,
-    size_t num_tensors,
-    size_t outer_size,
-    size_t inner_size,
-    size_t total_dim_size)
-{
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t total = outer_size * total_dim_size * inner_size;
+        size_t outer_idx = idx / (total_dim_size * inner_size);
+        size_t remainder = idx % (total_dim_size * inner_size);
+        size_t dim_idx = remainder / inner_size;
+        size_t inner_idx = remainder % inner_size;
 
-    if (idx >= total) return;
-
-    // Decompose index
-    size_t outer_idx = idx / (total_dim_size * inner_size);
-    size_t remainder = idx % (total_dim_size * inner_size);
-    size_t dim_idx = remainder / inner_size;
-    size_t inner_idx = remainder % inner_size;
-
-    // Find which tensor this element belongs to
-    size_t accumulated = 0;
-    for (size_t t = 0; t < num_tensors; ++t) {
-        if (dim_idx < accumulated + input_sizes[t]) {
-            size_t tensor_dim_idx = dim_idx - accumulated;
-            size_t src_idx = outer_idx * input_sizes[t] * inner_size +
-                           tensor_dim_idx * inner_size + inner_idx;
-            output[idx] = input_ptrs[t][src_idx];
-            return;
+        size_t accumulated = 0;
+        for (size_t t = 0; t < num_tensors; ++t) {
+            if (dim_idx < accumulated + input_sizes[t]) {
+                size_t tensor_dim_idx = dim_idx - accumulated;
+                size_t src_idx = outer_idx * input_sizes[t] * inner_size +
+                               tensor_dim_idx * inner_size + inner_idx;
+                output[idx] = input_ptrs[t][src_idx];
+                return;
+            }
+            accumulated += input_sizes[t];
         }
-        accumulated += input_sizes[t];
-    }
-}
-
-void launch_cat_middle_dim(
-    void* output,
-    const std::vector<Tensor>& tensors,
-    size_t outer_size,
-    size_t inner_size,
-    int resolved_dim,
-    size_t element_size,
-    cudaStream_t stream)
-{
-    size_t num_tensors = tensors.size();
-    size_t total_dim_size = 0;
-    for (const auto& t : tensors) {
-        total_dim_size += t.shape()[resolved_dim];
     }
 
-    size_t total_elements = outer_size * total_dim_size * inner_size;
+    void launch_cat_middle_dim(
+        void* output,
+        const std::vector<Tensor>& tensors,
+        size_t outer_size,
+        size_t inner_size,
+        int resolved_dim,
+        size_t element_size,
+        cudaStream_t stream)
+    {
+        size_t num_tensors = tensors.size();
+        size_t total_dim_size = 0;
+        for (const auto& t : tensors) {
+            total_dim_size += t.shape()[resolved_dim];
+        }
 
-    // Prepare device arrays
-    thrust::device_vector<const float*> d_input_ptrs(num_tensors);
-    thrust::device_vector<size_t> d_input_sizes(num_tensors);
+        size_t total_elements = outer_size * total_dim_size * inner_size;
 
-    for (size_t i = 0; i < num_tensors; ++i) {
-        d_input_ptrs[i] = static_cast<const float*>(tensors[i].raw_ptr());
-        d_input_sizes[i] = tensors[i].shape()[resolved_dim];
+        thrust::device_vector<const float*> d_input_ptrs(num_tensors);
+        thrust::device_vector<size_t> d_input_sizes(num_tensors);
+
+        for (size_t i = 0; i < num_tensors; ++i) {
+            d_input_ptrs[i] = static_cast<const float*>(tensors[i].raw_ptr());
+            d_input_sizes[i] = tensors[i].shape()[resolved_dim];
+        }
+
+        int block_size = 256;
+        int grid_size = (total_elements + block_size - 1) / block_size;
+
+        cat_middle_dim_kernel<<<grid_size, block_size, 0, stream>>>(
+            static_cast<float*>(output),
+            thrust::raw_pointer_cast(d_input_ptrs.data()),
+            thrust::raw_pointer_cast(d_input_sizes.data()),
+            num_tensors,
+            outer_size,
+            inner_size,
+            total_dim_size);
     }
 
-    int block_size = 256;
-    int grid_size = (total_elements + block_size - 1) / block_size;
+    // ============= EXPLICIT TEMPLATE INSTANTIATIONS =============
 
-    cat_middle_dim_kernel<<<grid_size, block_size, 0, stream>>>(
-        static_cast<float*>(output),
-        thrust::raw_pointer_cast(d_input_ptrs.data()),
-        thrust::raw_pointer_cast(d_input_sizes.data()),
-        num_tensors,
-        outer_size,
-        inner_size,
-        total_dim_size);
-}
+    // Type conversions
+    template void launch_convert_type<float, uint8_t>(const float*, uint8_t*, size_t, cudaStream_t);
+    template void launch_convert_type<uint8_t, float>(const uint8_t*, float*, size_t, cudaStream_t);
+    template void launch_convert_type<int, uint8_t>(const int*, uint8_t*, size_t, cudaStream_t);
+    template void launch_convert_type<uint8_t, int>(const uint8_t*, int*, size_t, cudaStream_t);
+    template void launch_convert_type<int64_t, float>(const int64_t*, float*, size_t, cudaStream_t);
+    template void launch_convert_type<float, int64_t>(const float*, int64_t*, size_t, cudaStream_t);
+    template void launch_convert_type<int, int64_t>(const int*, int64_t*, size_t, cudaStream_t);
+    template void launch_convert_type<int64_t, int>(const int64_t*, int*, size_t, cudaStream_t);
+    template void launch_convert_type<uint8_t, int64_t>(const uint8_t*, int64_t*, size_t, cudaStream_t);
+    template void launch_convert_type<int64_t, uint8_t>(const int64_t*, uint8_t*, size_t, cudaStream_t);
+    template void launch_convert_type<int, float>(const int*, float*, size_t, cudaStream_t);
+    template void launch_convert_type<float, int>(const float*, int*, size_t, cudaStream_t);
+
+
+    // ============= EXPLICIT INSTANTIATIONS FOR C++ FILES =============
+    // C++ files (not CUDA) can't see tensor_generic_ops.cuh (which is #ifdef __CUDACC__),
+    // so we need explicit instantiations for functors used by C++ expression templates.
+
+    // Basic unary operations (comprehensive list)
+    template void launch_unary_op_generic<float, float, ops::log_op>(
+        const float*, float*, size_t, ops::log_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::log_op>(
+        const int*, int*, size_t, ops::log_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::exp_op>(
+        const float*, float*, size_t, ops::exp_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::exp_op>(
+        const int*, int*, size_t, ops::exp_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::abs_op>(
+        const float*, float*, size_t, ops::abs_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::abs_op>(
+        const int*, int*, size_t, ops::abs_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::sqrt_op>(
+        const float*, float*, size_t, ops::sqrt_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::sqrt_op>(
+        const int*, int*, size_t, ops::sqrt_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::square_op>(
+        const float*, float*, size_t, ops::square_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::square_op>(
+        const int*, int*, size_t, ops::square_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::relu_op>(
+        const float*, float*, size_t, ops::relu_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::relu_op>(
+        const int*, int*, size_t, ops::relu_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::sigmoid_op>(
+        const float*, float*, size_t, ops::sigmoid_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::sigmoid_op>(
+        const int*, int*, size_t, ops::sigmoid_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::neg_op>(
+        const float*, float*, size_t, ops::neg_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::neg_op>(
+        const int*, int*, size_t, ops::neg_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::floor_op>(
+        const float*, float*, size_t, ops::floor_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::floor_op>(
+        const int*, int*, size_t, ops::floor_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::ceil_op>(
+        const float*, float*, size_t, ops::ceil_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::ceil_op>(
+        const int*, int*, size_t, ops::ceil_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::round_op>(
+        const float*, float*, size_t, ops::round_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::round_op>(
+        const int*, int*, size_t, ops::round_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::sin_op>(
+        const float*, float*, size_t, ops::sin_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::sin_op>(
+        const int*, int*, size_t, ops::sin_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::cos_op>(
+        const float*, float*, size_t, ops::cos_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::cos_op>(
+        const int*, int*, size_t, ops::cos_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::tan_op>(
+        const float*, float*, size_t, ops::tan_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::tan_op>(
+        const int*, int*, size_t, ops::tan_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::tanh_op>(
+        const float*, float*, size_t, ops::tanh_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::tanh_op>(
+        const int*, int*, size_t, ops::tanh_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::sign_op>(
+        const float*, float*, size_t, ops::sign_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::sign_op>(
+        const int*, int*, size_t, ops::sign_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::reciprocal_op>(
+        const float*, float*, size_t, ops::reciprocal_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::reciprocal_op>(
+        const int*, int*, size_t, ops::reciprocal_op, cudaStream_t);
+    template void launch_unary_op_generic<float, unsigned char, ops::logical_not_op>(
+        const float*, unsigned char*, size_t, ops::logical_not_op, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::logical_not_op>(
+        const int*, unsigned char*, size_t, ops::logical_not_op, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::logical_not_op>(
+        const unsigned char*, unsigned char*, size_t, ops::logical_not_op, cudaStream_t);
+
+    // Basic binary operations (same input/output type - comprehensive list)
+    template void launch_binary_op_generic<float, float, ops::add_op>(
+        const float*, const float*, float*, size_t, ops::add_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::add_op>(
+        const int*, const int*, int*, size_t, ops::add_op, cudaStream_t);
+    template void launch_binary_op_generic<float, float, ops::sub_op>(
+        const float*, const float*, float*, size_t, ops::sub_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::sub_op>(
+        const int*, const int*, int*, size_t, ops::sub_op, cudaStream_t);
+    template void launch_binary_op_generic<float, float, ops::mul_op>(
+        const float*, const float*, float*, size_t, ops::mul_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::mul_op>(
+        const int*, const int*, int*, size_t, ops::mul_op, cudaStream_t);
+    template void launch_binary_op_generic<float, float, ops::div_op>(
+        const float*, const float*, float*, size_t, ops::div_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::div_op>(
+        const int*, const int*, int*, size_t, ops::div_op, cudaStream_t);
+    template void launch_binary_op_generic<float, float, ops::minimum_op>(
+        const float*, const float*, float*, size_t, ops::minimum_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::minimum_op>(
+        const int*, const int*, int*, size_t, ops::minimum_op, cudaStream_t);
+    template void launch_binary_op_generic<float, float, ops::maximum_op>(
+        const float*, const float*, float*, size_t, ops::maximum_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::maximum_op>(
+        const int*, const int*, int*, size_t, ops::maximum_op, cudaStream_t);
+    template void launch_binary_op_generic<float, float, ops::pow_op>(
+        const float*, const float*, float*, size_t, ops::pow_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::pow_op>(
+        const int*, const int*, int*, size_t, ops::pow_op, cudaStream_t);
+
+    // Comparison operations (input T -> output unsigned char/bool)
+    template void launch_binary_op_generic<float, unsigned char, ops::greater_op>(
+        const float*, const float*, unsigned char*, size_t, ops::greater_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::greater_op>(
+        const int*, const int*, unsigned char*, size_t, ops::greater_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::greater_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::greater_op, cudaStream_t);
+
+    template void launch_binary_op_generic<float, unsigned char, ops::greater_equal_op>(
+        const float*, const float*, unsigned char*, size_t, ops::greater_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::greater_equal_op>(
+        const int*, const int*, unsigned char*, size_t, ops::greater_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::greater_equal_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::greater_equal_op, cudaStream_t);
+
+    template void launch_binary_op_generic<float, unsigned char, ops::less_equal_op>(
+        const float*, const float*, unsigned char*, size_t, ops::less_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::less_equal_op>(
+        const int*, const int*, unsigned char*, size_t, ops::less_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::less_equal_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::less_equal_op, cudaStream_t);
+
+    // Logical operations (bool/unsigned char -> unsigned char)
+    template void launch_binary_op_generic<float, unsigned char, ops::logical_and_op>(
+        const float*, const float*, unsigned char*, size_t, ops::logical_and_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::logical_and_op>(
+        const int*, const int*, unsigned char*, size_t, ops::logical_and_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::logical_and_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::logical_and_op, cudaStream_t);
+
+    template void launch_binary_op_generic<float, unsigned char, ops::logical_or_op>(
+        const float*, const float*, unsigned char*, size_t, ops::logical_or_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::logical_or_op>(
+        const int*, const int*, unsigned char*, size_t, ops::logical_or_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::logical_or_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::logical_or_op, cudaStream_t);
+
+    template void launch_binary_op_generic<float, unsigned char, ops::less_op>(
+        const float*, const float*, unsigned char*, size_t, ops::less_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::less_op>(
+        const int*, const int*, unsigned char*, size_t, ops::less_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::less_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::less_op, cudaStream_t);
+
+    template void launch_binary_op_generic<float, unsigned char, ops::equal_op>(
+        const float*, const float*, unsigned char*, size_t, ops::equal_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::equal_op>(
+        const int*, const int*, unsigned char*, size_t, ops::equal_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::equal_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::equal_op, cudaStream_t);
+
+    template void launch_binary_op_generic<float, unsigned char, ops::not_equal_op>(
+        const float*, const float*, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::not_equal_op>(
+        const int*, const int*, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::not_equal_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
+
+    // Scalar operations (uses constant_iterator, different from scalar_right_op!)
+    template void launch_scalar_op_generic<float, float, ops::add_op>(
+        const float*, float, float*, size_t, ops::add_op, cudaStream_t);
+    template void launch_scalar_op_generic<float, float, ops::sub_op>(
+        const float*, float, float*, size_t, ops::sub_op, cudaStream_t);
+    template void launch_scalar_op_generic<float, float, ops::mul_op>(
+        const float*, float, float*, size_t, ops::mul_op, cudaStream_t);
+
+    // scalar_right_op instantiations for various operations (comprehensive list)
+    template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::add_op, float>>(
+        const float*, float*, size_t, ops::scalar_right_op<ops::add_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::scalar_right_op<ops::add_op, float>>(
+        const int*, int*, size_t, ops::scalar_right_op<ops::add_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::sub_op, float>>(
+        const float*, float*, size_t, ops::scalar_right_op<ops::sub_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::scalar_right_op<ops::sub_op, float>>(
+        const int*, int*, size_t, ops::scalar_right_op<ops::sub_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::mul_op, float>>(
+        const float*, float*, size_t, ops::scalar_right_op<ops::mul_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::scalar_right_op<ops::mul_op, float>>(
+        const int*, int*, size_t, ops::scalar_right_op<ops::mul_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::div_op, float>>(
+        const float*, float*, size_t, ops::scalar_right_op<ops::div_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::scalar_right_op<ops::div_op, float>>(
+        const int*, int*, size_t, ops::scalar_right_op<ops::div_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::pow_op, float>>(
+        const float*, float*, size_t, ops::scalar_right_op<ops::pow_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::scalar_right_op<ops::pow_op, float>>(
+        const int*, int*, size_t, ops::scalar_right_op<ops::pow_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<float, unsigned char, ops::scalar_right_op<ops::not_equal_op, float>>(
+        const float*, unsigned char*, size_t, ops::scalar_right_op<ops::not_equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::scalar_right_op<ops::not_equal_op, float>>(
+        const int*, unsigned char*, size_t, ops::scalar_right_op<ops::not_equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::scalar_right_op<ops::not_equal_op, float>>(
+        const unsigned char*, unsigned char*, size_t, ops::scalar_right_op<ops::not_equal_op, float>, cudaStream_t);
+
+    template void launch_unary_op_generic<float, unsigned char, ops::scalar_right_op<ops::equal_op, float>>(
+        const float*, unsigned char*, size_t, ops::scalar_right_op<ops::equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::scalar_right_op<ops::equal_op, float>>(
+        const int*, unsigned char*, size_t, ops::scalar_right_op<ops::equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::scalar_right_op<ops::equal_op, float>>(
+        const unsigned char*, unsigned char*, size_t, ops::scalar_right_op<ops::equal_op, float>, cudaStream_t);
+
+    template void launch_unary_op_generic<float, unsigned char, ops::scalar_right_op<ops::greater_op, float>>(
+        const float*, unsigned char*, size_t, ops::scalar_right_op<ops::greater_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::scalar_right_op<ops::greater_op, float>>(
+        const int*, unsigned char*, size_t, ops::scalar_right_op<ops::greater_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::scalar_right_op<ops::greater_op, float>>(
+        const unsigned char*, unsigned char*, size_t, ops::scalar_right_op<ops::greater_op, float>, cudaStream_t);
+
+    template void launch_unary_op_generic<float, unsigned char, ops::scalar_right_op<ops::less_op, float>>(
+        const float*, unsigned char*, size_t, ops::scalar_right_op<ops::less_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::scalar_right_op<ops::less_op, float>>(
+        const int*, unsigned char*, size_t, ops::scalar_right_op<ops::less_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::scalar_right_op<ops::less_op, float>>(
+        const unsigned char*, unsigned char*, size_t, ops::scalar_right_op<ops::less_op, float>, cudaStream_t);
+
+    template void launch_unary_op_generic<float, unsigned char, ops::scalar_right_op<ops::greater_equal_op, float>>(
+        const float*, unsigned char*, size_t, ops::scalar_right_op<ops::greater_equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::scalar_right_op<ops::greater_equal_op, float>>(
+        const int*, unsigned char*, size_t, ops::scalar_right_op<ops::greater_equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::scalar_right_op<ops::greater_equal_op, float>>(
+        const unsigned char*, unsigned char*, size_t, ops::scalar_right_op<ops::greater_equal_op, float>, cudaStream_t);
+
+    template void launch_unary_op_generic<float, unsigned char, ops::scalar_right_op<ops::less_equal_op, float>>(
+        const float*, unsigned char*, size_t, ops::scalar_right_op<ops::less_equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::scalar_right_op<ops::less_equal_op, float>>(
+        const int*, unsigned char*, size_t, ops::scalar_right_op<ops::less_equal_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::scalar_right_op<ops::less_equal_op, float>>(
+        const unsigned char*, unsigned char*, size_t, ops::scalar_right_op<ops::less_equal_op, float>, cudaStream_t);
+
+    template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::mod_op, float>>(
+        const float*, float*, size_t, ops::scalar_right_op<ops::mod_op, float>, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::scalar_right_op<ops::mod_op, float>>(
+        const int*, int*, size_t, ops::scalar_right_op<ops::mod_op, float>, cudaStream_t);
+
+    // Composed unary operations (expression template fusion) - test-specific
+    template void launch_unary_op_generic<float, float, ops::composed_unary_op<ops::exp_op, ops::scalar_right_op<ops::mul_op, float>>>(
+        const float*, float*, size_t, ops::composed_unary_op<ops::exp_op, ops::scalar_right_op<ops::mul_op, float>>, cudaStream_t);
+
+    template void launch_unary_op_generic<float, float, ops::composed_unary_op<ops::scalar_right_op<ops::mul_op, float>, ops::abs_op>>(
+        const float*, float*, size_t, ops::composed_unary_op<ops::scalar_right_op<ops::mul_op, float>, ops::abs_op>, cudaStream_t);
+
+    template void launch_unary_op_generic<float, float, ops::composed_unary_op<ops::scalar_right_op<ops::mul_op, float>, ops::relu_op>>(
+        const float*, float*, size_t, ops::composed_unary_op<ops::scalar_right_op<ops::mul_op, float>, ops::relu_op>, cudaStream_t);
 
 } // namespace gs::tensor_ops

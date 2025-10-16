@@ -5,6 +5,8 @@
 #include "core/tensor.hpp"
 #include "core/tensor_broadcast.hpp"
 #include "core/tensor_ops.hpp"
+#include "core/tensor_functors.hpp"
+#include "core/memory_pool.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -14,6 +16,46 @@
 namespace gs {
 
     // ============= CORE UNIFIED OPERATIONS =============
+    constexpr static DataType promote_types(DataType a, DataType b) {
+        if (a == b)
+            return a;
+
+        if (a == DataType::Bool) {
+            if (b == DataType::Float32 || b == DataType::Float16)
+                return b;
+            if (b == DataType::Int32 || b == DataType::Int64)
+                return b;
+            return DataType::Float32;
+        }
+        if (b == DataType::Bool) {
+            if (a == DataType::Float32 || a == DataType::Float16)
+                return a;
+            if (a == DataType::Int32 || a == DataType::Int64)
+                return a;
+            return DataType::Float32;
+        }
+
+        if ((a == DataType::Int32 || a == DataType::Int64) &&
+            (b == DataType::Float32 || b == DataType::Float16)) {
+            return (b == DataType::Float16) ? DataType::Float16 : DataType::Float32;
+            }
+        if ((b == DataType::Int32 || b == DataType::Int64) &&
+            (a == DataType::Float32 || a == DataType::Float16)) {
+            return (a == DataType::Float16) ? DataType::Float16 : DataType::Float32;
+            }
+
+        if ((a == DataType::Int32 && b == DataType::Int64) ||
+            (a == DataType::Int64 && b == DataType::Int32)) {
+            return DataType::Int64;
+            }
+
+        if ((a == DataType::Float16 && b == DataType::Float32) ||
+            (a == DataType::Float32 && b == DataType::Float16)) {
+            return DataType::Float32;
+            }
+
+        return DataType::Float32;
+    }
 
     Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
         Tensor result;
@@ -21,6 +63,9 @@ namespace gs {
         switch (op) {
             case LoadOp::Empty: {
                 result.shape_ = args.shape;
+                result.strides_ = args.shape.strides();  // Initialize to contiguous strides
+                result.storage_offset_ = 0;
+                result.is_contiguous_ = true;
                 result.device_ = args.device;
                 result.dtype_ = args.dtype;
                 result.id_ = next_id_++;
@@ -31,10 +76,9 @@ namespace gs {
                     // Create a dummy allocation to hold a valid shared_ptr
                     // We allocate 1 byte even though we don't need it
                     if (result.device_ == Device::CUDA) {
-                        void* dummy = nullptr;
-                        cudaMalloc(&dummy, 1);
+                        void* dummy = CudaMemoryPool::instance().allocate(1, nullptr);
                         result.data_owner_ = std::shared_ptr<void>(dummy, [](void* p) {
-                            if (p) cudaFree(p);
+                            CudaMemoryPool::instance().deallocate(p, nullptr);
                         });
                     } else {
                         void* dummy = std::malloc(1);
@@ -47,15 +91,13 @@ namespace gs {
                 }
 
                 if (result.device_ == Device::CUDA) {
-                    void* ptr = nullptr;
-                    cudaError_t err = cudaMalloc(&ptr, bytes);
-                    if (err != cudaSuccess) {
-                        LOG_ERROR("Failed to allocate {} bytes on CUDA: {}", bytes, cudaGetErrorString(err));
+                    void* ptr = CudaMemoryPool::instance().allocate(bytes, nullptr);
+                    if (!ptr) {
+                        LOG_ERROR("Failed to allocate {} bytes from memory pool", bytes);
                         return Tensor();
                     }
                     result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
-                        if (p)
-                            cudaFree(p);
+                        CudaMemoryPool::instance().deallocate(p, nullptr);
                     });
                     result.data_ = result.data_owner_.get();
                 } else {
@@ -136,6 +178,9 @@ namespace gs {
             size_t count = static_cast<size_t>(std::ceil((end - start) / step));
 
             result.shape_ = TensorShape{count};
+            result.strides_ = result.shape_.strides();  // Initialize to contiguous strides
+            result.storage_offset_ = 0;
+            result.is_contiguous_ = true;
             result.device_ = args.device;
             result.dtype_ = args.dtype;
             result.id_ = next_id_++;
@@ -143,16 +188,15 @@ namespace gs {
             size_t bytes = count * dtype_size(result.dtype_);
 
             if (result.device_ == Device::CUDA) {
-                void* ptr = nullptr;
-                cudaError_t err = cudaMalloc(&ptr, bytes);
-                if (err != cudaSuccess) {
-                    LOG_ERROR("Failed to allocate {} bytes on CUDA", bytes);
+                void* ptr = CudaMemoryPool::instance().allocate(bytes, nullptr);
+                if (!ptr) {
+                    LOG_ERROR("Failed to allocate {} bytes from memory pool", bytes);
                     return Tensor();
                 }
                 result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
-                    if (p) cudaFree(p);
+                    CudaMemoryPool::instance().deallocate(p, nullptr);
                 });
-                result.data_ = result.data_owner_.get();  // CRITICAL: Set data_ pointer!
+                result.data_ = result.data_owner_.get();
 
                 if (result.dtype_ == DataType::Float32) {
                     std::vector<float> data(count);
@@ -174,7 +218,7 @@ namespace gs {
                     return Tensor();
                 }
                 result.data_owner_ = std::shared_ptr<void>(ptr, std::free);
-                result.data_ = result.data_owner_.get();  // CRITICAL: Set data_ pointer!
+                result.data_ = result.data_owner_.get();
 
                 if (result.dtype_ == DataType::Float32) {
                     float* data_ptr = static_cast<float*>(result.data_);
@@ -264,17 +308,21 @@ namespace gs {
                                                RandomGenerator::instance().get_next_cuda_seed(), 0);
                     cudaDeviceSynchronize();
                 } else if (result.dtype_ == DataType::Float32) {
-                    int* temp_buffer;
-                    cudaMalloc(&temp_buffer, result.numel() * sizeof(int));
+                    int* temp_buffer = static_cast<int*>(
+                        CudaMemoryPool::instance().allocate(result.numel() * sizeof(int), nullptr));
 
-                    tensor_ops::launch_randint(temp_buffer, result.numel(), low, high,
-                                               RandomGenerator::instance().get_next_cuda_seed(), 0);
+                    if (temp_buffer) {
+                        tensor_ops::launch_randint(temp_buffer, result.numel(), low, high,
+                                                   RandomGenerator::instance().get_next_cuda_seed(), 0);
 
-                    tensor_ops::launch_int_to_float(temp_buffer, result.ptr<float>(),
-                                                    result.numel(), 0);
-                    cudaDeviceSynchronize();
+                        tensor_ops::launch_convert_type<int, float>(temp_buffer, result.ptr<float>(),
+                                                result.numel(), 0);
+                        cudaDeviceSynchronize();
 
-                    cudaFree(temp_buffer);
+                        CudaMemoryPool::instance().deallocate(temp_buffer, nullptr);
+                    } else {
+                        LOG_ERROR("Failed to allocate temp buffer from memory pool");
+                    }
                 }
             } else {
                 auto& gen = *static_cast<std::mt19937_64*>(
@@ -453,595 +501,10 @@ namespace gs {
         }
 
         LoadArgs args;
-        args.shape = TensorShape({static_cast<size_t>(num_samples)});
-        args.device = weights.device();
+        args.shape = TensorShape({static_cast<size_t>(num_samples)}); args.device = weights.device();
         args.dtype = DataType::Int32;
         args.args = std::pair<void*, bool>{const_cast<void*>(static_cast<const void*>(&weights)), replacement};
         return load(LoadOp::Multinomial, args);
-    }
-
-    Tensor Tensor::unary(UnaryOp op, const UnaryArgs& args) const {
-        if (!validate_unary_op()) {
-            return Tensor();
-        }
-
-        auto result = Tensor::empty(shape_, device_,
-                                    (op >= UnaryOp::IsNan && op <= UnaryOp::LogicalNot)
-                                        ? DataType::Bool
-                                        : dtype_);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_unary_op(
-                data_, result.data_,
-                numel(), op,
-                dtype_, nullptr);
-            cudaDeviceSynchronize();
-        } else {
-            // CPU implementation using compile-time operation table
-            const float* src = static_cast<const float*>(data_);
-            float* dst = static_cast<float*>(result.data_);
-
-            // Use compile-time op table - single line!
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = op_tables::float_unary_ops[int(op)](src[i]);
-            }
-        }
-
-        return result;
-    }
-
-    Tensor Tensor::binary_op_impl(const Tensor& other, BinaryOp op) const {
-    if (!validate_binary_op(other, false, true)) {
-        return Tensor();
-    }
-
-    auto broadcast_shape = this->broadcast_shape(other.shape());
-    if (broadcast_shape.rank() == 0) {
-        LOG_ERROR("Incompatible shapes for broadcasting: {} vs {}",
-                  shape_.str(), other.shape_.str());
-        return Tensor();
-    }
-
-    // Determine output dtype
-    DataType out_dtype = dtype_;
-    if (op >= BinaryOp::Equal && op <= BinaryOp::GreaterEqual) {
-        out_dtype = DataType::Bool;
-    } else if (op >= BinaryOp::LogicalAnd && op <= BinaryOp::LogicalXor) {
-        out_dtype = DataType::Bool;
-    } else if (op >= BinaryOp::BitwiseAnd && op <= BinaryOp::BitwiseXor) {
-        out_dtype = DataType::Bool;
-    } else {
-        out_dtype = promote_types(dtype_, other.dtype());
-    }
-
-    auto result = Tensor::empty(broadcast_shape, device_, out_dtype);
-
-    bool a_needs_broadcast = (shape_ != broadcast_shape);
-    bool b_needs_broadcast = (other.shape() != broadcast_shape);
-
-    if (!a_needs_broadcast && !b_needs_broadcast) {
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_binary_op(
-                raw_ptr(), other.raw_ptr(), result.raw_ptr(),
-                result.numel(), op,
-                dtype_, other.dtype(), result.dtype(),
-                nullptr);
-            cudaDeviceSynchronize();
-        } else {
-            // CPU implementation using compile-time operation tables
-
-            // Int32 comparison operations
-            if (out_dtype == DataType::Bool && dtype_ == DataType::Int32 && other.dtype() == DataType::Int32) {
-                const int* src_a = static_cast<const int*>(raw_ptr());
-                const int* src_b = static_cast<const int*>(other.raw_ptr());
-                unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
-
-                for (size_t i = 0; i < result.numel(); ++i) {
-                    bool cmp_result = false;
-                    switch (op) {
-                        case BinaryOp::Equal: cmp_result = (src_a[i] == src_b[i]); break;
-                        case BinaryOp::NotEqual: cmp_result = (src_a[i] != src_b[i]); break;
-                        case BinaryOp::Less: cmp_result = (src_a[i] < src_b[i]); break;
-                        case BinaryOp::LessEqual: cmp_result = (src_a[i] <= src_b[i]); break;
-                        case BinaryOp::Greater: cmp_result = (src_a[i] > src_b[i]); break;
-                        case BinaryOp::GreaterEqual: cmp_result = (src_a[i] >= src_b[i]); break;
-                        default: cmp_result = false; break;
-                    }
-                    dst[i] = cmp_result ? 1 : 0;
-                }
-            }
-            // Float32 comparison operations
-            else if (out_dtype == DataType::Bool && dtype_ == DataType::Float32 && other.dtype() == DataType::Float32) {
-                const float* src_a = static_cast<const float*>(raw_ptr());
-                const float* src_b = static_cast<const float*>(other.raw_ptr());
-                unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
-
-                for (size_t i = 0; i < result.numel(); ++i) {
-                    dst[i] = op_tables::float_compare_ops[int(op)](src_a[i], src_b[i]) ? 1 : 0;
-                }
-            }
-            // Logical operations
-            else if (dtype_ == DataType::Bool && other.dtype() == DataType::Bool && out_dtype == DataType::Bool) {
-                const unsigned char* src_a = static_cast<const unsigned char*>(raw_ptr());
-                const unsigned char* src_b = static_cast<const unsigned char*>(other.raw_ptr());
-                unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
-
-                for (size_t i = 0; i < result.numel(); ++i) {
-                    dst[i] = op_tables::float_logical_ops[int(op)](src_a[i], src_b[i]) ? 1 : 0;
-                }
-            }
-            // Arithmetic operations
-            else if (dtype_ == DataType::Float32 && other.dtype() == DataType::Float32 && out_dtype == DataType::Float32) {
-                const float* src_a = static_cast<const float*>(raw_ptr());
-                const float* src_b = static_cast<const float*>(other.raw_ptr());
-                float* dst = static_cast<float*>(result.raw_ptr());
-
-                for (size_t i = 0; i < result.numel(); ++i) {
-                    dst[i] = op_tables::float_binary_ops[int(op)](src_a[i], src_b[i]);
-                }
-            }
-            // Int32 arithmetic operations
-            else if (dtype_ == DataType::Int32 && other.dtype() == DataType::Int32 && out_dtype == DataType::Int32) {
-                const int* src_a = static_cast<const int*>(raw_ptr());
-                const int* src_b = static_cast<const int*>(other.raw_ptr());
-                int* dst = static_cast<int*>(result.raw_ptr());
-
-                for (size_t i = 0; i < result.numel(); ++i) {
-                    dst[i] = op_tables::int_binary_ops[int(op)](src_a[i], src_b[i]);
-                }
-            }
-        }
-    } else {
-        // Broadcasting needed
-        if (device_ == Device::CUDA) {
-            // Use unified broadcast template
-            auto a_shape = shape_.dims();
-            auto b_shape = other.shape().dims();
-            auto c_shape = broadcast_shape.dims();
-
-            using namespace tensor_ops;
-
-            // Float32 operations
-            if (dtype_ == DataType::Float32 && other.dtype() == DataType::Float32) {
-                if (out_dtype == DataType::Float32) {
-                    // Arithmetic operations
-                    switch(op) {
-                        case BinaryOp::Add:
-                            launch_broadcast_binary(ptr<float>(), other.ptr<float>(), result.ptr<float>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), add_op<float>(), nullptr);
-                            break;
-                        case BinaryOp::Sub:
-                            launch_broadcast_binary(ptr<float>(), other.ptr<float>(), result.ptr<float>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), sub_op<float>(), nullptr);
-                            break;
-                        case BinaryOp::Mul:
-                            launch_broadcast_binary(ptr<float>(), other.ptr<float>(), result.ptr<float>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), mul_op<float>(), nullptr);
-                            break;
-                        case BinaryOp::Div:
-                            launch_broadcast_binary(ptr<float>(), other.ptr<float>(), result.ptr<float>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), div_op<float>(), nullptr);
-                            break;
-                        case BinaryOp::Pow:
-                            launch_broadcast_binary(ptr<float>(), other.ptr<float>(), result.ptr<float>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), pow_op<float>(), nullptr);
-                            break;
-                        default:
-                            // Fallback for other operations
-                            auto a_broadcast = a_needs_broadcast ? broadcast_to(broadcast_shape) : clone();
-                            auto b_broadcast = b_needs_broadcast ? other.broadcast_to(broadcast_shape) : other.clone();
-                            tensor_ops::launch_binary_op(
-                                a_broadcast.raw_ptr(), b_broadcast.raw_ptr(), result.raw_ptr(),
-                                result.numel(), op,
-                                a_broadcast.dtype(), b_broadcast.dtype(), result.dtype(),
-                                nullptr);
-                    }
-                } else if (out_dtype == DataType::Bool) {
-                    // Comparison operations
-                    switch(op) {
-                        case BinaryOp::Equal:
-                            launch_broadcast_binary(ptr<float>(), other.ptr<float>(), result.ptr<unsigned char>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), eq_op<float>(), nullptr);
-                            break;
-                        case BinaryOp::NotEqual:
-                            launch_broadcast_binary(ptr<float>(), other.ptr<float>(), result.ptr<unsigned char>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), ne_op<float>(), nullptr);
-                            break;
-                        case BinaryOp::Less:
-                            launch_broadcast_binary(ptr<float>(), other.ptr<float>(), result.ptr<unsigned char>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), lt_op<float>(), nullptr);
-                            break;
-                        case BinaryOp::LessEqual:
-                            launch_broadcast_binary(ptr<float>(), other.ptr<float>(), result.ptr<unsigned char>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), le_op<float>(), nullptr);
-                            break;
-                        case BinaryOp::Greater:
-                            launch_broadcast_binary(ptr<float>(), other.ptr<float>(), result.ptr<unsigned char>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), gt_op<float>(), nullptr);
-                            break;
-                        case BinaryOp::GreaterEqual:
-                            launch_broadcast_binary(ptr<float>(), other.ptr<float>(), result.ptr<unsigned char>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), ge_op<float>(), nullptr);
-                            break;
-                        default:
-                            // Fallback
-                            auto a_broadcast = a_needs_broadcast ? broadcast_to(broadcast_shape) : clone();
-                            auto b_broadcast = b_needs_broadcast ? other.broadcast_to(broadcast_shape) : other.clone();
-                            tensor_ops::launch_binary_op(
-                                a_broadcast.raw_ptr(), b_broadcast.raw_ptr(), result.raw_ptr(),
-                                result.numel(), op,
-                                a_broadcast.dtype(), b_broadcast.dtype(), result.dtype(),
-                                nullptr);
-                    }
-                }
-                cudaDeviceSynchronize();
-            }
-            // Int32 operations
-            else if (dtype_ == DataType::Int32 && other.dtype() == DataType::Int32) {
-                if (out_dtype == DataType::Int32) {
-                    // Arithmetic operations
-                    switch(op) {
-                        case BinaryOp::Add:
-                            launch_broadcast_binary(ptr<int>(), other.ptr<int>(), result.ptr<int>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), add_op<int>(), nullptr);
-                            break;
-                        case BinaryOp::Sub:
-                            launch_broadcast_binary(ptr<int>(), other.ptr<int>(), result.ptr<int>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), sub_op<int>(), nullptr);
-                            break;
-                        case BinaryOp::Mul:
-                            launch_broadcast_binary(ptr<int>(), other.ptr<int>(), result.ptr<int>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), mul_op<int>(), nullptr);
-                            break;
-                        case BinaryOp::Div:
-                            launch_broadcast_binary(ptr<int>(), other.ptr<int>(), result.ptr<int>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), div_op<int>(), nullptr);
-                            break;
-                        default:
-                            // Fallback
-                            auto a_broadcast = a_needs_broadcast ? broadcast_to(broadcast_shape) : clone();
-                            auto b_broadcast = b_needs_broadcast ? other.broadcast_to(broadcast_shape) : other.clone();
-                            tensor_ops::launch_binary_op(
-                                a_broadcast.raw_ptr(), b_broadcast.raw_ptr(), result.raw_ptr(),
-                                result.numel(), op,
-                                a_broadcast.dtype(), b_broadcast.dtype(), result.dtype(),
-                                nullptr);
-                    }
-                } else if (out_dtype == DataType::Bool) {
-                    // Comparison operations
-                    switch(op) {
-                        case BinaryOp::Equal:
-                            launch_broadcast_binary(ptr<int>(), other.ptr<int>(), result.ptr<unsigned char>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), eq_op<int>(), nullptr);
-                            break;
-                        case BinaryOp::NotEqual:
-                            launch_broadcast_binary(ptr<int>(), other.ptr<int>(), result.ptr<unsigned char>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), ne_op<int>(), nullptr);
-                            break;
-                        case BinaryOp::Less:
-                            launch_broadcast_binary(ptr<int>(), other.ptr<int>(), result.ptr<unsigned char>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), lt_op<int>(), nullptr);
-                            break;
-                        case BinaryOp::LessEqual:
-                            launch_broadcast_binary(ptr<int>(), other.ptr<int>(), result.ptr<unsigned char>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), le_op<int>(), nullptr);
-                            break;
-                        case BinaryOp::Greater:
-                            launch_broadcast_binary(ptr<int>(), other.ptr<int>(), result.ptr<unsigned char>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), gt_op<int>(), nullptr);
-                            break;
-                        case BinaryOp::GreaterEqual:
-                            launch_broadcast_binary(ptr<int>(), other.ptr<int>(), result.ptr<unsigned char>(),
-                                a_shape.data(), b_shape.data(), c_shape.data(),
-                                a_shape.size(), b_shape.size(), c_shape.size(),
-                                result.numel(), ge_op<int>(), nullptr);
-                            break;
-                        default:
-                            // Fallback
-                            auto a_broadcast = a_needs_broadcast ? broadcast_to(broadcast_shape) : clone();
-                            auto b_broadcast = b_needs_broadcast ? other.broadcast_to(broadcast_shape) : other.clone();
-                            tensor_ops::launch_binary_op(
-                                a_broadcast.raw_ptr(), b_broadcast.raw_ptr(), result.raw_ptr(),
-                                result.numel(), op,
-                                a_broadcast.dtype(), b_broadcast.dtype(), result.dtype(),
-                                nullptr);
-                    }
-                }
-                cudaDeviceSynchronize();
-            }
-            // Bool logical operations
-            else if (dtype_ == DataType::Bool && other.dtype() == DataType::Bool && out_dtype == DataType::Bool) {
-                switch(op) {
-                    case BinaryOp::LogicalAnd:
-                        launch_broadcast_binary(ptr<unsigned char>(), other.ptr<unsigned char>(), result.ptr<unsigned char>(),
-                            a_shape.data(), b_shape.data(), c_shape.data(),
-                            a_shape.size(), b_shape.size(), c_shape.size(),
-                            result.numel(), logical_and_op(), nullptr);
-                        break;
-                    case BinaryOp::LogicalOr:
-                    case BinaryOp::BitwiseOr:
-                        launch_broadcast_binary(ptr<unsigned char>(), other.ptr<unsigned char>(), result.ptr<unsigned char>(),
-                            a_shape.data(), b_shape.data(), c_shape.data(),
-                            a_shape.size(), b_shape.size(), c_shape.size(),
-                            result.numel(), logical_or_op(), nullptr);
-                        break;
-                    case BinaryOp::LogicalXor:
-                        launch_broadcast_binary(ptr<unsigned char>(), other.ptr<unsigned char>(), result.ptr<unsigned char>(),
-                            a_shape.data(), b_shape.data(), c_shape.data(),
-                            a_shape.size(), b_shape.size(), c_shape.size(),
-                            result.numel(), logical_xor_op(), nullptr);
-                        break;
-                    default:
-                        // Fallback
-                        auto a_broadcast = a_needs_broadcast ? broadcast_to(broadcast_shape) : clone();
-                        auto b_broadcast = b_needs_broadcast ? other.broadcast_to(broadcast_shape) : other.clone();
-                        tensor_ops::launch_binary_op(
-                            a_broadcast.raw_ptr(), b_broadcast.raw_ptr(), result.raw_ptr(),
-                            result.numel(), op,
-                            a_broadcast.dtype(), b_broadcast.dtype(), result.dtype(),
-                            nullptr);
-                }
-                cudaDeviceSynchronize();
-            }
-            // Fallback for unsupported combinations
-            else {
-                auto a_broadcast = a_needs_broadcast ? broadcast_to(broadcast_shape) : clone();
-                auto b_broadcast = b_needs_broadcast ? other.broadcast_to(broadcast_shape) : other.clone();
-
-                tensor_ops::launch_binary_op(
-                    a_broadcast.raw_ptr(), b_broadcast.raw_ptr(), result.raw_ptr(),
-                    result.numel(), op,
-                    a_broadcast.dtype(), b_broadcast.dtype(), result.dtype(),
-                    nullptr);
-                cudaDeviceSynchronize();
-            }
-        } else {
-            // CPU implementation with broadcasting
-            auto a_shape = shape_.dims();
-            auto b_shape = other.shape().dims();
-            auto c_shape = broadcast_shape.dims();
-
-            // Int32 comparison with broadcasting
-            if (out_dtype == DataType::Bool && dtype_ == DataType::Int32 && other.dtype() == DataType::Int32) {
-                const int* src_a = static_cast<const int*>(raw_ptr());
-                const int* src_b = static_cast<const int*>(other.raw_ptr());
-                unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
-
-                for (size_t i = 0; i < result.numel(); ++i) {
-                    size_t a_idx = broadcast::index(i, c_shape, a_shape);
-                    size_t b_idx = broadcast::index(i, c_shape, b_shape);
-
-                    bool cmp_result = false;
-                    switch (op) {
-                        case BinaryOp::Equal: cmp_result = (src_a[a_idx] == src_b[b_idx]); break;
-                        case BinaryOp::NotEqual: cmp_result = (src_a[a_idx] != src_b[b_idx]); break;
-                        case BinaryOp::Less: cmp_result = (src_a[a_idx] < src_b[b_idx]); break;
-                        case BinaryOp::LessEqual: cmp_result = (src_a[a_idx] <= src_b[b_idx]); break;
-                        case BinaryOp::Greater: cmp_result = (src_a[a_idx] > src_b[b_idx]); break;
-                        case BinaryOp::GreaterEqual: cmp_result = (src_a[a_idx] >= src_b[b_idx]); break;
-                        default: cmp_result = false; break;
-                    }
-                    dst[i] = cmp_result ? 1 : 0;
-                }
-            }
-            // Float32 comparison with broadcasting
-            else if (out_dtype == DataType::Bool && dtype_ == DataType::Float32 && other.dtype() == DataType::Float32) {
-                const float* src_a = static_cast<const float*>(raw_ptr());
-                const float* src_b = static_cast<const float*>(other.raw_ptr());
-                unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
-
-                for (size_t i = 0; i < result.numel(); ++i) {
-                    size_t a_idx = broadcast::index(i, c_shape, a_shape);
-                    size_t b_idx = broadcast::index(i, c_shape, b_shape);
-                    dst[i] = op_tables::float_compare_ops[int(op)](src_a[a_idx], src_b[b_idx]) ? 1 : 0;
-                }
-            }
-            // Bool logical with broadcasting
-            else if (dtype_ == DataType::Bool && other.dtype() == DataType::Bool && out_dtype == DataType::Bool) {
-                const unsigned char* src_a = static_cast<const unsigned char*>(raw_ptr());
-                const unsigned char* src_b = static_cast<const unsigned char*>(other.raw_ptr());
-                unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
-
-                for (size_t i = 0; i < result.numel(); ++i) {
-                    size_t a_idx = broadcast::index(i, c_shape, a_shape);
-                    size_t b_idx = broadcast::index(i, c_shape, b_shape);
-                    dst[i] = op_tables::float_logical_ops[int(op)](src_a[a_idx], src_b[b_idx]) ? 1 : 0;
-                }
-            }
-            // Float32 arithmetic with broadcasting
-            else if (dtype_ == DataType::Float32 && other.dtype() == DataType::Float32 && out_dtype == DataType::Float32) {
-                const float* src_a = static_cast<const float*>(raw_ptr());
-                const float* src_b = static_cast<const float*>(other.raw_ptr());
-                float* dst = static_cast<float*>(result.raw_ptr());
-
-                for (size_t i = 0; i < result.numel(); ++i) {
-                    size_t a_idx = broadcast::index(i, c_shape, a_shape);
-                    size_t b_idx = broadcast::index(i, c_shape, b_shape);
-                    dst[i] = op_tables::float_binary_ops[int(op)](src_a[a_idx], src_b[b_idx]);
-                }
-            }
-            // Int32 arithmetic with broadcasting
-            else if (dtype_ == DataType::Int32 && other.dtype() == DataType::Int32 && out_dtype == DataType::Int32) {
-                const int* src_a = static_cast<const int*>(raw_ptr());
-                const int* src_b = static_cast<const int*>(other.raw_ptr());
-                int* dst = static_cast<int*>(result.raw_ptr());
-
-                for (size_t i = 0; i < result.numel(); ++i) {
-                    size_t a_idx = broadcast::index(i, c_shape, a_shape);
-                    size_t b_idx = broadcast::index(i, c_shape, b_shape);
-                    dst[i] = op_tables::int_binary_ops[int(op)](src_a[a_idx], src_b[b_idx]);
-                }
-            }
-        }
-    }
-
-    return result;
-}
-
-     Tensor Tensor::binary_op_scalar(float scalar, BinaryOp op) const {
-        if (!validate_unary_op()) {
-            return Tensor();
-        }
-
-        DataType out_dtype = dtype_;
-        if (op >= BinaryOp::Equal && op <= BinaryOp::GreaterEqual) {
-            out_dtype = DataType::Bool;
-        }
-
-        auto result = Tensor::empty(shape_, device_, out_dtype);
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_binary_scalar(
-                raw_ptr(), scalar, result.raw_ptr(),
-                numel(), op,
-                dtype_, out_dtype,
-                nullptr);
-            cudaDeviceSynchronize();
-        } else {
-            // CPU implementation
-
-            // Int32 comparison with scalar
-            if (out_dtype == DataType::Bool && dtype_ == DataType::Int32) {
-                const int* src = static_cast<const int*>(raw_ptr());
-                unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
-                int scalar_int = static_cast<int>(scalar);
-
-                for (size_t i = 0; i < numel(); ++i) {
-                    bool cmp_result = false;
-                    switch (op) {
-                        case BinaryOp::Equal: cmp_result = (src[i] == scalar_int); break;
-                        case BinaryOp::NotEqual: cmp_result = (src[i] != scalar_int); break;
-                        case BinaryOp::Less: cmp_result = (src[i] < scalar_int); break;
-                        case BinaryOp::LessEqual: cmp_result = (src[i] <= scalar_int); break;
-                        case BinaryOp::Greater: cmp_result = (src[i] > scalar_int); break;
-                        case BinaryOp::GreaterEqual: cmp_result = (src[i] >= scalar_int); break;
-                        default: cmp_result = false; break;
-                    }
-                    dst[i] = cmp_result ? 1 : 0;
-                }
-            }
-            // Float32 comparison with scalar
-            else if (out_dtype == DataType::Bool && dtype_ == DataType::Float32) {
-                const float* src = static_cast<const float*>(raw_ptr());
-                unsigned char* dst = static_cast<unsigned char*>(result.raw_ptr());
-
-                for (size_t i = 0; i < numel(); ++i) {
-                    dst[i] = op_tables::float_compare_ops[int(op)](src[i], scalar) ? 1 : 0;
-                }
-            }
-            // Float32 arithmetic with scalar
-            else if (dtype_ == DataType::Float32 && out_dtype == DataType::Float32) {
-                const float* src = static_cast<const float*>(raw_ptr());
-                float* dst = static_cast<float*>(result.raw_ptr());
-
-                for (size_t i = 0; i < numel(); ++i) {
-                    dst[i] = op_tables::float_binary_ops[int(op)](src[i], scalar);
-                }
-            }
-            // Int32 arithmetic with scalar
-            else if (dtype_ == DataType::Int32 && out_dtype == DataType::Int32) {
-                const int* src = static_cast<const int*>(raw_ptr());
-                int* dst = static_cast<int*>(result.raw_ptr());
-                int scalar_int = static_cast<int>(scalar);
-
-                for (size_t i = 0; i < numel(); ++i) {
-                    dst[i] = op_tables::int_binary_ops[int(op)](src[i], scalar_int);
-                }
-            }
-        }
-
-        return result;
-    }
-
-    Tensor& Tensor::binary_op_inplace_impl(const Tensor& other, BinaryOp op) {
-        if (!validate_binary_op(other, true)) {
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_binary_op_inplace(
-                raw_ptr(),
-                other.raw_ptr(),
-                numel(),
-                op,
-                nullptr);
-            cudaDeviceSynchronize();
-        } else {
-            // CPU implementation using compile-time tables
-            float* dst = static_cast<float*>(raw_ptr());
-            const float* src = static_cast<const float*>(other.raw_ptr());
-
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = op_tables::float_binary_ops[int(op)](dst[i], src[i]);
-            }
-        }
-
-        return *this;
-    }
-
-    Tensor& Tensor::binary_op_inplace_scalar(float scalar, BinaryOp op) {
-        if (!validate_unary_op()) {
-            return *this;
-        }
-
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_binary_scalar_inplace(
-                raw_ptr(),
-                scalar,
-                numel(),
-                op,
-                nullptr);
-            cudaDeviceSynchronize();
-        } else {
-            // CPU implementation using compile-time tables
-            float* dst = static_cast<float*>(raw_ptr());
-
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = op_tables::float_binary_ops[int(op)](dst[i], scalar);
-            }
-        }
-
-        return *this;
     }
 
     Tensor Tensor::reduce(ReduceOp op, const ReduceArgs& args) const {
@@ -1349,7 +812,7 @@ namespace gs {
 
     // ============= TERNARY OPERATIONS =============
 
-    Tensor Tensor::ternary(const Tensor& b, const Tensor& c, TernaryOp op) const {
+    Tensor Tensor::ternary(const Tensor& b, const Tensor& c) const {
         if (!validate_ternary_op(b, c)) {
             return Tensor();
         }
@@ -1367,15 +830,11 @@ namespace gs {
                 return Tensor();
             }
 
-            DataType out_dtype = dtype_;
-            if (op == TernaryOp::Where) {
-                out_dtype = promote_types(b.dtype(), c.dtype());
-            }
-
+            DataType out_dtype = promote_types(b.dtype(), c.dtype());
             return empty(TensorShape(shape_abc_vec), device_, out_dtype);
         }
 
-        if (op == TernaryOp::Where && dtype_ != DataType::Bool) {
+        if (dtype_ != DataType::Bool) {
             LOG_ERROR("Where operation requires boolean condition tensor");
             return Tensor();
         }
@@ -1394,10 +853,7 @@ namespace gs {
 
         TensorShape shape_abc(shape_abc_vec);
 
-        DataType out_dtype = dtype_;
-        if (op == TernaryOp::Where) {
-            out_dtype = promote_types(b.dtype(), c.dtype());
-        }
+        DataType out_dtype = promote_types(b.dtype(), c.dtype());
 
         auto result = Tensor::empty(shape_abc, device_, out_dtype);
 
@@ -1422,58 +878,31 @@ namespace gs {
         }
 
         if (device_ == Device::CUDA) {
-            if (op == TernaryOp::Where) {
-                tensor_ops::launch_where(
-                    a_broadcast.ptr<unsigned char>(),
-                    b_broadcast.ptr<float>(),
-                    c_broadcast.ptr<float>(),
-                    result.ptr<float>(),
-                    a_broadcast.shape().dims().data(),
-                    b_broadcast.shape().dims().data(),
-                    c_broadcast.shape().dims().data(),
-                    result.shape().dims().data(),
-                    a_broadcast.shape().rank(),
-                    b_broadcast.shape().rank(),
-                    c_broadcast.shape().rank(),
-                    result.shape().rank(),
-                    result.numel(),
-                    0);
-            } else {
-                tensor_ops::launch_ternary_op(
-                    a_broadcast.raw_ptr(),
-                    b_broadcast.raw_ptr(),
-                    c_broadcast.raw_ptr(),
-                    result.raw_ptr(),
-                    result.numel(),
-                    op,
-                    result.dtype(),
-                    nullptr);
-            }
+            tensor_ops::launch_where(
+                a_broadcast.ptr<unsigned char>(),
+                b_broadcast.ptr<float>(),
+                c_broadcast.ptr<float>(),
+                result.ptr<float>(),
+                a_broadcast.shape().dims().data(),
+                b_broadcast.shape().dims().data(),
+                c_broadcast.shape().dims().data(),
+                result.shape().dims().data(),
+                a_broadcast.shape().rank(),
+                b_broadcast.shape().rank(),
+                c_broadcast.shape().rank(),
+                result.shape().rank(),
+                result.numel(),
+                0);
             cudaDeviceSynchronize();
         } else {
-            // CPU implementation
-            if (op == TernaryOp::Where) {
-                const unsigned char* cond = static_cast<const unsigned char*>(a_broadcast.raw_ptr());
-                const float* x = static_cast<const float*>(b_broadcast.raw_ptr());
-                const float* y = static_cast<const float*>(c_broadcast.raw_ptr());
-                float* dst = static_cast<float*>(result.raw_ptr());
+            // CPU implementation of where operation
+            const unsigned char* cond = static_cast<const unsigned char*>(a_broadcast.raw_ptr());
+            const float* x = static_cast<const float*>(b_broadcast.raw_ptr());
+            const float* y = static_cast<const float*>(c_broadcast.raw_ptr());
+            float* dst = static_cast<float*>(result.raw_ptr());
 
-                for (size_t i = 0; i < result.numel(); ++i) {
-                    dst[i] = cond[i] ? x[i] : y[i];
-                }
-            } else if (op == TernaryOp::Clamp) {
-                const float* src = static_cast<const float*>(a_broadcast.raw_ptr());
-                const float* min_vals = static_cast<const float*>(b_broadcast.raw_ptr());
-                const float* max_vals = static_cast<const float*>(c_broadcast.raw_ptr());
-                float* dst = static_cast<float*>(result.raw_ptr());
-
-                for (size_t i = 0; i < result.numel(); ++i) {
-                    if (std::isnan(src[i])) {
-                        dst[i] = src[i];
-                    } else {
-                        dst[i] = std::max(min_vals[i], std::min(max_vals[i], src[i]));
-                    }
-                }
+            for (size_t i = 0; i < result.numel(); ++i) {
+                dst[i] = cond[i] ? x[i] : y[i];
             }
         }
 
@@ -1496,7 +925,7 @@ namespace gs {
             LOG_ERROR("where: all tensors must be on the same device");
             return Tensor();
         }
-        return condition.ternary(x, y, TernaryOp::Where);
+        return condition.ternary(x, y);
     }
 
     float Tensor::norm(float p) const {
@@ -1602,298 +1031,350 @@ namespace gs {
 
     // ============= STATIC CAT OPERATION =============
 
-    // ============= STATIC CAT OPERATION =============
-
-Tensor Tensor::cat(const std::vector<Tensor>& tensors, int dim) {
-    if (tensors.empty()) {
-        LOG_ERROR("Cannot concatenate empty vector of tensors");
-        return Tensor();
-    }
-
-    if (tensors.size() == 1) {
-        return tensors[0].clone();
-    }
-
-    int resolved_dim = dim;
-    if (resolved_dim < 0) {
-        resolved_dim = tensors[0].shape().rank() + resolved_dim;
-    }
-
-    if (resolved_dim < 0 || resolved_dim >= static_cast<int>(tensors[0].shape().rank())) {
-        LOG_ERROR("Invalid dimension for cat: {}", dim);
-        return Tensor();
-    }
-
-    const auto& first_shape = tensors[0].shape();
-    const auto first_device = tensors[0].device();
-    const auto first_dtype = tensors[0].dtype();
-
-    size_t total_size_along_dim = first_shape[resolved_dim];
-
-    // Validate all tensors
-    for (size_t i = 1; i < tensors.size(); ++i) {
-        const auto& shape = tensors[i].shape();
-
-        if (shape.rank() != first_shape.rank()) {
-            LOG_ERROR("All tensors must have the same number of dimensions");
+    Tensor Tensor::cat(const std::vector<Tensor>& tensors, int dim) {
+        if (tensors.empty()) {
+            LOG_ERROR("Cannot concatenate empty vector of tensors");
             return Tensor();
         }
 
-        for (size_t d = 0; d < shape.rank(); ++d) {
-            if (d != static_cast<size_t>(resolved_dim) && shape[d] != first_shape[d]) {
-                LOG_ERROR("All dimensions except dim={} must match", dim);
+        if (tensors.size() == 1) {
+            return tensors[0].clone();
+        }
+
+        int resolved_dim = dim;
+        if (resolved_dim < 0) {
+            resolved_dim = tensors[0].shape().rank() + resolved_dim;
+        }
+
+        if (resolved_dim < 0 || resolved_dim >= static_cast<int>(tensors[0].shape().rank())) {
+            LOG_ERROR("Invalid dimension for cat: {}", dim);
+            return Tensor();
+        }
+
+        const auto& first_shape = tensors[0].shape();
+        const auto first_device = tensors[0].device();
+        const auto first_dtype = tensors[0].dtype();
+
+        size_t total_size_along_dim = first_shape[resolved_dim];
+
+        // Validate all tensors
+        for (size_t i = 1; i < tensors.size(); ++i) {
+            const auto& shape = tensors[i].shape();
+
+            if (shape.rank() != first_shape.rank()) {
+                LOG_ERROR("All tensors must have the same number of dimensions");
                 return Tensor();
             }
-        }
 
-        if (tensors[i].device() != first_device) {
-            LOG_ERROR("All tensors must be on the same device");
-            return Tensor();
-        }
-
-        if (tensors[i].dtype() != first_dtype) {
-            LOG_ERROR("All tensors must have the same dtype");
-            return Tensor();
-        }
-
-        total_size_along_dim += shape[resolved_dim];
-    }
-
-    // Build result shape
-    std::vector<size_t> result_dims = first_shape.dims();
-    result_dims[resolved_dim] = total_size_along_dim;
-    auto result = Tensor::empty(TensorShape(result_dims), first_device, first_dtype);
-
-    size_t element_size = dtype_size(first_dtype);
-
-    // ============= OPTIMIZED PATH: First dimension =============
-    if (resolved_dim == 0) {
-        // Concatenating along first dimension - completely contiguous
-        if (first_device == Device::CUDA) {
-            size_t offset = 0;
-            for (const auto& t : tensors) {
-                size_t bytes = t.bytes();
-                cudaMemcpy(
-                    static_cast<char*>(result.raw_ptr()) + offset,
-                    t.raw_ptr(),
-                    bytes,
-                    cudaMemcpyDeviceToDevice);
-                offset += bytes;
+            for (size_t d = 0; d < shape.rank(); ++d) {
+                if (d != static_cast<size_t>(resolved_dim) && shape[d] != first_shape[d]) {
+                    LOG_ERROR("All dimensions except dim={} must match", dim);
+                    return Tensor();
+                }
             }
-        } else {
-            size_t offset = 0;
-            for (const auto& t : tensors) {
-                size_t bytes = t.bytes();
-                std::memcpy(
-                    static_cast<char*>(result.raw_ptr()) + offset,
-                    t.raw_ptr(),
-                    bytes);
-                offset += bytes;
+
+            if (tensors[i].device() != first_device) {
+                LOG_ERROR("All tensors must be on the same device");
+                return Tensor();
             }
+
+            if (tensors[i].dtype() != first_dtype) {
+                LOG_ERROR("All tensors must have the same dtype");
+                return Tensor();
+            }
+
+            total_size_along_dim += shape[resolved_dim];
         }
 
-        return result;
-    }
+        // Build result shape
+        std::vector<size_t> result_dims = first_shape.dims();
+        result_dims[resolved_dim] = total_size_along_dim;
+        auto result = Tensor::empty(TensorShape(result_dims), first_device, first_dtype);
 
-    // ============= OPTIMIZED PATH: Last dimension (most common case) =============
-    if (resolved_dim == static_cast<int>(first_shape.rank()) - 1) {
-        // Concatenating along last dimension - can do bulk copies per "row"
-        size_t row_size = total_size_along_dim;
-        size_t num_rows = 1;
+        size_t element_size = dtype_size(first_dtype);
+
+        // ============= OPTIMIZED PATH: First dimension =============
+        if (resolved_dim == 0) {
+            // Concatenating along first dimension - completely contiguous
+            if (first_device == Device::CUDA) {
+                size_t offset = 0;
+                for (const auto& t : tensors) {
+                    size_t bytes = t.bytes();
+                    cudaMemcpy(
+                        static_cast<char*>(result.raw_ptr()) + offset,
+                        t.raw_ptr(),
+                        bytes,
+                        cudaMemcpyDeviceToDevice);
+                    offset += bytes;
+                }
+            } else {
+                size_t offset = 0;
+                for (const auto& t : tensors) {
+                    size_t bytes = t.bytes();
+                    std::memcpy(
+                        static_cast<char*>(result.raw_ptr()) + offset,
+                        t.raw_ptr(),
+                        bytes);
+                    offset += bytes;
+                }
+            }
+
+            return result;
+        }
+
+        // ============= OPTIMIZED PATH: Last dimension (most common case) =============
+        if (resolved_dim == static_cast<int>(first_shape.rank()) - 1) {
+            // Concatenating along last dimension - can do bulk copies per "row"
+            size_t row_size = total_size_along_dim;
+            size_t num_rows = 1;
+            for (int i = 0; i < resolved_dim; ++i) {
+                num_rows *= first_shape[i];
+            }
+
+            if (first_device == Device::CUDA) {
+                tensor_ops::launch_cat_last_dim(
+                    result.raw_ptr(),
+                    tensors,
+                    num_rows,
+                    row_size,
+                    element_size,
+                    nullptr);
+                cudaDeviceSynchronize();
+            } else {
+                // CPU: Simple memcpy per row
+                size_t result_offset = 0;
+                for (const auto& t : tensors) {
+                    size_t tensor_dim_size = t.shape()[resolved_dim];
+
+                    for (size_t row = 0; row < num_rows; ++row) {
+                        const void* src = static_cast<const char*>(t.raw_ptr()) +
+                                         row * tensor_dim_size * element_size;
+                        void* dst = static_cast<char*>(result.raw_ptr()) +
+                                   row * row_size * element_size + result_offset * element_size;
+
+                        std::memcpy(dst, src, tensor_dim_size * element_size);
+                    }
+
+                    result_offset += tensor_dim_size;
+                }
+            }
+
+            return result;
+        }
+
+        // ============= GENERAL PATH: Middle dimensions =============
+        size_t outer_size = 1;
         for (int i = 0; i < resolved_dim; ++i) {
-            num_rows *= first_shape[i];
+            outer_size *= first_shape[i];
+        }
+
+        size_t inner_size = 1;
+        for (size_t i = resolved_dim + 1; i < first_shape.rank(); ++i) {
+            inner_size *= first_shape[i];
         }
 
         if (first_device == Device::CUDA) {
-            tensor_ops::launch_cat_last_dim(
+            tensor_ops::launch_cat_middle_dim(
                 result.raw_ptr(),
                 tensors,
-                num_rows,
-                row_size,
+                outer_size,
+                inner_size,
+                resolved_dim,
                 element_size,
                 nullptr);
             cudaDeviceSynchronize();
         } else {
-            // CPU: Simple memcpy per row
-            size_t result_offset = 0;
-            for (const auto& t : tensors) {
-                size_t tensor_dim_size = t.shape()[resolved_dim];
+            // CPU fallback
+            for (size_t outer = 0; outer < outer_size; ++outer) {
+                size_t result_offset = 0;
 
-                for (size_t row = 0; row < num_rows; ++row) {
+                for (const auto& t : tensors) {
+                    size_t tensor_dim_size = t.shape()[resolved_dim];
+                    size_t copy_size = tensor_dim_size * inner_size * element_size;
+
                     const void* src = static_cast<const char*>(t.raw_ptr()) +
-                                     row * tensor_dim_size * element_size;
+                                     outer * tensor_dim_size * inner_size * element_size;
                     void* dst = static_cast<char*>(result.raw_ptr()) +
-                               row * row_size * element_size + result_offset * element_size;
+                               (outer * total_size_along_dim * inner_size + result_offset) * element_size;
 
-                    std::memcpy(dst, src, tensor_dim_size * element_size);
+                    std::memcpy(dst, src, copy_size);
+                    result_offset += tensor_dim_size * inner_size;
                 }
-
-                result_offset += tensor_dim_size;
             }
         }
 
         return result;
     }
 
-    // ============= GENERAL PATH: Middle dimensions =============
-    size_t outer_size = 1;
-    for (int i = 0; i < resolved_dim; ++i) {
-        outer_size *= first_shape[i];
-    }
-
-    size_t inner_size = 1;
-    for (size_t i = resolved_dim + 1; i < first_shape.rank(); ++i) {
-        inner_size *= first_shape[i];
-    }
-
-    if (first_device == Device::CUDA) {
-        tensor_ops::launch_cat_middle_dim(
-            result.raw_ptr(),
-            tensors,
-            outer_size,
-            inner_size,
-            resolved_dim,
-            element_size,
-            nullptr);
-        cudaDeviceSynchronize();
-    } else {
-        // CPU fallback
-        for (size_t outer = 0; outer < outer_size; ++outer) {
-            size_t result_offset = 0;
-
-            for (const auto& t : tensors) {
-                size_t tensor_dim_size = t.shape()[resolved_dim];
-                size_t copy_size = tensor_dim_size * inner_size * element_size;
-
-                const void* src = static_cast<const char*>(t.raw_ptr()) +
-                                 outer * tensor_dim_size * inner_size * element_size;
-                void* dst = static_cast<char*>(result.raw_ptr()) +
-                           (outer * total_size_along_dim * inner_size + result_offset) * element_size;
-
-                std::memcpy(dst, src, copy_size);
-                result_offset += tensor_dim_size * inner_size;
-            }
-        }
-    }
-
-    return result;
-}
-
     // ============= STATIC STACK OPERATION =============
 
     Tensor Tensor::stack(const std::vector<Tensor>& tensors, int dim) {
-    if (tensors.empty()) {
-        LOG_ERROR("Cannot stack empty vector of tensors");
-        return Tensor();
-    }
-
-    const auto& first_shape = tensors[0].shape();
-    const auto first_device = tensors[0].device();
-    const auto first_dtype = tensors[0].dtype();
-
-    // Validate all tensors have same shape, device, and dtype
-    for (size_t i = 1; i < tensors.size(); ++i) {
-        if (tensors[i].shape() != first_shape) {
-            LOG_ERROR("All tensors must have the same shape for stack");
+        if (tensors.empty()) {
+            LOG_ERROR("Cannot stack empty vector of tensors");
             return Tensor();
         }
-        if (tensors[i].device() != first_device) {
-            LOG_ERROR("All tensors must be on the same device");
+
+        const auto& first_shape = tensors[0].shape();
+        const auto first_device = tensors[0].device();
+        const auto first_dtype = tensors[0].dtype();
+
+        // Validate all tensors have same shape, device, and dtype
+        for (size_t i = 1; i < tensors.size(); ++i) {
+            if (tensors[i].shape() != first_shape) {
+                LOG_ERROR("All tensors must have the same shape for stack");
+                return Tensor();
+            }
+            if (tensors[i].device() != first_device) {
+                LOG_ERROR("All tensors must be on the same device");
+                return Tensor();
+            }
+            if (tensors[i].dtype() != first_dtype) {
+                LOG_ERROR("All tensors must have the same dtype");
+                return Tensor();
+            }
+        }
+
+        // Build output shape with new dimension inserted at 'dim'
+        std::vector<size_t> new_dims = first_shape.dims();
+
+        // Handle negative dimension
+        if (dim < 0) {
+            dim = first_shape.rank() + dim + 1;
+        }
+
+        if (dim < 0 || dim > static_cast<int>(first_shape.rank())) {
+            LOG_ERROR("Invalid dimension for stack: {}", dim);
             return Tensor();
         }
-        if (tensors[i].dtype() != first_dtype) {
-            LOG_ERROR("All tensors must have the same dtype");
-            return Tensor();
-        }
-    }
 
-    // Build output shape with new dimension inserted at 'dim'
-    std::vector<size_t> new_dims = first_shape.dims();
+        // Insert new dimension of size tensors.size() at position 'dim'
+        new_dims.insert(new_dims.begin() + dim, tensors.size());
 
-    // Handle negative dimension
-    if (dim < 0) {
-        dim = first_shape.rank() + dim + 1;
-    }
+        auto result = Tensor::empty(TensorShape(new_dims), first_device, first_dtype);
 
-    if (dim < 0 || dim > static_cast<int>(first_shape.rank())) {
-        LOG_ERROR("Invalid dimension for stack: {}", dim);
-        return Tensor();
-    }
+        size_t elements_per_tensor = first_shape.elements();
+        size_t bytes_per_tensor = elements_per_tensor * dtype_size(first_dtype);
 
-    // Insert new dimension of size tensors.size() at position 'dim'
-    new_dims.insert(new_dims.begin() + dim, tensors.size());
+        // Compute strides for the output tensor
+        auto result_strides = result.shape().strides();
 
-    auto result = Tensor::empty(TensorShape(new_dims), first_device, first_dtype);
+        // Size of one "slice" along the stacked dimension
+        size_t stride_at_dim = result_strides[dim];
 
-    size_t elements_per_tensor = first_shape.elements();
-    size_t bytes_per_tensor = elements_per_tensor * dtype_size(first_dtype);
+        // For each input tensor, we need to copy it to the right location in output
+        if (first_device == Device::CUDA) {
+            for (size_t i = 0; i < tensors.size(); ++i) {
+                if (dim == 0) {
+                    // Contiguous copy for dim=0 case (optimized path)
+                    void* dst = static_cast<char*>(result.raw_ptr()) + i * bytes_per_tensor;
+                    cudaMemcpy(dst, tensors[i].raw_ptr(), bytes_per_tensor,
+                               cudaMemcpyDeviceToDevice);
+                } else {
+                    // For non-zero dimensions, we need to scatter the data properly
+                    size_t outer_size = 1;
+                    for (int d = 0; d < dim; ++d) {
+                        outer_size *= result.shape()[d];
+                    }
 
-    // Compute strides for the output tensor
-    auto result_strides = result.shape().strides();
+                    size_t inner_size = elements_per_tensor / outer_size;
 
-    // Size of one "slice" along the stacked dimension
-    size_t stride_at_dim = result_strides[dim];
+                    // Copy each outer slice
+                    for (size_t outer = 0; outer < outer_size; ++outer) {
+                        const void* src_ptr = static_cast<const char*>(tensors[i].raw_ptr()) +
+                                             outer * inner_size * dtype_size(first_dtype);
+                        void* dst_ptr = static_cast<char*>(result.raw_ptr()) +
+                                       (outer * result_strides[dim == 0 ? 1 : 0] +
+                                        i * stride_at_dim) * dtype_size(first_dtype);
 
-    // For each input tensor, we need to copy it to the right location in output
-    if (first_device == Device::CUDA) {
-        for (size_t i = 0; i < tensors.size(); ++i) {
-            if (dim == 0) {
-                // Contiguous copy for dim=0 case (optimized path)
-                void* dst = static_cast<char*>(result.raw_ptr()) + i * bytes_per_tensor;
-                cudaMemcpy(dst, tensors[i].raw_ptr(), bytes_per_tensor,
-                           cudaMemcpyDeviceToDevice);
-            } else {
-                // For non-zero dimensions, we need to scatter the data properly
-                size_t outer_size = 1;
-                for (int d = 0; d < dim; ++d) {
-                    outer_size *= result.shape()[d];
+                        cudaMemcpy(dst_ptr, src_ptr, inner_size * dtype_size(first_dtype),
+                                  cudaMemcpyDeviceToDevice);
+                    }
                 }
+            }
+        } else {
+            // CPU implementation
+            for (size_t i = 0; i < tensors.size(); ++i) {
+                if (dim == 0) {
+                    // Contiguous copy for dim=0 case
+                    void* dst = static_cast<char*>(result.raw_ptr()) + i * bytes_per_tensor;
+                    std::memcpy(dst, tensors[i].raw_ptr(), bytes_per_tensor);
+                } else {
+                    // For non-zero dimensions, scatter properly
+                    size_t outer_size = 1;
+                    for (int d = 0; d < dim; ++d) {
+                        outer_size *= result.shape()[d];
+                    }
 
-                size_t inner_size = elements_per_tensor / outer_size;
+                    size_t inner_size = elements_per_tensor / outer_size;
 
-                // Copy each outer slice
-                for (size_t outer = 0; outer < outer_size; ++outer) {
-                    const void* src_ptr = static_cast<const char*>(tensors[i].raw_ptr()) +
-                                         outer * inner_size * dtype_size(first_dtype);
-                    void* dst_ptr = static_cast<char*>(result.raw_ptr()) +
-                                   (outer * result_strides[dim == 0 ? 1 : 0] +
-                                    i * stride_at_dim) * dtype_size(first_dtype);
+                    for (size_t outer = 0; outer < outer_size; ++outer) {
+                        const void* src_ptr = static_cast<const char*>(tensors[i].raw_ptr()) +
+                                             outer * inner_size * dtype_size(first_dtype);
+                        void* dst_ptr = static_cast<char*>(result.raw_ptr()) +
+                                       (outer * result_strides[dim == 0 ? 1 : 0] +
+                                        i * stride_at_dim) * dtype_size(first_dtype);
 
-                    cudaMemcpy(dst_ptr, src_ptr, inner_size * dtype_size(first_dtype),
-                              cudaMemcpyDeviceToDevice);
+                        std::memcpy(dst_ptr, src_ptr, inner_size * dtype_size(first_dtype));
+                    }
                 }
             }
         }
+
+        return result;
+    }
+
+    // ============= OPTIMIZED CLAMP (FUSED VERSION) =============
+
+    Tensor Tensor::clamp(float min_val, float max_val) const {
+    if (!is_valid()) {
+        LOG_ERROR("clamp() on invalid tensor");
+        return Tensor();
+    }
+
+    if (numel() == 0) {
+        return empty(shape_, device_, dtype_);
+    }
+
+    // FUSED VERSION: Allocate output + clamp in one pass (avoids separate clone)
+    auto result = empty(shape_, device_, dtype_);
+
+    if (device_ == Device::CUDA) {
+        if (dtype_ == DataType::Float32) {
+            // Single-pass: read from source, write clamped to destination
+            const float* src = ptr<float>();
+            float* dst = result.ptr<float>();
+            
+            // Use our optimized kernel
+            tensor_ops::launch_clamp_fused(src, dst, min_val, max_val, numel(), 0);
+        } else if (dtype_ == DataType::Int32) {
+            // Fallback: copy then clamp for int
+            cudaMemcpy(result.data_, data_, bytes(), cudaMemcpyDeviceToDevice);
+            tensor_ops::launch_clamp_scalar_int(result.ptr<int>(),
+                                                static_cast<int>(min_val),
+                                                static_cast<int>(max_val),
+                                                numel(), 0);
+        }
     } else {
-        // CPU implementation
-        for (size_t i = 0; i < tensors.size(); ++i) {
-            if (dim == 0) {
-                // Contiguous copy for dim=0 case
-                void* dst = static_cast<char*>(result.raw_ptr()) + i * bytes_per_tensor;
-                std::memcpy(dst, tensors[i].raw_ptr(), bytes_per_tensor);
-            } else {
-                // For non-zero dimensions, scatter properly
-                size_t outer_size = 1;
-                for (int d = 0; d < dim; ++d) {
-                    outer_size *= result.shape()[d];
-                }
-
-                size_t inner_size = elements_per_tensor / outer_size;
-
-                for (size_t outer = 0; outer < outer_size; ++outer) {
-                    const void* src_ptr = static_cast<const char*>(tensors[i].raw_ptr()) +
-                                         outer * inner_size * dtype_size(first_dtype);
-                    void* dst_ptr = static_cast<char*>(result.raw_ptr()) +
-                                   (outer * result_strides[dim == 0 ? 1 : 0] +
-                                    i * stride_at_dim) * dtype_size(first_dtype);
-
-                    std::memcpy(dst_ptr, src_ptr, inner_size * dtype_size(first_dtype));
-                }
+        // CPU: simple loop
+        if (dtype_ == DataType::Float32) {
+            const float* src = ptr<float>();
+            float* dst = result.ptr<float>();
+            for (size_t i = 0; i < numel(); ++i) {
+                dst[i] = std::isnan(src[i]) ? src[i] : std::clamp(src[i], min_val, max_val);
+            }
+        } else if (dtype_ == DataType::Int32) {
+            const int* src = ptr<int>();
+            int* dst = result.ptr<int>();
+            int min_int = static_cast<int>(min_val);
+            int max_int = static_cast<int>(max_val);
+            for (size_t i = 0; i < numel(); ++i) {
+                dst[i] = std::clamp(src[i], min_int, max_int);
             }
         }
     }
 
     return result;
-}
+    }
 
 } // namespace gs
+

@@ -26,6 +26,7 @@ vcpkg_*/**
 vcpkg_*/
 build*/
 build*/**
+CLAUDE.md
 
 *.pt
 !weights/*.pt

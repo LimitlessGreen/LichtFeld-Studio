@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
+#include "core/memory_pool.hpp"
 #include <algorithm>
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <chrono>
@@ -74,6 +75,9 @@ protected:
             c10::cuda::CUDACachingAllocator::emptyCache();
         }
 
+        // Clear our memory pool cache (symmetric with PyTorch)
+        CudaMemoryPool::instance().trim();
+
         // Give the system a moment to actually free memory
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
@@ -133,6 +137,11 @@ TEST_F(TensorStressTest, MaxMemoryAllocation) {
     tensors.clear();
     cudaDeviceSynchronize();
 
+    // Clear caches to actually release memory (both PyTorch and our pool cache)
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    CudaMemoryPool::instance().trim();
+    cudaDeviceSynchronize();
+
     // Memory should be freed
     size_t free_after, total_after;
     cudaMemGetInfo(&free_after, &total_after);
@@ -151,6 +160,11 @@ TEST_F(TensorStressTest, RapidAllocationDeallocation) {
         // Tensor destroyed here
     }
 
+    cudaDeviceSynchronize();
+
+    // Clear caches to verify no leaks (caching is expected, leaks are not)
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    CudaMemoryPool::instance().trim();
     cudaDeviceSynchronize();
 
     // Check memory is stable

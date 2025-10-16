@@ -76,26 +76,6 @@ namespace gs {
 
 } // namespace gs
 
-// ============= SafeOps Implementation =============
-namespace gs::SafeOps {
-
-    Tensor divide(const Tensor& a, const Tensor& b, float epsilon) {
-        auto safe_b = b.add(epsilon);
-        return a.div(safe_b);
-    }
-
-    Tensor log(const Tensor& input, float epsilon) {
-        auto safe_input = input.clamp_min(epsilon);
-        return safe_input.log();
-    }
-
-    Tensor sqrt(const Tensor& input, float epsilon) {
-        auto safe_input = input.clamp_min(epsilon);
-        return safe_input.sqrt();
-    }
-
-} // namespace gs::SafeOps
-
 // ============= MemoryInfo Implementation =============
 namespace gs {
 

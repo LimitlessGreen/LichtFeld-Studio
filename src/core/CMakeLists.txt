@@ -17,8 +17,8 @@ set(CORE_SOURCES
         splat_data_new.cpp
         sogs.cpp
         sogs_new.cpp
-        tensor/tensor.cpp              # Main tensor implementation
-        tensor/tensor_utils.cpp        # Minimal utilities (SafeOps, MemoryInfo, functional)
+        tensor/tensor.cpp              # Main tensor implementation (includes expr templates)
+        tensor/tensor_utils.cpp        # Minimal utilities MemoryInfo)
         tensor/tensor_matrix_ops.cpp   # Matrix operations (matmul, transpose, etc.)
         tensor/tensor_unified_ops.cpp  # Unified operations (load, unary, binary, reduce, ternary)
         tensor/tensor_movement_ops.cpp # Movement operations (reshape, permute, etc.)
@@ -37,6 +37,7 @@ set(CORE_CUDA_SOURCES
         tensor/tensor_broadcast_ops.cu # CUDA kernels for broadcasting
         tensor/tensor_masking_ops.cu   # CUDA kernels for masking/indexing
         tensor/tensor_random_ops.cu    # CUDA kernels for random ops
+        tensor/tensor_strided_ops.cu   # CUDA kernels for strided tensor operations
 	kmeans_new.cu
 	morton_encoding_new.cu
 )
