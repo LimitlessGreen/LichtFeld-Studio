@@ -33,6 +33,7 @@ set(CORE_SOURCES
 # CUDA sources (limited to C++20)
 set(CORE_CUDA_SOURCES
         tensor/tensor_ops.cu           # CUDA kernels for tensor operations
+        tensor/tensor_warp_reduce.cu   # Optimized warp-level reduction kernels (tiny-cuda-nn inspired)
         tensor/tensor_matrix_ops.cu    # CUDA kernels for matrix operations
         tensor/tensor_broadcast_ops.cu # CUDA kernels for broadcasting
         tensor/tensor_masking_ops.cu   # CUDA kernels for masking/indexing

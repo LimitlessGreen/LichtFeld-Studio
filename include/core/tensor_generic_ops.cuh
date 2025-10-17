@@ -9,6 +9,9 @@
 #include <thrust/iterator/constant_iterator.h>
 #include <thrust/transform.h>
 
+// Include vectorized operations for float4 optimizations
+#include "core/tensor_vectorized_ops.cuh"
+
 namespace gs::tensor_ops {
 
     // ============================================================================
@@ -48,6 +51,32 @@ namespace gs::tensor_ops {
                                   Op op, cudaStream_t stream = nullptr) {
         if (n == 0) return;
 
+        // FAST PATH 1: Vectorized comparison operations (float -> unsigned char)
+        // Perfect for <, >, ==, != operations
+        if constexpr (std::is_same_v<InT, float> && std::is_same_v<OutT, unsigned char>) {
+            bool a_aligned = (reinterpret_cast<uintptr_t>(a) % 16) == 0;
+            bool b_aligned = (reinterpret_cast<uintptr_t>(b) % 16) == 0;
+            bool c_aligned = (reinterpret_cast<uintptr_t>(c) % 4) == 0;  // uchar4 needs 4-byte alignment
+
+            if (a_aligned && b_aligned && c_aligned && n > 1024) {
+                launch_vectorized_comparison(a, b, c, n, op, stream);
+                return;
+            }
+        }
+
+        // FAST PATH 2: Vectorized float->float operations (arithmetic)
+        if constexpr (std::is_same_v<InT, float> && std::is_same_v<OutT, float>) {
+            bool a_aligned = (reinterpret_cast<uintptr_t>(a) % 16) == 0;
+            bool b_aligned = (reinterpret_cast<uintptr_t>(b) % 16) == 0;
+            bool c_aligned = (reinterpret_cast<uintptr_t>(c) % 16) == 0;
+
+            if (a_aligned && b_aligned && c_aligned && n > 1024) {
+                launch_vectorized_binary(a, b, c, n, op, stream);
+                return;
+            }
+        }
+
+        // FALLBACK: Use Thrust for unaligned or non-float types
         auto a_ptr = thrust::device_pointer_cast(a);
         auto b_ptr = thrust::device_pointer_cast(b);
         auto c_ptr = thrust::device_pointer_cast(c);
@@ -70,6 +99,18 @@ namespace gs::tensor_ops {
                                  Op op, cudaStream_t stream = nullptr) {
         if (n == 0) return;
 
+        // FAST PATH: Use vectorized kernel for float->float operations
+        if constexpr (std::is_same_v<InT, float> && std::is_same_v<OutT, float>) {
+            bool input_aligned = (reinterpret_cast<uintptr_t>(input) % 16) == 0;
+            bool output_aligned = (reinterpret_cast<uintptr_t>(output) % 16) == 0;
+
+            if (input_aligned && output_aligned && n > 1024) {
+                launch_vectorized_unary(input, output, n, op, stream);
+                return;
+            }
+        }
+
+        // FALLBACK: Use Thrust for unaligned or non-float types
         auto in_ptr = thrust::device_pointer_cast(input);
         auto out_ptr = thrust::device_pointer_cast(output);
 
@@ -91,6 +132,18 @@ namespace gs::tensor_ops {
                                   Op op, cudaStream_t stream = nullptr) {
         if (n == 0) return;
 
+        // FAST PATH: Use vectorized scalar broadcast for float operations
+        if constexpr (std::is_same_v<T, float> && std::is_same_v<OutputT, float>) {
+            bool data_aligned = (reinterpret_cast<uintptr_t>(data) % 16) == 0;
+            bool result_aligned = (reinterpret_cast<uintptr_t>(result) % 16) == 0;
+
+            if (data_aligned && result_aligned && n > 512) {
+                launch_vectorized_scalar_broadcast(data, scalar, result, n, op, stream);
+                return;
+            }
+        }
+
+        // FALLBACK: Use Thrust constant_iterator for unaligned or non-float types
         auto data_ptr = thrust::device_pointer_cast(data);
         auto result_ptr = thrust::device_pointer_cast(result);
 

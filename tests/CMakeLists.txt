@@ -68,6 +68,8 @@ set(OPTIONAL_TEST_FILES
     test_transform_iterator_benchmark.cpp
     test_cub_reduction_benchmark.cpp
     benchmark_strided_tensors.cpp
+    test_aligned_memory_pool.cpp
+    test_scalar_reduction_benchmark.cpp
     #test_sogs_comparison.cpp
 )
 
