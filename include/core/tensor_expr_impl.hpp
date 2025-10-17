@@ -246,25 +246,6 @@ namespace detail {
             bool needs_broadcast = (left_tensor.shape() != shape) ||
                                   (right_tensor.shape() != shape);
 
-            // DEBUG: Print for large tensors to track broadcast dispatch
-            if (result.numel() >= 100000) {
-                fprintf(stderr, "BinaryExprEvaluator: needs_broadcast=%d, numel=%zu\n", needs_broadcast, result.numel());
-                fprintf(stderr, "  left_shape=[");
-                for (size_t i = 0; i < left_tensor.shape().rank(); ++i)
-                    fprintf(stderr, "%zu%s", left_tensor.shape()[i], i < left_tensor.shape().rank()-1 ? "," : "");
-                fprintf(stderr, "], right_shape=[");
-                for (size_t i = 0; i < right_tensor.shape().rank(); ++i)
-                    fprintf(stderr, "%zu%s", right_tensor.shape()[i], i < right_tensor.shape().rank()-1 ? "," : "");
-                fprintf(stderr, "], output_shape=[");
-                for (size_t i = 0; i < shape.rank(); ++i)
-                    fprintf(stderr, "%zu%s", shape[i], i < shape.rank()-1 ? "," : "");
-                fprintf(stderr, "], device=%s, dtypes=(%d,%d)\n",
-                       device == Device::CUDA ? "CUDA" : "CPU",
-                       static_cast<int>(left_tensor.dtype()),
-                       static_cast<int>(right_tensor.dtype()));
-                fflush(stderr);
-            }
-
             // Check input dtypes to determine correct template instantiation
             if (left_tensor.dtype() == DataType::Int32 && right_tensor.dtype() == DataType::Int32) {
                 // Int32,Int32 -> Int32 operations (add, sub, mul, div, etc.)
@@ -319,8 +300,6 @@ namespace detail {
                 if (device == Device::CUDA) {
                     if (needs_broadcast) {
                         // Use broadcast binary kernel
-                        fprintf(stderr, "ABOUT TO CALL launch_broadcast_binary\n");
-                        fflush(stderr);
                         tensor_ops::launch_broadcast_binary(
                             left_tensor.template ptr<float>(),
                             right_tensor.template ptr<float>(),
@@ -330,8 +309,6 @@ namespace detail {
                             shape.dims().data(),
                             left_tensor.shape().rank(), right_tensor.shape().rank(), shape.rank(),
                             result.numel(), op, nullptr);
-                        fprintf(stderr, "RETURNED FROM launch_broadcast_binary\n");
-                        fflush(stderr);
                     } else {
                         // Element-wise binary operation (no broadcasting)
                         tensor_ops::launch_binary_op_generic(
@@ -392,25 +369,6 @@ namespace detail {
             // Determine if broadcasting is needed
             bool needs_broadcast = (left_tensor.shape() != shape) ||
                                   (right_tensor.shape() != shape);
-
-            // DEBUG: Print for large tensors to track broadcast dispatch (bool-returning)
-            if (result.numel() >= 100000) {
-                fprintf(stderr, "BinaryExprEvaluator(bool): needs_broadcast=%d, numel=%zu\n", needs_broadcast, result.numel());
-                fprintf(stderr, "  left_shape=[");
-                for (size_t i = 0; i < left_tensor.shape().rank(); ++i)
-                    fprintf(stderr, "%zu%s", left_tensor.shape()[i], i < left_tensor.shape().rank()-1 ? "," : "");
-                fprintf(stderr, "], right_shape=[");
-                for (size_t i = 0; i < right_tensor.shape().rank(); ++i)
-                    fprintf(stderr, "%zu%s", right_tensor.shape()[i], i < right_tensor.shape().rank()-1 ? "," : "");
-                fprintf(stderr, "], output_shape=[");
-                for (size_t i = 0; i < shape.rank(); ++i)
-                    fprintf(stderr, "%zu%s", shape[i], i < shape.rank()-1 ? "," : "");
-                fprintf(stderr, "], device=%s, dtypes=(%d,%d)\n",
-                       device == Device::CUDA ? "CUDA" : "CPU",
-                       static_cast<int>(left_tensor.dtype()),
-                       static_cast<int>(right_tensor.dtype()));
-                fflush(stderr);
-            }
 
             // Check input dtypes to determine correct template instantiation
             if (left_tensor.dtype() == DataType::Bool && right_tensor.dtype() == DataType::Bool) {
