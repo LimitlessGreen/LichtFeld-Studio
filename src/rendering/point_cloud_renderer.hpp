@@ -32,7 +32,6 @@ namespace gs::rendering {
 
     private:
         Result<void> createCubeGeometry();
-        Result<void> uploadPointData(std::span<const float> positions, std::span<const float> colors);
         static Tensor extractRGBFromSH(const Tensor& shs);
 
         // OpenGL resources using RAII
