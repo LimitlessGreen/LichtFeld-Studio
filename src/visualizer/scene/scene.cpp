@@ -218,11 +218,11 @@ namespace gs {
         const auto size = model->size();
 
         // Copy each tensor using slice
-        means.slice(0, offset, offset + size).copy_(model->get_means());
+        means.slice(0, offset, offset + size).copy_(model->means_raw());
         sh0.slice(0, offset, offset + size).copy_(model->sh0_raw());
-        opacity.slice(0, offset, offset + size).copy_(model->get_opacity());
-        scaling.slice(0, offset, offset + size).copy_(model->get_scaling());
-        rotation.slice(0, offset, offset + size).copy_(model->get_rotation());
+        opacity.slice(0, offset, offset + size).copy_(model->opacity_raw());
+        scaling.slice(0, offset, offset + size).copy_(model->scaling_raw());
+        rotation.slice(0, offset, offset + size).copy_(model->rotation_raw());
 
         // Copy shN if we have coefficients
         if (shN_coeffs > 0) {

@@ -184,7 +184,8 @@ namespace gs::rendering {
         // Convert result
         RenderResult result{
             .image = std::make_shared<Tensor>(pipeline_result->image),
-            .depth = std::make_shared<Tensor>(pipeline_result->depth)};
+            .depth = std::make_shared<Tensor>(pipeline_result->depth),
+            .valid = true};
 
         return result;
     }

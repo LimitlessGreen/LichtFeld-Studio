@@ -2,14 +2,16 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# Add the internal CUDA subdirectory first
-add_subdirectory(cuda)
+# Add the internal CUDA subdirectories first
+add_subdirectory(cuda)           # Original torch-based backend
+add_subdirectory(cuda_tensor)    # Tensor-based backend (libtorch-free)
 
 set(RENDERING_SOURCES
         rendering_engine.cpp
         rendering_engine_impl.cpp
         rendering_pipeline.cpp
         gs_rasterizer.cpp
+        gs_rasterizer_tensor.cpp
         point_cloud_renderer.cpp
         translation_gizmo.cpp
         grid_renderer.cpp
@@ -37,7 +39,8 @@ target_link_libraries(gs_rendering
         gs_geometry            # Link geometry module for BoundingBox and EuclideanTransform
         gs_kernels             # Link kernels module
         PRIVATE
-        rendering_cuda_backend
+        rendering_cuda_backend           # Original torch-based backend
+        rendering_cuda_tensor_backend    # Tensor-based backend (libtorch-free)
         ${TORCH_LIBRARIES}
         glm::glm
         glad::glad

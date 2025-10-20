@@ -21,6 +21,13 @@
 
 namespace gs::rendering {
 
+    // Rasterizer backend selection
+    enum class RasterizerBackend {
+        TORCH_CONVERSION,  // Convert to torch and use gs_rasterizer (current)
+        TENSOR_NATIVE,     // Use tensor-based rasterizer directly (new, libtorch-free)
+        COMPARE_BOTH       // Run both and compare outputs (for validation)
+    };
+
     class RenderingPipeline {
     public:
         struct RenderRequest {
@@ -36,6 +43,7 @@ namespace gs::rendering {
             bool point_cloud_mode = false;
             float voxel_size = 0.01f;
             bool gut = false;
+            RasterizerBackend rasterizer = RasterizerBackend::TENSOR_NATIVE;  // Default to new backend
         };
 
         struct RenderResult {

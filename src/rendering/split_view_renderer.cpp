@@ -393,7 +393,8 @@ namespace gs::rendering {
 
         return RenderResult{
             .image = std::make_shared<Tensor>(std::move(dummy_image)),
-            .depth = std::make_shared<Tensor>(std::move(dummy_depth))};
+            .depth = std::make_shared<Tensor>(std::move(dummy_depth)),
+            .valid = true};
     }
 
     Result<void> SplitViewRenderer::compositeSplitView(

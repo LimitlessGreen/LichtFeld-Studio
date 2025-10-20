@@ -53,6 +53,7 @@ namespace gs::rendering {
     struct RenderResult {
         std::shared_ptr<Tensor> image;
         std::shared_ptr<Tensor> depth;
+        bool valid = false;
     };
 
     // Split view support

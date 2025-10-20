@@ -243,7 +243,7 @@ namespace gs {
                                Tensor opacity_,
                                float scene_scale_)
         : max_sh_degree(sh_degree),
-          active_sh_degree(0),
+          active_sh_degree(sh_degree),
           scene_scale(scene_scale_),
           means(std::move(means_)),
           sh0(std::move(sh0_)),
