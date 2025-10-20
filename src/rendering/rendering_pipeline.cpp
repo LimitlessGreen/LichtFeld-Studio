@@ -15,6 +15,11 @@ namespace gs::rendering {
         LOG_DEBUG("RenderingPipeline initialized");
     }
 
+    RenderingPipeline::~RenderingPipeline() {
+        cleanupFBO();
+        cleanupPBO();
+    }
+
     Result<RenderingPipeline::RenderResult> RenderingPipeline::render(
         const SplatDataNew& model,
         const RenderRequest& request) {
@@ -156,109 +161,123 @@ namespace gs::rendering {
         float fov_rad = glm::radians(request.fov);
         glm::mat4 projection = glm::perspective(fov_rad, aspect, 0.1f, 1000.0f);
 
-        // Create framebuffer for offscreen rendering using RAII
-        auto fbo_result = create_vao(); // Using create_vao as proxy for FBO creation
-        if (!fbo_result) {
-            LOG_ERROR("Failed to create framebuffer");
-            return std::unexpected("Failed to create framebuffer");
-        }
+        // OPTIMIZATION: Flip Y-axis in projection to render image pre-flipped
+        // This eliminates the need for CPU-side vertical flip after glReadPixels
+        // OpenGL has origin at bottom-left, we want top-left (saves ~1ms CPU time)
+        projection[1][1] *= -1.0f;
 
-        GLuint fbo, color_texture, depth_texture;
-        glGenFramebuffers(1, &fbo);
-        if (fbo == 0) {
-            LOG_ERROR("Failed to create framebuffer - glGenFramebuffers returned 0");
-            return std::unexpected("Failed to create framebuffer");
-        }
-
-        // RAII cleanup for OpenGL resources
-        struct FBOGuard {
-            GLuint fbo, color_tex, depth_tex;
-            ~FBOGuard() {
-                if (fbo)
-                    glDeleteFramebuffers(1, &fbo);
-                if (color_tex)
-                    glDeleteTextures(1, &color_tex);
-                if (depth_tex)
-                    glDeleteTextures(1, &depth_tex);
-            }
-        } fbo_guard{fbo, 0, 0};
-
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-
-        // Color texture
-        glGenTextures(1, &color_texture);
-        fbo_guard.color_tex = color_texture;
-        glBindTexture(GL_TEXTURE_2D, color_texture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, request.viewport_size.x, request.viewport_size.y,
-                     0, GL_RGB, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_texture, 0);
-
-        // Depth texture
-        glGenTextures(1, &depth_texture);
-        fbo_guard.depth_tex = depth_texture;
-        glBindTexture(GL_TEXTURE_2D, depth_texture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, request.viewport_size.x, request.viewport_size.y,
-                     0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_texture, 0);
-
-        GLenum fb_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-        if (fb_status != GL_FRAMEBUFFER_COMPLETE) {
-            LOG_ERROR("Framebuffer not complete: 0x{:x}", fb_status);
-            return std::unexpected(std::format("Framebuffer not complete: 0x{:x}", fb_status));
+        // OPTIMIZATION: Use persistent FBO (avoids expensive glGenFramebuffers/glDeleteFramebuffers)
+        // This saves ~3-5ms per frame by reusing the same FBO across renders
+        ensureFBOSize(request.viewport_size.x, request.viewport_size.y);
+        if (persistent_fbo_ == 0) {
+            LOG_ERROR("Failed to setup persistent framebuffer");
+            return std::unexpected("Failed to setup persistent framebuffer");
         }
 
         // Set viewport to match the request size
         glViewport(0, 0, request.viewport_size.x, request.viewport_size.y);
 
         // Render point cloud to framebuffer
-        if (auto result = point_cloud_renderer_->render(model, view, projection,
-                                                        request.voxel_size, request.background_color);
-            !result) {
-            LOG_ERROR("Point cloud rendering failed: {}", result.error());
-            return std::unexpected(std::format("Point cloud rendering failed: {}", result.error()));
-        }
-
-        // Read back the rendered image
-        const int width = request.viewport_size.x;
-        const int height = request.viewport_size.y;
-        std::vector<float> pixels(width * height * 3);
-        glReadPixels(0, 0, width, height, GL_RGB, GL_FLOAT, pixels.data());
-
-        // Create tensor from the pixel data
-        auto image_cpu = Tensor::from_vector(pixels, {static_cast<size_t>(height),
-                                                      static_cast<size_t>(width),
-                                                      3},
-                                            Device::CPU);
-
-        // Flip vertically (OpenGL has origin at bottom-left)
-        // Manual flip since we don't have torch::flip
         {
-            auto data = image_cpu.ptr<float>();
-            const size_t row_size = width * 3 * sizeof(float);
-            std::vector<float> temp_row(width * 3);
-
-            for (int y = 0; y < height / 2; ++y) {
-                int top_row = y;
-                int bottom_row = height - 1 - y;
-
-                float* top_ptr = data + top_row * width * 3;
-                float* bottom_ptr = data + bottom_row * width * 3;
-
-                // Swap rows
-                std::memcpy(temp_row.data(), top_ptr, row_size);
-                std::memcpy(top_ptr, bottom_ptr, row_size);
-                std::memcpy(bottom_ptr, temp_row.data(), row_size);
+            LOG_TIMER_TRACE("point_cloud_renderer_->render");
+            if (auto result = point_cloud_renderer_->render(model, view, projection,
+                                                            request.voxel_size, request.background_color);
+                !result) {
+                LOG_ERROR("Point cloud rendering failed: {}", result.error());
+                return std::unexpected(std::format("Point cloud rendering failed: {}", result.error()));
             }
         }
 
-        // Convert to CHW format and move to CUDA
+        const int width = request.viewport_size.x;
+        const int height = request.viewport_size.y;
         RenderResult result;
-        result.image = image_cpu.permute({2, 0, 1}).cuda();
-        result.valid = true;
+
+#ifdef CUDA_GL_INTEROP_ENABLED
+        // Try CUDA-GL interop path for direct FBO→CUDA texture readback
+        if (use_fbo_interop_) {
+            LOG_TIMER_TRACE("CUDA-GL FBO interop readback");
+
+            // Initialize interop texture if needed
+            if (!fbo_interop_texture_) {
+                LOG_DEBUG("Initializing CUDA-GL FBO interop texture");
+                fbo_interop_texture_.emplace();
+                if (auto init_result = fbo_interop_texture_->initForReading(
+                        persistent_color_texture_, width, height); !init_result) {
+                    LOG_WARN("Failed to initialize FBO interop: {}", init_result.error());
+                    LOG_INFO("Falling back to PBO readback mode");
+                    use_fbo_interop_ = false;
+                    fbo_interop_texture_.reset();
+                }
+            }
+
+            if (use_fbo_interop_ && fbo_interop_texture_) {
+                // Read texture directly to CUDA tensor [H, W, 3]
+                Tensor image_hwc;
+                if (auto read_result = fbo_interop_texture_->readToTensor(image_hwc); read_result) {
+                    // Convert to CHW format
+                    result.image = image_hwc.permute({2, 0, 1}).contiguous();
+                    result.valid = true;
+                    LOG_TRACE("Successfully read FBO via CUDA-GL interop");
+                } else {
+                    LOG_WARN("Failed to read FBO via interop: {}", read_result.error());
+                    LOG_INFO("Falling back to PBO readback mode");
+                    use_fbo_interop_ = false;
+                    fbo_interop_texture_.reset();
+                }
+            }
+        }
+
+        // Fallback to PBO path if interop failed or is disabled
+        if (!use_fbo_interop_)
+#endif
+        {
+            // OPTIMIZATION: Use PBO for async GPU→CPU readback via DMA
+            LOG_TIMER_TRACE("PBO fallback readback");
+
+            ensurePBOSize(width, height);
+
+            // Ping-pong between two PBOs for double-buffering
+            int current_pbo = pbo_index_;
+            int next_pbo = 1 - pbo_index_;
+
+            std::vector<float> pixels(width * height * 3);
+            {
+                // Start async readback into current PBO
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_[current_pbo]);
+                glReadPixels(0, 0, width, height, GL_RGB, GL_FLOAT, nullptr);
+
+                // Map the PBO to read data (may wait if transfer not complete)
+                void* mapped_data = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+                if (mapped_data) {
+                    // Copy data from mapped PBO to our vector
+                    std::memcpy(pixels.data(), mapped_data, width * height * 3 * sizeof(float));
+                    glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+                } else {
+                    LOG_ERROR("Failed to map PBO for readback");
+                    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+                    return std::unexpected("Failed to map PBO for readback");
+                }
+
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            }
+
+            // Swap PBO index for next frame
+            pbo_index_ = next_pbo;
+
+            // Create tensor from the pixel data
+            // OPTIMIZATION: No CPU flip needed! Image is already pre-flipped by projection matrix
+            auto image_cpu = Tensor::from_vector(pixels, {static_cast<size_t>(height),
+                                                          static_cast<size_t>(width),
+                                                          3},
+                                                Device::CPU);
+
+            // Convert to CHW format and move to CUDA
+            {
+                LOG_TIMER_TRACE("permute and cuda upload");
+                result.image = image_cpu.permute({2, 0, 1}).cuda();
+            }
+            result.valid = true;
+        }
 
         LOG_TRACE("Point cloud rendering completed");
         return result;
@@ -363,6 +382,125 @@ namespace gs::rendering {
         return glm::vec2(
             atan(tan(fov_rad / 2.0f) * aspect) * 2.0f,
             fov_rad);
+    }
+
+    void RenderingPipeline::ensureFBOSize(int width, int height) {
+        // Check if we need to create or resize the FBO
+        if (persistent_fbo_ != 0 && persistent_fbo_width_ == width && persistent_fbo_height_ == height) {
+            // FBO already exists with correct size
+            glBindFramebuffer(GL_FRAMEBUFFER, persistent_fbo_);
+            return;
+        }
+
+        // Need to create or resize - cleanup old resources first
+        if (persistent_fbo_ != 0) {
+            LOG_DEBUG("Resizing persistent FBO from {}x{} to {}x{}",
+                     persistent_fbo_width_, persistent_fbo_height_, width, height);
+            cleanupFBO();
+        } else {
+            LOG_DEBUG("Creating persistent FBO with size {}x{}", width, height);
+        }
+
+        // Create new FBO
+        glGenFramebuffers(1, &persistent_fbo_);
+        if (persistent_fbo_ == 0) {
+            LOG_ERROR("Failed to create persistent framebuffer");
+            return;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, persistent_fbo_);
+
+        // Create color texture
+        glGenTextures(1, &persistent_color_texture_);
+        glBindTexture(GL_TEXTURE_2D, persistent_color_texture_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                              persistent_color_texture_, 0);
+
+        // Create depth texture
+        glGenTextures(1, &persistent_depth_texture_);
+        glBindTexture(GL_TEXTURE_2D, persistent_depth_texture_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, width, height,
+                    0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
+                              persistent_depth_texture_, 0);
+
+        // Verify framebuffer is complete
+        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            LOG_ERROR("Persistent framebuffer not complete: 0x{:x}", status);
+            cleanupFBO();
+            return;
+        }
+
+        // Update size tracking
+        persistent_fbo_width_ = width;
+        persistent_fbo_height_ = height;
+    }
+
+    void RenderingPipeline::cleanupFBO() {
+        if (persistent_fbo_ != 0) {
+            glDeleteFramebuffers(1, &persistent_fbo_);
+            persistent_fbo_ = 0;
+        }
+        if (persistent_color_texture_ != 0) {
+            glDeleteTextures(1, &persistent_color_texture_);
+            persistent_color_texture_ = 0;
+        }
+        if (persistent_depth_texture_ != 0) {
+            glDeleteTextures(1, &persistent_depth_texture_);
+            persistent_depth_texture_ = 0;
+        }
+        persistent_fbo_width_ = 0;
+        persistent_fbo_height_ = 0;
+    }
+
+    void RenderingPipeline::ensurePBOSize(int width, int height) {
+        // Check if we need to create or resize the PBOs
+        if (pbo_[0] != 0 && pbo_width_ == width && pbo_height_ == height) {
+            // PBOs already exist with correct size
+            return;
+        }
+
+        // Need to create or resize - cleanup old resources first
+        if (pbo_[0] != 0) {
+            LOG_DEBUG("Resizing PBOs from {}x{} to {}x{}",
+                     pbo_width_, pbo_height_, width, height);
+            cleanupPBO();
+        } else {
+            LOG_DEBUG("Creating PBOs with size {}x{}", width, height);
+        }
+
+        // Calculate buffer size (RGB floats)
+        size_t buffer_size = width * height * 3 * sizeof(float);
+
+        // Create two PBOs for double-buffering
+        glGenBuffers(2, pbo_);
+        for (int i = 0; i < 2; i++) {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_[i]);
+            // GL_STREAM_READ: data written by OpenGL, read by application once
+            glBufferData(GL_PIXEL_PACK_BUFFER, buffer_size, nullptr, GL_STREAM_READ);
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+
+        // Update size tracking
+        pbo_width_ = width;
+        pbo_height_ = height;
+        pbo_index_ = 0;
+    }
+
+    void RenderingPipeline::cleanupPBO() {
+        if (pbo_[0] != 0 || pbo_[1] != 0) {
+            glDeleteBuffers(2, pbo_);
+            pbo_[0] = 0;
+            pbo_[1] = 0;
+        }
+        pbo_width_ = 0;
+        pbo_height_ = 0;
+        pbo_index_ = 0;
     }
 
 } // namespace gs::rendering

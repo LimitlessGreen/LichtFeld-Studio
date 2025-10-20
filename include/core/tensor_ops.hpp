@@ -305,4 +305,17 @@ namespace gs::tensor_ops {
         cudaStream_t stream = nullptr
     );
 
+    // Fused strided upload: reads from pinned HOST memory with strides,
+    // writes contiguously to GPU memory. Eliminates CPU materialization!
+    void launch_strided_upload(
+        const void* host_input,     // Pinned host memory (non-contiguous)
+        void* gpu_output,           // GPU memory (contiguous output)
+        const size_t* d_shape,      // Device memory: tensor shape
+        const size_t* d_strides,    // Device memory: stride information
+        size_t rank,
+        size_t total_elements,
+        DataType dtype,
+        cudaStream_t stream = nullptr
+    );
+
 } // namespace gs::tensor_ops

@@ -2142,7 +2142,9 @@ public:
         }
 
         if (tensor_->shape().rank() < 2) {
-            LOG_ERROR("TensorRowProxy: tensor rank {} < 2", tensor_->shape().rank());
+            LOG_ERROR("TensorRowProxy: Cannot use tensor[i][j] on {}-D tensor with shape {}. "
+                      "Use tensor[i] for 1-D access, or tensor.unsqueeze() to add dimensions.",
+                      tensor_->shape().rank(), tensor_->shape().str());
             static float dummy = 0.0f;
             return dummy;
         }

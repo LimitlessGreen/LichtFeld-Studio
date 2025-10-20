@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "config.h"
 #include "core/camera_new.hpp"
 #include "core/splat_data_new.hpp"
 #include "core/tensor.hpp"
@@ -12,6 +13,11 @@
 #include "rendering/rendering.hpp"
 #include "screen_renderer.hpp"
 #include <glm/glm.hpp>
+
+#ifdef CUDA_GL_INTEROP_ENABLED
+#include "cuda_gl_interop.hpp"
+#include <optional>
+#endif
 
 namespace gs::rendering {
 
@@ -39,6 +45,7 @@ namespace gs::rendering {
         };
 
         RenderingPipeline();
+        ~RenderingPipeline();
 
         // Main render function - now returns Result
         Result<RenderResult> render(const SplatDataNew& model, const RenderRequest& request);
@@ -53,8 +60,37 @@ namespace gs::rendering {
         glm::vec2 computeFov(float fov_degrees, int width, int height);
         Result<RenderResult> renderPointCloud(const SplatDataNew& model, const RenderRequest& request);
 
+        // OPTIMIZATION: Ensure persistent FBO is sized correctly (avoids recreation every frame)
+        void ensureFBOSize(int width, int height);
+        void cleanupFBO();
+
+        // OPTIMIZATION: Ensure PBOs are sized correctly (avoids recreation every frame)
+        void ensurePBOSize(int width, int height);
+        void cleanupPBO();
+
         Tensor background_;
         std::unique_ptr<PointCloudRenderer> point_cloud_renderer_;
+
+        // OPTIMIZATION: Persistent framebuffer objects (reused across frames)
+        // Avoids expensive glGenFramebuffers/glDeleteFramebuffers every render (~3-5ms saved)
+        GLuint persistent_fbo_ = 0;
+        GLuint persistent_color_texture_ = 0;
+        GLuint persistent_depth_texture_ = 0;
+        int persistent_fbo_width_ = 0;
+        int persistent_fbo_height_ = 0;
+
+        // OPTIMIZATION: Pixel Buffer Objects for async GPU→CPU readback
+        // Uses double-buffering to overlap memory transfer with rendering (~3ms saved)
+        GLuint pbo_[2] = {0, 0};
+        int pbo_index_ = 0;
+        int pbo_width_ = 0;
+        int pbo_height_ = 0;
+
+#ifdef CUDA_GL_INTEROP_ENABLED
+        // CUDA-GL interop for direct FBO→CUDA texture readback (eliminates CPU round-trip)
+        std::optional<CudaGLInteropTexture> fbo_interop_texture_;
+        bool use_fbo_interop_ = true;
+#endif
     };
 
 } // namespace gs::rendering

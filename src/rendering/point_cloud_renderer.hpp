@@ -4,12 +4,18 @@
 
 #pragma once
 
+#include "config.h"
 #include "core/splat_data_new.hpp"
 #include "core/tensor.hpp"
 #include "gl_resources.hpp"
 #include "shader_manager.hpp"
 #include <glm/glm.hpp>
 #include <span>
+
+#ifdef CUDA_GL_INTEROP_ENABLED
+#include "cuda_gl_interop.hpp"
+#include <optional>
+#endif
 
 namespace gs::rendering {
 
@@ -53,6 +59,12 @@ namespace gs::rendering {
         // State
         bool initialized_ = false;
         size_t current_point_count_ = 0;
+
+#ifdef CUDA_GL_INTEROP_ENABLED
+        // CUDA-GL interop for direct GPU→OpenGL data transfer
+        std::optional<CudaGLInteropBuffer> interop_buffer_;
+        bool use_interop_ = true;
+#endif
 
         // Cube vertices
         static constexpr float cube_vertices_[] = {

@@ -5,6 +5,7 @@
 #include "core/application.hpp"
 #include "core/argument_parser.hpp"
 #include "core/logger.hpp"
+#include "core/pinned_memory_allocator.hpp"
 
 #include <c10/cuda/CUDAAllocatorConfig.h>
 #include <iostream>
@@ -42,6 +43,10 @@ int main(int argc, char* argv[]) {
     LOG_INFO("========================================");
 
     auto params = std::move(*params_result);
+
+    // Pre-warm pinned memory cache for fast CPU-GPU transfers
+    // This eliminates cold-start penalties (e.g., 23.8ms for 4K allocations)
+    gs::PinnedMemoryAllocator::instance().prewarm();
 
     gs::Application app;
     return app.run(std::move(params));

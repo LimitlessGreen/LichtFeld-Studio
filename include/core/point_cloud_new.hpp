@@ -24,8 +24,8 @@ public:
 
     // For Gaussian point clouds (optional)
     Tensor normals;    // [N, 3] float32
-    Tensor sh0;        // [N, 1, 3] float32 (coeffs, channels) - ACTUAL REF FORMAT
-    Tensor shN;        // [N, coeffs, 3] float32 (coeffs, channels) - ACTUAL REF FORMAT
+    Tensor sh0;        // [N, 3, 1] float32 (channels, coeffs) - ACTUAL REF FORMAT
+    Tensor shN;        // [N, 3, coeffs] float32 (channels, coeffs) - ACTUAL REF FORMAT
     Tensor opacity;    // [N, 1] float32
     Tensor scaling;    // [N, 3] float32
     Tensor rotation;   // [N, 4] float32 - quaternion
@@ -118,15 +118,17 @@ public:
     /**
      * @brief Allocate memory for Gaussian point cloud
      * @param n_points Number of points
-     * @param sh0_coeffs Number of coefficients in sh0 (usually 1)
      * @param sh0_channels Number of color channels in sh0 (usually 3)
-     * @param shN_coeffs Number of coefficients in shN (depends on SH degree)
+     * @param sh0_coeffs Number of coefficients in sh0 (usually 1)
      * @param shN_channels Number of color channels in shN (usually 3)
+     * @param shN_coeffs Number of coefficients in shN (depends on SH degree)
      * @param device Device to allocate on (default: CUDA)
+     *
+     * NOTE: Parameter order matches old PointCloud: (n, channels, coeffs, channels, coeffs)
      */
     void allocate_gaussian(size_t n_points,
-                          size_t sh0_coeffs, size_t sh0_channels,
-                          size_t shN_coeffs, size_t shN_channels,
+                          size_t sh0_channels, size_t sh0_coeffs,
+                          size_t shN_channels, size_t shN_coeffs,
                           Device device = Device::CUDA) {
 
         // Allocate basic attributes
@@ -135,10 +137,10 @@ public:
         if (n_points == 0) return;
 
         // Allocate Gaussian attributes
-        // Match ACTUAL reference convention: [N, coeffs, channels]
+        // Internal format: [N, channels, coeffs] (matches old PointCloud reference format)
         normals = Tensor::zeros({n_points, 3}, device, DataType::Float32);
-        sh0 = Tensor::zeros({n_points, sh0_coeffs, sh0_channels}, device, DataType::Float32);
-        shN = Tensor::zeros({n_points, shN_coeffs, shN_channels}, device, DataType::Float32);
+        sh0 = Tensor::zeros({n_points, sh0_channels, sh0_coeffs}, device, DataType::Float32);
+        shN = Tensor::zeros({n_points, shN_channels, shN_coeffs}, device, DataType::Float32);
         opacity = Tensor::zeros({n_points, 1}, device, DataType::Float32);
         scaling = Tensor::zeros({n_points, 3}, device, DataType::Float32);
         rotation = Tensor::zeros({n_points, 4}, device, DataType::Float32);
@@ -249,13 +251,13 @@ public:
                 return false;
             }
 
-            if (sh0.is_valid() && (sh0.ndim() != 3 || sh0.size(0) != n || sh0.size(2) != 3)) {
-                LOG_ERROR("PointCloudNew: sh0 must be [N, 1, 3]");
+            if (sh0.is_valid() && (sh0.ndim() != 3 || sh0.size(0) != n || sh0.size(1) != 3 || sh0.size(2) != 1)) {
+                LOG_ERROR("PointCloudNew: sh0 must be [N, 3, 1] but got [{}]", sh0.shape().str());
                 return false;
             }
 
-            if (shN.is_valid() && (shN.ndim() != 3 || shN.size(0) != n || shN.size(2) != 3)) {
-                LOG_ERROR("PointCloudNew: shN must be [N, coeffs, 3]");
+            if (shN.is_valid() && (shN.ndim() != 3 || shN.size(0) != n || shN.size(1) != 3)) {
+                LOG_ERROR("PointCloudNew: shN must be [N, 3, coeffs]");
                 return false;
             }
 

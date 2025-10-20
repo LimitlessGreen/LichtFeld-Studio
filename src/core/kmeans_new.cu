@@ -309,10 +309,14 @@ namespace gs {
             float min_val = data_2d.min().item();
             float max_val = data_2d.max().item();
 
-            // Create centroids as [k, 1] tensor
-            //auto centroids = Tensor::linspace(min_val, max_val, k, Device::CUDA).unsqueeze(1);
+            // Create centroids as [k, 1] tensor - initialize manually to avoid linspace dependency
+            std::vector<float> centroid_values(k);
+            float step = (k > 1) ? (max_val - min_val) / (k - 1) : 0.0f;
+            for (int i = 0; i < k; ++i) {
+                centroid_values[i] = min_val + i * step;
+            }
+            auto centroids = Tensor::from_vector(centroid_values, {static_cast<size_t>(k), 1}, Device::CUDA);
             auto labels = Tensor::zeros({static_cast<size_t>(n)}, Device::CUDA, DataType::Int32);
-            auto centroids = Tensor::zeros({static_cast<size_t>(n)}, Device::CUDA, DataType::Int32);
 
             const int block_size = 256;
             const int grid_size = (n + block_size - 1) / block_size;
@@ -339,18 +343,26 @@ namespace gs {
 
                 cudaDeviceSynchronize();
 
-                // Update centroids
-                for (int c = 0; c < k; ++c) {
-                    auto mask = labels.eq(c);
-                    if (mask.any_scalar()) {
-                        auto cluster_points = data_2d.masked_select(mask);
-                        if (cluster_points.numel() > 0) {
-                            float mean_val = cluster_points.mean().item();
-                            // Direct assignment using row proxy
-                            centroids[c] = Tensor::full({1, 1}, mean_val, Device::CUDA);
-                        }
-                    }
+                // OPTIMIZATION: Update centroids using parallel GPU kernel instead of slow CPU loop
+                // This eliminates k GPU->CPU syncs and processes all clusters in parallel
+                auto counts = Tensor::zeros({static_cast<size_t>(k)}, Device::CUDA, DataType::Int32);
+                dim3 block(1, 1);  // 1D data, only need 1 thread per cluster
+                dim3 grid(k, 1);
+
+                update_centroids_kernel<<<grid, block>>>(
+                    data_2d.ptr<float>(),
+                    labels.ptr<int>(),
+                    centroids.ptr<float>(),
+                    counts.ptr<int>(),
+                    n, k, 1);  // n_dims = 1 for 1D data
+
+                err = cudaGetLastError();
+                if (err != cudaSuccess) {
+                    LOG_ERROR("CUDA error in 1D update_centroids: {}", cudaGetErrorString(err));
+                    return {centroids, labels};
                 }
+
+                cudaDeviceSynchronize();
             }
 
             // Final sort of centroids and remap labels
@@ -360,15 +372,21 @@ namespace gs {
             auto final_idx = std::get<1>(final_sort);
             centroids = final_sorted.unsqueeze(1);
 
-            // Create inverse mapping for labels
+            // Create inverse mapping for labels using thrust::scatter (GPU-parallel, no CPU syncs)
             auto inv_map = Tensor::zeros({static_cast<size_t>(k)}, Device::CUDA, DataType::Int32);
             auto final_idx_int = final_idx.to(DataType::Int32);
 
-            // Build inverse permutation
-            for (int i = 0; i < k; ++i) {
-                int src_idx = final_idx_int[i].item_int();
-                inv_map[src_idx] = Tensor::full({1}, static_cast<float>(i), Device::CUDA, DataType::Int32)[0];
-            }
+            // Generate sequence [0, 1, 2, ..., k-1] for scatter values
+            auto seq = Tensor::arange(k).to(DataType::Int32).cuda();
+
+            // Scatter: inv_map[final_idx_int[i]] = seq[i] for all i
+            // This builds the inverse permutation in parallel on GPU
+            thrust::scatter(
+                thrust::device,
+                seq.ptr<int>(),
+                seq.ptr<int>() + k,
+                final_idx_int.ptr<int>(),
+                inv_map.ptr<int>());
 
             // Remap labels using thrust::gather
             auto remapped_labels = Tensor::zeros_like(labels);

@@ -14,6 +14,7 @@ pkg_check_modules(LibArchive REQUIRED libarchive)
 
 # Test sources - START WITH ONLY EXISTING FILES
 set(TEST_SOURCES
+    test_main.cpp       # Custom main with pinned memory pre-warming
     test_geometry.cpp
 )
 
@@ -70,6 +71,7 @@ set(OPTIONAL_TEST_FILES
     benchmark_strided_tensors.cpp
     test_aligned_memory_pool.cpp
     test_scalar_reduction_benchmark.cpp
+    test_permute_upload_benchmark.cpp
     #test_sogs_comparison.cpp
 )
 
@@ -123,9 +125,8 @@ target_link_libraries(lichtfeld_tests PRIVATE
     gsplat_backend
     fastgs_backend
     
-    # External libraries
+    # External libraries (using custom test_main.cpp instead of gtest_main)
     GTest::gtest
-    GTest::gtest_main
     ${TORCH_LIBRARIES}
     ${OPENGL_LIBRARIES}
     

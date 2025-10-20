@@ -164,6 +164,114 @@ namespace gs::rendering {
         return {};
     }
 
+    Result<void> CudaGLInteropTextureImpl<true>::initForReading(GLuint texture_id, int width, int height) {
+        LOG_TIMER_TRACE("CudaGLInteropTextureImpl<true>::initForReading");
+        LOG_DEBUG("Initializing CUDA-GL interop for reading texture {}: {}x{}", texture_id, width, height);
+
+        // Clean up any existing resources
+        cleanup();
+
+        texture_id_ = texture_id;
+        width_ = width;
+        height_ = height;
+
+        // Clear any previous CUDA errors
+        cudaGetLastError();
+
+        // Register existing texture with CUDA for reading
+        cudaGraphicsResource_t raw_resource;
+        cudaError_t err = cudaGraphicsGLRegisterImage(
+            &raw_resource, texture_id, GL_TEXTURE_2D,
+            cudaGraphicsRegisterFlagsReadOnly);
+
+        if (err != cudaSuccess) {
+            LOG_ERROR("Failed to register OpenGL texture for reading: {}", cudaGetErrorString(err));
+            return std::unexpected(std::format("Failed to register OpenGL texture for reading: {}",
+                                               cudaGetErrorString(err)));
+        }
+
+        cuda_resource_.reset(raw_resource);
+        is_registered_ = true;
+
+        LOG_DEBUG("CUDA-GL interop texture registered for reading");
+        return {};
+    }
+
+    Result<void> CudaGLInteropTextureImpl<true>::readToTensor(Tensor& output) {
+        LOG_TIMER_TRACE("CudaGLInteropTextureImpl<true>::readToTensor");
+
+        if (!is_registered_) {
+            LOG_ERROR("Texture not registered");
+            return std::unexpected("Texture not registered");
+        }
+
+        // Map CUDA resource
+        auto raw_resource = static_cast<cudaGraphicsResource_t>(cuda_resource_.get());
+        cudaError_t err = cudaGraphicsMapResources(1, &raw_resource, 0);
+        if (err != cudaSuccess) {
+            LOG_ERROR("Failed to map CUDA resource: {}", cudaGetErrorString(err));
+            return std::unexpected(std::format("Failed to map CUDA resource: {}",
+                                               cudaGetErrorString(err)));
+        }
+
+        // RAII unmap guard
+        struct UnmapGuard {
+            cudaGraphicsResource_t* resource;
+            ~UnmapGuard() {
+                if (resource) {
+                    cudaGraphicsUnmapResources(1, resource, 0);
+                    LOG_TRACE("Unmapped CUDA resource");
+                }
+            }
+        } unmap_guard{&raw_resource};
+
+        // Get CUDA array from mapped resource
+        cudaArray_t cuda_array;
+        err = cudaGraphicsSubResourceGetMappedArray(&cuda_array, raw_resource, 0, 0);
+        if (err != cudaSuccess) {
+            LOG_ERROR("Failed to get CUDA array: {}", cudaGetErrorString(err));
+            return std::unexpected(std::format("Failed to get CUDA array: {}",
+                                               cudaGetErrorString(err)));
+        }
+
+        // Allocate output tensor if needed [H, W, 3] in float32
+        if (!output.is_valid() || output.size(0) != static_cast<size_t>(height_) ||
+            output.size(1) != static_cast<size_t>(width_) || output.size(2) != 3) {
+            output = Tensor::empty({static_cast<size_t>(height_),
+                                   static_cast<size_t>(width_),
+                                   3},
+                                  Device::CUDA, DataType::Float32);
+        }
+
+        // Allocate temp buffer for RGBA data
+        auto rgba_temp = Tensor::empty({static_cast<size_t>(height_),
+                                       static_cast<size_t>(width_),
+                                       4},
+                                      Device::CUDA, DataType::Float32);
+
+        // Copy from CUDA array to temp buffer (RGBA float32)
+        err = cudaMemcpy2DFromArray(
+            rgba_temp.ptr<float>(),
+            width_ * 4 * sizeof(float), // pitch
+            cuda_array,
+            0, 0, // offset
+            width_ * 4 * sizeof(float), // width in bytes
+            height_,
+            cudaMemcpyDeviceToDevice);
+
+        if (err != cudaSuccess) {
+            LOG_ERROR("Failed to copy from CUDA array: {}", cudaGetErrorString(err));
+            return std::unexpected(std::format("Failed to copy from CUDA array: {}",
+                                               cudaGetErrorString(err)));
+        }
+
+        // Extract RGB channels (drop alpha)
+        output = rgba_temp.slice(2, 0, 3).contiguous();
+
+        LOG_TRACE("Successfully read texture to tensor");
+        return {};
+    }
+
     Result<void> CudaGLInteropTextureImpl<true>::resize(int new_width, int new_height) {
         if (width_ != new_width || height_ != new_height) {
             LOG_DEBUG("Resizing CUDA-GL interop texture from {}x{} to {}x{}",
@@ -285,6 +393,153 @@ namespace gs::rendering {
             glDeleteTextures(1, &texture_id_);
             texture_id_ = 0;
         }
+    }
+#endif // CUDA_GL_INTEROP_ENABLED
+
+    // ===== CudaGLInteropBuffer implementation =====
+
+    // Non-interop version
+    CudaGLInteropBufferImpl<false>::~CudaGLInteropBufferImpl() {
+        cleanup();
+    }
+
+    Result<void> CudaGLInteropBufferImpl<false>::init(GLuint buffer_id, size_t size) {
+        LOG_ERROR("CUDA-GL buffer interop not available");
+        return std::unexpected("CUDA-GL buffer interop not available");
+    }
+
+    Result<void*> CudaGLInteropBufferImpl<false>::mapBuffer() {
+        LOG_ERROR("CUDA-GL buffer interop not available");
+        return std::unexpected("CUDA-GL buffer interop not available");
+    }
+
+    Result<void> CudaGLInteropBufferImpl<false>::unmapBuffer() {
+        LOG_ERROR("CUDA-GL buffer interop not available");
+        return std::unexpected("CUDA-GL buffer interop not available");
+    }
+
+    void CudaGLInteropBufferImpl<false>::cleanup() {
+        buffer_id_ = 0;
+        size_ = 0;
+    }
+
+#ifdef CUDA_GL_INTEROP_ENABLED
+    // Interop-enabled version
+    CudaGLInteropBufferImpl<true>::CudaGLInteropBufferImpl()
+        : buffer_id_(0),
+          cuda_resource_(nullptr),
+          size_(0),
+          is_registered_(false),
+          mapped_ptr_(nullptr) {
+        LOG_TRACE("Creating CUDA-GL interop buffer");
+    }
+
+    CudaGLInteropBufferImpl<true>::~CudaGLInteropBufferImpl() {
+        cleanup();
+    }
+
+    Result<void> CudaGLInteropBufferImpl<true>::init(GLuint buffer_id, size_t size) {
+        LOG_TIMER_TRACE("CudaGLInteropBufferImpl<true>::init");
+        LOG_DEBUG("Registering OpenGL buffer {} ({} bytes) with CUDA", buffer_id, size);
+
+        // Clean up any existing resources
+        cleanup();
+
+        buffer_id_ = buffer_id;
+        size_ = size;
+
+        // Clear any previous CUDA errors
+        cudaGetLastError();
+
+        // Register buffer with CUDA
+        cudaGraphicsResource_t raw_resource;
+        cudaError_t err = cudaGraphicsGLRegisterBuffer(
+            &raw_resource, buffer_id, cudaGraphicsRegisterFlagsWriteDiscard);
+
+        if (err != cudaSuccess) {
+            cleanup();
+            LOG_ERROR("Failed to register OpenGL buffer with CUDA: {}", cudaGetErrorString(err));
+            return std::unexpected(std::format("Failed to register OpenGL buffer with CUDA: {}",
+                                               cudaGetErrorString(err)));
+        }
+
+        cuda_resource_.reset(raw_resource);
+        is_registered_ = true;
+
+        LOG_DEBUG("CUDA-GL buffer interop initialized successfully");
+        return {};
+    }
+
+    Result<void*> CudaGLInteropBufferImpl<true>::mapBuffer() {
+        LOG_TIMER_TRACE("CudaGLInteropBufferImpl<true>::mapBuffer");
+
+        if (!is_registered_) {
+            LOG_ERROR("Buffer not initialized");
+            return std::unexpected("Buffer not initialized");
+        }
+
+        if (mapped_ptr_) {
+            LOG_WARN("Buffer already mapped, returning existing pointer");
+            return mapped_ptr_;
+        }
+
+        // Map CUDA resource
+        auto raw_resource = static_cast<cudaGraphicsResource_t>(cuda_resource_.get());
+        cudaError_t err = cudaGraphicsMapResources(1, &raw_resource, 0);
+        if (err != cudaSuccess) {
+            LOG_ERROR("Failed to map CUDA resource: {}", cudaGetErrorString(err));
+            return std::unexpected(std::format("Failed to map CUDA resource: {}",
+                                               cudaGetErrorString(err)));
+        }
+
+        // Get device pointer
+        size_t mapped_size;
+        err = cudaGraphicsResourceGetMappedPointer(&mapped_ptr_, &mapped_size, raw_resource);
+        if (err != cudaSuccess) {
+            cudaGraphicsUnmapResources(1, &raw_resource, 0);
+            LOG_ERROR("Failed to get mapped pointer: {}", cudaGetErrorString(err));
+            return std::unexpected(std::format("Failed to get mapped pointer: {}",
+                                               cudaGetErrorString(err)));
+        }
+
+        if (mapped_size < size_) {
+            LOG_WARN("Mapped size {} is less than expected size {}", mapped_size, size_);
+        }
+
+        LOG_TRACE("Mapped buffer to CUDA pointer: {}", mapped_ptr_);
+        return mapped_ptr_;
+    }
+
+    Result<void> CudaGLInteropBufferImpl<true>::unmapBuffer() {
+        LOG_TIMER_TRACE("CudaGLInteropBufferImpl<true>::unmapBuffer");
+
+        if (!mapped_ptr_) {
+            LOG_TRACE("Buffer not mapped, nothing to do");
+            return {};
+        }
+
+        auto raw_resource = static_cast<cudaGraphicsResource_t>(cuda_resource_.get());
+        cudaError_t err = cudaGraphicsUnmapResources(1, &raw_resource, 0);
+        if (err != cudaSuccess) {
+            LOG_ERROR("Failed to unmap CUDA resource: {}", cudaGetErrorString(err));
+            return std::unexpected(std::format("Failed to unmap CUDA resource: {}",
+                                               cudaGetErrorString(err)));
+        }
+
+        mapped_ptr_ = nullptr;
+        LOG_TRACE("Unmapped buffer successfully");
+        return {};
+    }
+
+    void CudaGLInteropBufferImpl<true>::cleanup() {
+        LOG_TRACE("Cleaning up CUDA-GL interop buffer");
+        if (mapped_ptr_) {
+            unmapBuffer(); // Best effort
+        }
+        cuda_resource_.reset();
+        is_registered_ = false;
+        buffer_id_ = 0;
+        size_ = 0;
     }
 #endif // CUDA_GL_INTEROP_ENABLED
 

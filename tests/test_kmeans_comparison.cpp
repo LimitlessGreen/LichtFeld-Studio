@@ -370,11 +370,12 @@ TEST_F(KMeansComparisonTest, BasicClustering1D_Comparison) {
     EXPECT_EQ(labels_new.shape()[0], n_points);
 
     auto centroids_old_cpu = centroids_old.squeeze(1).cpu();
-    auto centroids_new_cpu = centroids_new.cpu();
+    auto centroids_new_cpu = centroids_new.squeeze(1).cpu();
+    auto centroids_new_vec = centroids_new_cpu.to_vector();
 
     for (int i = 1; i < k; ++i) {
         EXPECT_GE(centroids_old_cpu[i].item<float>(), centroids_old_cpu[i-1].item<float>());
-        EXPECT_GE(centroids_new_cpu[i][0], centroids_new_cpu[i-1][0]);
+        EXPECT_GE(centroids_new_vec[i], centroids_new_vec[i-1]);
     }
 
     EXPECT_TRUE(verify_labels_valid(labels_old, k));
@@ -653,10 +654,11 @@ TEST_F(KMeansComparisonTest, LargeOneDimensionalDataset_Comparison) {
 
     auto centroids_old_cpu = centroids_old.squeeze(1).cpu();
     auto centroids_new_cpu = centroids_new.squeeze(1).cpu();
+    auto centroids_new_vec = centroids_new_cpu.to_vector();
 
     for (int i = 1; i < k; ++i) {
         EXPECT_GE(centroids_old_cpu[i].item<float>(), centroids_old_cpu[i-1].item<float>());
-        EXPECT_GE(centroids_new_cpu[i][0], centroids_new_cpu[i-1][0]);
+        EXPECT_GE(centroids_new_vec[i], centroids_new_vec[i-1]);
     }
 
     EXPECT_TRUE(verify_labels_valid(labels_old, k));
@@ -706,10 +708,11 @@ TEST_F(KMeansComparisonTest, SOGTypical256Clusters_Comparison) {
 
     auto centroids_old_cpu = centroids_old.squeeze(1).cpu();
     auto centroids_new_cpu = centroids_new.squeeze(1).cpu();
+    auto centroids_new_vec = centroids_new_cpu.to_vector();
 
     for (int i = 1; i < 256; ++i) {
         EXPECT_GE(centroids_old_cpu[i].item<float>(), centroids_old_cpu[i-1].item<float>());
-        EXPECT_GE(centroids_new_cpu[i][0], centroids_new_cpu[i-1][0]);
+        EXPECT_GE(centroids_new_vec[i], centroids_new_vec[i-1]);
     }
 }
 

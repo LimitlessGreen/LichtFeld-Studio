@@ -300,14 +300,14 @@ TEST_F(PointCloudComparisonTest, AllocateGaussian_Degree0) {
     EXPECT_TRUE(old_pc.is_gaussian());
     EXPECT_TRUE(new_pc.is_gaussian());
     
-    // Verify shapes match
-    EXPECT_EQ(old_pc.sh0_dims[0], new_pc.sh0.size(0));
-    EXPECT_EQ(old_pc.sh0_dims[1], new_pc.sh0.size(1));
-    EXPECT_EQ(old_pc.sh0_dims[2], new_pc.sh0.size(2));
-    
-    EXPECT_EQ(old_pc.shN_dims[0], new_pc.shN.size(0));
-    EXPECT_EQ(old_pc.shN_dims[1], new_pc.shN.size(1));
-    EXPECT_EQ(old_pc.shN_dims[2], new_pc.shN.size(2));
+    // Verify shapes match - both use [N, channels, coeffs] format
+    EXPECT_EQ(old_pc.sh0_dims[0], new_pc.sh0.size(0));  // N == N
+    EXPECT_EQ(old_pc.sh0_dims[1], new_pc.sh0.size(1));  // channels == channels
+    EXPECT_EQ(old_pc.sh0_dims[2], new_pc.sh0.size(2));  // coeffs == coeffs
+
+    EXPECT_EQ(old_pc.shN_dims[0], new_pc.shN.size(0));  // N == N
+    EXPECT_EQ(old_pc.shN_dims[1], new_pc.shN.size(1));  // channels == channels
+    EXPECT_EQ(old_pc.shN_dims[2], new_pc.shN.size(2));  // coeffs == coeffs
 }
 
 TEST_F(PointCloudComparisonTest, AllocateGaussian_Degree1) {

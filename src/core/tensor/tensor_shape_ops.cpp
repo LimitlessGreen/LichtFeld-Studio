@@ -5,6 +5,7 @@
 #include "core/tensor_broadcast.hpp"
 #include "core/tensor_ops.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <execution>
 #include <numeric>
 
@@ -49,64 +50,83 @@ namespace gs {
         if (!is_valid())
             return {};
 
-        if (axes.size() != shape_.rank()) {
-            LOG_ERROR("Permute requires {} axes, got {}", shape_.rank(), axes.size());
+        const size_t rank = shape_.rank();
+        if (axes.size() != rank) {
+            LOG_ERROR("Permute requires {} axes, got {}", rank, axes.size());
             return {};
         }
 
-        std::vector<int> resolved_axes;
-        std::vector<bool> used(shape_.rank(), false);
+        // Fast path: use stack allocation for common small ranks (up to 8D)
+        constexpr size_t STACK_SIZE = 8;
+        int resolved_axes_buf[STACK_SIZE];
+        uint8_t used_buf[STACK_SIZE] = {};
 
-        for (int axis : axes) {
-            int resolved = resolve_dim(axis);
-            if (resolved < 0 || resolved >= static_cast<int>(shape_.rank())) {
-                LOG_ERROR("Invalid permute axis: {}", axis);
+        std::vector<int> resolved_axes_heap;
+        std::vector<uint8_t> used_heap;
+
+        int* resolved_axes;
+        uint8_t* used;
+
+        if (rank <= STACK_SIZE) {
+            resolved_axes = resolved_axes_buf;
+            used = used_buf;
+        } else {
+            resolved_axes_heap.resize(rank);
+            used_heap.resize(rank, 0);
+            resolved_axes = resolved_axes_heap.data();
+            used = used_heap.data();
+        }
+
+        // Validate and resolve axes
+        for (size_t i = 0; i < rank; ++i) {
+            int resolved = resolve_dim(axes[i]);
+            if (resolved < 0 || resolved >= static_cast<int>(rank)) {
+                LOG_ERROR("Invalid permute axis: {}", axes[i]);
                 return {};
             }
             if (used[resolved]) {
-                LOG_ERROR("Duplicate permute axis: {}", axis);
+                LOG_ERROR("Duplicate permute axis: {}", axes[i]);
                 return {};
             }
             used[resolved] = true;
-            resolved_axes.push_back(resolved);
+            resolved_axes[i] = resolved;
         }
 
-        std::vector<size_t> new_dims(shape_.rank());
-        for (size_t i = 0; i < shape_.rank(); ++i) {
+        // ZERO-COPY PERMUTE: Create a view with permuted dimensions and strides
+        Tensor view;
+        view.data_ = data_;
+        view.data_owner_ = data_owner_;  // Share ownership
+        view.device_ = device_;
+        view.dtype_ = dtype_;
+        view.is_view_ = true;
+        view.id_ = profiling_enabled_ ? next_id_++ : 0;  // Only increment ID when profiling
+        view.storage_offset_ = storage_offset_;
+
+        // Permute shape and strides together (single allocation, single loop)
+        std::vector<size_t> new_dims(rank);
+        std::vector<size_t> new_strides(rank);
+
+        for (size_t i = 0; i < rank; ++i) {
             new_dims[i] = shape_[resolved_axes[i]];
+            new_strides[i] = strides_[resolved_axes[i]];
         }
 
-        auto result = empty(TensorShape(new_dims), device_, dtype_);
+        view.shape_ = TensorShape(new_dims);
+        view.strides_ = std::move(new_strides);
 
-        if (device_ == Device::CUDA) {
-            auto cpu_copy = to(Device::CPU);
-            auto cpu_result = cpu_copy.permute(axes);
-            return cpu_result.to(Device::CUDA);
-        } else {
-            const float* src = ptr<float>();
-            float* dst = result.ptr<float>();
-
-            auto src_strides = shape_.strides();
-            auto dst_strides = result.shape().strides();
-
-            for (size_t dst_idx = 0; dst_idx < result.numel(); ++dst_idx) {
-                std::vector<size_t> dst_coords(shape_.rank());
-                size_t temp = dst_idx;
-                for (size_t i = 0; i < shape_.rank(); ++i) {
-                    dst_coords[i] = temp / dst_strides[i];
-                    temp %= dst_strides[i];
-                }
-
-                size_t src_idx = 0;
-                for (size_t i = 0; i < shape_.rank(); ++i) {
-                    src_idx += dst_coords[i] * src_strides[resolved_axes[i]];
-                }
-
-                dst[dst_idx] = src[src_idx];
+        // Check if the result is contiguous
+        size_t expected_stride = 1;
+        bool is_contiguous_result = true;
+        for (int i = static_cast<int>(rank) - 1; i >= 0; --i) {
+            if (view.strides_[i] != expected_stride) {
+                is_contiguous_result = false;
+                break;
             }
+            expected_stride *= new_dims[i];
         }
+        view.is_contiguous_ = is_contiguous_result;
 
-        return result;
+        return view;
     }
 
     Tensor Tensor::expand(const TensorShape& target_shape) const {
@@ -224,7 +244,7 @@ namespace gs {
         view.device_ = device_;
         view.dtype_ = dtype_;
         view.is_view_ = true;
-        view.id_ = next_id_++;
+        view.id_ = profiling_enabled_ ? next_id_++ : 0;  // Only increment ID when profiling
 
         // Adjust offset to point to slice start (in elements)
         view.storage_offset_ = storage_offset_ + start * strides_[dim];

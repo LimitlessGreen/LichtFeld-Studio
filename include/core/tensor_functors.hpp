@@ -455,6 +455,11 @@ namespace ops {
     struct pow_op {
         template<typename T>
         HOST_DEVICE constexpr T operator()(const T& a, const T& b) const {
+            // Special case: For squaring (pow 2.0), use multiplication to handle negative bases correctly
+            // powf(negative, 2.0) returns NaN because it's implemented as exp(b*log(a))
+            if (b == static_cast<T>(2.0)) {
+                return a * a;
+            }
             #ifdef __CUDA_ARCH__
             return powf(a, b);
             #else

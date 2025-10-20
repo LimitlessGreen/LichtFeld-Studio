@@ -12,6 +12,7 @@ set(CORE_SOURCES
         image_io.cpp
         image_io_new.cpp
         parameters.cpp
+        pinned_memory_allocator.cpp    # Pinned memory allocator for fast CPU-GPU transfers
         splat_data.cpp
         splat_data_ref.cpp
         splat_data_new.cpp
@@ -26,7 +27,7 @@ set(CORE_SOURCES
         tensor/tensor_broadcast.cpp    # Broadcasting implementation
         tensor/tensor_shape_ops.cpp    # Shape functions (reshape, slice, etc.)
         tensor/tensor_masking_ops.cpp  # Masking and indexing operations
-        tensor/tensor_advanced_ops.cpp 
+        tensor/tensor_advanced_ops.cpp
         tinyply.cpp
 )
 
@@ -175,6 +176,15 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     else()
         message(WARNING "✗ Compiler does not support AVX2")
     endif()
+endif()
+
+# OpenMP support for multi-threaded CPU operations
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(gs_core PUBLIC OpenMP::OpenMP_CXX)
+    message(STATUS "✓ OpenMP support enabled for gs_core (multi-threaded .contiguous())")
+else()
+    message(WARNING "✗ OpenMP not found - .contiguous() will use single-threaded code")
 endif()
 
 # Debug symbols in debug builds

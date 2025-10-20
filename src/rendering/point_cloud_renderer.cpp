@@ -156,14 +156,90 @@ namespace gs::rendering {
         // Extract RGB colors from SH coefficients
         Tensor colors = extractRGBFromSH(shs);
 
-        // Interleave on GPU using tensor concatenation (20x faster than CPU loop)
-        Tensor interleaved = Tensor::cat({positions, colors}, -1).contiguous();
-        auto cpu_data = interleaved.cpu();
+        const size_t num_points = positions.size(0);
+        const size_t buffer_size = num_points * 6 * sizeof(float); // 6 floats per point (pos + color)
+        current_point_count_ = num_points;
 
-        // Upload to OpenGL
-        BufferBinder<GL_ARRAY_BUFFER> bind(instance_vbo_);
-        glBufferData(GL_ARRAY_BUFFER, cpu_data.bytes(), cpu_data.raw_ptr(), GL_DYNAMIC_DRAW);
-        current_point_count_ = cpu_data.shape()[0];
+#ifdef CUDA_GL_INTEROP_ENABLED
+        // Try CUDA-GL interop path first
+        if (use_interop_) {
+            LOG_TIMER_TRACE("CUDA-GL interop upload");
+
+            // Ensure VBO has correct size
+            BufferBinder<GL_ARRAY_BUFFER> bind(instance_vbo_);
+            glBufferData(GL_ARRAY_BUFFER, buffer_size, nullptr, GL_DYNAMIC_DRAW);
+
+            // Initialize interop buffer if needed
+            if (!interop_buffer_) {
+                LOG_DEBUG("Initializing CUDA-GL interop buffer");
+                interop_buffer_.emplace();
+                if (auto result = interop_buffer_->init(instance_vbo_.get(), buffer_size); !result) {
+                    LOG_WARN("Failed to initialize CUDA-GL interop: {}", result.error());
+                    LOG_INFO("Falling back to CPU copy mode");
+                    use_interop_ = false;
+                    interop_buffer_.reset();
+                }
+            }
+
+            if (use_interop_ && interop_buffer_) {
+                // Map buffer to get CUDA pointer
+                auto map_result = interop_buffer_->mapBuffer();
+                if (map_result) {
+                    float* vbo_ptr = static_cast<float*>(*map_result);
+
+                    // Launch CUDA kernel to write interleaved data directly to VBO
+                    gs::launchWriteInterleavedPosColor(
+                        positions.ptr<float>(),
+                        colors.ptr<float>(),
+                        vbo_ptr,
+                        num_points,
+                        0); // default stream
+
+                    // Synchronize to ensure write is complete
+                    cudaDeviceSynchronize();
+
+                    // Unmap buffer
+                    if (auto unmap_result = interop_buffer_->unmapBuffer(); !unmap_result) {
+                        LOG_ERROR("Failed to unmap buffer: {}", unmap_result.error());
+                    }
+
+                    LOG_TRACE("Successfully uploaded {} points via CUDA-GL interop", num_points);
+                } else {
+                    LOG_WARN("Failed to map interop buffer: {}", map_result.error());
+                    LOG_INFO("Falling back to CPU copy mode");
+                    use_interop_ = false;
+                    interop_buffer_.reset();
+                }
+            }
+        }
+
+        // Fallback to CPU path if interop failed or is disabled
+        if (!use_interop_)
+#endif
+        {
+            // Original CPU path
+            LOG_TIMER_TRACE("CPU fallback upload");
+
+            // Interleave on GPU using tensor concatenation (20x faster than CPU loop)
+            Tensor interleaved;
+            {
+                LOG_TIMER_TRACE("tensor cat");
+                interleaved = Tensor::cat({positions, colors}, -1).contiguous();
+            }
+
+            Tensor cpu_data;
+            {
+                LOG_TIMER_TRACE("cuda to cpu");
+                cpu_data = interleaved.cpu();
+            }
+
+            // Upload to OpenGL
+            BufferBinder<GL_ARRAY_BUFFER> bind(instance_vbo_);
+            {
+                LOG_TIMER_TRACE("glBufferData");
+                glBufferData(GL_ARRAY_BUFFER, cpu_data.bytes(), cpu_data.raw_ptr(), GL_DYNAMIC_DRAW);
+            }
+        }
 
         // Validate instance count
         if (current_point_count_ > 10000000) { // 10 million sanity check

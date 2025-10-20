@@ -7,6 +7,7 @@
 #include "core/tensor_ops.hpp"
 #include "core/tensor_functors.hpp"
 #include "core/memory_pool.hpp"
+#include "core/pinned_memory_allocator.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -81,9 +82,10 @@ namespace gs {
                             CudaMemoryPool::instance().deallocate(p, nullptr);
                         });
                     } else {
-                        void* dummy = std::malloc(1);
+                        // Even dummy allocations use pinned memory
+                        void* dummy = PinnedMemoryAllocator::instance().allocate(1);
                         result.data_owner_ = std::shared_ptr<void>(dummy, [](void* p) {
-                            if (p) std::free(p);
+                            if (p) PinnedMemoryAllocator::instance().deallocate(p);
                         });
                     }
                     result.data_ = nullptr;  // Empty tensor has no usable data
@@ -101,14 +103,15 @@ namespace gs {
                     });
                     result.data_ = result.data_owner_.get();
                 } else {
-                    void* ptr = std::malloc(bytes);
+                    // Use pinned memory for CPU tensors (2-3x faster PCIe bandwidth)
+                    void* ptr = PinnedMemoryAllocator::instance().allocate(bytes);
                     if (!ptr) {
-                        LOG_ERROR("Failed to allocate {} bytes on CPU", bytes);
+                        LOG_ERROR("Failed to allocate {} bytes on CPU (pinned memory)", bytes);
                         return Tensor();
                     }
                     result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
                         if (p)
-                            std::free(p);
+                            PinnedMemoryAllocator::instance().deallocate(p);
                     });
                     result.data_ = result.data_owner_.get();
                 }
@@ -212,12 +215,15 @@ namespace gs {
                     cudaMemcpy(result.data_, data.data(), bytes, cudaMemcpyHostToDevice);
                 }
             } else {
-                void* ptr = std::malloc(bytes);
+                // Use pinned memory for CPU tensors
+                void* ptr = PinnedMemoryAllocator::instance().allocate(bytes);
                 if (!ptr) {
-                    LOG_ERROR("Failed to allocate {} bytes on CPU", bytes);
+                    LOG_ERROR("Failed to allocate {} bytes on CPU (pinned memory)", bytes);
                     return Tensor();
                 }
-                result.data_owner_ = std::shared_ptr<void>(ptr, std::free);
+                result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+                    if (p) PinnedMemoryAllocator::instance().deallocate(p);
+                });
                 result.data_ = result.data_owner_.get();
 
                 if (result.dtype_ == DataType::Float32) {
