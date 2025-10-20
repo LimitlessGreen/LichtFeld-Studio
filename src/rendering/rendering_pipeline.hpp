@@ -21,13 +21,6 @@
 
 namespace gs::rendering {
 
-    // Rasterizer backend selection
-    enum class RasterizerBackend {
-        TORCH_CONVERSION,  // Convert to torch and use gs_rasterizer (current)
-        TENSOR_NATIVE,     // Use tensor-based rasterizer directly (new, libtorch-free)
-        COMPARE_BOTH       // Run both and compare outputs (for validation)
-    };
-
     class RenderingPipeline {
     public:
         struct RenderRequest {
@@ -43,7 +36,6 @@ namespace gs::rendering {
             bool point_cloud_mode = false;
             float voxel_size = 0.01f;
             bool gut = false;
-            RasterizerBackend rasterizer = RasterizerBackend::TENSOR_NATIVE;  // Default to new backend
         };
 
         struct RenderResult {
@@ -68,27 +60,27 @@ namespace gs::rendering {
         glm::vec2 computeFov(float fov_degrees, int width, int height);
         Result<RenderResult> renderPointCloud(const SplatDataNew& model, const RenderRequest& request);
 
-        // OPTIMIZATION: Ensure persistent FBO is sized correctly (avoids recreation every frame)
+        // Ensure persistent FBO is sized correctly (avoids recreation every frame)
         void ensureFBOSize(int width, int height);
         void cleanupFBO();
 
-        // OPTIMIZATION: Ensure PBOs are sized correctly (avoids recreation every frame)
+        // Ensure PBOs are sized correctly (avoids recreation every frame)
         void ensurePBOSize(int width, int height);
         void cleanupPBO();
 
         Tensor background_;
         std::unique_ptr<PointCloudRenderer> point_cloud_renderer_;
 
-        // OPTIMIZATION: Persistent framebuffer objects (reused across frames)
-        // Avoids expensive glGenFramebuffers/glDeleteFramebuffers every render (~3-5ms saved)
+        // Persistent framebuffer objects (reused across frames)
+        // Avoids expensive glGenFramebuffers/glDeleteFramebuffers every render
         GLuint persistent_fbo_ = 0;
         GLuint persistent_color_texture_ = 0;
         GLuint persistent_depth_texture_ = 0;
         int persistent_fbo_width_ = 0;
         int persistent_fbo_height_ = 0;
 
-        // OPTIMIZATION: Pixel Buffer Objects for async GPU→CPU readback
-        // Uses double-buffering to overlap memory transfer with rendering (~3ms saved)
+        // Pixel Buffer Objects for async GPU→CPU readback
+        // Uses double-buffering to overlap memory transfer with rendering
         GLuint pbo_[2] = {0, 0};
         int pbo_index_ = 0;
         int pbo_width_ = 0;

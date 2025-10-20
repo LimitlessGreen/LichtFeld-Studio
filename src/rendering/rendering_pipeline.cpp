@@ -3,128 +3,15 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "rendering_pipeline.hpp"
-#include "gs_rasterizer.hpp"
 #include "gs_rasterizer_tensor.hpp"
-#include "core/camera.hpp"
 #include "core/camera_new.hpp"
-#include "core/splat_data.hpp"
+#include "core/camera_ref.hpp"
 #include "core/splat_data_new.hpp"
 
-#include <chrono>
 #include <cstring>
 #include <print>
-#include <torch/torch.h>
 
 namespace gs::rendering {
-
-    namespace {
-        // ========== TEMPORARY CONVERSION HELPERS FOR GS_RASTERIZER ==========
-        // TODO: Remove when proper Tensor-based rasterization is implemented
-
-        torch::Tensor tensor_to_torch(const Tensor& tensor, const std::vector<int64_t>& shape) {
-            if (!tensor.is_valid() || tensor.device() != Device::CUDA || tensor.dtype() != DataType::Float32) {
-                LOG_ERROR("Invalid tensor for conversion to torch");
-                return torch::empty({0});
-            }
-
-            void* data_ptr = const_cast<void*>(static_cast<const void*>(tensor.ptr<float>()));
-            auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA, 0);
-            return torch::from_blob(data_ptr, shape, options);
-        }
-
-        gs::SplatData convert_to_old_format(const SplatDataNew& model_new) {
-            int64_t N = model_new.size();
-            int max_sh_degree = model_new.get_max_sh_degree();
-
-            // Convert tensors to torch
-            torch::Tensor means = tensor_to_torch(model_new.means_raw(), {N, 3});
-            torch::Tensor sh0 = tensor_to_torch(model_new.sh0_raw(), {N, 1, 3});
-
-            torch::Tensor shN;
-            if (max_sh_degree > 0 && model_new.shN_raw().is_valid()) {
-                int64_t shN_coeffs = (max_sh_degree + 1) * (max_sh_degree + 1) - 1;
-                shN = tensor_to_torch(model_new.shN_raw(), {N, shN_coeffs, 3});
-            } else {
-                shN = torch::empty({N, 0, 3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-            }
-
-            torch::Tensor scaling = tensor_to_torch(model_new.scaling_raw(), {N, 3});
-            torch::Tensor rotation = tensor_to_torch(model_new.rotation_raw(), {N, 4});
-            torch::Tensor opacity = tensor_to_torch(model_new.opacity_raw(), {N, 1});
-
-            gs::SplatData model_old(max_sh_degree, means, sh0, shN, scaling, rotation, opacity, model_new.get_scene_scale());
-
-            // Set active SH degree
-            for (int i = 0; i < model_new.get_active_sh_degree(); ++i) {
-                model_old.increment_sh_degree();
-            }
-
-            return model_old;
-        }
-
-        gs::Camera convert_camera_new_to_old(const CameraNew& cam_new) {
-            // Convert rotation matrix [3, 3] to torch
-            const auto& R_tensor = cam_new.R();
-            std::vector<float> R_data(9);
-            auto R_cpu = R_tensor.cpu();
-            const float* R_ptr = R_cpu.ptr<float>();
-            std::memcpy(R_data.data(), R_ptr, 9 * sizeof(float));
-            torch::Tensor R = torch::from_blob(R_data.data(), {3, 3}, torch::kFloat32).clone().cuda();
-
-            // Convert translation [3] to torch
-            const auto& T_tensor = cam_new.T();
-            std::vector<float> T_data(3);
-            auto T_cpu = T_tensor.cpu();
-            const float* T_ptr = T_cpu.ptr<float>();
-            std::memcpy(T_data.data(), T_ptr, 3 * sizeof(float));
-            torch::Tensor T = torch::from_blob(T_data.data(), {3}, torch::kFloat32).clone().cuda();
-
-            // Create empty distortion tensors
-            torch::Tensor radial_dist = torch::zeros({4}, torch::kFloat32).cuda();
-            torch::Tensor tangential_dist = torch::zeros({2}, torch::kFloat32).cuda();
-
-            return gs::Camera(
-                R, T,
-                cam_new.focal_x(), cam_new.focal_y(),
-                cam_new.center_x(), cam_new.center_y(),
-                radial_dist, tangential_dist,
-                cam_new.camera_model_type(),
-                cam_new.image_name(),
-                cam_new.image_path(),
-                cam_new.camera_width(), cam_new.camera_height(),
-                cam_new.uid()
-            );
-        }
-
-        Tensor rasterize_with_conversion(const CameraNew& cam_new, SplatDataNew& model_new, const Tensor& bg_color) {
-            // Convert to old format
-            gs::SplatData model_old = convert_to_old_format(model_new);
-            gs::Camera camera_old = convert_camera_new_to_old(cam_new);
-
-            // Create bg torch tensor
-            std::vector<float> bg_data(3);
-            auto bg_cpu = bg_color.cpu();
-            const float* bg_ptr = bg_cpu.ptr<float>();
-            std::memcpy(bg_data.data(), bg_ptr, 3 * sizeof(float));
-            torch::Tensor bg = torch::from_blob(bg_data.data(), {3}, torch::kFloat32).clone().cuda();
-
-            // Call gs_rasterizer
-            torch::Tensor rendered_torch = gs::rendering::rasterize(camera_old, model_old, bg);
-
-            // Convert result back to Tensor
-            // rendered_torch is [3, H, W]
-            int64_t C = rendered_torch.size(0);
-            int64_t H = rendered_torch.size(1);
-            int64_t W = rendered_torch.size(2);
-
-            // Wrap torch tensor data as Tensor (non-owning view)
-            float* data_ptr = rendered_torch.data_ptr<float>();
-            Tensor result = Tensor::from_blob(data_ptr, TensorShape{static_cast<size_t>(C), static_cast<size_t>(H), static_cast<size_t>(W)}, Device::CUDA, DataType::Float32);
-
-            // Clone to own the data (torch tensor will be destroyed when this function returns)
-            return result.clone();
-        }
-    } // anonymous namespace
 
     RenderingPipeline::RenderingPipeline()
         : background_(Tensor::zeros({3}, Device::CUDA, DataType::Float32)) {
@@ -196,63 +83,15 @@ namespace gs::rendering {
             RenderResult result;
 
             if (request.gut) {
-                throw std::runtime_error("GUT rendering mode not yet implemented for new tensor backend");
+                throw std::runtime_error("GUT rendering mode not yet implemented for tensor backend");
             }
 
-            // Switch based on rasterizer backend selection
-            switch (request.rasterizer) {
-                case RasterizerBackend::TORCH_CONVERSION: {
-                    LOG_TRACE("Using TORCH_CONVERSION backend (gs_rasterizer with conversion)");
-                    result.image = rasterize_with_conversion(cam, mutable_model, background_);
-                    result.depth = Tensor::empty({0}, Device::CUDA, DataType::Float32);
-                    break;
-                }
-
-                case RasterizerBackend::TENSOR_NATIVE: {
-                    LOG_TRACE("Using TENSOR_NATIVE backend (libtorch-free rasterizer)");
-                    result.image = rasterize_tensor(cam, mutable_model, background_);
-                    result.depth = Tensor::empty({0}, Device::CUDA, DataType::Float32);
-                    break;
-                }
-
-                case RasterizerBackend::COMPARE_BOTH: {
-                    LOG_INFO("=== COMPARING BOTH RASTERIZERS ===");
-
-                    // Run torch-based version
-                    auto torch_start = std::chrono::high_resolution_clock::now();
-                    Tensor torch_result = rasterize_with_conversion(cam, mutable_model, background_);
-                    auto torch_end = std::chrono::high_resolution_clock::now();
-                    auto torch_ms = std::chrono::duration<double, std::milli>(torch_end - torch_start).count();
-
-                    // Run tensor-based version
-                    auto tensor_start = std::chrono::high_resolution_clock::now();
-                    Tensor tensor_result = rasterize_tensor(cam, mutable_model, background_);
-                    auto tensor_end = std::chrono::high_resolution_clock::now();
-                    auto tensor_ms = std::chrono::duration<double, std::milli>(tensor_end - tensor_start).count();
-
-                    // Compare outputs
-                    Tensor diff = (torch_result - tensor_result).abs();
-                    float max_diff = diff.max().item<float>();
-                    float mean_diff = diff.mean().item<float>();
-
-                    LOG_INFO("Torch backend:  {:.3f} ms", torch_ms);
-                    LOG_INFO("Tensor backend: {:.3f} ms ({:.1f}x speedup)",
-                             tensor_ms, torch_ms / tensor_ms);
-                    LOG_INFO("Max diff:  {:.6f}", max_diff);
-                    LOG_INFO("Mean diff: {:.6f}", mean_diff);
-
-                    if (max_diff > 1e-3f) {
-                        LOG_WARN("Large difference detected between backends!");
-                    }
-
-                    // Use tensor result by default
-                    result.image = std::move(tensor_result);
-                    result.depth = Tensor::empty({0}, Device::CUDA, DataType::Float32);
-                    break;
-                }
-            }
-
+            // Use libtorch-free tensor-based rasterizer
+            LOG_TRACE("Using TENSOR_NATIVE backend (libtorch-free rasterizer)");
+            result.image = rasterize_tensor(cam, mutable_model, background_);
+            result.depth = Tensor::empty({0}, Device::CUDA, DataType::Float32);
             result.valid = true;
+
             LOG_TRACE("Rasterization completed successfully");
             return result;
 

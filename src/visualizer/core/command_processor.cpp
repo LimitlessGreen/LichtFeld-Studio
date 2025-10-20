@@ -8,7 +8,6 @@
 #include "training/training_manager.hpp"
 #include <iomanip>
 #include <sstream>
-#include <torch/torch.h>
 
 namespace gs {
 

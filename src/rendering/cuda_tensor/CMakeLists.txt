@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # CUDA rasterization backend for rendering module (Tensor-based, libtorch-free)
-# Only includes tensor-specific files, links to cuda backend for shared CUDA kernels
+# Includes all necessary CUDA implementation files
 set(CUDA_RASTERIZER_TENSOR_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/src/forward.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/src/rasterization_api_tensor.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/src/rasterizer_memory_arena.cu
 )
@@ -23,12 +24,9 @@ target_include_directories(rendering_cuda_tensor_backend
         PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/include
         ${CMAKE_CURRENT_SOURCE_DIR}/utils
-        ${CMAKE_SOURCE_DIR}/src/rendering/cuda/rasterization/include  # Share headers from cuda backend
-        ${CMAKE_SOURCE_DIR}/src/rendering/cuda/utils
         PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${CUDAToolkit_INCLUDE_DIRS}
-        ${TORCH_INCLUDE_DIRS}
 )
 
 target_link_libraries(rendering_cuda_tensor_backend
@@ -38,8 +36,6 @@ target_link_libraries(rendering_cuda_tensor_backend
         CUDA::cublas
         CUDA::cuda_driver
         gs_core
-        rendering_cuda_backend  # Link to get shared forward() implementation
-        ${TORCH_LIBRARIES}
 )
 
 target_compile_options(rendering_cuda_tensor_backend PRIVATE

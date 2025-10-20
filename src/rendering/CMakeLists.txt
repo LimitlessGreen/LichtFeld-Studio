@@ -3,14 +3,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # Add the internal CUDA subdirectories first
-add_subdirectory(cuda)           # Original torch-based backend
-add_subdirectory(cuda_tensor)    # Tensor-based backend (libtorch-free)
+add_subdirectory(cuda_tensor)
 
 set(RENDERING_SOURCES
         rendering_engine.cpp
         rendering_engine_impl.cpp
         rendering_pipeline.cpp
-        gs_rasterizer.cpp
         gs_rasterizer_tensor.cpp
         point_cloud_renderer.cpp
         translation_gizmo.cpp
@@ -39,9 +37,7 @@ target_link_libraries(gs_rendering
         gs_geometry            # Link geometry module for BoundingBox and EuclideanTransform
         gs_kernels             # Link kernels module
         PRIVATE
-        rendering_cuda_backend           # Original torch-based backend
-        rendering_cuda_tensor_backend    # Tensor-based backend (libtorch-free)
-        ${TORCH_LIBRARIES}
+        rendering_cuda_tensor_backend
         glm::glm
         glad::glad
         glfw
@@ -60,8 +56,6 @@ target_include_directories(gs_rendering
         $<INSTALL_INTERFACE:include>
         PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/cuda/rasterization/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/cuda/utils
         ${CMAKE_SOURCE_DIR}/src
         ${OPENGL_INCLUDE_DIRS}
 )

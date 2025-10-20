@@ -67,7 +67,6 @@ target_link_libraries(gs_visualizer
         gs_loader
         gs_rendering
         gs_training
-        ${TORCH_LIBRARIES}
         glad::glad
         glfw
         imgui::imgui
