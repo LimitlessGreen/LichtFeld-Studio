@@ -63,7 +63,7 @@ namespace gs {
         // Default implementation: float -> float or Int32 -> Int32 operations
         template <typename InputExpr, typename UnaryOp, bool ReturnsBool>
         struct UnaryExprEvaluator {
-            static Tensor eval(const UnaryExpr<InputExpr, UnaryOp>& expr,
+            static Tensor eval(const UnaryExpr<InputExpr, UnaryOp>& /* expr */,
                                const InputExpr& input, const UnaryOp& op,
                                const TensorShape& shape, Device device, DataType dtype) {
                 // Recursively evaluate input expression
@@ -114,7 +114,7 @@ namespace gs {
         // Specialized implementation: Bool-returning operations
         template <typename InputExpr, typename UnaryOp>
         struct UnaryExprEvaluator<InputExpr, UnaryOp, true> {
-            static Tensor eval(const UnaryExpr<InputExpr, UnaryOp>& expr,
+            static Tensor eval(const UnaryExpr<InputExpr, UnaryOp>& /* expr */,
                                const InputExpr& input, const UnaryOp& op,
                                const TensorShape& shape, Device device, DataType dtype) {
                 // Recursively evaluate input expression
@@ -232,7 +232,7 @@ namespace gs {
         // Default implementation: float,float -> float or Int32,Int32 -> Int32 operations
         template <typename LeftExpr, typename RightExpr, typename BinaryOp, bool ReturnsBool>
         struct BinaryExprEvaluator {
-            static Tensor eval(const BinaryExpr<LeftExpr, RightExpr, BinaryOp>& expr,
+            static Tensor eval(const BinaryExpr<LeftExpr, RightExpr, BinaryOp>& /* expr */,
                                const LeftExpr& left, const RightExpr& right, const BinaryOp& op,
                                const TensorShape& shape, Device device, DataType dtype) {
                 // Evaluate both sides
@@ -356,7 +356,7 @@ namespace gs {
         // Specialized implementation: Bool-returning binary operations
         template <typename LeftExpr, typename RightExpr, typename BinaryOp>
         struct BinaryExprEvaluator<LeftExpr, RightExpr, BinaryOp, true> {
-            static Tensor eval(const BinaryExpr<LeftExpr, RightExpr, BinaryOp>& expr,
+            static Tensor eval(const BinaryExpr<LeftExpr, RightExpr, BinaryOp>& /* expr */,
                                const LeftExpr& left, const RightExpr& right, const BinaryOp& op,
                                const TensorShape& shape, Device device, DataType dtype) {
                 // Evaluate both sides

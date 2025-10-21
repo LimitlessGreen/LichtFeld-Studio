@@ -894,11 +894,11 @@ namespace gs {
             }
 
             // Reshape to (count, 1) to match PyTorch
-            return temp.reshape({static_cast<int64_t>(count), 1});
+            return temp.reshape({static_cast<size_t>(count), 1});
         }
 
         // Multi-dimensional case
-        auto result = empty({static_cast<int64_t>(count), static_cast<int64_t>(n_dims)}, device_, DataType::Int64);
+        auto result = empty({static_cast<size_t>(count), static_cast<size_t>(n_dims)}, device_, DataType::Int64);
 
         if (device_ == Device::CUDA) {
             auto cpu_tensor = to(Device::CPU);
