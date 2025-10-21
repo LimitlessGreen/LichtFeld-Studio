@@ -17,8 +17,8 @@ namespace gs::training {
                   "ForwardContext size exceeds allocated storage. Update FORWARD_CONTEXT_SIZE in rasterizer.hpp");
 
     RenderOutput fast_rasterize(
-        Camera& viewpoint_camera,
-        SplatData& gaussian_model,
+        CameraNew& viewpoint_camera,
+        SplatDataNew& gaussian_model,
         float* bg_color,
         TrainingMemory& cuda_memory) {
 
@@ -30,25 +30,25 @@ namespace gs::training {
         // Ensure CUDA memory is allocated for this size
         cuda_memory.ensure_size(width, height, 3, 1);
 
-        // Get raw Gaussian pointers - NO TORCH!
-        float* means_ptr = gaussian_model.means_cuda_ptr();
-        float* raw_opacities_ptr = gaussian_model.opacity_raw_cuda_ptr();
-        float* raw_scales_ptr = gaussian_model.scaling_raw_cuda_ptr();
-        float* raw_rotations_ptr = gaussian_model.rotation_raw_cuda_ptr();
-        float* sh0_ptr = gaussian_model.sh0_cuda_ptr();
-        float* shN_ptr = gaussian_model.shN_cuda_ptr();
+        // Get raw Gaussian pointers - LibTorch-free!
+        float* means_ptr = gaussian_model.means_raw().ptr<float>();
+        float* raw_opacities_ptr = gaussian_model.opacity_raw().ptr<float>();
+        float* raw_scales_ptr = gaussian_model.scaling_raw().ptr<float>();
+        float* raw_rotations_ptr = gaussian_model.rotation_raw().ptr<float>();
+        float* sh0_ptr = gaussian_model.sh0_raw().ptr<float>();
+        float* shN_ptr = gaussian_model.shN_raw().ptr<float>();
 
         const int sh_degree = gaussian_model.get_active_sh_degree();
         const int active_sh_bases = (sh_degree + 1) * (sh_degree + 1);
         const int n_primitives = gaussian_model.size();
-        const int total_bases_sh_rest = gaussian_model.get_shN_dim1();
+        const int total_bases_sh_rest = gaussian_model.shN_raw().size(1);
 
         constexpr float near_plane = 0.01f;
         constexpr float far_plane = 1e10f;
 
-        // Get raw camera pointers - NO TORCH!
-        const float* w2c_ptr = viewpoint_camera.world_view_transform_cuda_ptr();
-        const float* cam_position_ptr = viewpoint_camera.cam_position_cuda_ptr();
+        // Get raw camera pointers - LibTorch-free!
+        const float* w2c_ptr = viewpoint_camera.world_view_transform().ptr<float>();
+        const float* cam_position_ptr = viewpoint_camera.cam_position().ptr<float>();
 
         // Get DEDICATED render buffers (not gradient buffers!)
         float* image_buffer = cuda_memory.render_image();
@@ -143,8 +143,8 @@ namespace gs::training {
         const float* grad_image,
         const float* grad_alpha,
         const RenderOutput& render_output,
-        SplatData& gaussian_model,
-        Camera& viewpoint_camera) {
+        SplatDataNew& gaussian_model,
+        CameraNew& viewpoint_camera) {
 
         if (!render_output.has_context) {
             throw std::runtime_error("RenderOutput does not have a valid forward context for backward pass");
@@ -156,35 +156,35 @@ namespace gs::training {
         // Get camera parameters
         auto [fx, fy, cx, cy] = viewpoint_camera.get_intrinsics();
 
-        // Get raw camera pointers
-        const float* w2c_ptr = viewpoint_camera.world_view_transform_cuda_ptr();
-        const float* cam_position_ptr = viewpoint_camera.cam_position_cuda_ptr();
+        // Get raw camera pointers - LibTorch-free!
+        const float* w2c_ptr = viewpoint_camera.world_view_transform().ptr<float>();
+        const float* cam_position_ptr = viewpoint_camera.cam_position().ptr<float>();
 
         const int n_primitives = gaussian_model.size();
         const int sh_degree = gaussian_model.get_active_sh_degree();
         const int active_sh_bases = (sh_degree + 1) * (sh_degree + 1);
-        const int total_bases_sh_rest = gaussian_model.get_shN_dim1();
+        const int total_bases_sh_rest = gaussian_model.shN_raw().size(1);
 
-        // Get raw gradient pointers - these write directly to memory
-        float* grad_means_ptr = gaussian_model.means_grad_cuda_ptr();
-        float* grad_scales_raw_ptr = gaussian_model.scaling_grad_cuda_ptr();
-        float* grad_rotations_raw_ptr = gaussian_model.rotation_grad_cuda_ptr();
-        float* grad_opacities_raw_ptr = gaussian_model.opacity_grad_cuda_ptr();
-        float* grad_sh0_ptr = gaussian_model.sh0_grad_cuda_ptr();
-        float* grad_shN_ptr = gaussian_model.shN_grad_cuda_ptr();
+        // Get raw gradient pointers - LibTorch-free!
+        float* grad_means_ptr = gaussian_model.means_grad_ptr();
+        float* grad_scales_raw_ptr = gaussian_model.scaling_grad_ptr();
+        float* grad_rotations_raw_ptr = gaussian_model.rotation_grad_ptr();
+        float* grad_opacities_raw_ptr = gaussian_model.opacity_grad_ptr();
+        float* grad_sh0_ptr = gaussian_model.sh0_grad_ptr();
+        float* grad_shN_ptr = gaussian_model.shN_grad_ptr();
 
         // We don't support camera gradients
         float* grad_w2c_ptr = nullptr;
 
-        // Get raw data pointers for forward data
-        float* means_ptr = gaussian_model.means_cuda_ptr();
-        float* scales_raw_ptr = gaussian_model.scaling_raw_cuda_ptr();
-        float* rotations_raw_ptr = gaussian_model.rotation_raw_cuda_ptr();
-        float* shN_ptr = gaussian_model.shN_cuda_ptr();
+        // Get raw data pointers for forward data - LibTorch-free!
+        float* means_ptr = gaussian_model.means_raw().ptr<float>();
+        float* scales_raw_ptr = gaussian_model.scaling_raw().ptr<float>();
+        float* rotations_raw_ptr = gaussian_model.rotation_raw().ptr<float>();
+        float* shN_ptr = gaussian_model.shN_raw().ptr<float>();
 
         // Call raw CUDA backward with raw pointers
         fast_gs::rasterization::BackwardOutputs outputs = fast_gs::rasterization::backward_raw(
-            gaussian_model._densification_info.defined() ? gaussian_model._densification_info.data_ptr<float>() : nullptr,
+            gaussian_model.densification_info.is_valid() ? gaussian_model.densification_info.ptr<float>() : nullptr,
             grad_image,
             grad_alpha,
             render_output.image,

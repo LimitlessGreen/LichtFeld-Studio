@@ -160,7 +160,7 @@ namespace gs::training {
         // Updated method signature for processing a single training step
         std::expected<StepResult, std::string> train_step(
             int iter,
-            Camera* cam,
+            CameraNew* cam,
             const float* gt_image_ptr, // Raw pointer instead of tensor
             size_t img_width,
             size_t img_height,

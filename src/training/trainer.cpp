@@ -544,7 +544,7 @@ namespace gs::training {
 
     std::expected<Trainer::StepResult, std::string> Trainer::train_step(
         int iter,
-        Camera* cam,
+        CameraNew* cam,
         const float* gt_image_ptr, // Raw pointer instead of tensor
         size_t img_width,
         size_t img_height,
@@ -632,20 +632,18 @@ namespace gs::training {
                     LOG_INFO("Base training complete at iteration {}", base_iterations);
                     LOG_INFO("Starting ADMM sparsification for {} iterations",
                              params_.optimization.sparsify_steps);
-                    LOG_INFO("Current model size: {} Gaussians", strategy_->get_model().size());
+                    LOG_INFO("Current model size: {} Gaussians", strategy_new_->get_model().size());
                     LOG_INFO("Target pruning: {}% of Gaussians", params_.optimization.prune_ratio * 100);
                 }
             }
 
             check_memory("after sparsity logging");
 
-            auto adjusted_cam_pos = poseopt_module_->forward(cam->world_view_transform(), torch::tensor({cam->uid()}));
+            // TODO: Implement LibTorch-free pose optimization if needed
+            // For now, use camera directly without pose adjustment
+            CameraNew* adjusted_cam = cam;
 
-            check_memory("after poseopt_module forward");
-
-            auto adjusted_cam = Camera(*cam, adjusted_cam_pos);
-
-            check_memory("after Camera creation");
+            check_memory("after camera setup");
 
             // Use provided dimensions instead of getting from camera
             const int width = img_width;
@@ -678,12 +676,12 @@ namespace gs::training {
 
             check_memory("before forward pass");
 
-            // Forward pass - NO TORCH!
+            // Forward pass - LibTorch-free!
             RenderOutput r_output;
             {
                 ScopedMemoryTracker forward_tracker(iter, "forward_pass", track_memory);
                 if (!params_.optimization.gut) {
-                    r_output = fast_rasterize(adjusted_cam, strategy_->get_model(), bg, *cuda_memory_);
+                    r_output = fast_rasterize(*adjusted_cam, strategy_new_->get_model(), bg, *cuda_memory_);
                     check_memory("after fast_rasterize");
                 } else {
                     return std::unexpected("GUT rasterizer not supported in torch-free mode yet");
@@ -866,7 +864,7 @@ namespace gs::training {
             {
                 ScopedMemoryTracker backward_tracker(iter, "backward_pass", track_memory);
 
-                strategy_->get_model().ensure_grad_allocated();
+                strategy_new_->get_model().ensure_grad_allocated();
 
                 check_memory("after ensure_grad_allocated");
 
@@ -878,8 +876,8 @@ namespace gs::training {
                         grad_chw_ptr,
                         cuda_memory_->grad_alpha(),
                         r_output,
-                        strategy_->get_model(),
-                        adjusted_cam);
+                        strategy_new_->get_model(),
+                        *adjusted_cam);
 
                     check_memory("after fast_rasterize_backward");
                 }
@@ -887,9 +885,9 @@ namespace gs::training {
                 // Use CUDA kernels for regularization
                 if (params_.optimization.scale_reg > 0.0f) {
                     try {
-                        float* scale_grad_ptr = strategy_->get_model().scaling_grad_cuda_ptr();
-                        float* scaling_raw_ptr = strategy_->get_model().scaling_raw_cuda_ptr();
-                        size_t n_elements = strategy_->get_model().size() * 3;
+                        float* scale_grad_ptr = strategy_new_->get_model().scaling_grad_ptr();
+                        float* scaling_raw_ptr = strategy_new_->get_model().scaling_raw().ptr<float>();
+                        size_t n_elements = strategy_new_->get_model().size() * 3;
 
                         launch_add_scale_regularization(
                             scale_grad_ptr,
@@ -906,9 +904,9 @@ namespace gs::training {
 
                 if (params_.optimization.opacity_reg > 0.0f) {
                     try {
-                        float* opacity_grad_ptr = strategy_->get_model().opacity_grad_cuda_ptr();
-                        float* opacity_raw_ptr = strategy_->get_model().opacity_raw_cuda_ptr();
-                        size_t n_elements = strategy_->get_model().size();
+                        float* opacity_grad_ptr = strategy_new_->get_model().opacity_grad_ptr();
+                        float* opacity_raw_ptr = strategy_new_->get_model().opacity_raw().ptr<float>();
+                        size_t n_elements = strategy_new_->get_model().size();
 
                         launch_add_opacity_regularization(
                             opacity_grad_ptr,
@@ -947,8 +945,8 @@ namespace gs::training {
             // Update progress
             if (progress_) {
                 progress_->update(iter, current_loss_.load(),
-                                  static_cast<int>(strategy_->get_model().size()),
-                                  strategy_->is_refining(iter));
+                                  static_cast<int>(strategy_new_->get_model().size()),
+                                  strategy_new_->is_refining(iter));
             }
 
             check_memory("after progress update");
@@ -958,8 +956,8 @@ namespace gs::training {
                 events::state::TrainingProgress{
                     .iteration = iter,
                     .loss = current_loss_.load(),
-                    .num_gaussians = static_cast<int>(strategy_->get_model().size()),
-                    .is_refining = strategy_->is_refining(iter)}
+                    .num_gaussians = static_cast<int>(strategy_new_->get_model().size()),
+                    .is_refining = strategy_new_->is_refining(iter)}
                     .emit();
             }
 
@@ -973,13 +971,13 @@ namespace gs::training {
                 {
                     std::unique_lock<std::shared_mutex> lock(render_mutex_);
 
-                    strategy_->post_backward(iter, r_output);
+                    strategy_new_->post_backward(iter, r_output);
 
-                    check_memory("before strategy->step");
+                    check_memory("before strategy_new->step");
 
-                    strategy_->step(iter);
+                    strategy_new_->step(iter);
 
-                    check_memory("after strategy->step");
+                    check_memory("after strategy_new->step");
 
                     // Skip bilateral grid optimizer step
                     if (params_.optimization.use_bilateral_grid) {
@@ -993,7 +991,7 @@ namespace gs::training {
 
                     deferred.add(events::state::ModelUpdated{
                         .iteration = iter,
-                        .num_gaussians = static_cast<size_t>(strategy_->get_model().size())});
+                        .num_gaussians = static_cast<size_t>(strategy_new_->get_model().size())});
                 }
 
                 check_memory("after model update");
@@ -1009,6 +1007,10 @@ namespace gs::training {
                     evaluator_->print_evaluation_header(iter);
 
                     // Create minimal tensor wrapper for background
+                    // TODO: Port evaluator to work with SplatDataNew
+                    LOG_WARN_ONCE("Evaluation temporarily disabled - evaluator needs to be ported to SplatDataNew");
+
+                    /*
                     torch::Tensor bg_eval = torch::from_blob(
                         cuda_memory_->background(),
                         {3},
@@ -1017,12 +1019,13 @@ namespace gs::training {
                     check_memory("after bg_eval tensor creation");
 
                     auto metrics = evaluator_->evaluate(iter,
-                                                        strategy_->get_model(),
+                                                        strategy_new_->get_model(),
                                                         val_dataset_,
                                                         bg_eval);
                     LOG_INFO("{}", metrics.to_string());
 
                     check_memory("after evaluation");
+                    */
                 }
 
                 if (!params_.optimization.skip_intermediate_saving) {
@@ -1050,15 +1053,14 @@ namespace gs::training {
                         auto train_cam = train_dataset_->get_camera_by_filename(img_name);
                         auto val_cam = val_dataset_ ? val_dataset_->get_camera_by_filename(img_name) : std::nullopt;
                         if (train_cam.has_value() || val_cam.has_value()) {
-                            // TODO: fix this!
-                            Camera* cam_to_use; //= train_cam.has_value() ? train_cam.value() : val_cam.value();
+                            CameraNew* cam_to_use = train_cam.has_value() ? train_cam.value() : val_cam.value();
 
                             if (cam_to_use->camera_height() == cam_to_use->image_height() && params_.dataset.resize_factor != 1) {
                                 cam_to_use->load_image_size(params_.dataset.resize_factor);
                             }
 
                             RenderOutput rendered_timelapse_output = fast_rasterize(
-                                *cam_to_use, strategy_->get_model(), cuda_memory_->background(), *cuda_memory_);
+                                *cam_to_use, strategy_new_->get_model(), cuda_memory_->background(), *cuda_memory_);
 
                             check_memory("after timelapse rasterize");
 
@@ -1169,10 +1171,8 @@ namespace gs::training {
             const RenderMode render_mode = stringToRenderMode(params_.optimization.render_mode);
 
             if (progress_) {
-                int model_size = strategy_ ? static_cast<int>(strategy_->get_model().size())
-                                           : static_cast<int>(strategy_new_->get_model().size());
-                bool is_refining = strategy_ ? strategy_->is_refining(iter)
-                                             : strategy_new_->is_refining(iter);
+                int model_size = static_cast<int>(strategy_new_->get_model().size());
+                bool is_refining = strategy_new_->is_refining(iter);
                 progress_->update(iter, current_loss_.load(), model_size, is_refining);
             }
 
@@ -1198,8 +1198,7 @@ namespace gs::training {
                 // Get batch using our torch-free dataloader
                 auto batch = std::move(*loader_iter);
                 auto& camera_with_image = batch[0];
-                // TODO: fix this!
-                Camera* cam; // = camera_with_image.camera;
+                CameraNew* cam = camera_with_image.camera;
 
                 // Get raw image pointer and dimensions
                 const float* gt_image_ptr = camera_with_image.image_data();
