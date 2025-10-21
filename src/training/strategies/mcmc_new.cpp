@@ -185,34 +185,22 @@ namespace gs::training {
         }
 
         // Refine Gaussians (relocate dead + add new)
-        if (is_refining(iter)) {
-            // Relocate dead Gaussians
-            int n_relocated = relocate_gs();
-            if (n_relocated > 0) {
-                LOG_DEBUG("Relocated {} dead Gaussians at iteration {}", n_relocated, iter);
-            }
+        //if (is_refining(iter)) {
+        //    // Relocate dead Gaussians
+        //    int n_relocated = relocate_gs();
+        //    if (n_relocated > 0) {
+        //        LOG_DEBUG("Relocated {} dead Gaussians at iteration {}", n_relocated, iter);
+        //    }
 
-            // Add new Gaussians
-            int n_added = add_new_gs();
-            if (n_added > 0) {
-                LOG_DEBUG("Added {} new Gaussians at iteration {}", n_added, iter);
-            }
-        }
+        //    // Add new Gaussians
+        //    int n_added = add_new_gs();
+        //    if (n_added > 0) {
+        //        LOG_DEBUG("Added {} new Gaussians at iteration {}", n_added, iter);
+        //    }
+        //}
 
         // Inject noise to positions
-        inject_noise();
-
-#ifdef _WIN32
-        // Windows doesn't support CUDACachingAllocator expandable_segments
-        if (iter % 10 == 0) {
-            // Note: We're using gs::Tensor instead of torch, so we use CUDA runtime directly
-            cudaError_t err = cudaDeviceSynchronize();
-            if (err == cudaSuccess) {
-                // Reset CUDA memory pool if needed
-                // This is less critical with our custom Tensor library
-            }
-        }
-#endif
+        //inject_noise();
     }
 
     void MCMCNew::step(int iter) {
