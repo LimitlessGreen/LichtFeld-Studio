@@ -139,6 +139,40 @@ namespace gs {
         Tensor& shN_raw() { return shN; }
         const Tensor& shN_raw() const { return shN; }
 
+        // ========== GRADIENT ACCESS ==========
+
+        /**
+         * @brief Get gradient pointer for means
+         * @return Raw CUDA pointer to gradient data, or nullptr if not allocated
+         */
+        float* means_grad_ptr() { return means_grad.is_valid() ? means_grad.ptr<float>() : nullptr; }
+        const float* means_grad_ptr() const { return means_grad.is_valid() ? means_grad.ptr<float>() : nullptr; }
+
+        float* opacity_grad_ptr() { return opacity_grad.is_valid() ? opacity_grad.ptr<float>() : nullptr; }
+        const float* opacity_grad_ptr() const { return opacity_grad.is_valid() ? opacity_grad.ptr<float>() : nullptr; }
+
+        float* rotation_grad_ptr() { return rotation_grad.is_valid() ? rotation_grad.ptr<float>() : nullptr; }
+        const float* rotation_grad_ptr() const { return rotation_grad.is_valid() ? rotation_grad.ptr<float>() : nullptr; }
+
+        float* scaling_grad_ptr() { return scaling_grad.is_valid() ? scaling_grad.ptr<float>() : nullptr; }
+        const float* scaling_grad_ptr() const { return scaling_grad.is_valid() ? scaling_grad.ptr<float>() : nullptr; }
+
+        float* sh0_grad_ptr() { return sh0_grad.is_valid() ? sh0_grad.ptr<float>() : nullptr; }
+        const float* sh0_grad_ptr() const { return sh0_grad.is_valid() ? sh0_grad.ptr<float>() : nullptr; }
+
+        float* shN_grad_ptr() { return shN_grad.is_valid() ? shN_grad.ptr<float>() : nullptr; }
+        const float* shN_grad_ptr() const { return shN_grad.is_valid() ? shN_grad.ptr<float>() : nullptr; }
+
+        /**
+         * @brief Ensure all gradient tensors are allocated
+         */
+        void ensure_grad_allocated();
+
+        /**
+         * @brief Zero all gradients
+         */
+        void zero_grad();
+
         // ========== UTILITY METHODS ==========
 
         /**
@@ -220,6 +254,14 @@ namespace gs {
         Tensor scaling;    // [N, 3] - log-space scales
         Tensor rotation;   // [N, 4] - quaternions (unnormalized)
         Tensor opacity;    // [N, 1] - logit-space opacity
+
+        // Gradient tensors
+        Tensor means_grad;    // [N, 3] - means gradients
+        Tensor sh0_grad;      // [N, 1, 3] - DC SH gradients
+        Tensor shN_grad;      // [N, (degree+1)^2-1, 3] - higher-order SH gradients
+        Tensor scaling_grad;  // [N, 3] - scaling gradients
+        Tensor rotation_grad; // [N, 4] - rotation gradients
+        Tensor opacity_grad;  // [N, 1] - opacity gradients
 
         // Async save management
         mutable std::mutex save_mutex;

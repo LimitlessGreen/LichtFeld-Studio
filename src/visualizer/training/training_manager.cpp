@@ -324,7 +324,7 @@ namespace gs {
     int TrainerManager::getNumSplats() const {
         if (!trainer_)
             return 0;
-        return static_cast<int>(trainer_->get_strategy().get_model().size());
+        return static_cast<int>(trainer_->get_model_size());
     }
 
     void TrainerManager::updateLoss(float loss) {

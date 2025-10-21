@@ -7,14 +7,13 @@
 #include "core/point_cloud_new.hpp"
 #include "core/splat_data_new.hpp"
 #include "loader/loader.hpp"
-#include "strategies/default_strategy.hpp"
-#include "strategies/mcmc.hpp"
+#include "training/strategies/mcmc_new.hpp"
 #include <format>
 #include <random>
 
 namespace gs::training {
 
-    // Helper function to generate random point cloud (torch-free)
+    // Helper function to generate random point cloud (LibTorch-free)
     static PointCloudNew generate_random_initialization() {
         constexpr int NUM_INIT_GAUSSIAN = 10000;
         constexpr uint64_t SEED = 8128;
@@ -58,15 +57,21 @@ namespace gs::training {
         // 3. Load the dataset
         LOG_INFO("Loading dataset from: {}", params.dataset.data_path.string());
         auto load_result = loader->load(params.dataset.data_path, load_options);
+        LOG_INFO("Load completed, checking result...");
         if (!load_result) {
             return std::unexpected(std::format("Failed to load dataset: {}", load_result.error()));
         }
 
-        LOG_INFO("Dataset loaded successfully using {} loader", load_result->loader_used);
+        LOG_INFO("Load result valid");
+        const std::string& loader_name = load_result->loader_used;
+        LOG_INFO("Dataset loaded successfully using {} loader", loader_name);
 
         // 4. Handle the loaded data based on type
+        LOG_INFO("Processing loaded data variant...");
         return std::visit([&params, &load_result](auto&& data) -> std::expected<TrainingSetup, std::string> {
             using T = std::decay_t<decltype(data)>;
+
+            LOG_INFO("Variant type determined");
 
             if constexpr (std::is_same_v<T, std::shared_ptr<gs::SplatDataNew>>) {
                 // Direct PLY load - not supported for training
@@ -74,9 +79,11 @@ namespace gs::training {
                     "Direct PLY loading is not supported for training. Please use a dataset format (COLMAP or Blender).");
             } else if constexpr (std::is_same_v<T, loader::LoadedScene>) {
                 // Full scene data - set up training
+                LOG_INFO("Processing LoadedScene variant...");
 
                 // Initialize model directly with point cloud
                 std::expected<SplatDataNew, std::string> splat_result;
+                LOG_INFO("About to check init_ply parameter...");
                 if (params.init_ply.has_value()) {
                     // Load initialization PLY file
                     auto loader_ply = loader::Loader::create();
@@ -105,9 +112,12 @@ namespace gs::training {
                     }
 
                 } else {
+                    LOG_INFO("No init_ply, checking data.point_cloud...");
                     // Get point cloud or generate random one
                     PointCloudNew point_cloud_to_use;
+                    LOG_INFO("Created point_cloud_to_use variable");
                     if (data.point_cloud && data.point_cloud->size() > 0) {
+                        LOG_INFO("data.point_cloud exists with {} points", data.point_cloud->size());
                         // Use move semantics to transfer ownership
                         point_cloud_to_use = std::move(*data.point_cloud);
                         LOG_INFO("Using point cloud with {} points", point_cloud_to_use.size());
@@ -128,17 +138,16 @@ namespace gs::training {
                         std::format("Failed to initialize model: {}", splat_result.error()));
                 }
 
-                // 5. Create strategy
-                std::unique_ptr<IStrategy> strategy;
+                // 5. Create strategy (using new LibTorch-free implementation)
+                std::unique_ptr<IStrategyNew> strategy;
                 if (params.optimization.strategy == "mcmc") {
-                    //strategy = std::make_unique<MCMC>(std::move(*splat_result));
-                    LOG_DEBUG("Created MCMC strategy");
+                    strategy = std::make_unique<MCMCNew>(std::move(*splat_result));
+                    LOG_INFO("Created MCMCNew strategy (LibTorch-free) with {} Gaussians", strategy->get_model().size());
                 } else {
-                    //strategy = std::make_unique<DefaultStrategy>(std::move(*splat_result));
-                    LOG_DEBUG("Created default strategy");
+                    return std::unexpected("Only MCMC strategy is currently supported with LibTorch-free implementation");
                 }
 
-                // Create trainer (without parameters)
+                // Create trainer with LibTorch-free strategy
                 auto trainer = std::make_unique<Trainer>(
                     data.cameras,
                     std::move(strategy));

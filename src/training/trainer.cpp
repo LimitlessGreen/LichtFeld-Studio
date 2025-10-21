@@ -236,6 +236,17 @@ namespace gs::training {
         LOG_DEBUG("Trainer constructed with {} cameras", base_dataset_->get_cameras().size());
     }
 
+    // Constructor for LibTorch-free strategies
+    Trainer::Trainer(std::shared_ptr<CameraDataset> dataset,
+                     std::unique_ptr<IStrategyNew> strategy)
+        : base_dataset_(std::move(dataset)),
+          strategy_new_(std::move(strategy)) {
+        if (!torch::cuda::is_available()) {
+            throw std::runtime_error("CUDA is not available – aborting.");
+        }
+        LOG_DEBUG("Trainer constructed with {} cameras (LibTorch-free strategy)", base_dataset_->get_cameras().size());
+    }
+
     void Trainer::load_cameras_info() {
         m_cam_id_to_cam.clear();
         // Setup camera cache
@@ -309,16 +320,27 @@ namespace gs::training {
             LOG_DEBUG("Camera cache initialized with {} cameras", m_cam_id_to_cam.size());
 
             // Re-initialize strategy with new parameters
-            strategy_->initialize(params.optimization);
-            LOG_DEBUG("Strategy initialized");
-
-            // Initialize bilateral grid if enabled
-            if (auto result = initialize_bilateral_grid(); !result) {
-                return std::unexpected(result.error());
+            if (strategy_) {
+                strategy_->initialize(params.optimization);
+                LOG_DEBUG("Strategy initialized");
+            } else if (strategy_new_) {
+                strategy_new_->initialize(params.optimization);
+                LOG_DEBUG("Strategy (new) initialized");
+            } else {
+                return std::unexpected("No strategy available");
             }
 
-            // Initialize sparsity optimizer if enabled
-            if (params.optimization.enable_sparsity) {
+            // Initialize bilateral grid if enabled (not supported with new strategy yet)
+            if (strategy_ && !strategy_new_) {
+                if (auto result = initialize_bilateral_grid(); !result) {
+                    return std::unexpected(result.error());
+                }
+            } else if (strategy_new_ && params.optimization.bilateral_grid_X > 0) {
+                LOG_WARN("Bilateral grid not yet supported with LibTorch-free implementation");
+            }
+
+            // Initialize sparsity optimizer if enabled (not supported with new strategy yet)
+            if (strategy_ && !strategy_new_ && params.optimization.enable_sparsity) {
                 // Calculate when sparsity should start
                 int base_iterations = params.optimization.iterations;
                 int sparsity_start = base_iterations; // Start after base training
@@ -1128,15 +1150,30 @@ namespace gs::training {
         is_running_ = true;
         LOG_INFO("Starting training loop with {} workers", params_.optimization.num_workers);
 
+        // Check if using new strategy - full training loop not yet ported
+        if (strategy_new_) {
+            is_running_ = false;
+            return std::unexpected(
+                "LibTorch-free training loop not yet fully implemented.\n"
+                "The train_step() method needs to be ported to work with CameraNew and SplatDataNew types.\n"
+                "This includes:\n"
+                "  - Creating a LibTorch-free rasterizer that returns RenderOutput\n"
+                "  - Porting loss computation to work without torch::Tensor\n"
+                "  - Converting Camera* to CameraNew* throughout the pipeline\n"
+                "For now, please use the original strategy (remove --strategy mcmc from command line).");
+        }
+
         try {
             int iter = 1;
             const int num_workers = params_.optimization.num_workers;
             const RenderMode render_mode = stringToRenderMode(params_.optimization.render_mode);
 
             if (progress_) {
-                progress_->update(iter, current_loss_.load(),
-                                  static_cast<int>(strategy_->get_model().size()),
-                                  strategy_->is_refining(iter));
+                int model_size = strategy_ ? static_cast<int>(strategy_->get_model().size())
+                                            : static_cast<int>(strategy_new_->get_model().size());
+                bool is_refining = strategy_ ? strategy_->is_refining(iter)
+                                              : strategy_new_->is_refining(iter);
+                progress_->update(iter, current_loss_.load(), model_size, is_refining);
             }
 
             // Use our torch-free infinite dataloader
@@ -1235,7 +1272,9 @@ namespace gs::training {
             }
             evaluator_->save_report();
             if (progress_) {
-                progress_->print_final_summary(static_cast<int>(strategy_->get_model().size()));
+                int final_model_size = strategy_ ? static_cast<int>(strategy_->get_model().size())
+                                                  : static_cast<int>(strategy_new_->get_model().size());
+                progress_->print_final_summary(final_model_size);
             }
 
             is_running_ = false;

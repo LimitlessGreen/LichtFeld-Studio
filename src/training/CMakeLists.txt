@@ -14,8 +14,10 @@ set(TRAINING_HOST_SOURCES
 
         # Strategies
         strategies/strategy_utils.cpp
+        strategies/strategy_utils_new.cpp
         strategies/default_strategy.cpp
         strategies/mcmc.cpp
+        strategies/mcmc_new.cpp
 
         # Optimizers
         optimizers/scheduler.cpp

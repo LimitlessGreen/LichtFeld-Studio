@@ -381,9 +381,9 @@ namespace gs::loader {
             positions[i * 3 + 2] = static_cast<float>(read_f64(cur));
 
             // Convert uint8 [0,255] to float [0,1]
-            colors[i * 3 + 0] = (*cur++) / 255.0f;
-            colors[i * 3 + 1] = (*cur++) / 255.0f;
-            colors[i * 3 + 2] = (*cur++) / 255.0f;
+            colors[i * 3 + 0] = static_cast<uint8_t>(*cur++) / 255.0f;
+            colors[i * 3 + 1] = static_cast<uint8_t>(*cur++) / 255.0f;
+            colors[i * 3 + 2] = static_cast<uint8_t>(*cur++) / 255.0f;
 
             cur += 8;                                    // skip reprojection error
             cur += read_u64(cur) * sizeof(uint32_t) * 2; // skip track

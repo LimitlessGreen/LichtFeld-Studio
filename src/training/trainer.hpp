@@ -17,6 +17,7 @@
 #include "project/project.hpp"
 #include "rasterization/rasterizer.hpp"
 #include "strategies/istrategy.hpp"
+#include "strategies/istrategy_new.hpp"
 #include <ATen/cuda/CUDAEvent.h>
 #include <atomic>
 #include <expected>
@@ -35,6 +36,10 @@ namespace gs::training {
         // Constructor that takes ownership of strategy and shares datasets
         Trainer(std::shared_ptr<CameraDataset> dataset,
                 std::unique_ptr<IStrategy> strategy);
+
+        // Constructor for LibTorch-free strategies
+        Trainer(std::shared_ptr<CameraDataset> dataset,
+                std::unique_ptr<IStrategyNew> strategy);
 
         // Delete copy operations
         Trainer(const Trainer&) = delete;
@@ -74,6 +79,38 @@ namespace gs::training {
 
         // just for viewer to get model
         const IStrategy& get_strategy() const { return *strategy_; }
+
+        // Helper to check which strategy type we're using
+        bool using_new_strategy() const { return strategy_new_ != nullptr; }
+
+        // Helper to get model size from whichever strategy is active
+        size_t get_model_size() const {
+            if (strategy_) return strategy_->get_model().size();
+            if (strategy_new_) return strategy_new_->get_model().size();
+            return 0;
+        }
+
+        // Helper to get model from whichever strategy is active
+        gs::SplatData& get_model() {
+            if (strategy_) return strategy_->get_model();
+            // For now, strategy_new uses SplatDataNew which is incompatible
+            throw std::runtime_error("get_model() not yet supported for LibTorch-free strategies");
+        }
+
+        const gs::SplatData& get_model() const {
+            if (strategy_) return strategy_->get_model();
+            throw std::runtime_error("get_model() not yet supported for LibTorch-free strategies");
+        }
+
+        gs::SplatDataNew& get_model_new() {
+            if (strategy_new_) return strategy_new_->get_model();
+            throw std::runtime_error("get_model_new() only for LibTorch-free strategies");
+        }
+
+        const gs::SplatDataNew& get_model_new() const {
+            if (strategy_new_) return strategy_new_->get_model();
+            throw std::runtime_error("get_model_new() only for LibTorch-free strategies");
+        }
 
         // Allow viewer to lock for rendering
         std::shared_mutex& getRenderMutex() const { return render_mutex_; }
@@ -172,6 +209,7 @@ namespace gs::training {
         std::shared_ptr<CameraDataset> train_dataset_;
         std::shared_ptr<CameraDataset> val_dataset_;
         std::unique_ptr<IStrategy> strategy_;
+        std::unique_ptr<IStrategyNew> strategy_new_;  // LibTorch-free strategy
         param::TrainingParameters params_;
 
         // NO MORE background_wrapper_ tensor!

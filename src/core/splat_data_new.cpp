@@ -786,7 +786,7 @@ namespace gs {
                 }
 
                 positions = pcd.means.cuda();
-                colors = pcd.colors.cuda().div(255.0f); // Normalize to [0, 1]
+                colors = pcd.colors.cuda(); // Already normalized to [0, 1] by loader
             }
 
             auto scene_center_device = scene_center.to(positions.device());
@@ -890,6 +890,50 @@ namespace gs {
         } catch (const std::exception& e) {
             return std::unexpected(
                 std::format("Failed to initialize SplatDataNew: {}", e.what()));
+        }
+    }
+
+    void SplatDataNew::ensure_grad_allocated() {
+        // Allocate gradient tensors with same shapes as parameters
+        if (!means_grad.is_valid()) {
+            means_grad = Tensor::zeros(means.shape(), means.device());
+        }
+        if (!sh0_grad.is_valid()) {
+            sh0_grad = Tensor::zeros(sh0.shape(), sh0.device());
+        }
+        if (!shN_grad.is_valid()) {
+            shN_grad = Tensor::zeros(shN.shape(), shN.device());
+        }
+        if (!scaling_grad.is_valid()) {
+            scaling_grad = Tensor::zeros(scaling.shape(), scaling.device());
+        }
+        if (!rotation_grad.is_valid()) {
+            rotation_grad = Tensor::zeros(rotation.shape(), rotation.device());
+        }
+        if (!opacity_grad.is_valid()) {
+            opacity_grad = Tensor::zeros(opacity.shape(), opacity.device());
+        }
+    }
+
+    void SplatDataNew::zero_grad() {
+        // Zero out all gradient tensors if they exist
+        if (means_grad.is_valid()) {
+            means_grad.zero_();
+        }
+        if (sh0_grad.is_valid()) {
+            sh0_grad.zero_();
+        }
+        if (shN_grad.is_valid()) {
+            shN_grad.zero_();
+        }
+        if (scaling_grad.is_valid()) {
+            scaling_grad.zero_();
+        }
+        if (rotation_grad.is_valid()) {
+            rotation_grad.zero_();
+        }
+        if (opacity_grad.is_valid()) {
+            opacity_grad.zero_();
         }
     }
 

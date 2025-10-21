@@ -210,9 +210,10 @@ namespace gs::loader {
             auto load_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                 end_time - start_time);
 
-            // Get scene center values for logging
+            // Get scene center values and dataset size for logging BEFORE moving
             auto scene_center_cpu = scene_center.cpu();
             const float* sc_ptr = scene_center_cpu.ptr<float>();
+            size_t num_cameras = dataset->size();
 
             LoadResult result{
                 .data = LoadedScene{
@@ -224,7 +225,7 @@ namespace gs::loader {
                 .warnings = (has_points || has_points_text) ? std::vector<std::string>{} : std::vector<std::string>{"No sparse point cloud found - using random initialization"}};
 
             LOG_INFO("COLMAP dataset loaded successfully in {}ms", load_time.count());
-            LOG_INFO("  - {} cameras", dataset->size());
+            LOG_INFO("  - {} cameras", num_cameras);
             LOG_DEBUG("  - Scene center: [{:.3f}, {:.3f}, {:.3f}]",
                       sc_ptr[0], sc_ptr[1], sc_ptr[2]);
 

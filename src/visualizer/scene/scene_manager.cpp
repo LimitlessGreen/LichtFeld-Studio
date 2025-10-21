@@ -302,9 +302,7 @@ namespace gs {
 
             // Emit events
             const size_t num_gaussians = trainer_manager_->getTrainer()
-                                             ->get_strategy()
-                                             .get_model()
-                                             .size();
+                                             ->get_model_size();
 
             LOG_INFO("Dataset loaded successfully - {} images, {} initial gaussians",
                      setup_result->dataset->size(), num_gaussians);
@@ -360,15 +358,36 @@ namespace gs {
     const SplatDataNew* SceneManager::getModelForRendering() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
 
+        LOG_TRACE("getModelForRendering called: content_type={}", static_cast<int>(content_type_));
+
         if (content_type_ == ContentType::SplatFiles) {
-            return scene_.getCombinedModel();
+            auto* model = scene_.getCombinedModel();
+            LOG_TRACE("getModelForRendering: Returning SplatFiles model ({})", model ? "valid" : "null");
+            return model;
         } else if (content_type_ == ContentType::Dataset) {
-            if (trainer_manager_ && trainer_manager_->getTrainer()) {
-                throw std::runtime_error("getModelForRendering: Dataset rendering not yet implemented");
-                //return &trainer_manager_->getTrainer()->get_strategy().get_model();
+            LOG_TRACE("getModelForRendering: Dataset mode - checking trainer_manager");
+            if (!trainer_manager_) {
+                LOG_ERROR("getModelForRendering: trainer_manager_ is NULL!");
+                return nullptr;
             }
+
+            auto* trainer = trainer_manager_->getTrainer();
+            if (!trainer) {
+                LOG_ERROR("getModelForRendering: trainer is NULL!");
+                return nullptr;
+            }
+
+            LOG_TRACE("getModelForRendering: trainer found, using_new_strategy={}", trainer->using_new_strategy());
+
+            if (trainer->using_new_strategy()) {
+                const auto* model = &trainer->get_model_new();
+                return model;
+            }
+            LOG_ERROR("getModelForRendering: Old strategy not compatible with new rendering pipeline");
+            throw std::runtime_error("getModelForRendering: Old strategy not compatible with new rendering pipeline");
         }
 
+        LOG_TRACE("getModelForRendering: Returning nullptr (content_type={})", static_cast<int>(content_type_));
         return nullptr;
     }
 
@@ -404,9 +423,7 @@ namespace gs {
             info.has_model = trainer_manager_ && trainer_manager_->getTrainer();
             if (info.has_model) {
                 info.num_gaussians = trainer_manager_->getTrainer()
-                                         ->get_strategy()
-                                         .get_model()
-                                         .size();
+                                         ->get_model_size();
             }
             info.num_nodes = 1;
             info.source_type = "Dataset";

@@ -151,6 +151,64 @@ namespace gs::training {
             raw_opacities, raw_scales, raw_quats, noise, means, N, current_lr);
     }
 
+    // Relocation kernel - implements Equation (9) from "3D Gaussian Splatting as Markov Chain Monte Carlo"
+    __global__ void relocation_kernel(
+        const float* opacities,
+        const float* scales,
+        const int* ratios,
+        const float* binoms,
+        int N,
+        int n_max,
+        float* new_opacities,
+        float* new_scales) {
+
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx >= N)
+            return;
+
+        int n_idx = ratios[idx];
+        float denom_sum = 0.0f;
+
+        // Compute new opacity: α_new = 1 - (1 - α)^(1/n)
+        new_opacities[idx] = 1.0f - powf(1.0f - opacities[idx], 1.0f / n_idx);
+
+        // Compute new scale using binomial coefficients
+        for (int i = 1; i <= n_idx; ++i) {
+            for (int k = 0; k <= (i - 1); ++k) {
+                float bin_coeff = binoms[(i - 1) * n_max + k];
+                float term = (powf(-1.0f, k) / sqrtf(static_cast<float>(k + 1))) *
+                             powf(new_opacities[idx], k + 1);
+                denom_sum += (bin_coeff * term);
+            }
+        }
+
+        float coeff = (opacities[idx] / denom_sum);
+        for (int i = 0; i < 3; ++i) {
+            new_scales[idx * 3 + i] = coeff * scales[idx * 3 + i];
+        }
+    }
+
+    void launch_relocation_kernel(
+        const float* opacities,
+        const float* scales,
+        const int* ratios,
+        const float* binoms,
+        int N,
+        int n_max,
+        float* new_opacities,
+        float* new_scales,
+        cudaStream_t stream) {
+
+        if (N == 0)
+            return;
+
+        int block_size = 256;
+        int grid_size = (N + block_size - 1) / block_size;
+
+        relocation_kernel<<<grid_size, block_size, 0, stream>>>(
+            opacities, scales, ratios, binoms, N, n_max, new_opacities, new_scales);
+    }
+
     __global__ void background_blend_kernel(
         float* output,
         const float* base_bg,

@@ -24,6 +24,18 @@ namespace gs::training {
         float current_lr,
         cudaStream_t stream);
 
+    // Relocation kernel (Equation 9 from MCMC paper)
+    void launch_relocation_kernel(
+        const float* opacities,      // [N] input opacities
+        const float* scales,          // [N, 3] input scales
+        const int* ratios,            // [N] number of children per Gaussian
+        const float* binoms,          // [n_max, n_max] binomial coefficients
+        int N,                        // number of Gaussians
+        int n_max,                    // maximum ratio value
+        float* new_opacities,         // [N] output opacities
+        float* new_scales,            // [N, 3] output scales
+        cudaStream_t stream);
+
     // Background computation
     void launch_compute_sine_background(
         float* output,
