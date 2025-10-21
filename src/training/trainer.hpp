@@ -18,14 +18,13 @@
 #include "rasterization/rasterizer.hpp"
 #include "strategies/istrategy.hpp"
 #include "strategies/istrategy_new.hpp"
-#include <ATen/cuda/CUDAEvent.h>
 #include <atomic>
+#include <cuda_runtime.h>
 #include <expected>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <stop_token>
-#include <torch/torch.h>
 
 // Forward declaration
 class Camera;
@@ -169,20 +168,6 @@ namespace gs::training {
             std::stop_token stop_token = {});
 
         // Protected methods for computing loss
-        std::expected<torch::Tensor, std::string> compute_photometric_loss(
-            const RenderOutput& render_output,
-            const torch::Tensor& gt_image,
-            const SplatData& splatData,
-            const param::OptimizationParameters& opt_params);
-
-        std::expected<torch::Tensor, std::string> compute_scale_reg_loss(
-            const SplatData& splatData,
-            const param::OptimizationParameters& opt_params);
-
-        std::expected<torch::Tensor, std::string> compute_opacity_reg_loss(
-            const SplatData& splatData,
-            const param::OptimizationParameters& opt_params);
-
         std::expected<torch::Tensor, std::string> compute_bilateral_grid_tv_loss(
             const std::unique_ptr<BilateralGrid>& bilateral_grid,
             const param::OptimizationParameters& opt_params);
@@ -260,8 +245,7 @@ namespace gs::training {
         // Callback system for async operations
         std::function<void()> callback_;
         std::atomic<bool> callback_busy_{false};
-        at::cuda::CUDAStream callback_stream_ = at::cuda::getStreamFromPool(false);
-        at::cuda::CUDAEvent callback_launch_event_;
+        cudaStream_t callback_stream_ = nullptr;
 
         // camera id to cam
         std::map<int, std::shared_ptr<const CameraNew>> m_cam_id_to_cam;

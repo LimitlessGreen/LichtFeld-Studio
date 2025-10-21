@@ -328,8 +328,8 @@ namespace gs {
 #else
 // Fallback: scalar version (no SIMD), but still multi-threaded with collapse(2)
 #pragma omp parallel for collapse(2) if (use_parallel) schedule(static)
-                for (size_t i0 = 0; i0 < dim0; ++i0) {
-                    for (size_t i1 = 0; i1 < dim1; ++i1) {
+                for (int64_t i0 = 0; i0 < static_cast<int64_t>(dim0); ++i0) {
+                    for (int64_t i1 = 0; i1 < static_cast<int64_t>(dim1); ++i1) {
                         for (size_t i2 = 0; i2 < dim2; ++i2) {
                             size_t src_idx = i0 * stride0 + i1 * stride1 + i2 * stride2;
                             size_t dst_idx = i0 * dim1 * dim2 + i1 * dim2 + i2;
@@ -381,7 +381,7 @@ namespace gs {
 #else
 // Fallback: scalar version, but still multi-threaded
 #pragma omp parallel for if (use_parallel) schedule(static)
-                for (size_t i = 0; i < rows; ++i) {
+                for (int64_t i = 0; i < static_cast<int64_t>(rows); ++i) {
                     for (size_t j = 0; j < cols; ++j) {
                         size_t src_idx = i * stride0 + j * stride1;
                         size_t dst_idx = i * cols + j;
@@ -1359,22 +1359,22 @@ namespace gs {
 
     void Tensor::dump_diagnostic(const std::string& filename) const {
         std::ofstream file(filename);
-        std::print(file, "=== Tensor Diagnostic Dump ===\n");
-        std::print(file, "Info: {}\n", str());
-        std::print(file, "Memory address: {}\n", data_);
+        file << "=== Tensor Diagnostic Dump ===\n";
+        file << std::format("Info: {}\n", str());
+        file << std::format("Memory address: {}\n", data_);
 
         if (is_valid()) {
-            std::print(file, "Bytes: {}\n", bytes());
+            file << std::format("Bytes: {}\n", bytes());
 
             if (device_ == Device::CPU || numel() < 10000) {
                 auto values = to_vector();
-                std::print(file, "Values ({} total):\n", values.size());
+                file << std::format("Values ({} total):\n", values.size());
                 for (size_t i = 0; i < std::min(size_t(1000), values.size()); ++i) {
-                    std::print(file, "[{}]: {}\n", i, values[i]);
+                    file << std::format("[{}]: {}\n", i, values[i]);
                 }
             }
         } else {
-            std::print(file, "Tensor is invalid\n");
+            file << "Tensor is invalid\n";
         }
 
         file.close();

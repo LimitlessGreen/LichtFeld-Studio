@@ -14,10 +14,7 @@
 #include "rasterization/fast_rasterizer.hpp"
 #include "rasterization/rasterizer.hpp"
 #include "training_kernels.cuh"
-#include <ATen/cuda/CUDAEvent.h>
 #include <atomic>
-#include <c10/cuda/CUDAAllocatorConfig.h>
-#include <c10/cuda/CUDACachingAllocator.h>
 #include <chrono>
 #include <cuda_runtime.h>
 #include <expected>
@@ -33,7 +30,9 @@ namespace gs::training {
 
         // Wait for callback to finish if busy
         if (callback_busy_.load()) {
-            callback_stream_.synchronize();
+            if (callback_stream_) {
+                cudaStreamSynchronize(callback_stream_);
+            }
             callback_busy_.store(false);
         }
 
@@ -102,36 +101,6 @@ namespace gs::training {
             return {};
         } catch (const std::exception& e) {
             return std::unexpected(std::format("Failed to initialize bilateral grid: {}", e.what()));
-        }
-    }
-
-    std::expected<torch::Tensor, std::string> Trainer::compute_scale_reg_loss(
-        const SplatData& splatData,
-        const param::OptimizationParameters& opt_params) {
-        try {
-            if (opt_params.scale_reg > 0.0f) {
-                auto scale_l1 = splatData.get_scaling().mean();
-                return opt_params.scale_reg * scale_l1;
-            }
-            // Return zero scalar without requires_grad
-            return torch::zeros({}, torch::kFloat32);
-        } catch (const std::exception& e) {
-            return std::unexpected(std::format("Error computing scale regularization loss: {}", e.what()));
-        }
-    }
-
-    std::expected<torch::Tensor, std::string> Trainer::compute_opacity_reg_loss(
-        const SplatData& splatData,
-        const param::OptimizationParameters& opt_params) {
-        try {
-            if (opt_params.opacity_reg > 0.0f) {
-                auto opacity_l1 = splatData.get_opacity().mean();
-                return opt_params.opacity_reg * opacity_l1;
-            }
-            // Return zero scalar without requires_grad
-            return torch::zeros({}, torch::kFloat32);
-        } catch (const std::exception& e) {
-            return std::unexpected(std::format("Error computing opacity regularization loss: {}", e.what()));
         }
     }
 
@@ -230,7 +199,8 @@ namespace gs::training {
                      std::unique_ptr<IStrategy> strategy)
         : base_dataset_(std::move(dataset)),
           strategy_(std::move(strategy)) {
-        if (!torch::cuda::is_available()) {
+        int device_count = 0;
+        if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
             throw std::runtime_error("CUDA is not available – aborting.");
         }
         LOG_DEBUG("Trainer constructed with {} cameras", base_dataset_->get_cameras().size());
@@ -241,9 +211,12 @@ namespace gs::training {
                      std::unique_ptr<IStrategyNew> strategy)
         : base_dataset_(std::move(dataset)),
           strategy_new_(std::move(strategy)) {
-        if (!torch::cuda::is_available()) {
+        int device_count = 0;
+        if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
             throw std::runtime_error("CUDA is not available – aborting.");
         }
+        // Create CUDA stream for async operations
+        cudaStreamCreate(&callback_stream_);
         LOG_DEBUG("Trainer constructed with {} cameras (LibTorch-free strategy)", base_dataset_->get_cameras().size());
     }
 
@@ -436,9 +409,16 @@ namespace gs::training {
         stop_requested_ = true;
 
         // Wait for callback to finish if busy
-        if (callback_busy_.load()) {
-            callback_stream_.synchronize();
+        if (callback_busy_.load() && callback_stream_) {
+            cudaStreamSynchronize(callback_stream_);
         }
+
+        // Destroy CUDA stream
+        if (callback_stream_) {
+            cudaStreamDestroy(callback_stream_);
+            callback_stream_ = nullptr;
+        }
+
         LOG_DEBUG("Trainer destroyed");
     }
 
@@ -552,20 +532,12 @@ namespace gs::training {
         RenderMode render_mode,
         std::stop_token stop_token) {
         try {
-            // ENSURE NO AUTOGRAD IN INDIVIDUAL STEPS
-            torch::NoGradGuard no_grad;
+            // LibTorch-free training - no autograd needed
 
-            // ADD DETAILED MEMORY TRACKING
-            static size_t last_reserved = 0;
+            // Lightweight memory tracking (can be expanded if needed)
             auto check_memory = [&](const std::string& location) {
-                size_t current = c10::cuda::CUDACachingAllocator::getDeviceStats(0).reserved_bytes[0].current;
-                if (current > last_reserved) {
-                    LOG_ERROR("MEMORY GREW at {} by {} MB (now: {} MB total)",
-                              location,
-                              (current - last_reserved) / (1024.0 * 1024.0),
-                              current / (1024.0 * 1024.0));
-                }
-                last_reserved = current;
+                // Memory tracking placeholder - can use cudaMemGetInfo if needed
+                (void)location;
             };
 
             check_memory("START of train_step");
@@ -1125,9 +1097,6 @@ namespace gs::training {
             return std::unexpected("Trainer not initialized. Call initialize() before train()");
         }
 
-        // DISABLE AUTOGRAD FOR THE ENTIRE TRAINING LOOP
-        torch::NoGradGuard no_grad_guard;
-
         is_running_ = false;
         training_complete_ = false;
         ready_to_start_ = false;
@@ -1189,8 +1158,8 @@ namespace gs::training {
                 }
 
                 // Wait for previous callback if still running
-                if (callback_busy_.load()) {
-                    callback_stream_.synchronize();
+                if (callback_busy_.load() && callback_stream_) {
+                    cudaStreamSynchronize(callback_stream_);
                 }
 
                 // No memory tracking for batch loading - it uses buffer pool
@@ -1229,7 +1198,7 @@ namespace gs::training {
                 if (iter > 1 && callback_) {
                     callback_busy_ = true;
                     auto err = cudaLaunchHostFunc(
-                        callback_stream_.stream(),
+                        callback_stream_,
                         [](void* self) {
                             auto* trainer = static_cast<Trainer*>(self);
                             if (trainer->callback_) {
@@ -1251,8 +1220,8 @@ namespace gs::training {
             }
 
             // Ensure callback is finished before final save
-            if (callback_busy_.load()) {
-                callback_stream_.synchronize();
+            if (callback_busy_.load() && callback_stream_) {
+                cudaStreamSynchronize(callback_stream_);
             }
 
             // Final save if not already saved by stop request

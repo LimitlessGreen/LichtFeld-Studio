@@ -80,7 +80,19 @@ if(CORE_CUDA_SOURCES)
     target_compile_options(gs_tensor_kernels PRIVATE
             $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-O0 -g -G -lineinfo>
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-O3 -use_fast_math --ptxas-options=-v>
+            # Windows: Ensure MSVC gets /utf-8 when invoked by nvcc
+            $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:
+                -Xcompiler=/utf-8
+                -Xcompiler=/D_CRT_SECURE_NO_WARNINGS
+            >
     )
+
+    # Windows: Add compile definition to tell fmt that UTF-8 is enabled for CUDA files
+    if(MSVC)
+        target_compile_definitions(gs_tensor_kernels PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:FMT_UNICODE=0>
+        )
+    endif()
 endif()
 
 # Main core library (C++23)
