@@ -69,7 +69,7 @@ Join our growing community for discussions, support, and updates:
 
 ### Fourth Bounty: Automatic Per-Scene Hyperparameter Optimization
 **💰 $2,430** | [Issue #443](https://github.com/MrNeRF/LichtFeld-Studio/issues/443)  
-**📅 Deadline:** October 12, 2025 at 11:59 PM PST
+**📅 Deadline:** November 9, 2025 at 11:59 PM PST
 
 ### Third Bounty: Follow-up to Bounty #002
 **💰 $500** | [Issue #421](https://github.com/MrNeRF/LichtFeld-Studio/issues/421)  
