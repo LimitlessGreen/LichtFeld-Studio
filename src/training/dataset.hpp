@@ -704,6 +704,9 @@ namespace gs::training {
 
     private:
         void worker_thread(int worker_id) {
+            // Set CUDA device for this worker thread (CRITICAL for GUI mode)
+            cudaSetDevice(0);
+
             // Set CPU affinity if possible (Linux/Unix only)
 #if defined(__linux__) || defined(__unix__)
             cpu_set_t cpuset;

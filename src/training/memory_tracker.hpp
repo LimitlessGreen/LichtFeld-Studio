@@ -55,17 +55,26 @@ namespace gs::training {
             snapshot.phase = phase;
             snapshot.timestamp = std::chrono::steady_clock::now();
 
-            // CUDA memory info
-            auto stats = c10::cuda::CUDACachingAllocator::getDeviceStats(0);
-            snapshot.cuda_allocated_bytes = stats.allocated_bytes[0].current;
-            snapshot.cuda_reserved_bytes = stats.reserved_bytes[0].current;
-            snapshot.cuda_active_bytes = stats.active_bytes[0].current;
-            // Calculate inactive as the difference between reserved and allocated
-            snapshot.cuda_inactive_bytes = snapshot.cuda_reserved_bytes > snapshot.cuda_allocated_bytes
-                                               ? snapshot.cuda_reserved_bytes - snapshot.cuda_allocated_bytes
-                                               : 0;
+            // CUDA memory info - wrapped in try-catch for thread safety
+            // PyTorch's c10 allocator may not be initialized on all threads
+            try {
+                auto stats = c10::cuda::CUDACachingAllocator::getDeviceStats(0);
+                snapshot.cuda_allocated_bytes = stats.allocated_bytes[0].current;
+                snapshot.cuda_reserved_bytes = stats.reserved_bytes[0].current;
+                snapshot.cuda_active_bytes = stats.active_bytes[0].current;
+                // Calculate inactive as the difference between reserved and allocated
+                snapshot.cuda_inactive_bytes = snapshot.cuda_reserved_bytes > snapshot.cuda_allocated_bytes
+                                                   ? snapshot.cuda_reserved_bytes - snapshot.cuda_allocated_bytes
+                                                   : 0;
+            } catch (const c10::Error& e) {
+                // c10 allocator not available on this thread - use CUDA runtime instead
+                snapshot.cuda_allocated_bytes = 0;
+                snapshot.cuda_reserved_bytes = 0;
+                snapshot.cuda_active_bytes = 0;
+                snapshot.cuda_inactive_bytes = 0;
+            }
 
-            // System CUDA memory
+            // System CUDA memory (always works via CUDA runtime)
             cudaMemGetInfo(&snapshot.system_free_bytes, &snapshot.system_total_bytes);
 
             if (enabled_) {
@@ -189,18 +198,22 @@ namespace gs::training {
                 LOG_WARN("[Memory] High GPU memory usage: {:.1f}% ({:.2f}GB free of {:.2f}GB)",
                          usage_percent, bytes_to_gb(free), bytes_to_gb(total));
 
-                // Log cache allocator stats
-                auto stats = c10::cuda::CUDACachingAllocator::getDeviceStats(0);
+                // Log cache allocator stats (if available on this thread)
+                try {
+                    auto stats = c10::cuda::CUDACachingAllocator::getDeviceStats(0);
 
-                // Calculate inactive bytes as difference between reserved and allocated
-                size_t inactive_bytes = stats.reserved_bytes[0].current > stats.allocated_bytes[0].current
-                                            ? stats.reserved_bytes[0].current - stats.allocated_bytes[0].current
-                                            : 0;
+                    // Calculate inactive bytes as difference between reserved and allocated
+                    size_t inactive_bytes = stats.reserved_bytes[0].current > stats.allocated_bytes[0].current
+                                                ? stats.reserved_bytes[0].current - stats.allocated_bytes[0].current
+                                                : 0;
 
-                LOG_WARN("[Memory] Cache allocator - Allocated: {:.2f}GB, Reserved: {:.2f}GB, Inactive: {:.2f}GB",
-                         bytes_to_gb(stats.allocated_bytes[0].current),
-                         bytes_to_gb(stats.reserved_bytes[0].current),
-                         bytes_to_gb(inactive_bytes));
+                    LOG_WARN("[Memory] Cache allocator - Allocated: {:.2f}GB, Reserved: {:.2f}GB, Inactive: {:.2f}GB",
+                             bytes_to_gb(stats.allocated_bytes[0].current),
+                             bytes_to_gb(stats.reserved_bytes[0].current),
+                             bytes_to_gb(inactive_bytes));
+                } catch (const c10::Error&) {
+                    // c10 allocator not available on this thread - skip cache stats
+                }
             }
         }
 
