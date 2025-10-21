@@ -269,6 +269,8 @@ endif()
 
 if(WIN32)
     set(CMAKE_CUDA_RUNTIME_LIBRARY "Shared") # when using INTEROP in windows static and dynamic symbols are mixed
+    # Add /utf-8 flag for MSVC when compiling CUDA files (required by fmt library in libtorch)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=/utf-8")
 endif()
 
 # Check for CUDA-OpenGL interop capability (only if enabled)

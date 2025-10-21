@@ -70,7 +70,6 @@ if(CORE_CUDA_SOURCES)
 
     target_link_libraries(gs_tensor_kernels
             PUBLIC
-	    gs_training_kernels
             CUDA::cudart
             CUDA::cublas      # For matrix operations
             CUDA::curand      # For random number generation
