@@ -94,6 +94,18 @@ if(CORE_CUDA_SOURCES)
             $<$<COMPILE_LANGUAGE:CUDA>:FMT_UNICODE=0>
         )
     endif()
+
+    # Windows NVCC ICE workaround: Reduce optimization for tensor_broadcast_ops.cu
+    # NVCC 12.8 on Windows hits an internal compiler error with -O3 on complex template code
+    # Error: "unexpected expression with aggregate type!" during codegen
+    # Workaround: Use -O2 instead of -O3 for this file only
+    if(WIN32)
+        set_source_files_properties(
+            tensor/tensor_broadcast_ops.cu
+            PROPERTIES
+            COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2;--ptxas-options=-v>"
+        )
+    endif()
 endif()
 
 # Main core library (C++23)

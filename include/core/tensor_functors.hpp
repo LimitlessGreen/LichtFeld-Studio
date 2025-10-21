@@ -394,7 +394,8 @@ namespace gs {
             template <typename T>
             HOST_DEVICE constexpr unsigned char operator()(const T& x) const {
 #ifdef __CUDA_ARCH__
-                return ::isnan(x) ? 1 : 0;
+                // Use unqualified name in device code - resolves to CUDA math function
+                return isnan(static_cast<float>(x)) ? 1 : 0;
 #else
                 return std::isnan(x) ? 1 : 0;
 #endif
@@ -405,7 +406,8 @@ namespace gs {
             template <typename T>
             HOST_DEVICE constexpr unsigned char operator()(const T& x) const {
 #ifdef __CUDA_ARCH__
-                return ::isinf(x) ? 1 : 0;
+                // Use unqualified name in device code - resolves to CUDA math function
+                return isinf(static_cast<float>(x)) ? 1 : 0;
 #else
                 return std::isinf(x) ? 1 : 0;
 #endif
@@ -416,7 +418,8 @@ namespace gs {
             template <typename T>
             HOST_DEVICE constexpr unsigned char operator()(const T& x) const {
 #ifdef __CUDA_ARCH__
-                return ::isfinite(x) ? 1 : 0;
+                // Use unqualified name in device code - resolves to CUDA math function
+                return isfinite(static_cast<float>(x)) ? 1 : 0;
 #else
                 return std::isfinite(x) ? 1 : 0;
 #endif

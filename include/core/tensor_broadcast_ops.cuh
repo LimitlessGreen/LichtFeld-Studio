@@ -462,7 +462,6 @@ namespace gs::tensor_ops {
         // STEP 2: Cooperatively load channel vector into shared memory with VECTORIZATION
         // Use float4 (128-bit) loads when possible for better bandwidth utilization
         const size_t num_vec4 = C / 4;
-        const size_t remainder = C % 4;
 
         // Vectorized loads for aligned portion (C must be multiple of 4)
         if (C % 4 == 0 && (reinterpret_cast<uintptr_t>(channel_vals_global) % 16) == 0) {
