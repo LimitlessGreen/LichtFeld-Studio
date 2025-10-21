@@ -704,11 +704,13 @@ namespace gs::training {
 
     private:
         void worker_thread(int worker_id) {
-            // Set CPU affinity if possible
+            // Set CPU affinity if possible (Linux/Unix only)
+#if defined(__linux__) || defined(__unix__)
             cpu_set_t cpuset;
             CPU_ZERO(&cpuset);
             CPU_SET(worker_id % std::thread::hardware_concurrency(), &cpuset);
             pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+#endif
 
             while (!stop_workers_) {
                 // Check queue size

@@ -394,7 +394,7 @@ namespace gs {
             template <typename T>
             HOST_DEVICE constexpr unsigned char operator()(const T& x) const {
 #ifdef __CUDA_ARCH__
-                return isnan(x) ? 1 : 0;
+                return ::isnan(x) ? 1 : 0;
 #else
                 return std::isnan(x) ? 1 : 0;
 #endif
@@ -405,7 +405,7 @@ namespace gs {
             template <typename T>
             HOST_DEVICE constexpr unsigned char operator()(const T& x) const {
 #ifdef __CUDA_ARCH__
-                return isinf(x) ? 1 : 0;
+                return ::isinf(x) ? 1 : 0;
 #else
                 return std::isinf(x) ? 1 : 0;
 #endif
@@ -416,7 +416,7 @@ namespace gs {
             template <typename T>
             HOST_DEVICE constexpr unsigned char operator()(const T& x) const {
 #ifdef __CUDA_ARCH__
-                return isfinite(x) ? 1 : 0;
+                return ::isfinite(x) ? 1 : 0;
 #else
                 return std::isfinite(x) ? 1 : 0;
 #endif

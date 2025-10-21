@@ -380,6 +380,7 @@ if(KERNEL_SOURCES)
             $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:
                 -Xcompiler=/utf-8
                 -Xcompiler=/D_CRT_SECURE_NO_WARNINGS
+                --diag-suppress=27  # Suppress "character value out of range" warnings from fmt
             >
     )
 

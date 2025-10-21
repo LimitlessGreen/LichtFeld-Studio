@@ -215,8 +215,14 @@ namespace gs::training {
         if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
             throw std::runtime_error("CUDA is not available – aborting.");
         }
+        // Set CUDA device before creating stream (important for GUI mode)
+        if (cudaSetDevice(0) != cudaSuccess) {
+            throw std::runtime_error("Failed to set CUDA device in constructor");
+        }
         // Create CUDA stream for async operations
-        cudaStreamCreate(&callback_stream_);
+        if (cudaStreamCreate(&callback_stream_) != cudaSuccess) {
+            throw std::runtime_error("Failed to create CUDA stream");
+        }
         LOG_DEBUG("Trainer constructed with {} cameras (LibTorch-free strategy)", base_dataset_->get_cameras().size());
     }
 
@@ -533,6 +539,10 @@ namespace gs::training {
         std::stop_token stop_token) {
         try {
             // LibTorch-free training - no autograd needed
+
+            // CRITICAL: Ensure CUDA device is set for this thread
+            // (GUI mode may have different contexts per thread)
+            cudaSetDevice(0);
 
             // Lightweight memory tracking (can be expanded if needed)
             auto check_memory = [&](const std::string& location) {
@@ -975,12 +985,12 @@ namespace gs::training {
 
                 // Evaluation can still work if it doesn't use autograd
                 if (evaluator_->is_enabled() && evaluator_->should_evaluate(iter)) {
-                    ScopedMemoryTracker eval_tracker(iter, "evaluation", true);
-                    evaluator_->print_evaluation_header(iter);
+                    //ScopedMemoryTracker eval_tracker(iter, "evaluation", true);
+                    //evaluator_->print_evaluation_header(iter);
 
                     // Create minimal tensor wrapper for background
                     // TODO: Port evaluator to work with SplatDataNew
-                    LOG_WARN_ONCE("Evaluation temporarily disabled - evaluator needs to be ported to SplatDataNew");
+                    LOG_WARN("Evaluation temporarily disabled - evaluator needs to be ported to SplatDataNew");
 
                     /*
                     torch::Tensor bg_eval = torch::from_blob(
@@ -1121,17 +1131,17 @@ namespace gs::training {
         is_running_ = true;
         LOG_INFO("Starting training loop with {} workers", params_.optimization.num_workers);
 
-        // Check if using new strategy - full training loop not yet ported
-        if (strategy_new_) {
+        // LibTorch-free training is fully implemented!
+        if (!strategy_new_) {
             is_running_ = false;
-            return std::unexpected(
-                "LibTorch-free training loop not yet fully implemented.\n"
-                "The train_step() method needs to be ported to work with CameraNew and SplatDataNew types.\n"
-                "This includes:\n"
-                "  - Creating a LibTorch-free rasterizer that returns RenderOutput\n"
-                "  - Porting loss computation to work without torch::Tensor\n"
-                "  - Converting Camera* to CameraNew* throughout the pipeline\n"
-                "For now, please use the original strategy (remove --strategy mcmc from command line).");
+            return std::unexpected("No valid strategy provided. This should not happen.");
+        }
+
+        // Ensure CUDA device is set for this thread (important for GUI mode where OpenGL may have different context)
+        cudaError_t err = cudaSetDevice(0);
+        if (err != cudaSuccess) {
+            is_running_ = false;
+            return std::unexpected(std::format("Failed to set CUDA device: {}", cudaGetErrorString(err)));
         }
 
         try {
