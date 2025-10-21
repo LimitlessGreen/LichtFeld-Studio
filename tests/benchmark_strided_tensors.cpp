@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
-#include <gtest/gtest.h>
 #include <chrono>
+#include <gtest/gtest.h>
 #include <iomanip>
 #include <vector>
 
@@ -11,7 +11,7 @@ using namespace gs;
 using namespace std::chrono;
 
 // Benchmark helper
-template<typename Func>
+template <typename Func>
 double benchmark(Func func, int warmup_iters = 10, int bench_iters = 100) {
     // Warmup
     for (int i = 0; i < warmup_iters; ++i) {
@@ -89,7 +89,8 @@ TEST_F(StridedTensorBenchmark, Transpose1080pImage) {
     double gpu_materialize_time = benchmark([&]() {
         auto t = img_gpu.transpose(0, 1).contiguous();
         return t.numel();
-    }, 5, 20); // Fewer iterations for expensive operation
+    },
+                                            5, 20); // Fewer iterations for expensive operation
     print_time("GPU: Transpose + Materialize", gpu_materialize_time);
 
     // Materialized should be contiguous and own memory
@@ -167,7 +168,8 @@ TEST_F(StridedTensorBenchmark, ChainedViewOperations) {
     double chain_materialize_time = benchmark([&]() {
         auto t = tensor_gpu.transpose(0, 1).slice(1, 100, 200).transpose(1, 2).contiguous();
         return t.numel();
-    }, 5, 20);
+    },
+                                              5, 20);
     print_time("GPU: 3 chained views + materialize", chain_materialize_time);
 
     auto materialized = tensor_gpu.transpose(0, 1).slice(1, 100, 200).transpose(1, 2).contiguous();
@@ -205,7 +207,8 @@ TEST_F(StridedTensorBenchmark, MemoryAllocationVerification) {
     std::cout << "  - is_contiguous: " << transposed.is_contiguous() << "\n";
     std::cout << "  - strides: [";
     for (size_t i = 0; i < transposed.strides().size(); ++i) {
-        if (i > 0) std::cout << ", ";
+        if (i > 0)
+            std::cout << ", ";
         std::cout << transposed.strides()[i];
     }
     std::cout << "]\n";
@@ -226,7 +229,7 @@ TEST_F(StridedTensorBenchmark, MemoryAllocationVerification) {
 
     EXPECT_FALSE(sliced.owns_memory());
     EXPECT_TRUE(sliced.is_view());
-    EXPECT_TRUE(sliced.is_contiguous()); // Row slice is contiguous
+    EXPECT_TRUE(sliced.is_contiguous());                // Row slice is contiguous
     EXPECT_EQ(sliced.storage_offset(), 100 * 512 * 16); // Offset to row 100
 
     // Contiguous should materialize and own memory
@@ -237,7 +240,8 @@ TEST_F(StridedTensorBenchmark, MemoryAllocationVerification) {
     std::cout << "  - is_contiguous: " << materialized.is_contiguous() << "\n";
     std::cout << "  - strides: [";
     for (size_t i = 0; i < materialized.strides().size(); ++i) {
-        if (i > 0) std::cout << ", ";
+        if (i > 0)
+            std::cout << ", ";
         std::cout << materialized.strides()[i];
     }
     std::cout << "]\n";

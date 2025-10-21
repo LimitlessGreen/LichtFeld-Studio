@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "gs_rasterizer_tensor.hpp"
-#include "rasterization_api_tensor.h"
 #include "core/logger.hpp"
+#include "rasterization_api_tensor.h"
 #include <glm/glm.hpp>
 
 namespace gs::rendering {
@@ -29,8 +29,8 @@ namespace gs::rendering {
         // Build world-to-camera transform matrix [4, 4]
         // w2c = [R | t]
         //       [0 | 1]
-        const auto& R = viewpoint_camera.R();  // [3, 3] rotation
-        const auto& T = viewpoint_camera.T();  // [3] translation
+        const auto& R = viewpoint_camera.R(); // [3, 3] rotation
+        const auto& T = viewpoint_camera.T(); // [3] translation
 
         // Create w2c matrix [4, 4] on CPU
         std::vector<float> w2c_data(16, 0.0f);
@@ -58,9 +58,9 @@ namespace gs::rendering {
 
         // Camera position is -R^T @ t
         // We can compute this from the existing R and T
-        auto R_t = R.transpose(0, 1);  // R^T
-        auto T_expanded = T.unsqueeze(1);  // [3, 1]
-        auto cam_pos = -R_t.mm(T_expanded).squeeze();  // [3]
+        auto R_t = R.transpose(0, 1);                 // R^T
+        auto T_expanded = T.unsqueeze(1);             // [3, 1]
+        auto cam_pos = -R_t.mm(T_expanded).squeeze(); // [3]
 
         // Get model data
         const auto& means = gaussian_model.means_raw();
@@ -92,12 +92,12 @@ namespace gs::rendering {
 
         // Manually blend the background since the forward pass does not support it
         // bg_color is [3], need to make it [3, 1, 1]
-        Tensor bg = bg_color.unsqueeze(1).unsqueeze(2);  // [3, 1, 1]
+        Tensor bg = bg_color.unsqueeze(1).unsqueeze(2); // [3, 1, 1]
 
         // blended_image = image + (1.0 - alpha) * bg
         // Note: Tensor - Tensor works, but float - Tensor doesn't
         Tensor one_tensor = Tensor::ones_like(alpha);
-        Tensor one_minus_alpha = one_tensor - alpha;  // 1.0 - alpha
+        Tensor one_minus_alpha = one_tensor - alpha; // 1.0 - alpha
         Tensor blended_image = image + one_minus_alpha * bg;
 
         // Clamp to [0, 1] range

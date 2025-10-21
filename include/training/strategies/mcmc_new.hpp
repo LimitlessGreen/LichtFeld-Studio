@@ -22,7 +22,7 @@ namespace gs::training {
     class MCMCNew : public IStrategyNew {
     public:
         explicit MCMCNew(gs::SplatDataNew&& splat_data);
-        ~MCMCNew() override;  // Must be defined in .cpp due to unique_ptr of incomplete types
+        ~MCMCNew() override; // Must be defined in .cpp due to unique_ptr of incomplete types
 
         void initialize(const gs::param::OptimizationParameters& params) override;
         void post_backward(int iter, RenderOutput& render_output) override;

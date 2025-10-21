@@ -2,9 +2,9 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include <cuda_runtime.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
-#include <cuda_runtime.h>
 
 #include "core/image_io.hpp"
 #include "core/image_io_new.hpp"
@@ -23,177 +23,178 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr float FLOAT_TOLERANCE = 1e-4f;
-constexpr float IMAGE_TOLERANCE = 2.0f / 255.0f; // Allow 2 uint8 levels of difference
+    constexpr float FLOAT_TOLERANCE = 1e-4f;
+    constexpr float IMAGE_TOLERANCE = 2.0f / 255.0f; // Allow 2 uint8 levels of difference
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
+    // ============================================================================
+    // Helper Functions
+    // ============================================================================
 
-torch::Tensor create_test_image_torch(int h, int w, int c) {
-    auto img = torch::rand({h, w, c}, torch::kCPU);
-    return img;
-}
+    torch::Tensor create_test_image_torch(int h, int w, int c) {
+        auto img = torch::rand({h, w, c}, torch::kCPU);
+        return img;
+    }
 
-gs::Tensor create_test_image_tensor(int h, int w, int c) {
-    auto img = gs::Tensor::rand({static_cast<size_t>(h), 
-                                 static_cast<size_t>(w), 
-                                 static_cast<size_t>(c)}, 
-                                gs::Device::CPU);
-    return img;
-}
+    gs::Tensor create_test_image_tensor(int h, int w, int c) {
+        auto img = gs::Tensor::rand({static_cast<size_t>(h),
+                                     static_cast<size_t>(w),
+                                     static_cast<size_t>(c)},
+                                    gs::Device::CPU);
+        return img;
+    }
 
-torch::Tensor create_gradient_image_torch(int h, int w, int c) {
-    auto img = torch::zeros({h, w, c}, torch::kCPU);
-    for (int i = 0; i < h; ++i) {
-        for (int j = 0; j < w; ++j) {
-            float val = static_cast<float>(i + j) / (h + w);
-            for (int k = 0; k < c; ++k) {
-                img[i][j][k] = val;
+    torch::Tensor create_gradient_image_torch(int h, int w, int c) {
+        auto img = torch::zeros({h, w, c}, torch::kCPU);
+        for (int i = 0; i < h; ++i) {
+            for (int j = 0; j < w; ++j) {
+                float val = static_cast<float>(i + j) / (h + w);
+                for (int k = 0; k < c; ++k) {
+                    img[i][j][k] = val;
+                }
             }
         }
+        return img;
     }
-    return img;
-}
 
-gs::Tensor create_gradient_image_tensor(int h, int w, int c) {
-    auto img = gs::Tensor::zeros({static_cast<size_t>(h), 
-                                  static_cast<size_t>(w), 
-                                  static_cast<size_t>(c)}, 
-                                 gs::Device::CPU);
-    
-    auto img_acc = img.accessor<float, 3>();
-    for (int i = 0; i < h; ++i) {
-        for (int j = 0; j < w; ++j) {
-            float val = static_cast<float>(i + j) / (h + w);
-            for (int k = 0; k < c; ++k) {
-                img_acc(i, j, k) = val;
+    gs::Tensor create_gradient_image_tensor(int h, int w, int c) {
+        auto img = gs::Tensor::zeros({static_cast<size_t>(h),
+                                      static_cast<size_t>(w),
+                                      static_cast<size_t>(c)},
+                                     gs::Device::CPU);
+
+        auto img_acc = img.accessor<float, 3>();
+        for (int i = 0; i < h; ++i) {
+            for (int j = 0; j < w; ++j) {
+                float val = static_cast<float>(i + j) / (h + w);
+                for (int k = 0; k < c; ++k) {
+                    img_acc(i, j, k) = val;
+                }
             }
         }
-    }
-    return img;
-}
-
-gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
-    auto cpu_tensor = torch_tensor.cpu().contiguous();
-    std::vector<size_t> shape;
-    for (int i = 0; i < torch_tensor.dim(); ++i) {
-        shape.push_back(torch_tensor.size(i));
+        return img;
     }
 
-    if (torch_tensor.scalar_type() == torch::kFloat32) {
-        std::vector<float> data(cpu_tensor.data_ptr<float>(),
-                               cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
-        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CPU);
-    }
-    
-    return gs::Tensor();
-}
+    gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
+        auto cpu_tensor = torch_tensor.cpu().contiguous();
+        std::vector<size_t> shape;
+        for (int i = 0; i < torch_tensor.dim(); ++i) {
+            shape.push_back(torch_tensor.size(i));
+        }
 
-torch::Tensor tensor_to_torch(const gs::Tensor& gs_tensor) {
-    auto cpu_tensor = gs_tensor.cpu();
-    std::vector<int64_t> shape;
-    for (size_t i = 0; i < cpu_tensor.ndim(); ++i) {
-        shape.push_back(cpu_tensor.shape()[i]);
-    }
+        if (torch_tensor.scalar_type() == torch::kFloat32) {
+            std::vector<float> data(cpu_tensor.data_ptr<float>(),
+                                    cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
+            return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CPU);
+        }
 
-    if (gs_tensor.dtype() == gs::DataType::Float32) {
-        auto data = cpu_tensor.to_vector();
-        auto torch_tensor = torch::from_blob(data.data(), shape, torch::kFloat32).clone();
-        return torch_tensor;
-    }
-    
-    return torch::Tensor();
-}
-
-bool images_are_close(const torch::Tensor& torch_img, 
-                     const gs::Tensor& gs_img,
-                     float tolerance = IMAGE_TOLERANCE) {
-    if (torch_img.dim() != static_cast<int64_t>(gs_img.ndim())) {
-        return false;
+        return gs::Tensor();
     }
 
-    for (int i = 0; i < torch_img.dim(); ++i) {
-        if (torch_img.size(i) != static_cast<int64_t>(gs_img.shape()[i])) {
+    torch::Tensor tensor_to_torch(const gs::Tensor& gs_tensor) {
+        auto cpu_tensor = gs_tensor.cpu();
+        std::vector<int64_t> shape;
+        for (size_t i = 0; i < cpu_tensor.ndim(); ++i) {
+            shape.push_back(cpu_tensor.shape()[i]);
+        }
+
+        if (gs_tensor.dtype() == gs::DataType::Float32) {
+            auto data = cpu_tensor.to_vector();
+            auto torch_tensor = torch::from_blob(data.data(), shape, torch::kFloat32).clone();
+            return torch_tensor;
+        }
+
+        return torch::Tensor();
+    }
+
+    bool images_are_close(const torch::Tensor& torch_img,
+                          const gs::Tensor& gs_img,
+                          float tolerance = IMAGE_TOLERANCE) {
+        if (torch_img.dim() != static_cast<int64_t>(gs_img.ndim())) {
             return false;
         }
+
+        for (int i = 0; i < torch_img.dim(); ++i) {
+            if (torch_img.size(i) != static_cast<int64_t>(gs_img.shape()[i])) {
+                return false;
+            }
+        }
+
+        auto torch_cpu = torch_img.cpu().contiguous();
+        auto gs_cpu = gs_img.cpu();
+
+        if (torch_img.scalar_type() != torch::kFloat32 ||
+            gs_img.dtype() != gs::DataType::Float32) {
+            return false;
+        }
+
+        auto torch_data = torch_cpu.data_ptr<float>();
+        auto gs_data = gs_cpu.to_vector();
+
+        if (torch_cpu.numel() != static_cast<int64_t>(gs_data.size())) {
+            return false;
+        }
+
+        float max_diff = 0.0f;
+        int64_t diff_count = 0;
+
+        for (int64_t i = 0; i < torch_cpu.numel(); ++i) {
+            float diff = std::abs(torch_data[i] - gs_data[i]);
+            if (diff > tolerance) {
+                diff_count++;
+                max_diff = std::max(max_diff, diff);
+            }
+        }
+
+        // Allow up to 1% of pixels to be slightly off (due to rounding differences)
+        float diff_percentage = static_cast<float>(diff_count) / torch_cpu.numel() * 100.0f;
+
+        if (diff_percentage > 1.0f) {
+            std::cerr << "Images differ: " << diff_count << " pixels ("
+                      << diff_percentage << "%), max diff: " << max_diff << "\n";
+            return false;
+        }
+
+        return true;
     }
 
-    auto torch_cpu = torch_img.cpu().contiguous();
-    auto gs_cpu = gs_img.cpu();
-
-    if (torch_img.scalar_type() != torch::kFloat32 || 
-        gs_img.dtype() != gs::DataType::Float32) {
-        return false;
+    bool file_exists(const fs::path& path) {
+        return fs::exists(path) && fs::is_regular_file(path);
     }
 
-    auto torch_data = torch_cpu.data_ptr<float>();
-    auto gs_data = gs_cpu.to_vector();
-
-    if (torch_cpu.numel() != static_cast<int64_t>(gs_data.size())) {
-        return false;
+    size_t get_file_size(const fs::path& path) {
+        if (!file_exists(path))
+            return 0;
+        return fs::file_size(path);
     }
 
-    float max_diff = 0.0f;
-    int64_t diff_count = 0;
-    
-    for (int64_t i = 0; i < torch_cpu.numel(); ++i) {
-        float diff = std::abs(torch_data[i] - gs_data[i]);
-        if (diff > tolerance) {
-            diff_count++;
-            max_diff = std::max(max_diff, diff);
+    void cleanup_test_file(const fs::path& path) {
+        if (file_exists(path)) {
+            fs::remove(path);
         }
     }
 
-    // Allow up to 1% of pixels to be slightly off (due to rounding differences)
-    float diff_percentage = static_cast<float>(diff_count) / torch_cpu.numel() * 100.0f;
-    
-    if (diff_percentage > 1.0f) {
-        std::cerr << "Images differ: " << diff_count << " pixels (" 
-                  << diff_percentage << "%), max diff: " << max_diff << "\n";
-        return false;
-    }
-    
-    return true;
-}
-
-bool file_exists(const fs::path& path) {
-    return fs::exists(path) && fs::is_regular_file(path);
-}
-
-size_t get_file_size(const fs::path& path) {
-    if (!file_exists(path)) return 0;
-    return fs::file_size(path);
-}
-
-void cleanup_test_file(const fs::path& path) {
-    if (file_exists(path)) {
-        fs::remove(path);
-    }
-}
-
-class TempTestDirectory {
-public:
-    TempTestDirectory() {
-        path_ = fs::temp_directory_path() / "image_io_test";
-        fs::create_directories(path_);
-    }
-    
-    ~TempTestDirectory() {
-        if (fs::exists(path_)) {
-            fs::remove_all(path_);
+    class TempTestDirectory {
+    public:
+        TempTestDirectory() {
+            path_ = fs::temp_directory_path() / "image_io_test";
+            fs::create_directories(path_);
         }
-    }
-    
-    fs::path get_path() const { return path_; }
-    
-    fs::path make_path(const std::string& filename) const {
-        return path_ / filename;
-    }
 
-private:
-    fs::path path_;
-};
+        ~TempTestDirectory() {
+            if (fs::exists(path_)) {
+                fs::remove_all(path_);
+            }
+        }
+
+        fs::path get_path() const { return path_; }
+
+        fs::path make_path(const std::string& filename) const {
+            return path_ / filename;
+        }
+
+    private:
+        fs::path path_;
+    };
 
 } // anonymous namespace
 
@@ -222,56 +223,56 @@ protected:
 
 TEST_F(ImageIOComparisonTest, SaveAndLoadSimpleImage_PNG) {
     const int h = 100, w = 100, c = 3;
-    
+
     auto img_torch = create_gradient_image_torch(h, w, c);
     auto img_tensor = torch_to_tensor(img_torch);
-    
+
     auto path_old = test_dir_->make_path("test_old.png");
     auto path_new = test_dir_->make_path("test_new.png");
-    
+
     // Save with both implementations
     save_image(path_old, img_torch);
     gs::image_io::save_image(path_new, img_tensor);
-    
+
     ASSERT_TRUE(file_exists(path_old));
     ASSERT_TRUE(file_exists(path_new));
-    
+
     // Load back with old implementation
     auto [data_old, w_old, h_old, c_old] = load_image(path_old);
     auto [data_new, w_new, h_new, c_new] = load_image(path_new);
-    
+
     EXPECT_EQ(w_old, w);
     EXPECT_EQ(h_old, h);
     EXPECT_EQ(c_old, 3);
-    
+
     EXPECT_EQ(w_new, w);
     EXPECT_EQ(h_new, h);
     EXPECT_EQ(c_new, 3);
-    
+
     // Compare pixel data
     for (int i = 0; i < h * w * 3; ++i) {
         EXPECT_NEAR(data_old[i], data_new[i], 2);
     }
-    
+
     free_image(data_old);
     free_image(data_new);
 }
 
 TEST_F(ImageIOComparisonTest, SaveAndLoadSimpleImage_JPG) {
     const int h = 100, w = 100, c = 3;
-    
+
     auto img_torch = create_gradient_image_torch(h, w, c);
     auto img_tensor = torch_to_tensor(img_torch);
-    
+
     auto path_old = test_dir_->make_path("test_old.jpg");
     auto path_new = test_dir_->make_path("test_new.jpg");
-    
+
     save_image(path_old, img_torch);
     gs::image_io::save_image(path_new, img_tensor);
-    
+
     ASSERT_TRUE(file_exists(path_old));
     ASSERT_TRUE(file_exists(path_new));
-    
+
     // JPG is lossy, so just check that files are reasonable size
     EXPECT_GT(get_file_size(path_old), 1000);
     EXPECT_GT(get_file_size(path_new), 1000);
@@ -279,43 +280,43 @@ TEST_F(ImageIOComparisonTest, SaveAndLoadSimpleImage_JPG) {
 
 TEST_F(ImageIOComparisonTest, SaveGrayscaleImage) {
     const int h = 50, w = 50, c = 1;
-    
+
     auto img_torch = create_test_image_torch(h, w, c);
     auto img_tensor = torch_to_tensor(img_torch);
-    
+
     auto path_old = test_dir_->make_path("gray_old.png");
     auto path_new = test_dir_->make_path("gray_new.png");
-    
+
     save_image(path_old, img_torch);
     gs::image_io::save_image(path_new, img_tensor);
-    
+
     ASSERT_TRUE(file_exists(path_old));
     ASSERT_TRUE(file_exists(path_new));
-    
+
     auto [data_old, w_old, h_old, c_old] = load_image(path_old);
     auto [data_new, w_new, h_new, c_new] = load_image(path_new);
-    
+
     EXPECT_EQ(w_old, w);
     EXPECT_EQ(h_old, h);
     EXPECT_EQ(w_new, w);
     EXPECT_EQ(h_new, h);
-    
+
     free_image(data_old);
     free_image(data_new);
 }
 
 TEST_F(ImageIOComparisonTest, SaveRGBAImage) {
     const int h = 50, w = 50, c = 4;
-    
+
     auto img_torch = create_test_image_torch(h, w, c);
     auto img_tensor = torch_to_tensor(img_torch);
-    
+
     auto path_old = test_dir_->make_path("rgba_old.png");
     auto path_new = test_dir_->make_path("rgba_new.png");
-    
+
     save_image(path_old, img_torch);
     gs::image_io::save_image(path_new, img_tensor);
-    
+
     ASSERT_TRUE(file_exists(path_old));
     ASSERT_TRUE(file_exists(path_new));
 }
@@ -326,37 +327,39 @@ TEST_F(ImageIOComparisonTest, SaveRGBAImage) {
 
 TEST_F(ImageIOComparisonTest, SaveCHWLayout) {
     const int h = 64, w = 64, c = 3;
-    
+
     // Create [C, H, W] layout
     auto img_torch = create_test_image_torch(h, w, c).permute({2, 0, 1}).contiguous();
     auto img_tensor_hwc = create_test_image_tensor(h, w, c);
     auto img_tensor = img_tensor_hwc.permute({2, 0, 1}).contiguous();
-    
+
     auto path_old = test_dir_->make_path("chw_old.png");
     auto path_new = test_dir_->make_path("chw_new.png");
-    
+
     save_image(path_old, img_torch);
     gs::image_io::save_image(path_new, img_tensor);
-    
+
     ASSERT_TRUE(file_exists(path_old));
     ASSERT_TRUE(file_exists(path_new));
 }
 
 TEST_F(ImageIOComparisonTest, SaveBatchedImage) {
     const int h = 64, w = 64, c = 3;
-    
+
     // Create [1, C, H, W] layout
     auto img_torch = create_test_image_torch(h, w, c)
-                        .permute({2, 0, 1}).unsqueeze(0).contiguous();
+                         .permute({2, 0, 1})
+                         .unsqueeze(0)
+                         .contiguous();
     auto img_tensor_hwc = create_test_image_tensor(h, w, c);
     auto img_tensor = img_tensor_hwc.permute({2, 0, 1}).unsqueeze(0).contiguous();
-    
+
     auto path_old = test_dir_->make_path("batch_old.png");
     auto path_new = test_dir_->make_path("batch_new.png");
-    
+
     save_image(path_old, img_torch);
     gs::image_io::save_image(path_new, img_tensor);
-    
+
     ASSERT_TRUE(file_exists(path_old));
     ASSERT_TRUE(file_exists(path_new));
 }
@@ -367,99 +370,99 @@ TEST_F(ImageIOComparisonTest, SaveBatchedImage) {
 
 TEST_F(ImageIOComparisonTest, ConcatenateImagesHorizontal) {
     const int h = 50, w = 50, c = 3;
-    
+
     std::vector<torch::Tensor> images_torch;
     std::vector<gs::Tensor> images_tensor;
-    
+
     for (int i = 0; i < 3; ++i) {
         auto img_t = create_test_image_torch(h, w, c);
         images_torch.push_back(img_t);
         images_tensor.push_back(torch_to_tensor(img_t));
     }
-    
+
     auto path_old = test_dir_->make_path("concat_h_old.png");
     auto path_new = test_dir_->make_path("concat_h_new.png");
-    
+
     save_image(path_old, images_torch, true, 2);
     gs::image_io::save_image(path_new, images_tensor, true, 2);
-    
+
     ASSERT_TRUE(file_exists(path_old));
     ASSERT_TRUE(file_exists(path_new));
-    
+
     auto [data_old, w_old, h_old, c_old] = load_image(path_old);
     auto [data_new, w_new, h_new, c_new] = load_image(path_new);
-    
+
     // Width should be 3*w + 2*separator_width
     EXPECT_EQ(w_old, 3 * w + 2 * 2);
     EXPECT_EQ(w_new, 3 * w + 2 * 2);
     EXPECT_EQ(h_old, h);
     EXPECT_EQ(h_new, h);
-    
+
     free_image(data_old);
     free_image(data_new);
 }
 
 TEST_F(ImageIOComparisonTest, ConcatenateImagesVertical) {
     const int h = 50, w = 50, c = 3;
-    
+
     std::vector<torch::Tensor> images_torch;
     std::vector<gs::Tensor> images_tensor;
-    
+
     for (int i = 0; i < 3; ++i) {
         auto img_t = create_test_image_torch(h, w, c);
         images_torch.push_back(img_t);
         images_tensor.push_back(torch_to_tensor(img_t));
     }
-    
+
     auto path_old = test_dir_->make_path("concat_v_old.png");
     auto path_new = test_dir_->make_path("concat_v_new.png");
-    
+
     save_image(path_old, images_torch, false, 2);
     gs::image_io::save_image(path_new, images_tensor, false, 2);
-    
+
     ASSERT_TRUE(file_exists(path_old));
     ASSERT_TRUE(file_exists(path_new));
-    
+
     auto [data_old, w_old, h_old, c_old] = load_image(path_old);
     auto [data_new, w_new, h_new, c_new] = load_image(path_new);
-    
+
     // Height should be 3*h + 2*separator_width
     EXPECT_EQ(w_old, w);
     EXPECT_EQ(w_new, w);
     EXPECT_EQ(h_old, 3 * h + 2 * 2);
     EXPECT_EQ(h_new, 3 * h + 2 * 2);
-    
+
     free_image(data_old);
     free_image(data_new);
 }
 
 TEST_F(ImageIOComparisonTest, ConcatenateWithoutSeparator) {
     const int h = 40, w = 40, c = 3;
-    
+
     std::vector<torch::Tensor> images_torch;
     std::vector<gs::Tensor> images_tensor;
-    
+
     for (int i = 0; i < 2; ++i) {
         auto img_t = create_test_image_torch(h, w, c);
         images_torch.push_back(img_t);
         images_tensor.push_back(torch_to_tensor(img_t));
     }
-    
+
     auto path_old = test_dir_->make_path("concat_nosep_old.png");
     auto path_new = test_dir_->make_path("concat_nosep_new.png");
-    
+
     save_image(path_old, images_torch, true, 0);
     gs::image_io::save_image(path_new, images_tensor, true, 0);
-    
+
     ASSERT_TRUE(file_exists(path_old));
     ASSERT_TRUE(file_exists(path_new));
-    
+
     auto [data_old, w_old, h_old, c_old] = load_image(path_old);
     auto [data_new, w_new, h_new, c_new] = load_image(path_new);
-    
+
     EXPECT_EQ(w_old, 2 * w);
     EXPECT_EQ(w_new, 2 * w);
-    
+
     free_image(data_old);
     free_image(data_new);
 }
@@ -470,19 +473,19 @@ TEST_F(ImageIOComparisonTest, ConcatenateWithoutSeparator) {
 
 TEST_F(ImageIOComparisonTest, GetImageInfo) {
     const int h = 123, w = 456, c = 3;
-    
+
     auto img_tensor = create_test_image_tensor(h, w, c);
     auto path = test_dir_->make_path("info_test.png");
-    
+
     gs::image_io::save_image(path, img_tensor);
-    
+
     auto [info_w, info_h, info_c] = get_image_info(path);
     auto [new_w, new_h, new_c] = gs::image_io::get_image_info(path);
-    
+
     EXPECT_EQ(info_w, w);
     EXPECT_EQ(info_h, h);
     EXPECT_EQ(info_c, c);
-    
+
     EXPECT_EQ(new_w, w);
     EXPECT_EQ(new_h, h);
     EXPECT_EQ(new_c, c);
@@ -494,40 +497,40 @@ TEST_F(ImageIOComparisonTest, GetImageInfo) {
 
 TEST_F(ImageIOComparisonTest, LoadWithResize2x) {
     const int h = 128, w = 128, c = 3;
-    
+
     auto img_tensor = create_test_image_tensor(h, w, c);
     auto path = test_dir_->make_path("resize2x.png");
-    
+
     gs::image_io::save_image(path, img_tensor);
-    
+
     auto [data_old, w_old, h_old, c_old] = load_image(path, 2);
     auto [data_new, w_new, h_new, c_new] = gs::image_io::load_image(path, 2);
-    
+
     EXPECT_EQ(w_old, w / 2);
     EXPECT_EQ(h_old, h / 2);
     EXPECT_EQ(w_new, w / 2);
     EXPECT_EQ(h_new, h / 2);
-    
+
     free_image(data_old);
     free_image(data_new);
 }
 
 TEST_F(ImageIOComparisonTest, LoadWithResize4x) {
     const int h = 256, w = 256, c = 3;
-    
+
     auto img_tensor = create_test_image_tensor(h, w, c);
     auto path = test_dir_->make_path("resize4x.png");
-    
+
     gs::image_io::save_image(path, img_tensor);
-    
+
     auto [data_old, w_old, h_old, c_old] = load_image(path, 4);
     auto [data_new, w_new, h_new, c_new] = gs::image_io::load_image(path, 4);
-    
+
     EXPECT_EQ(w_old, w / 4);
     EXPECT_EQ(h_old, h / 4);
     EXPECT_EQ(w_new, w / 4);
     EXPECT_EQ(h_new, h / 4);
-    
+
     free_image(data_old);
     free_image(data_new);
 }
@@ -538,66 +541,66 @@ TEST_F(ImageIOComparisonTest, LoadWithResize4x) {
 
 TEST_F(ImageIOComparisonTest, VerySmallImage) {
     const int h = 2, w = 2, c = 3;
-    
+
     auto img_torch = create_test_image_torch(h, w, c);
     auto img_tensor = torch_to_tensor(img_torch);
-    
+
     auto path_old = test_dir_->make_path("tiny_old.png");
     auto path_new = test_dir_->make_path("tiny_new.png");
-    
+
     EXPECT_NO_THROW(save_image(path_old, img_torch));
     EXPECT_NO_THROW(gs::image_io::save_image(path_new, img_tensor));
-    
+
     EXPECT_TRUE(file_exists(path_old));
     EXPECT_TRUE(file_exists(path_new));
 }
 
 TEST_F(ImageIOComparisonTest, LargeImage) {
     const int h = 1024, w = 1024, c = 3;
-    
+
     auto img_torch = create_test_image_torch(h, w, c);
     auto img_tensor = torch_to_tensor(img_torch);
-    
+
     auto path_old = test_dir_->make_path("large_old.png");
     auto path_new = test_dir_->make_path("large_new.png");
-    
+
     EXPECT_NO_THROW(save_image(path_old, img_torch));
     EXPECT_NO_THROW(gs::image_io::save_image(path_new, img_tensor));
-    
+
     EXPECT_TRUE(file_exists(path_old));
     EXPECT_TRUE(file_exists(path_new));
 }
 
 TEST_F(ImageIOComparisonTest, SaveSingleImageList) {
     const int h = 50, w = 50, c = 3;
-    
+
     auto img_t = create_test_image_torch(h, w, c);
     std::vector<torch::Tensor> images_torch = {img_t};
     std::vector<gs::Tensor> images_tensor = {torch_to_tensor(img_t)};
-    
+
     auto path_old = test_dir_->make_path("single_list_old.png");
     auto path_new = test_dir_->make_path("single_list_new.png");
-    
+
     save_image(path_old, images_torch);
     gs::image_io::save_image(path_new, images_tensor);
-    
+
     ASSERT_TRUE(file_exists(path_old));
     ASSERT_TRUE(file_exists(path_new));
 }
 
 TEST_F(ImageIOComparisonTest, ClampingOutOfRange) {
     const int h = 50, w = 50, c = 3;
-    
+
     // Create image with values outside [0, 1]
     auto img_torch = torch::randn({h, w, c}, torch::kCPU) * 2.0f;
     auto img_tensor = torch_to_tensor(img_torch);
-    
+
     auto path_old = test_dir_->make_path("clamp_old.png");
     auto path_new = test_dir_->make_path("clamp_new.png");
-    
+
     EXPECT_NO_THROW(save_image(path_old, img_torch));
     EXPECT_NO_THROW(gs::image_io::save_image(path_new, img_tensor));
-    
+
     EXPECT_TRUE(file_exists(path_old));
     EXPECT_TRUE(file_exists(path_new));
 }
@@ -608,19 +611,19 @@ TEST_F(ImageIOComparisonTest, ClampingOutOfRange) {
 
 TEST_F(ImageIOComparisonTest, BatchSaverSingleImage) {
     const int h = 50, w = 50, c = 3;
-    
+
     auto img_torch = create_test_image_torch(h, w, c);
     auto img_tensor = torch_to_tensor(img_torch);
-    
+
     auto path_old = test_dir_->make_path("batch_single_old.png");
     auto path_new = test_dir_->make_path("batch_single_new.png");
-    
+
     image_io::save_image_async(path_old, img_torch);
     gs::image_io::save_image_async(path_new, img_tensor);
-    
+
     image_io::wait_for_pending_saves();
     gs::image_io::wait_for_pending_saves();
-    
+
     EXPECT_TRUE(file_exists(path_old));
     EXPECT_TRUE(file_exists(path_new));
 }
@@ -628,25 +631,25 @@ TEST_F(ImageIOComparisonTest, BatchSaverSingleImage) {
 TEST_F(ImageIOComparisonTest, BatchSaverMultipleImages) {
     const int h = 40, w = 40, c = 3;
     const int num_images = 10;
-    
+
     for (int i = 0; i < num_images; ++i) {
         auto img_torch = create_test_image_torch(h, w, c);
         auto img_tensor = torch_to_tensor(img_torch);
-        
+
         auto path_old = test_dir_->make_path("batch_" + std::to_string(i) + "_old.png");
         auto path_new = test_dir_->make_path("batch_" + std::to_string(i) + "_new.png");
-        
+
         image_io::save_image_async(path_old, img_torch);
         gs::image_io::save_image_async(path_new, img_tensor);
     }
-    
+
     image_io::wait_for_pending_saves();
     gs::image_io::wait_for_pending_saves();
-    
+
     for (int i = 0; i < num_images; ++i) {
         auto path_old = test_dir_->make_path("batch_" + std::to_string(i) + "_old.png");
         auto path_new = test_dir_->make_path("batch_" + std::to_string(i) + "_new.png");
-        
+
         EXPECT_TRUE(file_exists(path_old)) << "Old image " << i << " not saved";
         EXPECT_TRUE(file_exists(path_new)) << "New image " << i << " not saved";
     }
@@ -655,47 +658,47 @@ TEST_F(ImageIOComparisonTest, BatchSaverMultipleImages) {
 TEST_F(ImageIOComparisonTest, BatchSaverPendingCount) {
     auto& saver_old = image_io::BatchImageSaver::instance();
     auto& saver_new = gs::image_io::BatchImageSaver::instance();
-    
+
     const int h = 30, w = 30, c = 3;
-    
+
     auto img_torch = create_test_image_torch(h, w, c);
     auto img_tensor = torch_to_tensor(img_torch);
-    
+
     // Queue multiple saves
     for (int i = 0; i < 5; ++i) {
-        saver_old.queue_save(test_dir_->make_path("pending_old_" + std::to_string(i) + ".png"), 
-                            img_torch);
-        saver_new.queue_save(test_dir_->make_path("pending_new_" + std::to_string(i) + ".png"), 
-                            img_tensor);
+        saver_old.queue_save(test_dir_->make_path("pending_old_" + std::to_string(i) + ".png"),
+                             img_torch);
+        saver_new.queue_save(test_dir_->make_path("pending_new_" + std::to_string(i) + ".png"),
+                             img_tensor);
     }
-    
+
     // Check pending count (may be 0 if processing is fast)
     EXPECT_GE(saver_old.pending_count(), 0);
     EXPECT_GE(saver_new.pending_count(), 0);
-    
+
     saver_old.wait_all();
     saver_new.wait_all();
-    
+
     EXPECT_EQ(saver_old.pending_count(), 0);
     EXPECT_EQ(saver_new.pending_count(), 0);
 }
 
 TEST_F(ImageIOComparisonTest, BatchSaverDisabled) {
     auto& saver_new = gs::image_io::BatchImageSaver::instance();
-    
+
     saver_new.set_enabled(false);
     EXPECT_FALSE(saver_new.is_enabled());
-    
+
     const int h = 30, w = 30, c = 3;
     auto img_tensor = create_test_image_tensor(h, w, c);
     auto path = test_dir_->make_path("disabled_async.png");
-    
+
     // Should save synchronously
     saver_new.queue_save(path, img_tensor);
-    
+
     // Should be immediately available
     EXPECT_TRUE(file_exists(path));
-    
+
     saver_new.set_enabled(true);
     EXPECT_TRUE(saver_new.is_enabled());
 }
@@ -726,7 +729,7 @@ protected:
         test_dir_.reset();
     }
 
-    template<typename Func>
+    template <typename Func>
     double benchmark(Func func, int warmup_runs = 2, int timing_runs = 5) {
         // Warm-up
         for (int i = 0; i < warmup_runs; ++i) {
@@ -745,7 +748,8 @@ protected:
     }
 
     void print_results(const std::vector<BenchmarkResult>& results) {
-        std::cout << "\n" << std::string(100, '=') << "\n";
+        std::cout << "\n"
+                  << std::string(100, '=') << "\n";
         std::cout << "IMAGE I/O PERFORMANCE COMPARISON: image_io.cpp vs image_io_new.cpp\n";
         std::cout << std::string(100, '=') << "\n\n";
 
@@ -925,11 +929,13 @@ TEST_F(ImageIOPerformanceTest, DISABLED_ConcatenationPerformance) {
 
         result.time_ms_old = benchmark([&]() {
             save_image(path_old, images_torch, true, 2);
-        }, 1, 3);
+        },
+                                       1, 3);
 
         result.time_ms_new = benchmark([&]() {
             gs::image_io::save_image(path_new, images_tensor, true, 2);
-        }, 1, 3);
+        },
+                                       1, 3);
 
         result.speedup = result.time_ms_old / result.time_ms_new;
         results.push_back(result);
@@ -973,7 +979,8 @@ TEST_F(ImageIOPerformanceTest, DISABLED_BatchSavePerformance) {
                 image_io::save_image_async(path, img);
             }
             image_io::wait_for_pending_saves();
-        }, 1, 2);
+        },
+                                       1, 2);
 
         // New implementation
         result.time_ms_new = benchmark([&]() {
@@ -983,7 +990,8 @@ TEST_F(ImageIOPerformanceTest, DISABLED_BatchSavePerformance) {
                 gs::image_io::save_image_async(path, img);
             }
             gs::image_io::wait_for_pending_saves();
-        }, 1, 2);
+        },
+                                       1, 2);
 
         result.speedup = result.time_ms_old / result.time_ms_new;
         results.push_back(result);
@@ -1108,7 +1116,7 @@ TEST_F(ImageIOComparisonTest, DifferentFormats) {
     for (const auto& ext : formats) {
         auto path = test_dir_->make_path("format_test" + ext);
 
-        EXPECT_NO_THROW(gs::image_io::save_image(path, img_tensor)) 
+        EXPECT_NO_THROW(gs::image_io::save_image(path, img_tensor))
             << "Failed to save format: " << ext;
 
         if (file_exists(path)) {
@@ -1158,10 +1166,10 @@ TEST_F(ImageIOComparisonTest, SaveInvalidDimensionTensor) {
 TEST_F(ImageIOComparisonTest, SaveTooManyChannels) {
     const int h = 50, w = 50;
     // Create tensor with 5 channels (invalid)
-    auto invalid_tensor = gs::Tensor::rand({static_cast<size_t>(h), 
-                                           static_cast<size_t>(w), 
-                                           5}, 
-                                          gs::Device::CPU);
+    auto invalid_tensor = gs::Tensor::rand({static_cast<size_t>(h),
+                                            static_cast<size_t>(w),
+                                            5},
+                                           gs::Device::CPU);
     auto path = test_dir_->make_path("too_many_channels.png");
 
     EXPECT_THROW(gs::image_io::save_image(path, invalid_tensor), std::runtime_error);

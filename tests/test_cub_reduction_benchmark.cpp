@@ -1,12 +1,12 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <gtest/gtest.h>
 #include "core/tensor.hpp"
 #include "core/tensor_ops.hpp"
 #include <chrono>
-#include <iostream>
+#include <gtest/gtest.h>
 #include <iomanip>
+#include <iostream>
 
 using namespace gs;
 using namespace std::chrono;
@@ -31,10 +31,14 @@ protected:
         // Warm-up
         for (int i = 0; i < 5; ++i) {
             Tensor result;
-            if (op_name == "sum") result = data.sum();
-            else if (op_name == "mean") result = data.mean();
-            else if (op_name == "max") result = data.max();
-            else if (op_name == "min") result = data.min();
+            if (op_name == "sum")
+                result = data.sum();
+            else if (op_name == "mean")
+                result = data.mean();
+            else if (op_name == "max")
+                result = data.max();
+            else if (op_name == "min")
+                result = data.min();
             cudaDeviceSynchronize();
         }
 
@@ -42,10 +46,14 @@ protected:
         auto start_custom = high_resolution_clock::now();
         Tensor result_custom;
         for (int i = 0; i < num_iterations; ++i) {
-            if (op_name == "sum") result_custom = data.sum();
-            else if (op_name == "mean") result_custom = data.mean();
-            else if (op_name == "max") result_custom = data.max();
-            else if (op_name == "min") result_custom = data.min();
+            if (op_name == "sum")
+                result_custom = data.sum();
+            else if (op_name == "mean")
+                result_custom = data.mean();
+            else if (op_name == "max")
+                result_custom = data.max();
+            else if (op_name == "min")
+                result_custom = data.min();
         }
         cudaDeviceSynchronize();
         auto end_custom = high_resolution_clock::now();
@@ -55,10 +63,14 @@ protected:
         auto start_verify = high_resolution_clock::now();
         Tensor result_verify;
         for (int i = 0; i < num_iterations; ++i) {
-            if (op_name == "sum") result_verify = data.sum();
-            else if (op_name == "mean") result_verify = data.mean();
-            else if (op_name == "max") result_verify = data.max();
-            else if (op_name == "min") result_verify = data.min();
+            if (op_name == "sum")
+                result_verify = data.sum();
+            else if (op_name == "mean")
+                result_verify = data.mean();
+            else if (op_name == "max")
+                result_verify = data.max();
+            else if (op_name == "min")
+                result_verify = data.min();
         }
         cudaDeviceSynchronize();
         auto end_verify = high_resolution_clock::now();

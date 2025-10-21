@@ -15,7 +15,7 @@ namespace gs {
     enum class DataType : uint8_t;
     enum class ReduceOp : uint8_t;
     enum class LoadOp : uint8_t;
-}
+} // namespace gs
 
 // ============= Generic CUDA Operations =============
 // Include template implementation for inline instantiation
@@ -25,15 +25,15 @@ namespace gs {
 #else
 // Forward declaration for C++ files - implementation in tensor_ops.cu
 namespace gs::tensor_ops {
-    template<typename InT, typename OutT, typename Op>
+    template <typename InT, typename OutT, typename Op>
     void launch_binary_op_generic(const InT* a, const InT* b, OutT* c, size_t n,
                                   Op op, cudaStream_t stream = nullptr);
 
-    template<typename T, typename OutT, typename Op>
+    template <typename T, typename OutT, typename Op>
     void launch_unary_op_generic(const T* input, OutT* output, size_t n,
                                  Op op, cudaStream_t stream = nullptr);
 
-    template<typename T, typename OutputT, typename Op>
+    template <typename T, typename OutputT, typename Op>
     void launch_scalar_op_generic(const T* data, T scalar, OutputT* result, size_t n,
                                   Op op, cudaStream_t stream = nullptr);
 } // namespace gs::tensor_ops
@@ -42,7 +42,7 @@ namespace gs::tensor_ops {
 // ============= CPU Helpers (Generic, Header-Only) =============
 namespace gs {
     // CPU helper for unary operations
-    template<typename T, typename OutT, typename Op>
+    template <typename T, typename OutT, typename Op>
     void apply_unary_cpu(const T* input, OutT* output, size_t n, Op op) {
         for (size_t i = 0; i < n; ++i) {
             output[i] = op(input[i]);
@@ -50,7 +50,7 @@ namespace gs {
     }
 
     // CPU helper for binary operations
-    template<typename T, typename OutputT, typename Op>
+    template <typename T, typename OutputT, typename Op>
     void apply_binary_cpu(const T* a, const T* b, OutputT* c, size_t n, Op op) {
         for (size_t i = 0; i < n; ++i) {
             c[i] = op(a[i], b[i]);
@@ -74,22 +74,21 @@ namespace gs::tensor_ops {
     // ============= WARP-LEVEL REDUCTIONS (OPTIMIZED) =============
     // Fast reductions using warp shuffle instructions (5-10x faster than CUB for small-medium tensors)
     void launch_warp_reduce_full(const float* input, float* output, size_t n,
-                                  ReduceOp op, cudaStream_t stream);
+                                 ReduceOp op, cudaStream_t stream);
 
     void launch_warp_segmented_reduce(const float* input, float* output,
-                                       size_t num_segments, size_t segment_size,
-                                       ReduceOp op, cudaStream_t stream);
+                                      size_t num_segments, size_t segment_size,
+                                      ReduceOp op, cudaStream_t stream);
 
     void launch_warp_strided_reduce(const float* input, float* output,
-                                     size_t outer_size, size_t reduce_size, size_t inner_size,
-                                     ReduceOp op, cudaStream_t stream);
+                                    size_t outer_size, size_t reduce_size, size_t inner_size,
+                                    ReduceOp op, cudaStream_t stream);
 
     void launch_warp_multi_axis_reduce(const float* input, float* output,
-                                        size_t output_size, size_t reduce_count,
-                                        ReduceOp op, cudaStream_t stream);
+                                       size_t output_size, size_t reduce_count,
+                                       ReduceOp op, cudaStream_t stream);
 
     bool should_use_warp_reduce(size_t n, size_t num_segments);
-
 
     // ============= Load Operations =============
     void launch_load_op(void* output, const size_t* shape, size_t rank,
@@ -97,7 +96,7 @@ namespace gs::tensor_ops {
                         DataType dtype, cudaStream_t stream);
 
     // Unified Type Conversion Template
-    template<typename SrcT, typename DstT>
+    template <typename SrcT, typename DstT>
     void launch_convert_type(const SrcT* src, DstT* dst, size_t n, cudaStream_t stream);
 
     // ============= Broadcasting =============
@@ -114,20 +113,59 @@ namespace gs::tensor_ops {
     // ============= Broadcasting Binary Operations - UNIFIED INTERFACE =============
 
     // Forward declare operation functors
-    template<typename T> struct add_op { __device__ T operator()(T a, T b) const { return a + b; } };
-    template<typename T> struct sub_op { __device__ T operator()(T a, T b) const { return a - b; } };
-    template<typename T> struct mul_op { __device__ T operator()(T a, T b) const { return a * b; } };
-    template<typename T> struct div_op { __device__ T operator()(T a, T b) const { return a / b; } };
-    template<typename T> struct pow_op { __device__ T operator()(T a, T b) const { return powf(a, b); } };
-    template<typename T> struct eq_op { __device__ unsigned char operator()(T a, T b) const { return a == b ? 1 : 0; } };
-    template<typename T> struct ne_op { __device__ unsigned char operator()(T a, T b) const { return a != b ? 1 : 0; } };
-    template<typename T> struct lt_op { __device__ unsigned char operator()(T a, T b) const { return a < b ? 1 : 0; } };
-    template<typename T> struct le_op { __device__ unsigned char operator()(T a, T b) const { return a <= b ? 1 : 0; } };
-    template<typename T> struct gt_op { __device__ unsigned char operator()(T a, T b) const { return a > b ? 1 : 0; } };
-    template<typename T> struct ge_op { __device__ unsigned char operator()(T a, T b) const { return a >= b ? 1 : 0; } };
-    struct logical_and_op { __device__ unsigned char operator()(unsigned char a, unsigned char b) const { return (a && b) ? 1 : 0; } };
-    struct logical_or_op { __device__ unsigned char operator()(unsigned char a, unsigned char b) const { return (a || b) ? 1 : 0; } };
-    struct logical_xor_op { __device__ unsigned char operator()(unsigned char a, unsigned char b) const { return (a != b) ? 1 : 0; } };
+    template <typename T>
+    struct add_op {
+        __device__ T operator()(T a, T b) const { return a + b; }
+    };
+    template <typename T>
+    struct sub_op {
+        __device__ T operator()(T a, T b) const { return a - b; }
+    };
+    template <typename T>
+    struct mul_op {
+        __device__ T operator()(T a, T b) const { return a * b; }
+    };
+    template <typename T>
+    struct div_op {
+        __device__ T operator()(T a, T b) const { return a / b; }
+    };
+    template <typename T>
+    struct pow_op {
+        __device__ T operator()(T a, T b) const { return powf(a, b); }
+    };
+    template <typename T>
+    struct eq_op {
+        __device__ unsigned char operator()(T a, T b) const { return a == b ? 1 : 0; }
+    };
+    template <typename T>
+    struct ne_op {
+        __device__ unsigned char operator()(T a, T b) const { return a != b ? 1 : 0; }
+    };
+    template <typename T>
+    struct lt_op {
+        __device__ unsigned char operator()(T a, T b) const { return a < b ? 1 : 0; }
+    };
+    template <typename T>
+    struct le_op {
+        __device__ unsigned char operator()(T a, T b) const { return a <= b ? 1 : 0; }
+    };
+    template <typename T>
+    struct gt_op {
+        __device__ unsigned char operator()(T a, T b) const { return a > b ? 1 : 0; }
+    };
+    template <typename T>
+    struct ge_op {
+        __device__ unsigned char operator()(T a, T b) const { return a >= b ? 1 : 0; }
+    };
+    struct logical_and_op {
+        __device__ unsigned char operator()(unsigned char a, unsigned char b) const { return (a && b) ? 1 : 0; }
+    };
+    struct logical_or_op {
+        __device__ unsigned char operator()(unsigned char a, unsigned char b) const { return (a || b) ? 1 : 0; }
+    };
+    struct logical_xor_op {
+        __device__ unsigned char operator()(unsigned char a, unsigned char b) const { return (a != b) ? 1 : 0; }
+    };
 
 } // namespace gs::tensor_ops
 
@@ -138,7 +176,7 @@ namespace gs::tensor_ops {
 #else
 // Forward declaration for C++ files - implementation in tensor_broadcast_ops.cu
 namespace gs::tensor_ops {
-    template<typename T, typename OutputT, typename BinaryOp>
+    template <typename T, typename OutputT, typename BinaryOp>
     void launch_broadcast_binary(const T* a, const T* b, OutputT* c,
                                  const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                                  size_t a_rank, size_t b_rank, size_t c_rank,
@@ -223,10 +261,10 @@ namespace gs::tensor_ops {
                      size_t input_size, size_t index_size, cudaStream_t stream);
 
     // Fused gather + unary operation using thrust::permutation_iterator for zero-copy
-    template<typename UnaryOp>
+    template <typename UnaryOp>
     void launch_gather_fused_unary(const float* input, const int* indices, float* output,
-                                    size_t input_size, size_t index_size,
-                                    UnaryOp op, cudaStream_t stream = nullptr);
+                                   size_t input_size, size_t index_size,
+                                   UnaryOp op, cudaStream_t stream = nullptr);
 
     // Multi-tensor gather using zip_iterator - gather from multiple tensors with same indices
     // Perfect for: gather positions AND colors, or gather multiple Gaussian properties
@@ -288,10 +326,10 @@ namespace gs::tensor_ops {
 
     // ============= Concatenation Operations =============
     void launch_cat_last_dim(void* output, const std::vector<Tensor>& tensors, size_t num_rows,
-        size_t row_size, size_t element_size, cudaStream_t stream);
+                             size_t row_size, size_t element_size, cudaStream_t stream);
 
     void launch_cat_middle_dim(void* output, const std::vector<Tensor>& tensors, size_t outer_size, size_t inner_size,
-        int resolved_dim, size_t element_size, cudaStream_t stream);
+                               int resolved_dim, size_t element_size, cudaStream_t stream);
 
     // ============= Strided Tensor Operations =============
     void launch_strided_copy(
@@ -302,20 +340,18 @@ namespace gs::tensor_ops {
         size_t rank,
         size_t total_elements,
         DataType dtype,
-        cudaStream_t stream = nullptr
-    );
+        cudaStream_t stream = nullptr);
 
     // Fused strided upload: reads from pinned HOST memory with strides,
     // writes contiguously to GPU memory. Eliminates CPU materialization!
     void launch_strided_upload(
-        const void* host_input,     // Pinned host memory (non-contiguous)
-        void* gpu_output,           // GPU memory (contiguous output)
-        const size_t* d_shape,      // Device memory: tensor shape
-        const size_t* d_strides,    // Device memory: stride information
+        const void* host_input,  // Pinned host memory (non-contiguous)
+        void* gpu_output,        // GPU memory (contiguous output)
+        const size_t* d_shape,   // Device memory: tensor shape
+        const size_t* d_strides, // Device memory: stride information
         size_t rank,
         size_t total_elements,
         DataType dtype,
-        cudaStream_t stream = nullptr
-    );
+        cudaStream_t stream = nullptr);
 
 } // namespace gs::tensor_ops

@@ -22,16 +22,16 @@ namespace gs {
     }
 
     CameraRef::CameraRef(const torch::Tensor& R,
-                   const torch::Tensor& T,
-                   float focal_x, float focal_y,
-                   float center_x, float center_y,
-                   const torch::Tensor radial_distortion,
-                   const torch::Tensor tangential_distortion,
-                   gsplat::CameraModelType camera_model_type,
-                   const std::string& image_name,
-                   const std::filesystem::path& image_path,
-                   int camera_width, int camera_height,
-                   int uid)
+                         const torch::Tensor& T,
+                         float focal_x, float focal_y,
+                         float center_x, float center_y,
+                         const torch::Tensor radial_distortion,
+                         const torch::Tensor tangential_distortion,
+                         gsplat::CameraModelType camera_model_type,
+                         const std::string& image_name,
+                         const std::filesystem::path& image_path,
+                         int camera_width, int camera_height,
+                         int uid)
         : _uid(uid),
           _focal_x(focal_x),
           _focal_y(focal_y),

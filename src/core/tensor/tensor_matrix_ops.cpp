@@ -304,8 +304,8 @@ namespace gs {
 
             // Expand 2D tensor to 3D by adding batch dimension
             auto expanded_a = a.unsqueeze(0).expand({static_cast<int>(batch_size),
-                                                   static_cast<int>(M),
-                                                   static_cast<int>(K)});
+                                                     static_cast<int>(M),
+                                                     static_cast<int>(K)});
             return expanded_a.bmm(b);
 
         } else if (a.shape_.rank() == 3 && b.shape_.rank() == 2) {
@@ -324,8 +324,8 @@ namespace gs {
 
             // Expand 2D tensor to 3D by adding batch dimension
             auto expanded_b = b.unsqueeze(0).expand({static_cast<int>(batch_size),
-                                                         static_cast<int>(K),
-                                                         static_cast<int>(N)});
+                                                     static_cast<int>(K),
+                                                     static_cast<int>(N)});
             return a.bmm(expanded_b);
 
         } else {

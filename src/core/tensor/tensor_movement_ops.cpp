@@ -45,13 +45,16 @@ namespace gs {
 
     // ============= Helper: Check contiguity =============
     static bool check_contiguous(const TensorShape& shape, const std::vector<size_t>& strides) {
-        if (strides.empty()) return true;
-        if (strides.size() != shape.rank()) return false;
+        if (strides.empty())
+            return true;
+        if (strides.size() != shape.rank())
+            return false;
 
         // Check if strides match row-major contiguous layout
         size_t expected_stride = 1;
         for (int i = static_cast<int>(shape.rank()) - 1; i >= 0; --i) {
-            if (strides[i] != expected_stride) return false;
+            if (strides[i] != expected_stride)
+                return false;
             expected_stride *= shape[i];
         }
         return true;
@@ -119,7 +122,7 @@ namespace gs {
                 // ZERO-COPY TRANSPOSE: Just swap stride metadata!
                 Tensor view;
                 view.data_ = data_;
-                view.data_owner_ = data_owner_;  // Share ownership
+                view.data_owner_ = data_owner_; // Share ownership
                 view.device_ = device_;
                 view.dtype_ = dtype_;
                 view.is_view_ = true;

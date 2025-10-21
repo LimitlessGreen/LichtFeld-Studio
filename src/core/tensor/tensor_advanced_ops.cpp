@@ -46,7 +46,7 @@ namespace gs {
 
         if (device_ == Device::CUDA) {
             tensor_ops::launch_cdist(ptr<float>(), other_same_device.ptr<float>(),
-                                    result.ptr<float>(), N, M, D, p, 0);
+                                     result.ptr<float>(), N, M, D, p, 0);
             CHECK_CUDA(cudaDeviceSynchronize());
         } else {
             const float* a_data = ptr<float>();
@@ -176,12 +176,14 @@ namespace gs {
                 out_shape.push_back(1);
             }
         }
-        if (out_shape.empty()) out_shape.push_back(1);
+        if (out_shape.empty())
+            out_shape.push_back(1);
 
         LOG_DEBUG("  Output shape: [{}]", [&]() {
             std::string s;
             for (size_t i = 0; i < out_shape.size(); ++i) {
-                if (i > 0) s += ", ";
+                if (i > 0)
+                    s += ", ";
                 s += std::to_string(out_shape[i]);
             }
             return s;
@@ -385,9 +387,9 @@ namespace gs {
         int64_t* idx_data = reinterpret_cast<int64_t*>(indices.raw_ptr());
 
         LOG_DEBUG("  Pointers - data: {}, val_data: {}, idx_data: {}",
-                 static_cast<const void*>(data),
-                 static_cast<void*>(val_data),
-                 static_cast<void*>(idx_data));
+                  static_cast<const void*>(data),
+                  static_cast<void*>(val_data),
+                  static_cast<void*>(idx_data));
 
         // Special case for 2D tensors
         if (cpu_tensor.ndim() == 2) {
@@ -511,8 +513,8 @@ namespace gs {
         if (ndim() == 1 && dim == 0) {
             if (device_ == Device::CUDA) {
                 tensor_ops::launch_sort_1d(sorted.ptr<float>(),
-                                          reinterpret_cast<int64_t*>(indices.raw_ptr()),
-                                          numel(), descending, 0);
+                                           reinterpret_cast<int64_t*>(indices.raw_ptr()),
+                                           numel(), descending, 0);
                 CHECK_CUDA(cudaDeviceSynchronize());
             } else {
                 // CPU fallback
@@ -522,10 +524,10 @@ namespace gs {
 
                 if (descending) {
                     std::sort(idx_vec.begin(), idx_vec.end(),
-                             [&](size_t a, size_t b) { return values_vec[a] > values_vec[b]; });
+                              [&](size_t a, size_t b) { return values_vec[a] > values_vec[b]; });
                 } else {
                     std::sort(idx_vec.begin(), idx_vec.end(),
-                             [&](size_t a, size_t b) { return values_vec[a] < values_vec[b]; });
+                              [&](size_t a, size_t b) { return values_vec[a] < values_vec[b]; });
                 }
 
                 float* sorted_data = sorted.ptr<float>();
@@ -554,9 +556,9 @@ namespace gs {
 
         if (device_ == Device::CUDA) {
             tensor_ops::launch_sort_2d(sorted.ptr<float>(),
-                                      reinterpret_cast<int64_t*>(indices.raw_ptr()),
-                                      outer_size, dim_size, inner_size,
-                                      dim, descending, 0);
+                                       reinterpret_cast<int64_t*>(indices.raw_ptr()),
+                                       outer_size, dim_size, inner_size,
+                                       dim, descending, 0);
             CHECK_CUDA(cudaDeviceSynchronize());
         } else {
             // CPU implementation
@@ -577,10 +579,10 @@ namespace gs {
                     // Sort the slice
                     if (descending) {
                         std::sort(slice_data.begin(), slice_data.end(),
-                                 [](const auto& a, const auto& b) { return a.first > b.first; });
+                                  [](const auto& a, const auto& b) { return a.first > b.first; });
                     } else {
                         std::sort(slice_data.begin(), slice_data.end(),
-                                 [](const auto& a, const auto& b) { return a.first < b.first; });
+                                  [](const auto& a, const auto& b) { return a.first < b.first; });
                     }
 
                     // Write back sorted values and indices

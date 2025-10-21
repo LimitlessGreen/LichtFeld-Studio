@@ -248,12 +248,12 @@ namespace gs {
         float scene_scale = 0.0f;
 
         // Core gaussian attributes
-        Tensor means;      // [N, 3] - positions
-        Tensor sh0;        // [N, 1, 3] - DC SH coefficients (coeffs, channels) - ACTUAL REF FORMAT
-        Tensor shN;        // [N, (degree+1)^2-1, 3] - higher-order SH (coeffs, channels) - ACTUAL REF FORMAT
-        Tensor scaling;    // [N, 3] - log-space scales
-        Tensor rotation;   // [N, 4] - quaternions (unnormalized)
-        Tensor opacity;    // [N, 1] - logit-space opacity
+        Tensor means;    // [N, 3] - positions
+        Tensor sh0;      // [N, 1, 3] - DC SH coefficients (coeffs, channels) - ACTUAL REF FORMAT
+        Tensor shN;      // [N, (degree+1)^2-1, 3] - higher-order SH (coeffs, channels) - ACTUAL REF FORMAT
+        Tensor scaling;  // [N, 3] - log-space scales
+        Tensor rotation; // [N, 4] - quaternions (unnormalized)
+        Tensor opacity;  // [N, 1] - logit-space opacity
 
         // Gradient tensors
         Tensor means_grad;    // [N, 3] - means gradients

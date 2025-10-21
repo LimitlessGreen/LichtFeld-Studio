@@ -18,16 +18,16 @@ namespace gs {
         CameraRef() = default;
 
         CameraRef(const torch::Tensor& R,
-               const torch::Tensor& T,
-               float focal_x, float focal_y,
-               float center_x, float center_y,
-               torch::Tensor radial_distortion,
-               torch::Tensor tangential_distortion,
-               gsplat::CameraModelType camera_model_type,
-               const std::string& image_name,
-               const std::filesystem::path& image_path,
-               int camera_width, int camera_height,
-               int uid);
+                  const torch::Tensor& T,
+                  float focal_x, float focal_y,
+                  float center_x, float center_y,
+                  torch::Tensor radial_distortion,
+                  torch::Tensor tangential_distortion,
+                  gsplat::CameraModelType camera_model_type,
+                  const std::string& image_name,
+                  const std::filesystem::path& image_path,
+                  int camera_width, int camera_height,
+                  int uid);
         CameraRef(const CameraRef&, const torch::Tensor& transform);
 
         // Delete copy, allow move

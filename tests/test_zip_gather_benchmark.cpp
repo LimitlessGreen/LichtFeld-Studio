@@ -1,12 +1,12 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <gtest/gtest.h>
 #include "core/tensor.hpp"
 #include "core/tensor_ops.hpp"
 #include <chrono>
-#include <iostream>
+#include <gtest/gtest.h>
 #include <iomanip>
+#include <iostream>
 
 using namespace gs;
 using namespace std::chrono;
@@ -65,7 +65,7 @@ protected:
                 indices.ptr<int>(),
                 result1_zip.ptr<float>(), result2_zip.ptr<float>(),
                 data_size, gather_size,
-                1, 1,  // strides
+                1, 1, // strides
                 nullptr);
         }
         cudaDeviceSynchronize();
@@ -74,7 +74,7 @@ protected:
 
         // Verify correctness
         bool correctness_pass = result1_sep.all_close(result1_zip, 1e-5, 1e-5) &&
-                               result2_sep.all_close(result2_zip, 1e-5, 1e-5);
+                                result2_sep.all_close(result2_zip, 1e-5, 1e-5);
 
         double speedup = separate_ms / zipped_ms;
 
@@ -126,7 +126,7 @@ protected:
                 indices.ptr<int>(),
                 result1_zip.ptr<float>(), result2_zip.ptr<float>(), result3_zip.ptr<float>(),
                 data_size, gather_size,
-                1, 1, 1,  // strides
+                1, 1, 1, // strides
                 nullptr);
         }
         cudaDeviceSynchronize();
@@ -135,8 +135,8 @@ protected:
 
         // Verify correctness
         bool correctness_pass = result1_sep.all_close(result1_zip, 1e-5, 1e-5) &&
-                               result2_sep.all_close(result2_zip, 1e-5, 1e-5) &&
-                               result3_sep.all_close(result3_zip, 1e-5, 1e-5);
+                                result2_sep.all_close(result2_zip, 1e-5, 1e-5) &&
+                                result3_sep.all_close(result3_zip, 1e-5, 1e-5);
 
         double speedup = separate_ms / zipped_ms;
 

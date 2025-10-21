@@ -1,12 +1,12 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "core/tensor.hpp"
 #include "core/memory_pool.hpp"
-#include <gtest/gtest.h>
-#include <torch/torch.h>
+#include "core/tensor.hpp"
 #include <chrono>
+#include <gtest/gtest.h>
 #include <iomanip>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -14,46 +14,46 @@ using namespace gs;
 
 namespace {
 
-class Timer {
-private:
-    std::chrono::high_resolution_clock::time_point start_;
+    class Timer {
+    private:
+        std::chrono::high_resolution_clock::time_point start_;
 
-public:
-    Timer() {
-        start_ = std::chrono::high_resolution_clock::now();
-    }
-
-    double elapsed_ms() const {
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
-        return duration.count() / 1000.0;
-    }
-};
-
-struct BenchmarkResult {
-    std::string operation;
-    double custom_ms;
-    double torch_ms;
-    double speedup;
-
-    void print() const {
-        std::cout << std::setw(50) << std::left << operation
-                  << "  Custom: " << std::setw(8) << std::right << std::fixed
-                  << std::setprecision(4) << custom_ms << " ms"
-                  << "  Torch: " << std::setw(8) << torch_ms << " ms"
-                  << "  Speedup: " << std::setw(6) << std::setprecision(2)
-                  << speedup << "×";
-
-        if (speedup < 0.8) {
-            std::cout << " ⚠️  SLOWER";
-        } else if (speedup > 1.5) {
-            std::cout << " ✓ FASTER";
-        } else {
-            std::cout << " ~ SIMILAR";
+    public:
+        Timer() {
+            start_ = std::chrono::high_resolution_clock::now();
         }
-        std::cout << std::endl;
-    }
-};
+
+        double elapsed_ms() const {
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
+            return duration.count() / 1000.0;
+        }
+    };
+
+    struct BenchmarkResult {
+        std::string operation;
+        double custom_ms;
+        double torch_ms;
+        double speedup;
+
+        void print() const {
+            std::cout << std::setw(50) << std::left << operation
+                      << "  Custom: " << std::setw(8) << std::right << std::fixed
+                      << std::setprecision(4) << custom_ms << " ms"
+                      << "  Torch: " << std::setw(8) << torch_ms << " ms"
+                      << "  Speedup: " << std::setw(6) << std::setprecision(2)
+                      << speedup << "×";
+
+            if (speedup < 0.8) {
+                std::cout << " ⚠️  SLOWER";
+            } else if (speedup > 1.5) {
+                std::cout << " ✓ FASTER";
+            } else {
+                std::cout << " ~ SIMILAR";
+            }
+            std::cout << std::endl;
+        }
+    };
 
 } // namespace
 
@@ -67,7 +67,8 @@ protected:
     }
 
     void print_separator(const std::string& title = "") {
-        std::cout << "\n" << std::string(110, '=') << std::endl;
+        std::cout << "\n"
+                  << std::string(110, '=') << std::endl;
         if (!title.empty()) {
             std::cout << title << std::endl;
             std::cout << std::string(110, '=') << std::endl;
@@ -81,7 +82,8 @@ TEST_F(MemoryPoolBenchmarkTest, RepeatedAllocationDeallocation) {
     print_separator("MEMORY ALLOCATION BENCHMARK - The Critical Bottleneck");
 
     std::cout << "\n🎯 OBJECTIVE: Verify memory pool provides 2-10× speedup for repeated allocations" << std::endl;
-    std::cout << "📊 This is the EXACT bottleneck identified in tensor operations\n" << std::endl;
+    std::cout << "📊 This is the EXACT bottleneck identified in tensor operations\n"
+              << std::endl;
 
     // Test various allocation sizes representative of real workloads
     std::vector<std::pair<std::string, size_t>> test_cases = {
@@ -89,8 +91,7 @@ TEST_F(MemoryPoolBenchmarkTest, RepeatedAllocationDeallocation) {
         {"Medium (256K elements)", 256 * 1024},
         {"Large (1M elements)", 1024 * 1024},
         {"Image 720p (720×820×4)", 720 * 820 * 4},
-        {"Image 1080p (1920×1080×4)", 1920 * 1080 * 4}
-    };
+        {"Image 1080p (1920×1080×4)", 1920 * 1080 * 4}};
 
     const int iterations = 100;
 
@@ -128,8 +129,7 @@ TEST_F(MemoryPoolBenchmarkTest, RepeatedAllocationDeallocation) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
 
         // Performance expectations
@@ -152,7 +152,8 @@ TEST_F(MemoryPoolBenchmarkTest, ImageUploadAllocationPattern) {
     print_separator("REAL-WORLD PATTERN - Image Upload Allocations");
 
     std::cout << "\n📸 Simulating actual image processing workload" << std::endl;
-    std::cout << "Pattern: Multiple temporary tensors during upload pipeline\n" << std::endl;
+    std::cout << "Pattern: Multiple temporary tensors during upload pipeline\n"
+              << std::endl;
 
     const int H = 720;
     const int W = 820;
@@ -171,19 +172,20 @@ TEST_F(MemoryPoolBenchmarkTest, ImageUploadAllocationPattern) {
         for (int i = 0; i < iterations; ++i) {
             // Allocation 1: Input RGB image
             auto rgb = Tensor::empty({static_cast<size_t>(H), static_cast<size_t>(W),
-                                     static_cast<size_t>(C)}, Device::CUDA);
+                                      static_cast<size_t>(C)},
+                                     Device::CUDA);
 
             // Allocation 2: Alpha channel
             auto alpha = Tensor::ones({static_cast<size_t>(H), static_cast<size_t>(W), 1},
-                                     Device::CUDA);
+                                      Device::CUDA);
 
             // Allocation 3: RGBA concatenated result
             auto rgba = Tensor::empty({static_cast<size_t>(H), static_cast<size_t>(W), 4},
-                                     Device::CUDA);
+                                      Device::CUDA);
 
             // Allocation 4: Clamped result
             auto clamped = Tensor::empty({static_cast<size_t>(H), static_cast<size_t>(W), 4},
-                                        Device::CUDA);
+                                         Device::CUDA);
 
             // All destructors fire here - deallocations happen
         }
@@ -217,8 +219,7 @@ TEST_F(MemoryPoolBenchmarkTest, ImageUploadAllocationPattern) {
         "Image upload pattern (4 allocs/deallocs per iteration)",
         total_custom / iterations,
         total_torch / iterations,
-        total_torch / total_custom
-    };
+        total_torch / total_custom};
     result.print();
 
     std::cout << "\n📊 ANALYSIS:" << std::endl;
@@ -241,17 +242,18 @@ TEST_F(MemoryPoolBenchmarkTest, ChurnTest) {
     print_separator("MEMORY CHURN TEST - Varying Sizes");
 
     std::cout << "\n🔄 Testing allocation/deallocation with varying tensor sizes" << std::endl;
-    std::cout << "Simulates real workload with mixed tensor sizes\n" << std::endl;
+    std::cout << "Simulates real workload with mixed tensor sizes\n"
+              << std::endl;
 
     const int iterations = 100;
 
     // Mix of sizes that appear in real workloads
     std::vector<size_t> sizes = {
-        1024,           // 1K
-        256 * 1024,     // 256K
-        1024 * 1024,    // 1M
-        720 * 820 * 4,  // Image
-        512 * 512,      // Medium
+        1024,          // 1K
+        256 * 1024,    // 256K
+        1024 * 1024,   // 1M
+        720 * 820 * 4, // Image
+        512 * 512,     // Medium
     };
 
     double total_custom = 0.0;
@@ -285,8 +287,7 @@ TEST_F(MemoryPoolBenchmarkTest, ChurnTest) {
         "Mixed size churn test",
         total_custom / iterations,
         total_torch / iterations,
-        total_torch / total_custom
-    };
+        total_torch / total_custom};
     result.print();
 
     std::cout << "\n  Total allocations: " << iterations * sizes.size() << std::endl;
@@ -298,7 +299,8 @@ TEST_F(MemoryPoolBenchmarkTest, ChurnTest) {
 TEST_F(MemoryPoolBenchmarkTest, MemoryPoolStats) {
     print_separator("MEMORY POOL STATISTICS");
 
-    std::cout << "\n📈 Current memory pool status:\n" << std::endl;
+    std::cout << "\n📈 Current memory pool status:\n"
+              << std::endl;
 
     // Allocate some tensors to populate the pool
     std::vector<Tensor> tensors;
@@ -311,7 +313,8 @@ TEST_F(MemoryPoolBenchmarkTest, MemoryPoolStats) {
     // Clear tensors (return to pool)
     tensors.clear();
 
-    std::cout << "\n" << CudaMemoryPool::instance().get_stats() << std::endl;
+    std::cout << "\n"
+              << CudaMemoryPool::instance().get_stats() << std::endl;
     std::cout << "\n✓ Pool is caching memory for fast reuse" << std::endl;
 }
 

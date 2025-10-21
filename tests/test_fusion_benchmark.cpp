@@ -2,10 +2,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
-#include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <chrono>
+#include <gtest/gtest.h>
 #include <iomanip>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -15,87 +15,87 @@ using namespace gs;
 
 namespace {
 
-class Timer {
-private:
-    std::chrono::high_resolution_clock::time_point start_;
+    class Timer {
+    private:
+        std::chrono::high_resolution_clock::time_point start_;
 
-public:
-    Timer() {
-        start_ = std::chrono::high_resolution_clock::now();
-    }
-
-    double elapsed_ms() const {
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
-        return duration.count() / 1000.0;
-    }
-};
-
-struct BenchmarkResult {
-    std::string operation;
-    double custom_ms;
-    double torch_ms;
-    double speedup;
-    bool verified;
-
-    void print() const {
-        std::cout << std::setw(60) << std::left << operation
-                  << "  Custom: " << std::setw(8) << std::right << std::fixed
-                  << std::setprecision(4) << custom_ms << " ms"
-                  << "  Torch: " << std::setw(8) << torch_ms << " ms"
-                  << "  Speedup: " << std::setw(6) << std::setprecision(2)
-                  << speedup << "x";
-
-        if (!verified) {
-            std::cout << " ❌ MISMATCH";
-        } else if (speedup > 1.5) {
-            std::cout << " ✓ FASTER";
-        } else if (speedup > 0.8) {
-            std::cout << " ~ SIMILAR";
-        } else {
-            std::cout << " ⚠ SLOWER";
+    public:
+        Timer() {
+            start_ = std::chrono::high_resolution_clock::now();
         }
-        std::cout << std::endl;
-    }
-};
 
-bool tensors_equal(const Tensor& a, const torch::Tensor& b_torch, float tol = 1e-4f) {
-    // Convert both to CPU for comparison
-    auto a_cpu = a.cpu();
-    auto b_cpu = b_torch.cpu();
+        double elapsed_ms() const {
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
+            return duration.count() / 1000.0;
+        }
+    };
 
-    if (a_cpu.numel() != b_cpu.numel()) {
-        std::cout << "    Size mismatch: " << a_cpu.numel() << " vs " << b_cpu.numel() << std::endl;
-        return false;
-    }
+    struct BenchmarkResult {
+        std::string operation;
+        double custom_ms;
+        double torch_ms;
+        double speedup;
+        bool verified;
 
-    const float* a_ptr = a_cpu.ptr<float>();
-    const float* b_ptr = b_cpu.data_ptr<float>();
+        void print() const {
+            std::cout << std::setw(60) << std::left << operation
+                      << "  Custom: " << std::setw(8) << std::right << std::fixed
+                      << std::setprecision(4) << custom_ms << " ms"
+                      << "  Torch: " << std::setw(8) << torch_ms << " ms"
+                      << "  Speedup: " << std::setw(6) << std::setprecision(2)
+                      << speedup << "x";
 
-    size_t mismatch_count = 0;
-    float max_diff = 0.0f;
+            if (!verified) {
+                std::cout << " ❌ MISMATCH";
+            } else if (speedup > 1.5) {
+                std::cout << " ✓ FASTER";
+            } else if (speedup > 0.8) {
+                std::cout << " ~ SIMILAR";
+            } else {
+                std::cout << " ⚠ SLOWER";
+            }
+            std::cout << std::endl;
+        }
+    };
 
-    for (size_t i = 0; i < a_cpu.numel(); ++i) {
-        float diff = std::abs(a_ptr[i] - b_ptr[i]);
-        max_diff = std::max(max_diff, diff);
-        if (diff > tol) {
-            mismatch_count++;
-            if (mismatch_count <= 5) {  // Print first 5 mismatches
-                std::cout << "    Mismatch at [" << i << "]: "
-                          << a_ptr[i] << " vs " << b_ptr[i]
-                          << " (diff: " << diff << ")" << std::endl;
+    bool tensors_equal(const Tensor& a, const torch::Tensor& b_torch, float tol = 1e-4f) {
+        // Convert both to CPU for comparison
+        auto a_cpu = a.cpu();
+        auto b_cpu = b_torch.cpu();
+
+        if (a_cpu.numel() != b_cpu.numel()) {
+            std::cout << "    Size mismatch: " << a_cpu.numel() << " vs " << b_cpu.numel() << std::endl;
+            return false;
+        }
+
+        const float* a_ptr = a_cpu.ptr<float>();
+        const float* b_ptr = b_cpu.data_ptr<float>();
+
+        size_t mismatch_count = 0;
+        float max_diff = 0.0f;
+
+        for (size_t i = 0; i < a_cpu.numel(); ++i) {
+            float diff = std::abs(a_ptr[i] - b_ptr[i]);
+            max_diff = std::max(max_diff, diff);
+            if (diff > tol) {
+                mismatch_count++;
+                if (mismatch_count <= 5) { // Print first 5 mismatches
+                    std::cout << "    Mismatch at [" << i << "]: "
+                              << a_ptr[i] << " vs " << b_ptr[i]
+                              << " (diff: " << diff << ")" << std::endl;
+                }
             }
         }
-    }
 
-    if (mismatch_count > 0) {
-        std::cout << "    Total mismatches: " << mismatch_count << " / " << a_cpu.numel()
-                  << " (max diff: " << max_diff << ")" << std::endl;
-        return false;
-    }
+        if (mismatch_count > 0) {
+            std::cout << "    Total mismatches: " << mismatch_count << " / " << a_cpu.numel()
+                      << " (max diff: " << max_diff << ")" << std::endl;
+            return false;
+        }
 
-    return true;
-}
+        return true;
+    }
 
 } // namespace
 
@@ -113,7 +113,8 @@ protected:
     }
 
     void print_separator(const std::string& title = "") {
-        std::cout << "\n" << std::string(120, '=') << std::endl;
+        std::cout << "\n"
+                  << std::string(120, '=') << std::endl;
         if (!title.empty()) {
             std::cout << title << std::endl;
             std::cout << std::string(120, '=') << std::endl;
@@ -129,7 +130,8 @@ TEST_F(FusionBenchmarkTest, TwoOpChain_ExpMul) {
     print_separator("2-OPERATION FUSION: exp().mul()");
 
     std::cout << "\nPattern: a.exp() * 2.0" << std::endl;
-    std::cout << "Expected: 2× speedup (1 allocation + 1 fused kernel vs 2 allocations + 2 kernels)\n" << std::endl;
+    std::cout << "Expected: 2× speedup (1 allocation + 1 fused kernel vs 2 allocations + 2 kernels)\n"
+              << std::endl;
 
     const int iterations = 100;
     std::vector<std::tuple<std::string, std::vector<size_t>>> test_cases = {
@@ -184,8 +186,7 @@ TEST_F(FusionBenchmarkTest, TwoOpChain_ExpMul) {
             total_custom / iterations,
             total_torch / iterations,
             total_torch / total_custom,
-            verified
-        };
+            verified};
         result.print();
     }
 }
@@ -194,7 +195,8 @@ TEST_F(FusionBenchmarkTest, TwoOpChain_ExpAdd) {
     print_separator("2-OPERATION FUSION: exp().add()");
 
     std::cout << "\nPattern: a.exp() + 1.0" << std::endl;
-    std::cout << "Expected: 2× speedup\n" << std::endl;
+    std::cout << "Expected: 2× speedup\n"
+              << std::endl;
 
     const int iterations = 100;
     std::vector<std::tuple<std::string, std::vector<size_t>>> test_cases = {
@@ -241,8 +243,7 @@ TEST_F(FusionBenchmarkTest, TwoOpChain_ExpAdd) {
             total_custom / iterations,
             total_torch / iterations,
             total_torch / total_custom,
-            verified
-        };
+            verified};
         result.print();
     }
 }
@@ -251,7 +252,8 @@ TEST_F(FusionBenchmarkTest, TwoOpChain_MulAdd) {
     print_separator("2-OPERATION FUSION: mul().add()");
 
     std::cout << "\nPattern: a * 2.0 + 1.0" << std::endl;
-    std::cout << "Expected: 2× speedup\n" << std::endl;
+    std::cout << "Expected: 2× speedup\n"
+              << std::endl;
 
     const int iterations = 100;
     std::vector<std::tuple<std::string, std::vector<size_t>>> test_cases = {
@@ -299,8 +301,7 @@ TEST_F(FusionBenchmarkTest, TwoOpChain_MulAdd) {
             total_custom / iterations,
             total_torch / iterations,
             total_torch / total_custom,
-            verified
-        };
+            verified};
         result.print();
     }
 }
@@ -313,7 +314,8 @@ TEST_F(FusionBenchmarkTest, ThreeOpChain_ExpMulAdd) {
     print_separator("3-OPERATION FUSION: exp().mul().add()");
 
     std::cout << "\nPattern: a.exp() * 2.0 + 1.0" << std::endl;
-    std::cout << "Expected: 3× speedup (1 allocation + 1 fused kernel vs 3 allocations + 3 kernels)\n" << std::endl;
+    std::cout << "Expected: 3× speedup (1 allocation + 1 fused kernel vs 3 allocations + 3 kernels)\n"
+              << std::endl;
 
     const int iterations = 100;
     std::vector<std::tuple<std::string, std::vector<size_t>>> test_cases = {
@@ -361,8 +363,7 @@ TEST_F(FusionBenchmarkTest, ThreeOpChain_ExpMulAdd) {
             total_custom / iterations,
             total_torch / iterations,
             total_torch / total_custom,
-            verified
-        };
+            verified};
         result.print();
     }
 }
@@ -371,7 +372,8 @@ TEST_F(FusionBenchmarkTest, ThreeOpChain_SqrtMulSub) {
     print_separator("3-OPERATION FUSION: sqrt().mul().sub()");
 
     std::cout << "\nPattern: a.sqrt() * 3.0 - 0.5" << std::endl;
-    std::cout << "Expected: 3× speedup\n" << std::endl;
+    std::cout << "Expected: 3× speedup\n"
+              << std::endl;
 
     const int iterations = 100;
     std::vector<std::tuple<std::string, std::vector<size_t>>> test_cases = {
@@ -380,7 +382,7 @@ TEST_F(FusionBenchmarkTest, ThreeOpChain_SqrtMulSub) {
     };
 
     for (const auto& [name, shape] : test_cases) {
-        auto tensor_custom = Tensor::rand(TensorShape(shape), Device::CUDA) + 0.1f;  // Avoid sqrt(0)
+        auto tensor_custom = Tensor::rand(TensorShape(shape), Device::CUDA) + 0.1f; // Avoid sqrt(0)
         std::vector<int64_t> torch_shape(shape.begin(), shape.end());
         auto tensor_torch = torch::rand(torch_shape, torch::kCUDA) + 0.1f;
 
@@ -418,8 +420,7 @@ TEST_F(FusionBenchmarkTest, ThreeOpChain_SqrtMulSub) {
             total_custom / iterations,
             total_torch / iterations,
             total_torch / total_custom,
-            verified
-        };
+            verified};
         result.print();
     }
 }
@@ -432,7 +433,8 @@ TEST_F(FusionBenchmarkTest, FourOpChain_AbsExpMulAdd) {
     print_separator("4-OPERATION FUSION: abs().exp().mul().add()");
 
     std::cout << "\nPattern: a.abs().exp() * 2.0 + 1.0" << std::endl;
-    std::cout << "Expected: 4× speedup\n" << std::endl;
+    std::cout << "Expected: 4× speedup\n"
+              << std::endl;
 
     const int iterations = 100;
     std::vector<std::tuple<std::string, std::vector<size_t>>> test_cases = {
@@ -479,8 +481,7 @@ TEST_F(FusionBenchmarkTest, FourOpChain_AbsExpMulAdd) {
             total_custom / iterations,
             total_torch / iterations,
             total_torch / total_custom,
-            verified
-        };
+            verified};
         result.print();
     }
 }
@@ -494,7 +495,8 @@ TEST_F(FusionBenchmarkTest, RealWorld_ImageNormalization) {
 
     std::cout << "\nPattern: (image - mean) / std" << std::endl;
     std::cout << "This is a common preprocessing step in computer vision pipelines" << std::endl;
-    std::cout << "Expected: 2× speedup\n" << std::endl;
+    std::cout << "Expected: 2× speedup\n"
+              << std::endl;
 
     const int iterations = 100;
 
@@ -547,8 +549,7 @@ TEST_F(FusionBenchmarkTest, RealWorld_ImageNormalization) {
             total_custom / iterations,
             total_torch / iterations,
             total_torch / total_custom,
-            verified
-        };
+            verified};
         result.print();
     }
 }
@@ -558,7 +559,8 @@ TEST_F(FusionBenchmarkTest, RealWorld_LayerNormActivation) {
 
     std::cout << "\nPattern: (x * scale + bias).relu()" << std::endl;
     std::cout << "Common in neural network forward passes" << std::endl;
-    std::cout << "Expected: 3× speedup\n" << std::endl;
+    std::cout << "Expected: 3× speedup\n"
+              << std::endl;
 
     const int iterations = 100;
 
@@ -609,8 +611,7 @@ TEST_F(FusionBenchmarkTest, RealWorld_LayerNormActivation) {
             total_custom / iterations,
             total_torch / iterations,
             total_torch / total_custom,
-            verified
-        };
+            verified};
         result.print();
     }
 }
@@ -620,7 +621,8 @@ TEST_F(FusionBenchmarkTest, RealWorld_GaussianSplatting) {
 
     std::cout << "\nPattern: exp(-x.abs()) * opacity" << std::endl;
     std::cout << "Used in Gaussian splatting rasterization" << std::endl;
-    std::cout << "Expected: 3× speedup\n" << std::endl;
+    std::cout << "Expected: 3× speedup\n"
+              << std::endl;
 
     const int iterations = 100;
 
@@ -671,8 +673,7 @@ TEST_F(FusionBenchmarkTest, RealWorld_GaussianSplatting) {
             total_custom / iterations,
             total_torch / iterations,
             total_torch / total_custom,
-            verified
-        };
+            verified};
         result.print();
     }
 }
@@ -685,7 +686,8 @@ TEST_F(FusionBenchmarkTest, ComplexChain_5Ops) {
     print_separator("COMPLEX CHAIN: 5 Operations");
 
     std::cout << "\nPattern: ((a + 1.0).exp() * 2.0 - 0.5).relu()" << std::endl;
-    std::cout << "Expected: 5× speedup\n" << std::endl;
+    std::cout << "Expected: 5× speedup\n"
+              << std::endl;
 
     const int iterations = 100;
 
@@ -733,8 +735,7 @@ TEST_F(FusionBenchmarkTest, ComplexChain_5Ops) {
             total_custom / iterations,
             total_torch / iterations,
             total_torch / total_custom,
-            verified
-        };
+            verified};
         result.print();
     }
 }
@@ -743,7 +744,8 @@ TEST_F(FusionBenchmarkTest, ComplexChain_6Ops) {
     print_separator("COMPLEX CHAIN: 6 Operations");
 
     std::cout << "\nPattern: (a.abs().sqrt() + 0.1).log() * 5.0 - 1.0" << std::endl;
-    std::cout << "Expected: 5-6× speedup\n" << std::endl;
+    std::cout << "Expected: 5-6× speedup\n"
+              << std::endl;
 
     const int iterations = 100;
 
@@ -791,8 +793,7 @@ TEST_F(FusionBenchmarkTest, ComplexChain_6Ops) {
             total_custom / iterations,
             total_torch / iterations,
             total_torch / total_custom,
-            verified
-        };
+            verified};
         result.print();
     }
 }
@@ -804,22 +805,27 @@ TEST_F(FusionBenchmarkTest, ComplexChain_6Ops) {
 TEST_F(FusionBenchmarkTest, Summary) {
     print_separator("FUSION BENCHMARK SUMMARY");
 
-    std::cout << "\nKEY FINDINGS:\n" << std::endl;
+    std::cout << "\nKEY FINDINGS:\n"
+              << std::endl;
     std::cout << "Expression templates provide automatic kernel fusion, eliminating:" << std::endl;
     std::cout << "  1. Intermediate memory allocations (except final result)" << std::endl;
     std::cout << "  2. Multiple kernel launches (fused into single kernel)" << std::endl;
     std::cout << "  3. Redundant memory bandwidth (single pass through data)" << std::endl;
-    std::cout << "\nEXPECTED PERFORMANCE:\n" << std::endl;
+    std::cout << "\nEXPECTED PERFORMANCE:\n"
+              << std::endl;
     std::cout << "  - 2-operation chains: 2× speedup" << std::endl;
     std::cout << "  - 3-operation chains: 3× speedup" << std::endl;
     std::cout << "  - 4+ operation chains: 4-10× speedup" << std::endl;
-    std::cout << "\nCOMBINED WITH MEMORY POOL (Track 1):\n" << std::endl;
+    std::cout << "\nCOMBINED WITH MEMORY POOL (Track 1):\n"
+              << std::endl;
     std::cout << "  - Memory pool: 150× faster allocations" << std::endl;
     std::cout << "  - Expression templates: Eliminate intermediate allocations" << std::endl;
     std::cout << "  - Combined: 10-30× total speedup for complex operations" << std::endl;
-    std::cout << "\nVERIFICATION:\n" << std::endl;
+    std::cout << "\nVERIFICATION:\n"
+              << std::endl;
     std::cout << "  All results are verified against PyTorch with tolerance 1e-4" << std::endl;
     std::cout << "  Any mismatches are reported in test output" << std::endl;
 
-    std::cout << "\n" << std::string(120, '=') << std::endl;
+    std::cout << "\n"
+              << std::string(120, '=') << std::endl;
 }

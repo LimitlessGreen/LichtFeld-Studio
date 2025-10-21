@@ -4,9 +4,9 @@
 
 #include "split_view_renderer.hpp"
 #include "core/logger.hpp"
+#include "core/tensor.hpp"
 #include "gl_state_guard.hpp"
 #include <glad/glad.h>
-#include "core/tensor.hpp"
 
 namespace gs::rendering {
 

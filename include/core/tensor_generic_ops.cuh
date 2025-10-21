@@ -18,7 +18,7 @@ namespace gs::tensor_ops {
     // THRUST POLICY HELPER - Stream support for Thrust operations
     // ============================================================================
 
-    template<typename Func>
+    template <typename Func>
     inline void run_with_thrust_policy(cudaStream_t stream, Func&& func) {
         if (stream) {
             func(thrust::cuda::par.on(stream));
@@ -46,17 +46,18 @@ namespace gs::tensor_ops {
      * @tparam OutT Output element type
      * @tparam Op Binary functor type (must be __device__ callable)
      */
-    template<typename InT, typename OutT, typename Op>
+    template <typename InT, typename OutT, typename Op>
     void launch_binary_op_generic(const InT* a, const InT* b, OutT* c, size_t n,
                                   Op op, cudaStream_t stream = nullptr) {
-        if (n == 0) return;
+        if (n == 0)
+            return;
 
         // FAST PATH 1: Vectorized comparison operations (float -> unsigned char)
         // Perfect for <, >, ==, != operations
         if constexpr (std::is_same_v<InT, float> && std::is_same_v<OutT, unsigned char>) {
             bool a_aligned = (reinterpret_cast<uintptr_t>(a) % 16) == 0;
             bool b_aligned = (reinterpret_cast<uintptr_t>(b) % 16) == 0;
-            bool c_aligned = (reinterpret_cast<uintptr_t>(c) % 4) == 0;  // uchar4 needs 4-byte alignment
+            bool c_aligned = (reinterpret_cast<uintptr_t>(c) % 4) == 0; // uchar4 needs 4-byte alignment
 
             if (a_aligned && b_aligned && c_aligned && n > 1024) {
                 launch_vectorized_comparison(a, b, c, n, op, stream);
@@ -94,10 +95,11 @@ namespace gs::tensor_ops {
      * @tparam OutT Output element type
      * @tparam Op Unary functor type (must be __device__ callable)
      */
-    template<typename InT, typename OutT, typename Op>
+    template <typename InT, typename OutT, typename Op>
     void launch_unary_op_generic(const InT* input, OutT* output, size_t n,
                                  Op op, cudaStream_t stream = nullptr) {
-        if (n == 0) return;
+        if (n == 0)
+            return;
 
         // FAST PATH: Use vectorized kernel for float->float operations
         if constexpr (std::is_same_v<InT, float> && std::is_same_v<OutT, float>) {
@@ -127,10 +129,11 @@ namespace gs::tensor_ops {
      * @tparam OutputT Output element type
      * @tparam Op Binary functor type (must be __device__ callable)
      */
-    template<typename T, typename OutputT, typename Op>
+    template <typename T, typename OutputT, typename Op>
     void launch_scalar_op_generic(const T* data, T scalar, OutputT* result, size_t n,
                                   Op op, cudaStream_t stream = nullptr) {
-        if (n == 0) return;
+        if (n == 0)
+            return;
 
         // FAST PATH: Use vectorized scalar broadcast for float operations
         if constexpr (std::is_same_v<T, float> && std::is_same_v<OutputT, float>) {

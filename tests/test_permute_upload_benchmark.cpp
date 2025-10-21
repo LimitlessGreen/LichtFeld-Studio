@@ -2,11 +2,11 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
-#include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <chrono>
+#include <gtest/gtest.h>
 #include <iomanip>
 #include <random>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -14,91 +14,91 @@ using namespace gs;
 
 namespace {
 
-class Timer {
-private:
-    std::chrono::high_resolution_clock::time_point start_;
+    class Timer {
+    private:
+        std::chrono::high_resolution_clock::time_point start_;
 
-public:
-    Timer() {
-        start_ = std::chrono::high_resolution_clock::now();
-    }
-
-    double elapsed_ms() const {
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
-        return duration.count() / 1000.0;
-    }
-};
-
-struct BenchmarkResult {
-    std::string operation;
-    double custom_ms;
-    double torch_ms;
-    double speedup;
-
-    void print() const {
-        std::cout << std::setw(60) << std::left << operation
-                  << "  Custom: " << std::setw(8) << std::right << std::fixed
-                  << std::setprecision(3) << custom_ms << " ms"
-                  << "  Torch: " << std::setw(8) << torch_ms << " ms"
-                  << "  Speedup: " << std::setw(6) << std::setprecision(2)
-                  << speedup << "x";
-
-        // If both are < 0.001 ms (1 μs), differences are pure noise
-        if (custom_ms < 0.001 && torch_ms < 0.001) {
-            std::cout << " ⚡ INSTANT (< 1 μs, noise only)";
-        } else if (speedup < 0.5) {
-            std::cout << " 🔴 CRITICAL BOTTLENECK";
-        } else if (speedup < 0.8) {
-            std::cout << " ⚠️  SLOWER";
-        } else if (speedup > 1.2) {
-            std::cout << " ✓ FASTER";
-        } else {
-            std::cout << " ~ SIMILAR";
+    public:
+        Timer() {
+            start_ = std::chrono::high_resolution_clock::now();
         }
-        std::cout << std::endl;
-    }
-};
 
-// Helper to create random CPU data
-std::vector<float> create_random_data(size_t n, float min_val = 0.0f, float max_val = 1.0f) {
-    static std::mt19937 rng(42);  // Fixed seed for reproducibility
-    std::uniform_real_distribution<float> dist(min_val, max_val);
+        double elapsed_ms() const {
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
+            return duration.count() / 1000.0;
+        }
+    };
 
-    std::vector<float> data(n);
-    for (auto& val : data) {
-        val = dist(rng);
-    }
-    return data;
-}
+    struct BenchmarkResult {
+        std::string operation;
+        double custom_ms;
+        double torch_ms;
+        double speedup;
 
-void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
-                     float rtol = 1e-3f, float atol = 1e-3f) {
-    auto ref_cpu = reference.cpu().contiguous();
-    auto custom_cpu = custom.cpu();
+        void print() const {
+            std::cout << std::setw(60) << std::left << operation
+                      << "  Custom: " << std::setw(8) << std::right << std::fixed
+                      << std::setprecision(3) << custom_ms << " ms"
+                      << "  Torch: " << std::setw(8) << torch_ms << " ms"
+                      << "  Speedup: " << std::setw(6) << std::setprecision(2)
+                      << speedup << "x";
 
-    ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << "Rank mismatch";
-    ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel())) << "Element count mismatch";
-
-    auto custom_vec = custom_cpu.to_vector();
-    auto ref_ptr = ref_cpu.data_ptr<float>();
-
-    size_t mismatch_count = 0;
-    for (size_t i = 0; i < custom_vec.size(); ++i) {
-        float diff = std::abs(custom_vec[i] - ref_ptr[i]);
-        float threshold = atol + rtol * std::abs(ref_ptr[i]);
-        if (diff > threshold) {
-            if (mismatch_count < 10) {  // Only print first 10 mismatches
-                EXPECT_LE(diff, threshold)
-                    << "Mismatch at index " << i
-                    << " (custom=" << custom_vec[i]
-                    << ", torch=" << ref_ptr[i] << ")";
+            // If both are < 0.001 ms (1 μs), differences are pure noise
+            if (custom_ms < 0.001 && torch_ms < 0.001) {
+                std::cout << " ⚡ INSTANT (< 1 μs, noise only)";
+            } else if (speedup < 0.5) {
+                std::cout << " 🔴 CRITICAL BOTTLENECK";
+            } else if (speedup < 0.8) {
+                std::cout << " ⚠️  SLOWER";
+            } else if (speedup > 1.2) {
+                std::cout << " ✓ FASTER";
+            } else {
+                std::cout << " ~ SIMILAR";
             }
-            mismatch_count++;
+            std::cout << std::endl;
         }
+    };
+
+    // Helper to create random CPU data
+    std::vector<float> create_random_data(size_t n, float min_val = 0.0f, float max_val = 1.0f) {
+        static std::mt19937 rng(42); // Fixed seed for reproducibility
+        std::uniform_real_distribution<float> dist(min_val, max_val);
+
+        std::vector<float> data(n);
+        for (auto& val : data) {
+            val = dist(rng);
+        }
+        return data;
     }
-    EXPECT_EQ(mismatch_count, 0) << "Total mismatches: " << mismatch_count;
-}
+
+    void compare_tensors(const Tensor& custom, const torch::Tensor& reference,
+                         float rtol = 1e-3f, float atol = 1e-3f) {
+        auto ref_cpu = reference.cpu().contiguous();
+        auto custom_cpu = custom.cpu();
+
+        ASSERT_EQ(custom_cpu.ndim(), ref_cpu.dim()) << "Rank mismatch";
+        ASSERT_EQ(custom_cpu.numel(), static_cast<size_t>(ref_cpu.numel())) << "Element count mismatch";
+
+        auto custom_vec = custom_cpu.to_vector();
+        auto ref_ptr = ref_cpu.data_ptr<float>();
+
+        size_t mismatch_count = 0;
+        for (size_t i = 0; i < custom_vec.size(); ++i) {
+            float diff = std::abs(custom_vec[i] - ref_ptr[i]);
+            float threshold = atol + rtol * std::abs(ref_ptr[i]);
+            if (diff > threshold) {
+                if (mismatch_count < 10) { // Only print first 10 mismatches
+                    EXPECT_LE(diff, threshold)
+                        << "Mismatch at index " << i
+                        << " (custom=" << custom_vec[i]
+                        << ", torch=" << ref_ptr[i] << ")";
+                }
+                mismatch_count++;
+            }
+        }
+        EXPECT_EQ(mismatch_count, 0) << "Total mismatches: " << mismatch_count;
+    }
 
 } // namespace
 
@@ -112,7 +112,8 @@ protected:
     }
 
     void print_separator(const std::string& title = "") {
-        std::cout << "\n" << std::string(120, '=') << std::endl;
+        std::cout << "\n"
+                  << std::string(120, '=') << std::endl;
         if (!title.empty()) {
             std::cout << title << std::endl;
             std::cout << std::string(120, '=') << std::endl;
@@ -126,7 +127,8 @@ TEST_F(PermuteUploadBenchmarkTest, CPUPermuteOnly) {
     print_separator("CPU PERMUTE ONLY - HWC → CHW (No Upload)");
 
     std::cout << "\n🎯 This tests ONLY the permute operation on CPU" << std::endl;
-    std::cout << "📊 Data stays on CPU (no CUDA transfer)\n" << std::endl;
+    std::cout << "📊 Data stays on CPU (no CUDA transfer)\n"
+              << std::endl;
 
     std::vector<std::tuple<std::string, int, int, int>> test_cases = {
         {"720x820x3 (Real rendering resolution)", 720, 820, 3},
@@ -147,15 +149,15 @@ TEST_F(PermuteUploadBenchmarkTest, CPUPermuteOnly) {
 
         // Custom: from_vector creates on CPU
         auto custom_cpu = Tensor::from_vector(input_data,
-            {static_cast<size_t>(H), static_cast<size_t>(W), static_cast<size_t>(C)},
-            Device::CPU);
+                                              {static_cast<size_t>(H), static_cast<size_t>(W), static_cast<size_t>(C)},
+                                              Device::CPU);
 
         // Torch: from_blob on CPU
         auto torch_cpu = torch::from_blob(
-            const_cast<float*>(input_data.data()),
-            {H, W, C},
-            torch::TensorOptions().dtype(torch::kFloat32)
-        ).clone();  // Clone to own the data
+                             const_cast<float*>(input_data.data()),
+                             {H, W, C},
+                             torch::TensorOptions().dtype(torch::kFloat32))
+                             .clone(); // Clone to own the data
 
         double total_custom = 0.0;
         double total_torch = 0.0;
@@ -183,8 +185,7 @@ TEST_F(PermuteUploadBenchmarkTest, CPUPermuteOnly) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
 
         // Verify correctness
@@ -198,7 +199,8 @@ TEST_F(PermuteUploadBenchmarkTest, CUDAUploadOnly) {
     print_separator("CUDA UPLOAD ONLY - CPU → GPU (No Permute)");
 
     std::cout << "\n🎯 This tests ONLY the CUDA upload operation" << std::endl;
-    std::cout << "📊 No permute, just memcpy CPU → GPU\n" << std::endl;
+    std::cout << "📊 No permute, just memcpy CPU → GPU\n"
+              << std::endl;
 
     std::vector<std::tuple<std::string, int, int, int>> test_cases = {
         {"720x820x3 (Real rendering resolution)", 720, 820, 3},
@@ -216,14 +218,14 @@ TEST_F(PermuteUploadBenchmarkTest, CUDAUploadOnly) {
         auto input_data = create_random_data(H * W * C);
 
         auto custom_cpu = Tensor::from_vector(input_data,
-            {static_cast<size_t>(H), static_cast<size_t>(W), static_cast<size_t>(C)},
-            Device::CPU);
+                                              {static_cast<size_t>(H), static_cast<size_t>(W), static_cast<size_t>(C)},
+                                              Device::CPU);
 
         auto torch_cpu = torch::from_blob(
-            const_cast<float*>(input_data.data()),
-            {H, W, C},
-            torch::TensorOptions().dtype(torch::kFloat32)
-        ).clone();
+                             const_cast<float*>(input_data.data()),
+                             {H, W, C},
+                             torch::TensorOptions().dtype(torch::kFloat32))
+                             .clone();
 
         double total_custom = 0.0;
         double total_torch = 0.0;
@@ -253,8 +255,7 @@ TEST_F(PermuteUploadBenchmarkTest, CUDAUploadOnly) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
 
         // Verify correctness
@@ -269,7 +270,8 @@ TEST_F(PermuteUploadBenchmarkTest, PermuteAndUploadCombined) {
 
     std::cout << "\n🔴 THIS IS THE CRITICAL BOTTLENECK from rendering_pipeline.cpp:269" << std::endl;
     std::cout << "📊 Code: result.image = image_cpu.permute({2, 0, 1}).cuda();" << std::endl;
-    std::cout << "🎯 Target: < 5ms (currently ~72ms in production!)\n" << std::endl;
+    std::cout << "🎯 Target: < 5ms (currently ~72ms in production!)\n"
+              << std::endl;
 
     std::vector<std::tuple<std::string, int, int, int>> test_cases = {
         {"720x820x3 (EXACT production size)", 720, 820, 3},
@@ -279,7 +281,7 @@ TEST_F(PermuteUploadBenchmarkTest, PermuteAndUploadCombined) {
         {"2160x3840x3 (4K)", 2160, 3840, 3},
     };
 
-    const int iterations = 10;  // Fewer iterations since this is slow
+    const int iterations = 10; // Fewer iterations since this is slow
 
     for (const auto& [name, H, W, C] : test_cases) {
         std::cout << "\n--- " << name << " ---" << std::endl;
@@ -292,14 +294,14 @@ TEST_F(PermuteUploadBenchmarkTest, PermuteAndUploadCombined) {
         auto input_data = create_random_data(H * W * C);
 
         auto custom_cpu = Tensor::from_vector(input_data,
-            {static_cast<size_t>(H), static_cast<size_t>(W), static_cast<size_t>(C)},
-            Device::CPU);
+                                              {static_cast<size_t>(H), static_cast<size_t>(W), static_cast<size_t>(C)},
+                                              Device::CPU);
 
         auto torch_cpu = torch::from_blob(
-            const_cast<float*>(input_data.data()),
-            {H, W, C},
-            torch::TensorOptions().dtype(torch::kFloat32)
-        ).clone();
+                             const_cast<float*>(input_data.data()),
+                             {H, W, C},
+                             torch::TensorOptions().dtype(torch::kFloat32))
+                             .clone();
 
         double total_custom = 0.0;
         double total_torch = 0.0;
@@ -355,8 +357,7 @@ TEST_F(PermuteUploadBenchmarkTest, PermuteAndUploadCombined) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
 
         std::cout << "\n  🔬 WITH contiguous() first:" << std::endl;
@@ -364,8 +365,7 @@ TEST_F(PermuteUploadBenchmarkTest, PermuteAndUploadCombined) {
             name + " (with .contiguous())",
             total_custom_contiguous / iterations,
             total_torch / iterations,
-            total_torch / total_custom_contiguous
-        };
+            total_torch / total_custom_contiguous};
         result_cont.print();
 
         std::cout << "\n  📊 DETAILED BREAKDOWN (first iteration):" << std::endl;
@@ -403,7 +403,8 @@ TEST_F(PermuteUploadBenchmarkTest, GPUPermuteOnly) {
     print_separator("GPU PERMUTE - Data Already on GPU");
 
     std::cout << "\n🎯 This tests permute when data is ALREADY on GPU" << std::endl;
-    std::cout << "📊 Best case scenario (not our bottleneck, but good to know)\n" << std::endl;
+    std::cout << "📊 Best case scenario (not our bottleneck, but good to know)\n"
+              << std::endl;
 
     std::vector<std::tuple<std::string, int, int, int>> test_cases = {
         {"720x820x3", 720, 820, 3},
@@ -446,8 +447,7 @@ TEST_F(PermuteUploadBenchmarkTest, GPUPermuteOnly) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 
@@ -464,7 +464,8 @@ TEST_F(PermuteUploadBenchmarkTest, CPUtoGPUTransferBenchmark) {
 
     std::cout << "\n🎯 This tests raw data transfer from CPU to GPU" << std::endl;
     std::cout << "📊 Pure cudaMemcpy performance comparison with LibTorch" << std::endl;
-    std::cout << "🎪 Tests various sizes from small to large\n" << std::endl;
+    std::cout << "🎪 Tests various sizes from small to large\n"
+              << std::endl;
 
     std::vector<std::tuple<std::string, size_t, int>> test_cases = {
         // {name, total_elements, iterations}
@@ -488,13 +489,13 @@ TEST_F(PermuteUploadBenchmarkTest, CPUtoGPUTransferBenchmark) {
         auto input_data = create_random_data(num_elements);
 
         auto custom_cpu = Tensor::from_vector(input_data,
-            {num_elements}, Device::CPU);
+                                              {num_elements}, Device::CPU);
 
         auto torch_cpu = torch::from_blob(
-            const_cast<float*>(input_data.data()),
-            {static_cast<int64_t>(num_elements)},
-            torch::TensorOptions().dtype(torch::kFloat32)
-        ).clone();
+                             const_cast<float*>(input_data.data()),
+                             {static_cast<int64_t>(num_elements)},
+                             torch::TensorOptions().dtype(torch::kFloat32))
+                             .clone();
 
         double total_custom = 0.0;
         double total_torch = 0.0;
@@ -527,8 +528,7 @@ TEST_F(PermuteUploadBenchmarkTest, CPUtoGPUTransferBenchmark) {
             name,
             avg_custom_ms,
             avg_torch_ms,
-            avg_torch_ms / avg_custom_ms
-        };
+            avg_torch_ms / avg_custom_ms};
         result.print();
 
         // Calculate bandwidth
@@ -558,7 +558,8 @@ TEST_F(PermuteUploadBenchmarkTest, GPUtoCPUTransferBenchmark) {
 
     std::cout << "\n🎯 This tests raw data transfer from GPU to CPU" << std::endl;
     std::cout << "📊 Pure cudaMemcpy performance comparison with LibTorch" << std::endl;
-    std::cout << "🔄 This is used in point_cloud_renderer.cpp:169 (5.48ms bottleneck!)\n" << std::endl;
+    std::cout << "🔄 This is used in point_cloud_renderer.cpp:169 (5.48ms bottleneck!)\n"
+              << std::endl;
 
     std::vector<std::tuple<std::string, size_t, int>> test_cases = {
         {"1 MB (256x256x4)", 256 * 256 * 4, 100},
@@ -611,8 +612,7 @@ TEST_F(PermuteUploadBenchmarkTest, GPUtoCPUTransferBenchmark) {
             name,
             avg_custom_ms,
             avg_torch_ms,
-            avg_torch_ms / avg_custom_ms
-        };
+            avg_torch_ms / avg_custom_ms};
         result.print();
 
         // Calculate bandwidth
@@ -638,7 +638,8 @@ TEST_F(PermuteUploadBenchmarkTest, RoundTripTransferBenchmark) {
     print_separator("ROUND-TRIP TRANSFER BENCHMARK - CPU → GPU → CPU");
 
     std::cout << "\n🎯 This tests full round-trip transfer performance" << std::endl;
-    std::cout << "📊 Measures latency and throughput for bidirectional transfers\n" << std::endl;
+    std::cout << "📊 Measures latency and throughput for bidirectional transfers\n"
+              << std::endl;
 
     std::vector<std::tuple<std::string, size_t, int>> test_cases = {
         {"1 MB", 256 * 1024, 50},
@@ -656,10 +657,10 @@ TEST_F(PermuteUploadBenchmarkTest, RoundTripTransferBenchmark) {
         auto input_data = create_random_data(num_elements);
         auto custom_cpu = Tensor::from_vector(input_data, {num_elements}, Device::CPU);
         auto torch_cpu = torch::from_blob(
-            const_cast<float*>(input_data.data()),
-            {static_cast<int64_t>(num_elements)},
-            torch::TensorOptions().dtype(torch::kFloat32)
-        ).clone();
+                             const_cast<float*>(input_data.data()),
+                             {static_cast<int64_t>(num_elements)},
+                             torch::TensorOptions().dtype(torch::kFloat32))
+                             .clone();
 
         double total_custom = 0.0;
         double total_torch = 0.0;
@@ -691,8 +692,7 @@ TEST_F(PermuteUploadBenchmarkTest, RoundTripTransferBenchmark) {
             name,
             avg_custom_ms,
             avg_torch_ms,
-            avg_torch_ms / avg_custom_ms
-        };
+            avg_torch_ms / avg_custom_ms};
         result.print();
 
         std::cout << "  Total latency: " << std::fixed << std::setprecision(3)
@@ -705,7 +705,8 @@ TEST_F(PermuteUploadBenchmarkTest, ContiguousVsStridedTransfer) {
     print_separator("CONTIGUOUS vs STRIDED TRANSFER");
 
     std::cout << "\n🎯 This tests transfer performance for contiguous vs non-contiguous memory" << std::endl;
-    std::cout << "📊 Non-contiguous transfers may be slower due to gather operations\n" << std::endl;
+    std::cout << "📊 Non-contiguous transfers may be slower due to gather operations\n"
+              << std::endl;
 
     const size_t H = 1080;
     const size_t W = 1920;
@@ -718,10 +719,10 @@ TEST_F(PermuteUploadBenchmarkTest, ContiguousVsStridedTransfer) {
         auto input_data = create_random_data(H * W * C);
         auto custom_cpu = Tensor::from_vector(input_data, {H, W, C}, Device::CPU);
         auto torch_cpu = torch::from_blob(
-            const_cast<float*>(input_data.data()),
-            {static_cast<int64_t>(H), static_cast<int64_t>(W), static_cast<int64_t>(C)},
-            torch::TensorOptions().dtype(torch::kFloat32)
-        ).clone();
+                             const_cast<float*>(input_data.data()),
+                             {static_cast<int64_t>(H), static_cast<int64_t>(W), static_cast<int64_t>(C)},
+                             torch::TensorOptions().dtype(torch::kFloat32))
+                             .clone();
 
         double total_custom = 0.0;
         double total_torch = 0.0;
@@ -745,8 +746,7 @@ TEST_F(PermuteUploadBenchmarkTest, ContiguousVsStridedTransfer) {
             "Contiguous HWC upload",
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 
@@ -756,13 +756,13 @@ TEST_F(PermuteUploadBenchmarkTest, ContiguousVsStridedTransfer) {
         auto input_data = create_random_data(C * H * W);
         auto custom_cpu = Tensor::from_vector(input_data, {C, H, W}, Device::CPU);
         auto torch_cpu = torch::from_blob(
-            const_cast<float*>(input_data.data()),
-            {static_cast<int64_t>(C), static_cast<int64_t>(H), static_cast<int64_t>(W)},
-            torch::TensorOptions().dtype(torch::kFloat32)
-        ).clone();
+                             const_cast<float*>(input_data.data()),
+                             {static_cast<int64_t>(C), static_cast<int64_t>(H), static_cast<int64_t>(W)},
+                             torch::TensorOptions().dtype(torch::kFloat32))
+                             .clone();
 
         // Transpose to non-contiguous layout
-        auto custom_transposed = custom_cpu.transpose(0, 2);  // CHW → WHC (non-contiguous)
+        auto custom_transposed = custom_cpu.transpose(0, 2); // CHW → WHC (non-contiguous)
         auto torch_transposed = torch_cpu.transpose(0, 2);
 
         double total_custom = 0.0;
@@ -787,8 +787,7 @@ TEST_F(PermuteUploadBenchmarkTest, ContiguousVsStridedTransfer) {
             "Non-contiguous transposed upload",
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 

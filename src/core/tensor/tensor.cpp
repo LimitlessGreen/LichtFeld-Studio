@@ -40,13 +40,16 @@ namespace gs {
 
     // Check if strides represent contiguous memory layout (row-major)
     static bool check_contiguous(const TensorShape& shape, const std::vector<size_t>& strides) {
-        if (strides.empty()) return true;
-        if (strides.size() != shape.rank()) return false;
+        if (strides.empty())
+            return true;
+        if (strides.size() != shape.rank())
+            return false;
 
         // Check if strides match row-major contiguous layout
         size_t expected_stride = 1;
         for (int i = static_cast<int>(shape.rank()) - 1; i >= 0; --i) {
-            if (strides[i] != expected_stride) return false;
+            if (strides[i] != expected_stride)
+                return false;
             expected_stride *= shape[i];
         }
         return true;
@@ -56,14 +59,14 @@ namespace gs {
 
     Tensor::Tensor(void* data, TensorShape shape, Device device, DataType dtype)
         : data_(data),
-          data_owner_(nullptr),  // Non-owning
+          data_owner_(nullptr), // Non-owning
           shape_(shape),
-          strides_(shape.strides()),  // Initialize to contiguous strides
+          strides_(shape.strides()), // Initialize to contiguous strides
           storage_offset_(0),
           is_contiguous_(true),
           device_(device),
           dtype_(dtype),
-          is_view_(true),  // This is a view
+          is_view_(true), // This is a view
           id_(next_id_++) {
 
         if (profiling_enabled_) {
@@ -74,10 +77,10 @@ namespace gs {
 
     // ============= Copy Constructor - SHALLOW COPY (LibTorch behavior) =============
     Tensor::Tensor(const Tensor& other)
-        : data_(other.data_),                    // Share the pointer
-          data_owner_(other.data_owner_),        // Share ownership via shared_ptr!
+        : data_(other.data_),             // Share the pointer
+          data_owner_(other.data_owner_), // Share ownership via shared_ptr!
           shape_(other.shape_),
-          strides_(other.strides_),              // Copy stride information
+          strides_(other.strides_), // Copy stride information
           storage_offset_(other.storage_offset_),
           is_contiguous_(other.is_contiguous_),
           device_(other.device_),
@@ -100,9 +103,9 @@ namespace gs {
 
         // Shallow copy - share data via shared_ptr
         data_ = other.data_;
-        data_owner_ = other.data_owner_;  // shared_ptr handles refcounting automatically
+        data_owner_ = other.data_owner_; // shared_ptr handles refcounting automatically
         shape_ = other.shape_;
-        strides_ = other.strides_;        // Copy stride information
+        strides_ = other.strides_; // Copy stride information
         storage_offset_ = other.storage_offset_;
         is_contiguous_ = other.is_contiguous_;
         device_ = other.device_;
@@ -249,8 +252,7 @@ namespace gs {
                 shape_.rank(),
                 numel(),
                 dtype_,
-                nullptr
-            );
+                nullptr);
 
             cudaDeviceSynchronize();
             cudaFree(d_shape);
@@ -276,17 +278,17 @@ namespace gs {
 
                 // Use multi-threading for medium/large tensors (>100KB)
                 // Small tensors: thread overhead not worth it
-                bool use_parallel = bytes() > 100*1024;
+                bool use_parallel = bytes() > 100 * 1024;
 
 #if defined(__AVX2__)
-                constexpr size_t SIMD_WIDTH = 8;  // AVX2 processes 8 floats
+                constexpr size_t SIMD_WIDTH = 8; // AVX2 processes 8 floats
 
-                // MULTI-THREADED: Parallelize over BOTH dim0 and dim1 using collapse(2)
-                // For HWC→CHW permute ([H, W, C] → [C, H, W]), this means:
-                //   dim0 = C (typically 3), dim1 = H (typically 720+), dim2 = W (typically 820+)
-                // Using collapse(2) distributes work across C×H iterations (e.g., 3×720=2160 iterations)
-                // This ensures good work distribution even when dim0 is small
-                #pragma omp parallel for collapse(2) if(use_parallel) schedule(static)
+// MULTI-THREADED: Parallelize over BOTH dim0 and dim1 using collapse(2)
+// For HWC→CHW permute ([H, W, C] → [C, H, W]), this means:
+//   dim0 = C (typically 3), dim1 = H (typically 720+), dim2 = W (typically 820+)
+// Using collapse(2) distributes work across C×H iterations (e.g., 3×720=2160 iterations)
+// This ensures good work distribution even when dim0 is small
+#pragma omp parallel for collapse(2) if (use_parallel) schedule(static)
                 for (size_t i0 = 0; i0 < dim0; ++i0) {
                     for (size_t i1 = 0; i1 < dim1; ++i1) {
                         size_t i2 = 0;
@@ -324,8 +326,8 @@ namespace gs {
                     }
                 }
 #else
-                // Fallback: scalar version (no SIMD), but still multi-threaded with collapse(2)
-                #pragma omp parallel for collapse(2) if(use_parallel) schedule(static)
+// Fallback: scalar version (no SIMD), but still multi-threaded with collapse(2)
+#pragma omp parallel for collapse(2) if (use_parallel) schedule(static)
                 for (size_t i0 = 0; i0 < dim0; ++i0) {
                     for (size_t i1 = 0; i1 < dim1; ++i1) {
                         for (size_t i2 = 0; i2 < dim2; ++i2) {
@@ -348,13 +350,13 @@ namespace gs {
                 size_t stride0 = strides_[0];
                 size_t stride1 = strides_[1];
 
-                bool use_parallel = bytes() > 100*1024;
+                bool use_parallel = bytes() > 100 * 1024;
 
 #if defined(__AVX2__)
                 constexpr size_t SIMD_WIDTH = 8;
 
-                // MULTI-THREADED: Each thread processes rows
-                #pragma omp parallel for if(use_parallel) schedule(static)
+// MULTI-THREADED: Each thread processes rows
+#pragma omp parallel for if (use_parallel) schedule(static)
                 for (size_t i = 0; i < rows; ++i) {
                     size_t j = 0;
 
@@ -377,8 +379,8 @@ namespace gs {
                     }
                 }
 #else
-                // Fallback: scalar version, but still multi-threaded
-                #pragma omp parallel for if(use_parallel) schedule(static)
+// Fallback: scalar version, but still multi-threaded
+#pragma omp parallel for if (use_parallel) schedule(static)
                 for (size_t i = 0; i < rows; ++i) {
                     for (size_t j = 0; j < cols; ++j) {
                         size_t src_idx = i * stride0 + j * stride1;
@@ -465,12 +467,12 @@ namespace gs {
                     tensor_ops::launch_strided_upload(
                         src,
                         t.data_,
-                        shape_.dims().data(),      // Host memory pointer
-                        strides_.data(),           // Host memory pointer
+                        shape_.dims().data(), // Host memory pointer
+                        strides_.data(),      // Host memory pointer
                         shape_.rank(),
                         numel(),
                         dtype_,
-                        nullptr  // Default stream
+                        nullptr // Default stream
                     );
 
                     // NO SYNC: Let CUDA runtime handle synchronization when data is accessed
@@ -505,7 +507,7 @@ namespace gs {
                     shape_.rank(),
                     numel(),
                     dtype_,
-                    nullptr  // Default stream
+                    nullptr // Default stream
                 );
 
                 // Free metadata immediately (kernel has already captured the data)
@@ -533,11 +535,11 @@ namespace gs {
             // Use cudaMemcpyAsync with pinned memory for maximum PCIe bandwidth (~7-11 GB/s)
             // CPU tensor now uses pinned memory (allocated via PinnedMemoryAllocator)
             CHECK_CUDA(cudaMemcpyAsync(t.data_, src, bytes(), cudaMemcpyHostToDevice, 0));
-            CHECK_CUDA(cudaDeviceSynchronize());  // Ensure transfer completes before returning
+            CHECK_CUDA(cudaDeviceSynchronize()); // Ensure transfer completes before returning
         } else if (device_ == Device::CUDA && device == Device::CPU) {
             // Async transfer for GPU→CPU as well (destination is pinned)
             CHECK_CUDA(cudaMemcpyAsync(t.data_, src, bytes(), cudaMemcpyDeviceToHost, 0));
-            CHECK_CUDA(cudaDeviceSynchronize());  // Ensure transfer completes before returning
+            CHECK_CUDA(cudaDeviceSynchronize()); // Ensure transfer completes before returning
         }
 
         return t;
@@ -545,128 +547,130 @@ namespace gs {
 
     // ============= Type Conversion =============
     Tensor Tensor::to(DataType dtype) const {
-    if (!is_valid()) {
-        LOG_ERROR("Cannot convert invalid tensor to different dtype");
+        if (!is_valid()) {
+            LOG_ERROR("Cannot convert invalid tensor to different dtype");
+            return Tensor();
+        }
+
+        if (dtype_ == dtype) {
+            return clone();
+        }
+
+        // If not contiguous, materialize first
+        if (!is_contiguous_) {
+            return contiguous().to(dtype);
+        }
+
+// Macro for type conversions using launch_convert_type
+#define CONVERT_DTYPE_CUDA(FROM_TYPE, TO_TYPE, FROM_DTYPE, TO_DTYPE)                                                                         \
+    if (dtype_ == FROM_DTYPE && dtype == TO_DTYPE) {                                                                                         \
+        auto result = empty(shape_, device_, TO_DTYPE);                                                                                      \
+        if (numel() == 0)                                                                                                                    \
+            return result;                                                                                                                   \
+        if (device_ == Device::CUDA) {                                                                                                       \
+            tensor_ops::launch_convert_type<FROM_TYPE, TO_TYPE>(                                                                             \
+                ptr<FROM_TYPE>(), result.ptr<TO_TYPE>(), numel(), 0);                                                                        \
+            CHECK_CUDA(cudaDeviceSynchronize());                                                                                             \
+            return result;                                                                                                                   \
+        }                                                                                                                                    \
+        /* CPU fallback */                                                                                                                   \
+        const FROM_TYPE* src = ptr<FROM_TYPE>();                                                                                             \
+        TO_TYPE* dst = result.ptr<TO_TYPE>();                                                                                                \
+        for (size_t i = 0; i < numel(); ++i) {                                                                                               \
+            if constexpr (std::is_same_v<FROM_TYPE, float> && std::is_same_v<TO_TYPE, uint8_t>) {                                            \
+                dst[i] = static_cast<uint8_t>(std::round(std::clamp(static_cast<float>(src[i]), 0.0f, 255.0f)));                             \
+            } else if constexpr (std::is_same_v<FROM_TYPE, int> && std::is_same_v<TO_TYPE, uint8_t>) {                                       \
+                dst[i] = static_cast<uint8_t>(std::clamp(static_cast<int>(src[i]), 0, 255));                                                 \
+            } else if constexpr (std::is_same_v<FROM_TYPE, int64_t> && std::is_same_v<TO_TYPE, uint8_t>) {                                   \
+                dst[i] = static_cast<uint8_t>(std::clamp(static_cast<int64_t>(src[i]), static_cast<int64_t>(0), static_cast<int64_t>(255))); \
+            } else {                                                                                                                         \
+                dst[i] = static_cast<TO_TYPE>(src[i]);                                                                                       \
+            }                                                                                                                                \
+        }                                                                                                                                    \
+        return result;                                                                                                                       \
+    }
+
+        // Bool <-> Float32 (manual - can't use launch_convert_type due to uint8_t conflict)
+        if (dtype_ == DataType::Bool && dtype == DataType::Float32) {
+            auto result = empty(shape_, device_, DataType::Float32);
+            if (numel() == 0)
+                return result;
+
+            if (device_ == Device::CUDA) {
+                // Use generic conversion (unsigned char -> float)
+                tensor_ops::launch_convert_type<unsigned char, float>(
+                    ptr<unsigned char>(), result.ptr<float>(), numel(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                const unsigned char* src = ptr<unsigned char>();
+                float* dst = result.ptr<float>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = static_cast<float>(src[i]);
+                }
+            }
+            return result;
+        }
+
+        if (dtype_ == DataType::Float32 && dtype == DataType::Bool) {
+            auto result = empty(shape_, device_, DataType::Bool);
+            if (numel() == 0)
+                return result;
+
+            if (device_ == Device::CUDA) {
+                // Can't use launch_convert_type - need custom != 0 logic
+                auto result_cpu = empty(shape_, Device::CPU, DataType::Bool);
+                std::vector<float> temp(numel());
+                CHECK_CUDA(cudaMemcpy(temp.data(), ptr<float>(), bytes(), cudaMemcpyDeviceToHost));
+
+                unsigned char* dst_cpu = result_cpu.ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst_cpu[i] = (temp[i] != 0.0f) ? 1 : 0;
+                }
+
+                CHECK_CUDA(cudaMemcpy(result.ptr<unsigned char>(), dst_cpu, numel(), cudaMemcpyHostToDevice));
+            } else {
+                const float* src = ptr<float>();
+                unsigned char* dst = result.ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = (src[i] != 0.0f) ? 1 : 0;
+                }
+            }
+            return result;
+        }
+
+        // Float32 <-> Int32
+        CONVERT_DTYPE_CUDA(float, int, DataType::Float32, DataType::Int32)
+        CONVERT_DTYPE_CUDA(int, float, DataType::Int32, DataType::Float32)
+
+        // UInt8 conversions
+        CONVERT_DTYPE_CUDA(float, uint8_t, DataType::Float32, DataType::UInt8)
+        CONVERT_DTYPE_CUDA(uint8_t, float, DataType::UInt8, DataType::Float32)
+        CONVERT_DTYPE_CUDA(int, uint8_t, DataType::Int32, DataType::UInt8)
+        CONVERT_DTYPE_CUDA(uint8_t, int, DataType::UInt8, DataType::Int32)
+
+        // Bool <-> UInt8: Same underlying type (unsigned char), just clone
+        if (dtype_ == DataType::Bool && dtype == DataType::UInt8) {
+            return clone();
+        }
+        if (dtype_ == DataType::UInt8 && dtype == DataType::Bool) {
+            return clone();
+        }
+
+        CONVERT_DTYPE_CUDA(int64_t, uint8_t, DataType::Int64, DataType::UInt8)
+        CONVERT_DTYPE_CUDA(uint8_t, int64_t, DataType::UInt8, DataType::Int64)
+
+        // Int64 conversions
+        CONVERT_DTYPE_CUDA(int64_t, float, DataType::Int64, DataType::Float32)
+        CONVERT_DTYPE_CUDA(float, int64_t, DataType::Float32, DataType::Int64)
+        CONVERT_DTYPE_CUDA(int, int64_t, DataType::Int32, DataType::Int64)
+        CONVERT_DTYPE_CUDA(int64_t, int, DataType::Int64, DataType::Int32)
+
+#undef CONVERT_DTYPE_CUDA
+
+        LOG_ERROR("Type conversion from {} to {} not implemented",
+                  dtype_name(dtype_), dtype_name(dtype));
         return Tensor();
     }
-
-    if (dtype_ == dtype) {
-        return clone();
-    }
-
-    // If not contiguous, materialize first
-    if (!is_contiguous_) {
-        return contiguous().to(dtype);
-    }
-
-    // Macro for type conversions using launch_convert_type
-    #define CONVERT_DTYPE_CUDA(FROM_TYPE, TO_TYPE, FROM_DTYPE, TO_DTYPE) \
-        if (dtype_ == FROM_DTYPE && dtype == TO_DTYPE) { \
-            auto result = empty(shape_, device_, TO_DTYPE); \
-            if (numel() == 0) return result; \
-            if (device_ == Device::CUDA) { \
-                tensor_ops::launch_convert_type<FROM_TYPE, TO_TYPE>( \
-                    ptr<FROM_TYPE>(), result.ptr<TO_TYPE>(), numel(), 0); \
-                CHECK_CUDA(cudaDeviceSynchronize()); \
-                return result; \
-            } \
-            /* CPU fallback */ \
-            const FROM_TYPE* src = ptr<FROM_TYPE>(); \
-            TO_TYPE* dst = result.ptr<TO_TYPE>(); \
-            for (size_t i = 0; i < numel(); ++i) { \
-                if constexpr (std::is_same_v<FROM_TYPE, float> && std::is_same_v<TO_TYPE, uint8_t>) { \
-                    dst[i] = static_cast<uint8_t>(std::round(std::clamp(static_cast<float>(src[i]), 0.0f, 255.0f))); \
-                } else if constexpr (std::is_same_v<FROM_TYPE, int> && std::is_same_v<TO_TYPE, uint8_t>) { \
-                    dst[i] = static_cast<uint8_t>(std::clamp(static_cast<int>(src[i]), 0, 255)); \
-                } else if constexpr (std::is_same_v<FROM_TYPE, int64_t> && std::is_same_v<TO_TYPE, uint8_t>) { \
-                    dst[i] = static_cast<uint8_t>(std::clamp(static_cast<int64_t>(src[i]), static_cast<int64_t>(0), static_cast<int64_t>(255))); \
-                } else { \
-                    dst[i] = static_cast<TO_TYPE>(src[i]); \
-                } \
-            } \
-            return result; \
-        }
-
-    // Bool <-> Float32 (manual - can't use launch_convert_type due to uint8_t conflict)
-    if (dtype_ == DataType::Bool && dtype == DataType::Float32) {
-        auto result = empty(shape_, device_, DataType::Float32);
-        if (numel() == 0) return result;
-
-        if (device_ == Device::CUDA) {
-            // Use generic conversion (unsigned char -> float)
-            tensor_ops::launch_convert_type<unsigned char, float>(
-                ptr<unsigned char>(), result.ptr<float>(), numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
-        } else {
-            const unsigned char* src = ptr<unsigned char>();
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = static_cast<float>(src[i]);
-            }
-        }
-        return result;
-    }
-
-    if (dtype_ == DataType::Float32 && dtype == DataType::Bool) {
-        auto result = empty(shape_, device_, DataType::Bool);
-        if (numel() == 0) return result;
-
-        if (device_ == Device::CUDA) {
-            // Can't use launch_convert_type - need custom != 0 logic
-            auto result_cpu = empty(shape_, Device::CPU, DataType::Bool);
-            std::vector<float> temp(numel());
-            CHECK_CUDA(cudaMemcpy(temp.data(), ptr<float>(), bytes(), cudaMemcpyDeviceToHost));
-
-            unsigned char* dst_cpu = result_cpu.ptr<unsigned char>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst_cpu[i] = (temp[i] != 0.0f) ? 1 : 0;
-            }
-
-            CHECK_CUDA(cudaMemcpy(result.ptr<unsigned char>(), dst_cpu, numel(), cudaMemcpyHostToDevice));
-        } else {
-            const float* src = ptr<float>();
-            unsigned char* dst = result.ptr<unsigned char>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = (src[i] != 0.0f) ? 1 : 0;
-            }
-        }
-        return result;
-    }
-
-    // Float32 <-> Int32
-    CONVERT_DTYPE_CUDA(float, int, DataType::Float32, DataType::Int32)
-    CONVERT_DTYPE_CUDA(int, float, DataType::Int32, DataType::Float32)
-
-    // UInt8 conversions
-    CONVERT_DTYPE_CUDA(float, uint8_t, DataType::Float32, DataType::UInt8)
-    CONVERT_DTYPE_CUDA(uint8_t, float, DataType::UInt8, DataType::Float32)
-    CONVERT_DTYPE_CUDA(int, uint8_t, DataType::Int32, DataType::UInt8)
-    CONVERT_DTYPE_CUDA(uint8_t, int, DataType::UInt8, DataType::Int32)
-
-    // Bool <-> UInt8: Same underlying type (unsigned char), just clone
-    if (dtype_ == DataType::Bool && dtype == DataType::UInt8) {
-        return clone();
-    }
-    if (dtype_ == DataType::UInt8 && dtype == DataType::Bool) {
-        return clone();
-    }
-
-    CONVERT_DTYPE_CUDA(int64_t, uint8_t, DataType::Int64, DataType::UInt8)
-    CONVERT_DTYPE_CUDA(uint8_t, int64_t, DataType::UInt8, DataType::Int64)
-
-    // Int64 conversions
-    CONVERT_DTYPE_CUDA(int64_t, float, DataType::Int64, DataType::Float32)
-    CONVERT_DTYPE_CUDA(float, int64_t, DataType::Float32, DataType::Int64)
-    CONVERT_DTYPE_CUDA(int, int64_t, DataType::Int32, DataType::Int64)
-    CONVERT_DTYPE_CUDA(int64_t, int, DataType::Int64, DataType::Int32)
-
-    #undef CONVERT_DTYPE_CUDA
-
-    LOG_ERROR("Type conversion from {} to {} not implemented",
-              dtype_name(dtype_), dtype_name(dtype));
-    return Tensor();
-}
-
 
     // ============= In-place Operations =============
 
@@ -1014,7 +1018,8 @@ namespace gs {
     }
 
     void Tensor::print_1d(size_t max_elem) const {
-        if (!is_valid()) return;
+        if (!is_valid())
+            return;
 
         auto values = debug_values(std::min(max_elem, numel()));
         std::print("  [");
@@ -1198,7 +1203,6 @@ namespace gs {
 
         return result;
     }
-
 
     std::vector<int64_t> Tensor::to_vector_int64() const {
         LOG_DEBUG("to_vector_int64() called");

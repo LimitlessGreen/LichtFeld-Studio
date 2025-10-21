@@ -11,8 +11,10 @@ using namespace gs;
 // ============================================================================
 
 bool tensors_equal(const Tensor& a, const Tensor& b, float tol = 1e-5f) {
-    if (a.shape() != b.shape()) return false;
-    if (a.device() != b.device()) return false;
+    if (a.shape() != b.shape())
+        return false;
+    if (a.device() != b.device())
+        return false;
 
     auto a_cpu = a.cpu();
     auto b_cpu = b.cpu();
@@ -355,7 +357,7 @@ TEST(ExpressionTemplates, ImplicitConversion) {
         leaf, ops::exp_op{}, x.shape(), x.device(), x.dtype());
 
     // Implicit conversion through assignment
-    Tensor result = expr;  // Calls operator Tensor()
+    Tensor result = expr; // Calls operator Tensor()
     Tensor expected = x.exp();
 
     EXPECT_TRUE(tensors_equal(result, expected));

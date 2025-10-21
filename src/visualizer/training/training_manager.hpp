@@ -4,8 +4,8 @@
 
 #pragma once
 
-#include "trainer.hpp"
 #include "core/camera_new.hpp"
+#include "trainer.hpp"
 #include <atomic>
 #include <deque>
 #include <memory>

@@ -2,15 +2,15 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "kernels/kmeans_new.cuh"
 #include "core/tensor.hpp"
+#include "kernels/kmeans_new.cuh"
 #include <cuda_runtime.h>
+#include <curand_kernel.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
 #include <thrust/gather.h>
-#include <thrust/sort.h>
 #include <thrust/sequence.h>
-#include <curand_kernel.h>
+#include <thrust/sort.h>
 
 namespace gs {
     namespace cuda {
@@ -157,7 +157,7 @@ namespace gs {
                     auto cumsum = probs.cumsum(0);
                     float rand_val = Tensor::rand({1}, Device::CUDA).item();
                     auto ge_mask = cumsum.ge(rand_val);
-                    auto indices = ge_mask.nonzero();  // Returns [count, 1] for 1D input
+                    auto indices = ge_mask.nonzero(); // Returns [count, 1] for 1D input
 
                     if (indices.numel() == 0) {
                         // Fallback: if no index found (shouldn't happen), pick randomly
@@ -278,7 +278,6 @@ namespace gs {
             return {centroids, labels};
         }
 
-
         std::tuple<Tensor, Tensor> kmeans_1d_new(
             const Tensor& data,
             int k,
@@ -287,7 +286,7 @@ namespace gs {
             // Reshape to [N, 1] properly
             Tensor data_2d;
             if (data.ndim() == 1) {
-                data_2d = data.unsqueeze(1);  // [N] -> [N, 1]
+                data_2d = data.unsqueeze(1); // [N] -> [N, 1]
             } else if (data.ndim() == 2 && data.shape()[1] == 1) {
                 data_2d = data.clone();
             } else {
@@ -323,7 +322,7 @@ namespace gs {
 
             for (int iter = 0; iter < iterations; ++iter) {
                 // Sort centroids for efficient 1D assignment
-                auto centroids_1d = centroids.squeeze();  // [k, 1] -> [k]
+                auto centroids_1d = centroids.squeeze(); // [k, 1] -> [k]
                 auto sort_result = centroids_1d.sort(0);
                 auto sorted_centroids = std::get<0>(sort_result);
                 auto sort_idx = std::get<1>(sort_result);
@@ -346,7 +345,7 @@ namespace gs {
                 // OPTIMIZATION: Update centroids using parallel GPU kernel instead of slow CPU loop
                 // This eliminates k GPU->CPU syncs and processes all clusters in parallel
                 auto counts = Tensor::zeros({static_cast<size_t>(k)}, Device::CUDA, DataType::Int32);
-                dim3 block(1, 1);  // 1D data, only need 1 thread per cluster
+                dim3 block(1, 1); // 1D data, only need 1 thread per cluster
                 dim3 grid(k, 1);
 
                 update_centroids_kernel<<<grid, block>>>(
@@ -354,7 +353,7 @@ namespace gs {
                     labels.ptr<int>(),
                     centroids.ptr<float>(),
                     counts.ptr<int>(),
-                    n, k, 1);  // n_dims = 1 for 1D data
+                    n, k, 1); // n_dims = 1 for 1D data
 
                 err = cudaGetLastError();
                 if (err != cudaSuccess) {

@@ -95,11 +95,11 @@ namespace gs {
         // ZERO-COPY PERMUTE: Create a view with permuted dimensions and strides
         Tensor view;
         view.data_ = data_;
-        view.data_owner_ = data_owner_;  // Share ownership
+        view.data_owner_ = data_owner_; // Share ownership
         view.device_ = device_;
         view.dtype_ = dtype_;
         view.is_view_ = true;
-        view.id_ = profiling_enabled_ ? next_id_++ : 0;  // Only increment ID when profiling
+        view.id_ = profiling_enabled_ ? next_id_++ : 0; // Only increment ID when profiling
         view.storage_offset_ = storage_offset_;
 
         // Permute shape and strides together (single allocation, single loop)
@@ -239,12 +239,12 @@ namespace gs {
         // ZERO-COPY SLICE: Adjust offset and shape - NO DATA COPYING!
         Tensor view;
         view.data_ = data_;
-        view.data_owner_ = data_owner_;  // Share ownership
-        view.strides_ = strides_;  // Keep same strides
+        view.data_owner_ = data_owner_; // Share ownership
+        view.strides_ = strides_;       // Keep same strides
         view.device_ = device_;
         view.dtype_ = dtype_;
         view.is_view_ = true;
-        view.id_ = profiling_enabled_ ? next_id_++ : 0;  // Only increment ID when profiling
+        view.id_ = profiling_enabled_ ? next_id_++ : 0; // Only increment ID when profiling
 
         // Adjust offset to point to slice start (in elements)
         view.storage_offset_ = storage_offset_ + start * strides_[dim];

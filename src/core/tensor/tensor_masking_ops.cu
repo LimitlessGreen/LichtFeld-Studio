@@ -121,21 +121,21 @@ namespace gs::tensor_ops {
         auto a_ptr = thrust::device_pointer_cast(a);
         auto r_ptr = thrust::device_pointer_cast(r);
         thrust::transform(thrust::cuda::par.on(s), a_ptr, a_ptr + n, r_ptr,
-                         ops::equal_scalar_op<float>(val));
+                          ops::equal_scalar_op<float>(val));
     }
 
     void launch_compare_scalar_lt(const float* a, float val, unsigned char* r, size_t n, cudaStream_t s) {
         auto a_ptr = thrust::device_pointer_cast(a);
         auto r_ptr = thrust::device_pointer_cast(r);
         thrust::transform(thrust::cuda::par.on(s), a_ptr, a_ptr + n, r_ptr,
-                         ops::less_scalar_op<float>(val));
+                          ops::less_scalar_op<float>(val));
     }
 
     void launch_compare_scalar_gt(const float* a, float val, unsigned char* r, size_t n, cudaStream_t s) {
         auto a_ptr = thrust::device_pointer_cast(a);
         auto r_ptr = thrust::device_pointer_cast(r);
         thrust::transform(thrust::cuda::par.on(s), a_ptr, a_ptr + n, r_ptr,
-                         ops::greater_scalar_op<float>(val));
+                          ops::greater_scalar_op<float>(val));
     }
 
     // ============= Logical Operation Kernels (with broadcasting) =============
@@ -206,7 +206,7 @@ namespace gs::tensor_ops {
         auto a_ptr = thrust::device_pointer_cast(a);
         auto r_ptr = thrust::device_pointer_cast(r);
         thrust::transform(thrust::cuda::par.on(s), a_ptr, a_ptr + n, r_ptr,
-                         ops::logical_not_op());
+                          ops::logical_not_op());
     }
 
     // ============= Launch Functions for Comparison/Logical Ops =============
@@ -337,7 +337,7 @@ namespace gs::tensor_ops {
         auto begin = thrust::make_zip_iterator(thrust::make_tuple(data_ptr, mask_ptr));
         auto end = thrust::make_zip_iterator(thrust::make_tuple(data_ptr + n, mask_ptr + n));
         thrust::transform(thrust::cuda::par.on(s), begin, end, data_ptr,
-                         ops::masked_fill_op<float>(val));
+                          ops::masked_fill_op<float>(val));
     }
 
     void launch_masked_select(const float* input, const unsigned char* mask,
@@ -357,7 +357,7 @@ namespace gs::tensor_ops {
         auto mask_begin = thrust::make_transform_iterator(begin, ops::extract_mask_op());
 
         thrust::copy_if(thrust::cuda::par.on(stream),
-            transform_begin, transform_end, mask_begin, output_ptr, thrust::identity<bool>());
+                        transform_begin, transform_end, mask_begin, output_ptr, thrust::identity<bool>());
     }
 
     __global__ void masked_scatter_compact_kernel(float* data, const unsigned char* mask,
@@ -479,7 +479,8 @@ namespace gs::tensor_ops {
                                         size_t idx_size, int boundary) {
         size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
         size_t total = outer * idx_size * inner;
-        if (tid >= total) return;
+        if (tid >= total)
+            return;
 
         size_t o = tid / (idx_size * inner);
         size_t i = (tid / inner) % idx_size;
@@ -502,8 +503,10 @@ namespace gs::tensor_ops {
                              const size_t* shape, size_t rank, int dim,
                              size_t idx_size, int boundary, cudaStream_t stream) {
         size_t outer = 1, inner = 1;
-        for (int i = 0; i < dim; ++i) outer *= shape[i];
-        for (size_t i = dim + 1; i < rank; ++i) inner *= shape[i];
+        for (int i = 0; i < dim; ++i)
+            outer *= shape[i];
+        for (size_t i = dim + 1; i < rank; ++i)
+            inner *= shape[i];
         size_t total = outer * idx_size * inner;
         index_select_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
             in, idx, out, outer, shape[dim], inner, idx_size, boundary);
@@ -513,7 +516,8 @@ namespace gs::tensor_ops {
                                   const size_t* in_shape, const size_t* idx_shape,
                                   size_t in_rank, size_t idx_rank, int dim, size_t total, int boundary) {
         size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-        if (tid >= total) return;
+        if (tid >= total)
+            return;
 
         size_t in_strides[10];
         in_strides[in_rank - 1] = 1;
@@ -600,7 +604,8 @@ namespace gs::tensor_ops {
             }
         }
 
-        if (idx_rank == 0) idx_rank = 1;
+        if (idx_rank == 0)
+            idx_rank = 1;
 
         for (size_t i = 0; i < rank; ++i) {
             h_in_shape[i] = in_shape[i];
@@ -623,32 +628,32 @@ namespace gs::tensor_ops {
         auto transform_idx = thrust::make_transform_iterator(idx_ptr,
                                                              ops::index_clamp_op(in_size));
         thrust::gather(thrust::cuda::par.on(stream), transform_idx, transform_idx + out_size,
-                      in_ptr, out_ptr);
+                       in_ptr, out_ptr);
     }
 
     // ============= OPTIMIZED: Fused Gather + Unary Operation =============
     // This uses thrust::permutation_iterator for ZERO-COPY gather combined with
     // thrust::transform for fusion - inspired by NVIDIA's parrot library
-    template<typename UnaryOp>
+    template <typename UnaryOp>
     void launch_gather_fused_unary(const float* in, const int* idx, float* out,
-                                    size_t in_size, size_t out_size,
-                                    UnaryOp op, cudaStream_t stream) {
+                                   size_t in_size, size_t out_size,
+                                   UnaryOp op, cudaStream_t stream) {
         auto in_ptr = thrust::device_pointer_cast(in);
         auto idx_ptr = thrust::device_pointer_cast(idx);
         auto out_ptr = thrust::device_pointer_cast(out);
 
         // Clamp indices to valid range
         auto clamped_idx = thrust::make_transform_iterator(idx_ptr,
-                                                            ops::index_clamp_op(in_size));
+                                                           ops::index_clamp_op(in_size));
 
         // Create zero-copy permutation view: applies gather WITHOUT materializing
         auto permuted_view = thrust::make_permutation_iterator(in_ptr, clamped_idx);
 
         // Single fused kernel: gather + unary operation!
         thrust::transform(thrust::cuda::par.on(stream),
-                         permuted_view, permuted_view + out_size,
-                         out_ptr,
-                         op);
+                          permuted_view, permuted_view + out_size,
+                          out_ptr,
+                          op);
     }
 
     __global__ void scatter_kernel(float* out, const int* idx, const float* in,
@@ -656,14 +661,16 @@ namespace gs::tensor_ops {
                                    size_t idx_sz, int mode) {
         size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
         size_t n = outer * idx_sz * inner;
-        if (tid >= n) return;
+        if (tid >= n)
+            return;
 
         size_t outer_idx = tid / (idx_sz * inner);
         size_t idx_pos = (tid / inner) % idx_sz;
         size_t inner_idx = tid % inner;
 
         int scatter_idx = idx[idx_pos];
-        if (scatter_idx < 0 || scatter_idx >= dim_sz) return;
+        if (scatter_idx < 0 || scatter_idx >= dim_sz)
+            return;
 
         size_t dst_idx = outer_idx * dim_sz * inner + scatter_idx * inner + inner_idx;
 
@@ -678,8 +685,10 @@ namespace gs::tensor_ops {
                         const size_t* out_shape, const size_t* in_shape,
                         size_t rank, int dim, size_t total, int mode, cudaStream_t stream) {
         size_t outer = 1, inner = 1;
-        for (int i = 0; i < dim; ++i) outer *= out_shape[i];
-        for (size_t i = dim + 1; i < rank; ++i) inner *= out_shape[i];
+        for (int i = 0; i < dim; ++i)
+            outer *= out_shape[i];
+        for (size_t i = dim + 1; i < rank; ++i)
+            inner *= out_shape[i];
         scatter_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
             out, idx, in, outer, out_shape[dim], inner, in_shape[dim], mode);
     }
@@ -723,26 +732,28 @@ namespace gs::tensor_ops {
         auto transform_idx = thrust::make_transform_iterator(idx_ptr,
                                                              ops::index_clamp_op(data_size));
         thrust::scatter(thrust::cuda::par.on(stream), vals_ptr, vals_ptr + idx_size,
-                       transform_idx, data_ptr);
+                        transform_idx, data_ptr);
     }
 
     // ============= Nonzero Operations =============
     void launch_nonzero(const float* data, int64_t* indices, size_t n, size_t output_size, cudaStream_t stream) {
-        if (n == 0 || output_size == 0) return;
+        if (n == 0 || output_size == 0)
+            return;
         auto data_ptr = thrust::device_pointer_cast(data);
         auto indices_ptr = thrust::device_pointer_cast(indices);
         auto counting = thrust::counting_iterator<int64_t>(0);
         thrust::copy_if(thrust::cuda::par.on(stream), counting, counting + n, data_ptr,
-                       indices_ptr, ops::nonzero_predicate<float>());
+                        indices_ptr, ops::nonzero_predicate<float>());
     }
 
     void launch_nonzero_bool(const unsigned char* data, int64_t* indices, size_t n, size_t output_size, cudaStream_t stream) {
-        if (n == 0 || output_size == 0) return;
+        if (n == 0 || output_size == 0)
+            return;
         auto data_ptr = thrust::device_pointer_cast(data);
         auto indices_ptr = thrust::device_pointer_cast(indices);
         auto counting = thrust::counting_iterator<int64_t>(0);
         thrust::copy_if(thrust::cuda::par.on(stream), counting, counting + n, data_ptr,
-                       indices_ptr, ops::nonzero_bool_predicate());
+                        indices_ptr, ops::nonzero_bool_predicate());
     }
 
     // ============= Multi-Tensor Gather (Zip Gather) =============
@@ -763,25 +774,23 @@ namespace gs::tensor_ops {
 
         // Clamp indices to valid range
         auto clamped_idx = thrust::make_transform_iterator(idx_ptr,
-                                                            ops::index_clamp_op(input_size));
+                                                           ops::index_clamp_op(input_size));
 
         // Create zip iterator for inputs - combines two sequences
         auto zipped_input = thrust::make_zip_iterator(
-            thrust::make_tuple(in1_ptr, in2_ptr)
-        );
+            thrust::make_tuple(in1_ptr, in2_ptr));
 
         // Create permutation iterator - applies gather lazily
         auto permuted = thrust::make_permutation_iterator(zipped_input, clamped_idx);
 
         // Create zip iterator for outputs
         auto zipped_output = thrust::make_zip_iterator(
-            thrust::make_tuple(out1_ptr, out2_ptr)
-        );
+            thrust::make_tuple(out1_ptr, out2_ptr));
 
         // Single gather operation copies both tensors!
         thrust::copy(thrust::cuda::par.on(stream),
-                    permuted, permuted + index_size,
-                    zipped_output);
+                     permuted, permuted + index_size,
+                     zipped_output);
     }
 
     void launch_zip_gather_3(const float* input1, const float* input2, const float* input3,
@@ -800,25 +809,23 @@ namespace gs::tensor_ops {
 
         // Clamp indices
         auto clamped_idx = thrust::make_transform_iterator(idx_ptr,
-                                                            ops::index_clamp_op(input_size));
+                                                           ops::index_clamp_op(input_size));
 
         // Zip three input sequences
         auto zipped_input = thrust::make_zip_iterator(
-            thrust::make_tuple(in1_ptr, in2_ptr, in3_ptr)
-        );
+            thrust::make_tuple(in1_ptr, in2_ptr, in3_ptr));
 
         // Permuted gather view
         auto permuted = thrust::make_permutation_iterator(zipped_input, clamped_idx);
 
         // Zip three output sequences
         auto zipped_output = thrust::make_zip_iterator(
-            thrust::make_tuple(out1_ptr, out2_ptr, out3_ptr)
-        );
+            thrust::make_tuple(out1_ptr, out2_ptr, out3_ptr));
 
         // Single gather for all three tensors!
         thrust::copy(thrust::cuda::par.on(stream),
-                    permuted, permuted + index_size,
-                    zipped_output);
+                     permuted, permuted + index_size,
+                     zipped_output);
     }
 
     // ============= Explicit Instantiations for Fused Gather =============

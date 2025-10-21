@@ -32,7 +32,7 @@ namespace gs::loader {
 
         // Normalize quaternion
         float len = std::sqrt(q_raw[0] * q_raw[0] + q_raw[1] * q_raw[1] +
-                             q_raw[2] * q_raw[2] + q_raw[3] * q_raw[3]);
+                              q_raw[2] * q_raw[2] + q_raw[3] * q_raw[3]);
         if (len < 1e-8f) {
             LOG_ERROR("Quaternion has zero length");
             throw std::runtime_error("Zero-length quaternion");
@@ -582,9 +582,9 @@ namespace gs::loader {
     // -----------------------------------------------------------------------------
     std::tuple<std::vector<std::shared_ptr<CameraNew>>, Tensor>
     assemble_colmap_cameras(const std::filesystem::path& base_path,
-                           const std::unordered_map<uint32_t, CameraDataIntermediate>& cam_map,
-                           const std::vector<ImageData>& images,
-                           const std::string& images_folder) {
+                            const std::unordered_map<uint32_t, CameraDataIntermediate>& cam_map,
+                            const std::vector<ImageData>& images,
+                            const std::string& images_folder) {
 
         LOG_TIMER_TRACE("Assemble COLMAP cameras");
 
@@ -826,7 +826,7 @@ namespace gs::loader {
 
     std::tuple<std::vector<std::shared_ptr<CameraNew>>, Tensor>
     read_colmap_cameras_and_images_text(const std::filesystem::path& base,
-                                       const std::string& images_folder) {
+                                        const std::string& images_folder) {
 
         LOG_TIMER_TRACE("Read COLMAP cameras and images (text)");
 

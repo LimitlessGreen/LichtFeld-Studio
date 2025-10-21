@@ -334,10 +334,10 @@ namespace gs::loader {
             __cpuid(cpuInfo, 7);
             has_avx2 = (cpuInfo[1] & (1 << 5)) != 0;
 #elif defined(__GNUC__) || defined(__clang__)
-            __builtin_cpu_init();
-            has_avx2 = __builtin_cpu_supports("avx2");
+                __builtin_cpu_init();
+                has_avx2 = __builtin_cpu_supports("avx2");
 #else
-            has_avx2 = false;
+                has_avx2 = false;
 #endif
         });
 
@@ -360,7 +360,7 @@ namespace gs::loader {
 #ifdef _MSC_VER
                                       _mm_prefetch((const char*)(vertex_data + (i + 16) * stride), _MM_HINT_T0);
 #elif defined(__GNUC__) || defined(__clang__)
-                                      __builtin_prefetch(vertex_data + (i + 16) * stride, 0, 1);
+                        __builtin_prefetch(vertex_data + (i + 16) * stride, 0, 1);
 #endif
 
                                       __m256 x_vals = _mm256_set_ps(

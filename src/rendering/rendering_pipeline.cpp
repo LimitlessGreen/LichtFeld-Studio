@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "rendering_pipeline.hpp"
-#include "gs_rasterizer_tensor.hpp"
 #include "core/camera_new.hpp"
 #include "core/camera_ref.hpp"
 #include "core/splat_data_new.hpp"
+#include "gs_rasterizer_tensor.hpp"
 
 #include <cstring>
 #include <print>
@@ -53,8 +53,7 @@ namespace gs::rendering {
             float bg_values[3] = {
                 request.background_color.r,
                 request.background_color.g,
-                request.background_color.b
-            };
+                request.background_color.b};
             cudaMemcpy(bg_data, bg_values, 3 * sizeof(float), cudaMemcpyHostToDevice);
         }
 
@@ -207,7 +206,8 @@ namespace gs::rendering {
                 LOG_DEBUG("Initializing CUDA-GL FBO interop texture");
                 fbo_interop_texture_.emplace();
                 if (auto init_result = fbo_interop_texture_->initForReading(
-                        persistent_color_texture_, width, height); !init_result) {
+                        persistent_color_texture_, width, height);
+                    !init_result) {
                     LOG_WARN("Failed to initialize FBO interop: {}", init_result.error());
                     LOG_INFO("Falling back to PBO readback mode");
                     use_fbo_interop_ = false;
@@ -271,10 +271,8 @@ namespace gs::rendering {
 
             // Create tensor from the pixel data
             // OPTIMIZATION: No CPU flip needed! Image is already pre-flipped by projection matrix
-            auto image_cpu = Tensor::from_vector(pixels, {static_cast<size_t>(height),
-                                                          static_cast<size_t>(width),
-                                                          3},
-                                                Device::CPU);
+            auto image_cpu = Tensor::from_vector(pixels, {static_cast<size_t>(height), static_cast<size_t>(width), 3},
+                                                 Device::CPU);
 
             // Convert to CHW format and move to CUDA
             {
@@ -336,16 +334,14 @@ namespace gs::rendering {
         std::vector<float> R_data = {
             request.view_rotation[0][0], request.view_rotation[1][0], request.view_rotation[2][0],
             request.view_rotation[0][1], request.view_rotation[1][1], request.view_rotation[2][1],
-            request.view_rotation[0][2], request.view_rotation[1][2], request.view_rotation[2][2]
-        };
+            request.view_rotation[0][2], request.view_rotation[1][2], request.view_rotation[2][2]};
 
         auto R_tensor = Tensor::from_vector(R_data, {3, 3}, Device::CPU);
 
         std::vector<float> t_data = {
             request.view_translation[0],
             request.view_translation[1],
-            request.view_translation[2]
-        };
+            request.view_translation[2]};
 
         auto t_tensor = Tensor::from_vector(t_data, {3, 1}, Device::CPU);
 
@@ -400,7 +396,7 @@ namespace gs::rendering {
         // Need to create or resize - cleanup old resources first
         if (persistent_fbo_ != 0) {
             LOG_DEBUG("Resizing persistent FBO from {}x{} to {}x{}",
-                     persistent_fbo_width_, persistent_fbo_height_, width, height);
+                      persistent_fbo_width_, persistent_fbo_height_, width, height);
             cleanupFBO();
         } else {
             LOG_DEBUG("Creating persistent FBO with size {}x{}", width, height);
@@ -421,17 +417,17 @@ namespace gs::rendering {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                              persistent_color_texture_, 0);
+                               persistent_color_texture_, 0);
 
         // Create depth texture
         glGenTextures(1, &persistent_depth_texture_);
         glBindTexture(GL_TEXTURE_2D, persistent_depth_texture_);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, width, height,
-                    0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+                     0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
-                              persistent_depth_texture_, 0);
+                               persistent_depth_texture_, 0);
 
         // Verify framebuffer is complete
         GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
@@ -473,7 +469,7 @@ namespace gs::rendering {
         // Need to create or resize - cleanup old resources first
         if (pbo_[0] != 0) {
             LOG_DEBUG("Resizing PBOs from {}x{} to {}x{}",
-                     pbo_width_, pbo_height_, width, height);
+                      pbo_width_, pbo_height_, width, height);
             cleanupPBO();
         } else {
             LOG_DEBUG("Creating PBOs with size {}x{}", width, height);

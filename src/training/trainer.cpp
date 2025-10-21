@@ -5,8 +5,8 @@
 #include "trainer.hpp"
 #include "components/bilateral_grid.hpp"
 #include "components/poseopt.hpp"
-#include "core/events.hpp"
 #include "components/sparsity_optimizer.hpp"
+#include "core/events.hpp"
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
 #include "kernels/ssim.cuh"
@@ -1080,7 +1080,7 @@ namespace gs::training {
                             std::filesystem::create_directories(output_path);
 
                             // TODO: fix this!
-                            //image_io::save_image_async(output_path / std::format("{:06d}.jpg", iter),
+                            // image_io::save_image_async(output_path / std::format("{:06d}.jpg", iter),
                             //                           image_tensor);
 
                             check_memory("after timelapse save");
@@ -1170,9 +1170,9 @@ namespace gs::training {
 
             if (progress_) {
                 int model_size = strategy_ ? static_cast<int>(strategy_->get_model().size())
-                                            : static_cast<int>(strategy_new_->get_model().size());
+                                           : static_cast<int>(strategy_new_->get_model().size());
                 bool is_refining = strategy_ ? strategy_->is_refining(iter)
-                                              : strategy_new_->is_refining(iter);
+                                             : strategy_new_->is_refining(iter);
                 progress_->update(iter, current_loss_.load(), model_size, is_refining);
             }
 
@@ -1199,7 +1199,7 @@ namespace gs::training {
                 auto batch = std::move(*loader_iter);
                 auto& camera_with_image = batch[0];
                 // TODO: fix this!
-                Camera* cam;// = camera_with_image.camera;
+                Camera* cam; // = camera_with_image.camera;
 
                 // Get raw image pointer and dimensions
                 const float* gt_image_ptr = camera_with_image.image_data();
@@ -1273,7 +1273,7 @@ namespace gs::training {
             evaluator_->save_report();
             if (progress_) {
                 int final_model_size = strategy_ ? static_cast<int>(strategy_->get_model().size())
-                                                  : static_cast<int>(strategy_new_->get_model().size());
+                                                 : static_cast<int>(strategy_new_->get_model().size());
                 progress_->print_final_summary(final_model_size);
             }
 

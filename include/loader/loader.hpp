@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/tensor.hpp"
 #include <chrono>
 #include <expected>
 #include <filesystem>
@@ -11,7 +12,6 @@
 #include <memory>
 #include <string>
 #include <variant>
-#include "core/tensor.hpp"
 #include <vector>
 
 // Forward declarations only - hide implementation details

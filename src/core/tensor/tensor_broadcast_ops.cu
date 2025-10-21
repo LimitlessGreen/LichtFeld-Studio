@@ -1,10 +1,10 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include "core/logger.hpp"
+#include "core/memory_pool.hpp"
 #include "core/tensor_functors.hpp"
 #include "core/tensor_ops.hpp"
-#include "core/memory_pool.hpp"
-#include "core/logger.hpp"
 #include <cuda_runtime.h>
 #include <thrust/copy.h>
 #include <thrust/device_ptr.h>
@@ -21,7 +21,7 @@ namespace gs::tensor_ops {
     // BROADCASTING INDEX FUNCTOR (for single-array broadcast)
     // ============================================================================
 
-    template<int MaxRank = 8>
+    template <int MaxRank = 8>
     struct broadcast_index_functor {
         int src_rank, dst_rank;
         int src_shape[MaxRank];
@@ -81,12 +81,13 @@ namespace gs::tensor_ops {
     // SINGLE-ARRAY BROADCASTING (Generic) - NOT used by binary ops
     // ============================================================================
 
-    template<typename T>
+    template <typename T>
     void launch_broadcast_generic(const T* src, T* dst,
-                                   const size_t* src_shape, const size_t* dst_shape,
-                                   size_t src_rank, size_t dst_rank,
-                                   size_t dst_elements, cudaStream_t stream) {
-        if (dst_elements == 0) return;
+                                  const size_t* src_shape, const size_t* dst_shape,
+                                  size_t src_rank, size_t dst_rank,
+                                  size_t dst_elements, cudaStream_t stream) {
+        if (dst_elements == 0)
+            return;
 
         std::vector<size_t> src_vec(src_shape, src_shape + src_rank);
         std::vector<size_t> dst_vec(dst_shape, dst_shape + dst_rank);

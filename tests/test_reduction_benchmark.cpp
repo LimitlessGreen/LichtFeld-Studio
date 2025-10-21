@@ -2,10 +2,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
-#include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <chrono>
+#include <gtest/gtest.h>
 #include <iomanip>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -13,46 +13,46 @@ using namespace gs;
 
 namespace {
 
-class Timer {
-private:
-    std::chrono::high_resolution_clock::time_point start_;
+    class Timer {
+    private:
+        std::chrono::high_resolution_clock::time_point start_;
 
-public:
-    Timer() {
-        start_ = std::chrono::high_resolution_clock::now();
-    }
-
-    double elapsed_ms() const {
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
-        return duration.count() / 1000.0;
-    }
-};
-
-struct BenchmarkResult {
-    std::string operation;
-    double custom_ms;
-    double torch_ms;
-    double speedup;
-
-    void print() const {
-        std::cout << std::setw(50) << std::left << operation
-                  << "  Custom: " << std::setw(8) << std::right << std::fixed
-                  << std::setprecision(4) << custom_ms << " ms"
-                  << "  Torch: " << std::setw(8) << torch_ms << " ms"
-                  << "  Speedup: " << std::setw(6) << std::setprecision(2)
-                  << speedup << "x";
-
-        if (speedup < 0.8) {
-            std::cout << " WARNING: SLOWER";
-        } else if (speedup > 1.5) {
-            std::cout << " FASTER";
-        } else {
-            std::cout << " ~ SIMILAR";
+    public:
+        Timer() {
+            start_ = std::chrono::high_resolution_clock::now();
         }
-        std::cout << std::endl;
-    }
-};
+
+        double elapsed_ms() const {
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
+            return duration.count() / 1000.0;
+        }
+    };
+
+    struct BenchmarkResult {
+        std::string operation;
+        double custom_ms;
+        double torch_ms;
+        double speedup;
+
+        void print() const {
+            std::cout << std::setw(50) << std::left << operation
+                      << "  Custom: " << std::setw(8) << std::right << std::fixed
+                      << std::setprecision(4) << custom_ms << " ms"
+                      << "  Torch: " << std::setw(8) << torch_ms << " ms"
+                      << "  Speedup: " << std::setw(6) << std::setprecision(2)
+                      << speedup << "x";
+
+            if (speedup < 0.8) {
+                std::cout << " WARNING: SLOWER";
+            } else if (speedup > 1.5) {
+                std::cout << " FASTER";
+            } else {
+                std::cout << " ~ SIMILAR";
+            }
+            std::cout << std::endl;
+        }
+    };
 
 } // namespace
 
@@ -66,7 +66,8 @@ protected:
     }
 
     void print_separator(const std::string& title = "") {
-        std::cout << "\n" << std::string(110, '=') << std::endl;
+        std::cout << "\n"
+                  << std::string(110, '=') << std::endl;
         if (!title.empty()) {
             std::cout << title << std::endl;
             std::cout << std::string(110, '=') << std::endl;
@@ -80,7 +81,8 @@ TEST_F(ReductionBenchmarkTest, SumReductionSingleDim) {
     print_separator("SUM REDUCTION - Memory Pool Impact");
 
     std::cout << "\nThis tests the Phase 2B optimization (CUB temp storage)" << std::endl;
-    std::cout << "Each reduction allocates CUB temporary buffer (size varies: 100KB-10MB)\n" << std::endl;
+    std::cout << "Each reduction allocates CUB temporary buffer (size varies: 100KB-10MB)\n"
+              << std::endl;
 
     std::vector<std::tuple<std::string, std::vector<int64_t>, int>> test_cases = {
         {"Large matrix sum along dim 0 (1024x1024)", {1024, 1024}, 0},
@@ -99,7 +101,8 @@ TEST_F(ReductionBenchmarkTest, SumReductionSingleDim) {
 
         // Convert shapes
         std::vector<size_t> custom_shape;
-        for (auto s : shape) custom_shape.push_back(s);
+        for (auto s : shape)
+            custom_shape.push_back(s);
 
         // Create tensors
         auto tensor_custom = Tensor::rand(TensorShape(custom_shape), Device::CUDA);
@@ -131,8 +134,7 @@ TEST_F(ReductionBenchmarkTest, SumReductionSingleDim) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 }
@@ -150,7 +152,8 @@ TEST_F(ReductionBenchmarkTest, MeanReduction) {
 
     for (const auto& [name, shape, dim] : test_cases) {
         std::vector<size_t> custom_shape;
-        for (auto s : shape) custom_shape.push_back(s);
+        for (auto s : shape)
+            custom_shape.push_back(s);
 
         auto tensor_custom = Tensor::rand(TensorShape(custom_shape), Device::CUDA);
         auto tensor_torch = torch::rand(shape, torch::kCUDA);
@@ -178,8 +181,7 @@ TEST_F(ReductionBenchmarkTest, MeanReduction) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 }
@@ -197,7 +199,8 @@ TEST_F(ReductionBenchmarkTest, MinMaxReduction) {
 
     for (const auto& [name, shape, dim] : test_cases) {
         std::vector<size_t> custom_shape;
-        for (auto s : shape) custom_shape.push_back(s);
+        for (auto s : shape)
+            custom_shape.push_back(s);
 
         auto tensor_custom = Tensor::rand(TensorShape(custom_shape), Device::CUDA);
         auto tensor_torch = torch::rand(shape, torch::kCUDA);
@@ -243,8 +246,7 @@ TEST_F(ReductionBenchmarkTest, MinMaxReduction) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 }
@@ -253,7 +255,8 @@ TEST_F(ReductionBenchmarkTest, ChainedReductions) {
     print_separator("CHAINED REDUCTIONS - Real-world Pattern");
 
     std::cout << "\nSimulates training pipeline with multiple reductions" << std::endl;
-    std::cout << "Pattern: sum → mean → normalize\n" << std::endl;
+    std::cout << "Pattern: sum → mean → normalize\n"
+              << std::endl;
 
     const int H = 256;
     const int W = 256;
@@ -270,8 +273,8 @@ TEST_F(ReductionBenchmarkTest, ChainedReductions) {
         // Custom - multiple reductions
         {
             Timer timer;
-            auto sum_hw = tensor_custom.sum({0, 1}, false);  // Sum over H, W
-            auto mean_c = sum_hw.mean({0}, false);           // Mean over C
+            auto sum_hw = tensor_custom.sum({0, 1}, false); // Sum over H, W
+            auto mean_c = sum_hw.mean({0}, false);          // Mean over C
             cudaDeviceSynchronize();
             total_custom += timer.elapsed_ms();
         }
@@ -291,8 +294,7 @@ TEST_F(ReductionBenchmarkTest, ChainedReductions) {
         "Training pipeline (multiple reductions)",
         total_custom / iterations,
         total_torch / iterations,
-        total_torch / total_custom
-    };
+        total_torch / total_custom};
     result.print();
 
     std::cout << "\nANALYSIS:" << std::endl;
@@ -306,7 +308,8 @@ TEST_F(ReductionBenchmarkTest, VariableSizeTempStorage) {
     print_separator("VARIABLE-SIZE TEMP STORAGE - Pool Cache Effectiveness");
 
     std::cout << "\nTests CUB temp storage caching across different tensor sizes" << std::endl;
-    std::cout << "Memory pool should reuse cached buffers for same sizes\n" << std::endl;
+    std::cout << "Memory pool should reuse cached buffers for same sizes\n"
+              << std::endl;
 
     const int iterations = 100;
 
@@ -316,12 +319,13 @@ TEST_F(ReductionBenchmarkTest, VariableSizeTempStorage) {
         {"Large (1024x1024)", {1024, 1024}},
         {"Very Large (2048x2048)", {2048, 2048}},
         {"Small (128x128) - repeat", {128, 128}},  // Should hit cache
-        {"Medium (512x512) - repeat", {512, 512}},  // Should hit cache
+        {"Medium (512x512) - repeat", {512, 512}}, // Should hit cache
     };
 
     for (const auto& [name, shape] : test_cases) {
         std::vector<size_t> custom_shape;
-        for (auto s : shape) custom_shape.push_back(s);
+        for (auto s : shape)
+            custom_shape.push_back(s);
 
         auto tensor_custom = Tensor::rand(TensorShape(custom_shape), Device::CUDA);
         auto tensor_torch = torch::rand(shape, torch::kCUDA);
@@ -349,8 +353,7 @@ TEST_F(ReductionBenchmarkTest, VariableSizeTempStorage) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 

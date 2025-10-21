@@ -1,12 +1,12 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <gtest/gtest.h>
 #include "core/tensor.hpp"
 #include "core/tensor_ops.hpp"
 #include <chrono>
-#include <iostream>
+#include <gtest/gtest.h>
 #include <iomanip>
+#include <iostream>
 
 using namespace gs;
 using namespace std::chrono;
@@ -18,11 +18,11 @@ protected:
     }
 
     struct BenchmarkResult {
-        double eager_ms;        // Materialize each intermediate result
-        double lazy_ms;          // Single fused kernel (if optimized)
+        double eager_ms; // Materialize each intermediate result
+        double lazy_ms;  // Single fused kernel (if optimized)
         double speedup;
         bool correctness_pass;
-        size_t num_intermediates_saved;  // How many allocations we avoid
+        size_t num_intermediates_saved; // How many allocations we avoid
     };
 
     // Benchmark: (x * scalar).sigmoid()  - Common pattern in neural nets
@@ -40,8 +40,8 @@ protected:
         auto start_eager = high_resolution_clock::now();
         Tensor result_eager;
         for (int i = 0; i < num_iterations; ++i) {
-            auto temp = data * scalar;  // Allocate intermediate
-            result_eager = temp.sigmoid();  // Allocate result
+            auto temp = data * scalar;     // Allocate intermediate
+            result_eager = temp.sigmoid(); // Allocate result
         }
         cudaDeviceSynchronize();
         auto end_eager = high_resolution_clock::now();
@@ -52,7 +52,7 @@ protected:
         auto start_lazy = high_resolution_clock::now();
         Tensor result_lazy;
         for (int i = 0; i < num_iterations; ++i) {
-            result_lazy = (data * scalar).sigmoid();  // Should compose operations
+            result_lazy = (data * scalar).sigmoid(); // Should compose operations
         }
         cudaDeviceSynchronize();
         auto end_lazy = high_resolution_clock::now();
@@ -63,7 +63,7 @@ protected:
 
         double speedup = eager_ms / lazy_ms;
 
-        return {eager_ms, lazy_ms, speedup, correctness_pass, 1};  // 1 intermediate saved
+        return {eager_ms, lazy_ms, speedup, correctness_pass, 1}; // 1 intermediate saved
     }
 
     // Benchmark: (x - mean) / std  - Normalization pattern
@@ -82,8 +82,8 @@ protected:
         auto start_eager = high_resolution_clock::now();
         Tensor result_eager;
         for (int i = 0; i < num_iterations; ++i) {
-            auto temp = data - mean;  // Intermediate 1
-            result_eager = temp / std;  // Result
+            auto temp = data - mean;   // Intermediate 1
+            result_eager = temp / std; // Result
         }
         cudaDeviceSynchronize();
         auto end_eager = high_resolution_clock::now();
@@ -146,12 +146,12 @@ protected:
 
         double speedup = eager_ms / lazy_ms;
 
-        return {eager_ms, lazy_ms, speedup, correctness_pass, 2};  // 2 intermediates saved
+        return {eager_ms, lazy_ms, speedup, correctness_pass, 2}; // 2 intermediates saved
     }
 
     // Benchmark: x.abs().sqrt()  - Chained unary operations
     BenchmarkResult benchmark_abs_sqrt(size_t n, int num_iterations = 100) {
-        auto data = Tensor::randn({static_cast<int>(n)}, Device::CUDA);  // Can have negative values
+        auto data = Tensor::randn({static_cast<int>(n)}, Device::CUDA); // Can have negative values
 
         // Warm-up
         for (int i = 0; i < 5; ++i) {
@@ -163,8 +163,8 @@ protected:
         auto start_eager = high_resolution_clock::now();
         Tensor result_eager;
         for (int i = 0; i < num_iterations; ++i) {
-            auto temp = data.abs();        // Intermediate
-            result_eager = temp.sqrt();    // Result
+            auto temp = data.abs();     // Intermediate
+            result_eager = temp.sqrt(); // Result
         }
         cudaDeviceSynchronize();
         auto end_eager = high_resolution_clock::now();

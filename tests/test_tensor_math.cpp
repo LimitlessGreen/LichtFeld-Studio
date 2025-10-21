@@ -13,7 +13,6 @@ using namespace gs;
 
 namespace {
 
-
     // Helper to create PyTorch tensor from vector data
     torch::Tensor create_torch_tensor(const std::vector<float>& data,
                                       const std::vector<int64_t>& shape,

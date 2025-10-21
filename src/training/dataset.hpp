@@ -11,13 +11,13 @@
 #include "core/splat_data_new.hpp"
 #include "core/tensor.hpp"
 #include "loader/loader.hpp"
-#include <iostream>
 #include <atomic>
 #include <condition_variable>
 #include <cuda_runtime.h>
 #include <expected>
 #include <format>
 #include <future>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -310,10 +310,10 @@ namespace gs::training {
                 return 0;
             }
             size_t total_bytes = 0;
-            //for (const auto& cam : _cameras) {
-            //    //total_bytes += cam->get_num_bytes_from_file();
-            //}
-            // Adjust for resolution factor if specified
+            // for (const auto& cam : _cameras) {
+            //     //total_bytes += cam->get_num_bytes_from_file();
+            // }
+            //  Adjust for resolution factor if specified
             if (_datasetConfig.resize_factor > 0) {
                 total_bytes /= _datasetConfig.resize_factor * _datasetConfig.resize_factor;
             }

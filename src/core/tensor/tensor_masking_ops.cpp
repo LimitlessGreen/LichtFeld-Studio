@@ -20,65 +20,65 @@ namespace gs {
 
     // ============= Masking Operations =============
     Tensor Tensor::masked_select(const Tensor& mask) const {
-    if (!is_valid() || !mask.is_valid()) {
-        LOG_ERROR("masked_select on invalid tensor");
-        return Tensor();
-    }
-
-    if (mask.dtype() != DataType::Bool) {
-        LOG_ERROR("masked_select requires boolean mask");
-        return Tensor();
-    }
-
-    if (mask.shape() != shape_) {
-        LOG_ERROR("Mask shape {} doesn't match tensor shape {}",
-                 mask.shape().str(), shape_.str());
-        return Tensor();
-    }
-
-    // CRITICAL: Check device compatibility BEFORE any operations
-    if (mask.device() != device_) {
-        LOG_ERROR("masked_select: mask device ({}) doesn't match tensor device ({})",
-                 device_name(mask.device()), device_name(device_));
-        return Tensor();
-    }
-
-    // CRITICAL FIX: Count TRUE values in mask to determine output size
-    size_t output_size = mask.count_nonzero();
-
-    LOG_DEBUG("masked_select: input size={}, mask trues={}, output size={}",
-             numel(), output_size, output_size);
-
-    if (output_size == 0) {
-        return empty({0}, device_, dtype_);
-    }
-
-    auto result = empty({output_size}, device_, dtype_);
-
-    if (device_ == Device::CUDA) {
-        // Use CUDA kernel
-        tensor_ops::launch_masked_select(ptr<float>(), mask.ptr<unsigned char>(),
-                                        result.ptr<float>(), numel(), output_size, 0);
-        CHECK_CUDA(cudaDeviceSynchronize());
-    } else {
-        // CPU implementation - FIXED to respect mask
-        const float* src = ptr<float>();
-        const unsigned char* mask_data = mask.ptr<unsigned char>();
-        float* dst = result.ptr<float>();
-
-        size_t write_idx = 0;
-        for (size_t i = 0; i < numel(); ++i) {
-            // CRITICAL FIX: Only copy when mask is TRUE
-            if (mask_data[i]) {
-                dst[write_idx++] = src[i];
-            }
+        if (!is_valid() || !mask.is_valid()) {
+            LOG_ERROR("masked_select on invalid tensor");
+            return Tensor();
         }
 
-        LOG_DEBUG("masked_select CPU: wrote {} elements", write_idx);
-    }
+        if (mask.dtype() != DataType::Bool) {
+            LOG_ERROR("masked_select requires boolean mask");
+            return Tensor();
+        }
 
-    return result;
-}
+        if (mask.shape() != shape_) {
+            LOG_ERROR("Mask shape {} doesn't match tensor shape {}",
+                      mask.shape().str(), shape_.str());
+            return Tensor();
+        }
+
+        // CRITICAL: Check device compatibility BEFORE any operations
+        if (mask.device() != device_) {
+            LOG_ERROR("masked_select: mask device ({}) doesn't match tensor device ({})",
+                      device_name(mask.device()), device_name(device_));
+            return Tensor();
+        }
+
+        // CRITICAL FIX: Count TRUE values in mask to determine output size
+        size_t output_size = mask.count_nonzero();
+
+        LOG_DEBUG("masked_select: input size={}, mask trues={}, output size={}",
+                  numel(), output_size, output_size);
+
+        if (output_size == 0) {
+            return empty({0}, device_, dtype_);
+        }
+
+        auto result = empty({output_size}, device_, dtype_);
+
+        if (device_ == Device::CUDA) {
+            // Use CUDA kernel
+            tensor_ops::launch_masked_select(ptr<float>(), mask.ptr<unsigned char>(),
+                                             result.ptr<float>(), numel(), output_size, 0);
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else {
+            // CPU implementation - FIXED to respect mask
+            const float* src = ptr<float>();
+            const unsigned char* mask_data = mask.ptr<unsigned char>();
+            float* dst = result.ptr<float>();
+
+            size_t write_idx = 0;
+            for (size_t i = 0; i < numel(); ++i) {
+                // CRITICAL FIX: Only copy when mask is TRUE
+                if (mask_data[i]) {
+                    dst[write_idx++] = src[i];
+                }
+            }
+
+            LOG_DEBUG("masked_select CPU: wrote {} elements", write_idx);
+        }
+
+        return result;
+    }
 
     Tensor& Tensor::masked_fill_(const Tensor& mask, float value) {
         if (!is_valid() || !mask.is_valid()) {
@@ -99,13 +99,13 @@ namespace gs {
         // CRITICAL: Check device compatibility
         if (mask.device() != device_) {
             LOG_ERROR("masked_fill_: mask device ({}) doesn't match tensor device ({})",
-                     device_name(mask.device()), device_name(device_));
+                      device_name(mask.device()), device_name(device_));
             return *this;
         }
 
         if (device_ == Device::CUDA) {
             tensor_ops::launch_masked_fill(ptr<float>(), mask.ptr<unsigned char>(),
-                                          value, numel(), 0);
+                                           value, numel(), 0);
             CHECK_CUDA(cudaDeviceSynchronize());
         } else {
             float* data = ptr<float>();
@@ -810,17 +810,20 @@ namespace gs {
             if (dtype_ == DataType::Bool) {
                 const unsigned char* data = ptr<unsigned char>();
                 for (size_t i = 0; i < numel(); ++i) {
-                    if (data[i]) count++;
+                    if (data[i])
+                        count++;
                 }
             } else if (dtype_ == DataType::Float32) {
                 const float* data = ptr<float>();
                 for (size_t i = 0; i < numel(); ++i) {
-                    if (data[i] != 0.0f) count++;
+                    if (data[i] != 0.0f)
+                        count++;
                 }
             } else if (dtype_ == DataType::Int32) {
                 const int* data = ptr<int>();
                 for (size_t i = 0; i < numel(); ++i) {
-                    if (data[i] != 0) count++;
+                    if (data[i] != 0)
+                        count++;
                 }
             }
 
@@ -828,131 +831,129 @@ namespace gs {
         }
     }
 
-
     Tensor Tensor::nonzero() const {
-    if (!is_valid()) {
-        LOG_ERROR("nonzero() on invalid tensor");
-        return {};
-    }
+        if (!is_valid()) {
+            LOG_ERROR("nonzero() on invalid tensor");
+            return {};
+        }
 
-    if (numel() == 0) {
-        return empty({0, ndim()}, device_, DataType::Int64);
-    }
+        if (numel() == 0) {
+            return empty({0, ndim()}, device_, DataType::Int64);
+        }
 
-    size_t count = count_nonzero();
+        size_t count = count_nonzero();
 
-    if (count == 0) {
-        return empty({0, ndim()}, device_, DataType::Int64);
-    }
+        if (count == 0) {
+            return empty({0, ndim()}, device_, DataType::Int64);
+        }
 
-    size_t n_dims = ndim();
+        size_t n_dims = ndim();
 
-    // Special case for 1D tensors
-    if (n_dims == 1) {
-        // Create a flat tensor first
-        auto temp = empty({count}, device_, DataType::Int64);
+        // Special case for 1D tensors
+        if (n_dims == 1) {
+            // Create a flat tensor first
+            auto temp = empty({count}, device_, DataType::Int64);
 
-        if (device_ == Device::CUDA) {
-            if (dtype_ == DataType::Bool) {
-                tensor_ops::launch_nonzero_bool(ptr<unsigned char>(),
+            if (device_ == Device::CUDA) {
+                if (dtype_ == DataType::Bool) {
+                    tensor_ops::launch_nonzero_bool(ptr<unsigned char>(),
+                                                    reinterpret_cast<int64_t*>(temp.raw_ptr()),
+                                                    numel(), count, 0);
+                } else {
+                    tensor_ops::launch_nonzero(ptr<float>(),
                                                reinterpret_cast<int64_t*>(temp.raw_ptr()),
                                                numel(), count, 0);
+                }
+                CHECK_CUDA(cudaDeviceSynchronize());
             } else {
-                tensor_ops::launch_nonzero(ptr<float>(),
-                                          reinterpret_cast<int64_t*>(temp.raw_ptr()),
-                                          numel(), count, 0);
+                int64_t* indices = reinterpret_cast<int64_t*>(temp.raw_ptr());
+                size_t write_idx = 0;
+
+                if (dtype_ == DataType::Bool) {
+                    const unsigned char* data = ptr<unsigned char>();
+                    for (size_t i = 0; i < numel(); ++i) {
+                        if (data[i]) {
+                            indices[write_idx++] = static_cast<int64_t>(i);
+                        }
+                    }
+                } else if (dtype_ == DataType::Float32) {
+                    const float* data = ptr<float>();
+                    for (size_t i = 0; i < numel(); ++i) {
+                        if (data[i] != 0.0f) {
+                            indices[write_idx++] = static_cast<int64_t>(i);
+                        }
+                    }
+                } else if (dtype_ == DataType::Int32) {
+                    const int* data = ptr<int>();
+                    for (size_t i = 0; i < numel(); ++i) {
+                        if (data[i] != 0) {
+                            indices[write_idx++] = static_cast<int64_t>(i);
+                        }
+                    }
+                }
             }
-            CHECK_CUDA(cudaDeviceSynchronize());
+
+            // Reshape to (count, 1) to match PyTorch
+            return temp.reshape({count, 1});
+        }
+
+        // Multi-dimensional case
+        auto result = empty({count, n_dims}, device_, DataType::Int64);
+
+        if (device_ == Device::CUDA) {
+            auto cpu_tensor = to(Device::CPU);
+            auto cpu_result = cpu_tensor.nonzero();
+            result = cpu_result.to(Device::CUDA);
         } else {
-            int64_t* indices = reinterpret_cast<int64_t*>(temp.raw_ptr());
+            int64_t* indices = reinterpret_cast<int64_t*>(result.raw_ptr());
             size_t write_idx = 0;
+
+            auto strides = shape_.strides();
 
             if (dtype_ == DataType::Bool) {
                 const unsigned char* data = ptr<unsigned char>();
                 for (size_t i = 0; i < numel(); ++i) {
                     if (data[i]) {
-                        indices[write_idx++] = static_cast<int64_t>(i);
+                        size_t temp = i;
+                        for (size_t dim = 0; dim < n_dims; ++dim) {
+                            size_t coord = temp / strides[dim];
+                            temp %= strides[dim];
+                            indices[write_idx * n_dims + dim] = static_cast<int64_t>(coord);
+                        }
+                        write_idx++;
                     }
                 }
             } else if (dtype_ == DataType::Float32) {
                 const float* data = ptr<float>();
                 for (size_t i = 0; i < numel(); ++i) {
                     if (data[i] != 0.0f) {
-                        indices[write_idx++] = static_cast<int64_t>(i);
+                        size_t temp = i;
+                        for (size_t dim = 0; dim < n_dims; ++dim) {
+                            size_t coord = temp / strides[dim];
+                            temp %= strides[dim];
+                            indices[write_idx * n_dims + dim] = static_cast<int64_t>(coord);
+                        }
+                        write_idx++;
                     }
                 }
             } else if (dtype_ == DataType::Int32) {
                 const int* data = ptr<int>();
                 for (size_t i = 0; i < numel(); ++i) {
                     if (data[i] != 0) {
-                        indices[write_idx++] = static_cast<int64_t>(i);
+                        size_t temp = i;
+                        for (size_t dim = 0; dim < n_dims; ++dim) {
+                            size_t coord = temp / strides[dim];
+                            temp %= strides[dim];
+                            indices[write_idx * n_dims + dim] = static_cast<int64_t>(coord);
+                        }
+                        write_idx++;
                     }
                 }
             }
         }
 
-        // Reshape to (count, 1) to match PyTorch
-        return temp.reshape({count, 1});
+        return result;
     }
-
-    // Multi-dimensional case
-    auto result = empty({count, n_dims}, device_, DataType::Int64);
-
-    if (device_ == Device::CUDA) {
-        auto cpu_tensor = to(Device::CPU);
-        auto cpu_result = cpu_tensor.nonzero();
-        result = cpu_result.to(Device::CUDA);
-    } else {
-        int64_t* indices = reinterpret_cast<int64_t*>(result.raw_ptr());
-        size_t write_idx = 0;
-
-        auto strides = shape_.strides();
-
-        if (dtype_ == DataType::Bool) {
-            const unsigned char* data = ptr<unsigned char>();
-            for (size_t i = 0; i < numel(); ++i) {
-                if (data[i]) {
-                    size_t temp = i;
-                    for (size_t dim = 0; dim < n_dims; ++dim) {
-                        size_t coord = temp / strides[dim];
-                        temp %= strides[dim];
-                        indices[write_idx * n_dims + dim] = static_cast<int64_t>(coord);
-                    }
-                    write_idx++;
-                }
-            }
-        } else if (dtype_ == DataType::Float32) {
-            const float* data = ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                if (data[i] != 0.0f) {
-                    size_t temp = i;
-                    for (size_t dim = 0; dim < n_dims; ++dim) {
-                        size_t coord = temp / strides[dim];
-                        temp %= strides[dim];
-                        indices[write_idx * n_dims + dim] = static_cast<int64_t>(coord);
-                    }
-                    write_idx++;
-                }
-            }
-        } else if (dtype_ == DataType::Int32) {
-            const int* data = ptr<int>();
-            for (size_t i = 0; i < numel(); ++i) {
-                if (data[i] != 0) {
-                    size_t temp = i;
-                    for (size_t dim = 0; dim < n_dims; ++dim) {
-                        size_t coord = temp / strides[dim];
-                        temp %= strides[dim];
-                        indices[write_idx * n_dims + dim] = static_cast<int64_t>(coord);
-                    }
-                    write_idx++;
-                }
-            }
-        }
-    }
-
-    return result;
-}
-
 
     std::vector<Tensor> Tensor::nonzero_split() const {
         std::vector<Tensor> result;
@@ -1121,90 +1122,88 @@ namespace gs {
     }
 
     // Location: After the existing get_bool/set_bool implementations (around line 800+)
-// grep -C 3 "bool Tensor::get_bool"
+    // grep -C 3 "bool Tensor::get_bool"
 
-void Tensor::set_bool(std::span<const size_t> indices, bool value) {
-    if (dtype_ != DataType::Bool) {
-        LOG_ERROR("set_bool() only works on boolean tensors, got {}", dtype_name(dtype_));
-        return;
-    }
-
-    if (indices.size() != shape_.rank()) {
-        LOG_ERROR("set_bool() requires {} indices, got {}", shape_.rank(), indices.size());
-        return;
-    }
-
-    // Calculate linear index from multi-dimensional indices
-    auto strides = shape_.strides();
-
-    size_t linear_idx = 0;
-    for (size_t i = 0; i < indices.size(); ++i) {
-        if (indices[i] >= shape_[i]) {
-            LOG_ERROR("Index {} out of bounds for dimension {} with size {}",
-                     indices[i], i, shape_[i]);
+    void Tensor::set_bool(std::span<const size_t> indices, bool value) {
+        if (dtype_ != DataType::Bool) {
+            LOG_ERROR("set_bool() only works on boolean tensors, got {}", dtype_name(dtype_));
             return;
         }
-        linear_idx += indices[i] * strides[i];
-    }
 
-    unsigned char val = value ? 1 : 0;
-
-    if (device_ == Device::CUDA) {
-        cudaError_t err = cudaMemcpy(
-            ptr<unsigned char>() + linear_idx,
-            &val,
-            1,
-            cudaMemcpyHostToDevice
-        );
-        if (err != cudaSuccess) {
-            LOG_ERROR("CUDA memcpy failed in set_bool: {}", cudaGetErrorString(err));
+        if (indices.size() != shape_.rank()) {
+            LOG_ERROR("set_bool() requires {} indices, got {}", shape_.rank(), indices.size());
+            return;
         }
-    } else {
-        ptr<unsigned char>()[linear_idx] = val;
+
+        // Calculate linear index from multi-dimensional indices
+        auto strides = shape_.strides();
+
+        size_t linear_idx = 0;
+        for (size_t i = 0; i < indices.size(); ++i) {
+            if (indices[i] >= shape_[i]) {
+                LOG_ERROR("Index {} out of bounds for dimension {} with size {}",
+                          indices[i], i, shape_[i]);
+                return;
+            }
+            linear_idx += indices[i] * strides[i];
+        }
+
+        unsigned char val = value ? 1 : 0;
+
+        if (device_ == Device::CUDA) {
+            cudaError_t err = cudaMemcpy(
+                ptr<unsigned char>() + linear_idx,
+                &val,
+                1,
+                cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) {
+                LOG_ERROR("CUDA memcpy failed in set_bool: {}", cudaGetErrorString(err));
+            }
+        } else {
+            ptr<unsigned char>()[linear_idx] = val;
+        }
     }
-}
 
-bool Tensor::get_bool(std::span<const size_t> indices) const {
-    if (dtype_ != DataType::Bool) {
-        LOG_ERROR("get_bool() only works on boolean tensors, got {}", dtype_name(dtype_));
-        return false;
-    }
-
-    if (indices.size() != shape_.rank()) {
-        LOG_ERROR("get_bool() requires {} indices, got {}", shape_.rank(), indices.size());
-        return false;
-    }
-
-    // Calculate linear index from multi-dimensional indices
-    auto strides = shape_.strides();
-
-    size_t linear_idx = 0;
-    for (size_t i = 0; i < indices.size(); ++i) {
-        if (indices[i] >= shape_[i]) {
-            LOG_ERROR("Index {} out of bounds for dimension {} with size {}",
-                     indices[i], i, shape_[i]);
+    bool Tensor::get_bool(std::span<const size_t> indices) const {
+        if (dtype_ != DataType::Bool) {
+            LOG_ERROR("get_bool() only works on boolean tensors, got {}", dtype_name(dtype_));
             return false;
         }
-        linear_idx += indices[i] * strides[i];
-    }
 
-    if (device_ == Device::CUDA) {
-        unsigned char val;
-        cudaError_t err = cudaMemcpy(
-            &val,
-            ptr<unsigned char>() + linear_idx,
-            1,
-            cudaMemcpyDeviceToHost
-        );
-        if (err != cudaSuccess) {
-            LOG_ERROR("CUDA memcpy failed in get_bool: {}", cudaGetErrorString(err));
+        if (indices.size() != shape_.rank()) {
+            LOG_ERROR("get_bool() requires {} indices, got {}", shape_.rank(), indices.size());
             return false;
         }
-        return val != 0;
-    } else {
-        return ptr<unsigned char>()[linear_idx] != 0;
+
+        // Calculate linear index from multi-dimensional indices
+        auto strides = shape_.strides();
+
+        size_t linear_idx = 0;
+        for (size_t i = 0; i < indices.size(); ++i) {
+            if (indices[i] >= shape_[i]) {
+                LOG_ERROR("Index {} out of bounds for dimension {} with size {}",
+                          indices[i], i, shape_[i]);
+                return false;
+            }
+            linear_idx += indices[i] * strides[i];
+        }
+
+        if (device_ == Device::CUDA) {
+            unsigned char val;
+            cudaError_t err = cudaMemcpy(
+                &val,
+                ptr<unsigned char>() + linear_idx,
+                1,
+                cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess) {
+                LOG_ERROR("CUDA memcpy failed in get_bool: {}", cudaGetErrorString(err));
+                return false;
+            }
+            return val != 0;
+        } else {
+            return ptr<unsigned char>()[linear_idx] != 0;
+        }
     }
-}
 
     // Proxy Implementations
     void MaskedTensorProxy::operator=(float value) {

@@ -2,21 +2,21 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <gtest/gtest.h>
-#include <torch/torch.h>
-#include <cuda_runtime.h>
-#include <cmath>
-#include <vector>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
 #include <iomanip>
 #include <print>
+#include <torch/torch.h>
+#include <vector>
 
-#include "core/splat_data_ref.hpp"
-#include "core/splat_data_new.hpp"
-#include "core/point_cloud_ref.hpp"
-#include "core/point_cloud_new.hpp"
 #include "core/parameters.hpp"
+#include "core/point_cloud_new.hpp"
+#include "core/point_cloud_ref.hpp"
+#include "core/splat_data_new.hpp"
+#include "core/splat_data_ref.hpp"
 #include "core/tensor.hpp"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -24,220 +24,220 @@
 
 namespace {
 
-constexpr float FLOAT_TOLERANCE = 1e-3f;
-constexpr float ACTIVATION_TOLERANCE = 1e-2f; // More lenient for activations
+    constexpr float FLOAT_TOLERANCE = 1e-3f;
+    constexpr float ACTIVATION_TOLERANCE = 1e-2f; // More lenient for activations
 
-#define CUDA_CHECK(call) \
-    do { \
-        cudaError_t error = call; \
+#define CUDA_CHECK(call)                                                              \
+    do {                                                                              \
+        cudaError_t error = call;                                                     \
         ASSERT_EQ(error, cudaSuccess) << "CUDA error: " << cudaGetErrorString(error); \
-    } while(0)
+    } while (0)
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
+    // ============================================================================
+    // Helper Functions
+    // ============================================================================
 
-/**
- * @brief Convert torch::Tensor to gs::Tensor
- */
-gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
-    auto cpu_tensor = torch_tensor.cpu().contiguous();
-    std::vector<size_t> shape;
-    for (int i = 0; i < torch_tensor.dim(); ++i) {
-        shape.push_back(torch_tensor.size(i));
-    }
-
-    if (torch_tensor.scalar_type() == torch::kFloat32) {
-        std::vector<float> data(cpu_tensor.data_ptr<float>(),
-                               cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
-        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
-    } else if (torch_tensor.scalar_type() == torch::kInt32) {
-        std::vector<int> data(cpu_tensor.data_ptr<int>(),
-                             cpu_tensor.data_ptr<int>() + cpu_tensor.numel());
-        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
-    }
-
-    return gs::Tensor();
-}
-
-/**
- * @brief Convert gs::Tensor to torch::Tensor
- */
-torch::Tensor tensor_to_torch(const gs::Tensor& gs_tensor) {
-    auto cpu_tensor = gs_tensor.cpu();
-    std::vector<int64_t> shape;
-    for (size_t i = 0; i < cpu_tensor.ndim(); ++i) {
-        shape.push_back(cpu_tensor.shape()[i]);
-    }
-
-    if (gs_tensor.dtype() == gs::DataType::Float32) {
-        auto data = cpu_tensor.to_vector();
-        auto torch_tensor = torch::from_blob(data.data(), shape, torch::kFloat32).clone();
-        return torch_tensor.cuda();
-    } else if (gs_tensor.dtype() == gs::DataType::Int32) {
-        auto data = cpu_tensor.to_vector_int();
-        auto torch_tensor = torch::from_blob(data.data(), shape, torch::kInt32).clone();
-        return torch_tensor.cuda();
-    }
-
-    return torch::Tensor();
-}
-
-/**
- * @brief Compare two tensors (torch vs gs::Tensor)
- */
-bool tensors_are_close(const torch::Tensor& torch_tensor,
-                       const gs::Tensor& gs_tensor,
-                       float tolerance = 1e-3f,
-                       bool verbose = false) {
-    if (torch_tensor.dim() != static_cast<int64_t>(gs_tensor.ndim())) {
-        if (verbose) {
-            std::print("Dimension mismatch: torch={}, gs={}\n",
-                      torch_tensor.dim(), gs_tensor.ndim());
+    /**
+     * @brief Convert torch::Tensor to gs::Tensor
+     */
+    gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
+        auto cpu_tensor = torch_tensor.cpu().contiguous();
+        std::vector<size_t> shape;
+        for (int i = 0; i < torch_tensor.dim(); ++i) {
+            shape.push_back(torch_tensor.size(i));
         }
-        return false;
+
+        if (torch_tensor.scalar_type() == torch::kFloat32) {
+            std::vector<float> data(cpu_tensor.data_ptr<float>(),
+                                    cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
+            return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
+        } else if (torch_tensor.scalar_type() == torch::kInt32) {
+            std::vector<int> data(cpu_tensor.data_ptr<int>(),
+                                  cpu_tensor.data_ptr<int>() + cpu_tensor.numel());
+            return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
+        }
+
+        return gs::Tensor();
     }
 
-    for (int i = 0; i < torch_tensor.dim(); ++i) {
-        if (torch_tensor.size(i) != static_cast<int64_t>(gs_tensor.shape()[i])) {
+    /**
+     * @brief Convert gs::Tensor to torch::Tensor
+     */
+    torch::Tensor tensor_to_torch(const gs::Tensor& gs_tensor) {
+        auto cpu_tensor = gs_tensor.cpu();
+        std::vector<int64_t> shape;
+        for (size_t i = 0; i < cpu_tensor.ndim(); ++i) {
+            shape.push_back(cpu_tensor.shape()[i]);
+        }
+
+        if (gs_tensor.dtype() == gs::DataType::Float32) {
+            auto data = cpu_tensor.to_vector();
+            auto torch_tensor = torch::from_blob(data.data(), shape, torch::kFloat32).clone();
+            return torch_tensor.cuda();
+        } else if (gs_tensor.dtype() == gs::DataType::Int32) {
+            auto data = cpu_tensor.to_vector_int();
+            auto torch_tensor = torch::from_blob(data.data(), shape, torch::kInt32).clone();
+            return torch_tensor.cuda();
+        }
+
+        return torch::Tensor();
+    }
+
+    /**
+     * @brief Compare two tensors (torch vs gs::Tensor)
+     */
+    bool tensors_are_close(const torch::Tensor& torch_tensor,
+                           const gs::Tensor& gs_tensor,
+                           float tolerance = 1e-3f,
+                           bool verbose = false) {
+        if (torch_tensor.dim() != static_cast<int64_t>(gs_tensor.ndim())) {
             if (verbose) {
-                std::print("Shape mismatch at dim {}: torch={}, gs={}\n",
-                          i, torch_tensor.size(i), gs_tensor.shape()[i]);
+                std::print("Dimension mismatch: torch={}, gs={}\n",
+                           torch_tensor.dim(), gs_tensor.ndim());
             }
             return false;
         }
-    }
 
-    auto torch_cpu = torch_tensor.cpu().contiguous();
-    auto gs_cpu = gs_tensor.cpu();
-
-    if (torch_tensor.scalar_type() == torch::kFloat32 &&
-        gs_tensor.dtype() == gs::DataType::Float32) {
-
-        auto torch_data = torch_cpu.data_ptr<float>();
-        auto gs_data = gs_cpu.to_vector();
-
-        size_t mismatch_count = 0;
-        float max_diff = 0.0f;
-
-        for (int64_t i = 0; i < torch_cpu.numel(); ++i) {
-            float diff = std::abs(torch_data[i] - gs_data[i]);
-            max_diff = std::max(max_diff, diff);
-
-            if (diff > tolerance) {
-                mismatch_count++;
-                if (verbose && mismatch_count <= 5) {
-                    std::print("Mismatch at index {}: torch={}, gs={}, diff={}\n",
-                              i, torch_data[i], gs_data[i], diff);
+        for (int i = 0; i < torch_tensor.dim(); ++i) {
+            if (torch_tensor.size(i) != static_cast<int64_t>(gs_tensor.shape()[i])) {
+                if (verbose) {
+                    std::print("Shape mismatch at dim {}: torch={}, gs={}\n",
+                               i, torch_tensor.size(i), gs_tensor.shape()[i]);
                 }
+                return false;
             }
         }
 
-        if (verbose && mismatch_count > 0) {
-            std::print("Total mismatches: {}/{}, max_diff={}\n",
-                      mismatch_count, torch_cpu.numel(), max_diff);
+        auto torch_cpu = torch_tensor.cpu().contiguous();
+        auto gs_cpu = gs_tensor.cpu();
+
+        if (torch_tensor.scalar_type() == torch::kFloat32 &&
+            gs_tensor.dtype() == gs::DataType::Float32) {
+
+            auto torch_data = torch_cpu.data_ptr<float>();
+            auto gs_data = gs_cpu.to_vector();
+
+            size_t mismatch_count = 0;
+            float max_diff = 0.0f;
+
+            for (int64_t i = 0; i < torch_cpu.numel(); ++i) {
+                float diff = std::abs(torch_data[i] - gs_data[i]);
+                max_diff = std::max(max_diff, diff);
+
+                if (diff > tolerance) {
+                    mismatch_count++;
+                    if (verbose && mismatch_count <= 5) {
+                        std::print("Mismatch at index {}: torch={}, gs={}, diff={}\n",
+                                   i, torch_data[i], gs_data[i], diff);
+                    }
+                }
+            }
+
+            if (verbose && mismatch_count > 0) {
+                std::print("Total mismatches: {}/{}, max_diff={}\n",
+                           mismatch_count, torch_cpu.numel(), max_diff);
+            }
+
+            return mismatch_count == 0;
         }
 
-        return mismatch_count == 0;
+        return false;
     }
 
-    return false;
-}
+    /**
+     * @brief Create a random point cloud for testing (PointCloudRef version)
+     */
+    gs::PointCloudRef create_test_point_cloud_ref(int n_points, int sh_degree = 3) {
+        // Create tensors directly
+        auto means = torch::rand({n_points, 3}, torch::kCUDA) * 20.0f - 10.0f;
+        auto colors = torch::randint(0, 256, {n_points, 3}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        auto normals = torch::zeros({n_points, 3}, torch::kCUDA);
 
-/**
- * @brief Create a random point cloud for testing (PointCloudRef version)
- */
-gs::PointCloudRef create_test_point_cloud_ref(int n_points, int sh_degree = 3) {
-    // Create tensors directly
-    auto means = torch::rand({n_points, 3}, torch::kCUDA) * 20.0f - 10.0f;
-    auto colors = torch::randint(0, 256, {n_points, 3}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
-    auto normals = torch::zeros({n_points, 3}, torch::kCUDA);
+        // SH coefficients
+        const size_t sh0_coeffs = 1;
+        const size_t shN_coeffs = (sh_degree + 1) * (sh_degree + 1) - 1;
 
-    // SH coefficients
-    const size_t sh0_coeffs = 1;
-    const size_t shN_coeffs = (sh_degree + 1) * (sh_degree + 1) - 1;
+        auto sh0 = torch::randn({n_points, 3, static_cast<int64_t>(sh0_coeffs)}, torch::kCUDA) * 0.5f;
+        auto shN = torch::randn({n_points, 3, static_cast<int64_t>(shN_coeffs)}, torch::kCUDA) * 0.5f;
+        auto opacity = torch::randn({n_points, 1}, torch::kCUDA);
+        auto scaling = torch::randn({n_points, 3}, torch::kCUDA) * 0.5f - 1.0f;
 
-    auto sh0 = torch::randn({n_points, 3, static_cast<int64_t>(sh0_coeffs)}, torch::kCUDA) * 0.5f;
-    auto shN = torch::randn({n_points, 3, static_cast<int64_t>(shN_coeffs)}, torch::kCUDA) * 0.5f;
-    auto opacity = torch::randn({n_points, 1}, torch::kCUDA);
-    auto scaling = torch::randn({n_points, 3}, torch::kCUDA) * 0.5f - 1.0f;
+        // Rotation (identity + noise)
+        auto rotation = torch::zeros({n_points, 4}, torch::kCUDA);
+        rotation.index_put_({torch::indexing::Slice(), 0}, 1.0f); // w = 1
+        rotation.index_put_({torch::indexing::Slice(), torch::indexing::Slice(1, 4)},
+                            torch::randn({n_points, 3}, torch::kCUDA) * 0.1f);
 
-    // Rotation (identity + noise)
-    auto rotation = torch::zeros({n_points, 4}, torch::kCUDA);
-    rotation.index_put_({torch::indexing::Slice(), 0}, 1.0f); // w = 1
-    rotation.index_put_({torch::indexing::Slice(), torch::indexing::Slice(1, 4)},
-                        torch::randn({n_points, 3}, torch::kCUDA) * 0.1f);
+        gs::PointCloudRef pc(means, colors);
+        pc.normals = normals;
+        pc.sh0 = sh0;
+        pc.shN = shN;
+        pc.opacity = opacity;
+        pc.scaling = scaling;
+        pc.rotation = rotation;
 
-    gs::PointCloudRef pc(means, colors);
-    pc.normals = normals;
-    pc.sh0 = sh0;
-    pc.shN = shN;
-    pc.opacity = opacity;
-    pc.scaling = scaling;
-    pc.rotation = rotation;
+        return pc;
+    }
 
-    return pc;
-}
+    /**
+     * @brief Convert PointCloudRef to PointCloudNew
+     */
+    gs::PointCloudNew point_cloud_ref_to_new(const gs::PointCloudRef& pc_ref) {
+        gs::PointCloudNew pc_new;
 
-/**
- * @brief Convert PointCloudRef to PointCloudNew
- */
-gs::PointCloudNew point_cloud_ref_to_new(const gs::PointCloudRef& pc_ref) {
-    gs::PointCloudNew pc_new;
+        if (!pc_ref.means.defined() || pc_ref.means.size(0) == 0) {
+            return pc_new;
+        }
 
-    if (!pc_ref.means.defined() || pc_ref.means.size(0) == 0) {
+        // Convert torch tensors to gs::Tensor
+        pc_new.means = torch_to_tensor(pc_ref.means);
+
+        // Handle colors (may be uint8 or float32)
+        if (pc_ref.colors.defined()) {
+            if (pc_ref.colors.dtype() == torch::kUInt8) {
+                // Convert uint8 [0, 255] to float32 [0, 255]
+                auto colors_float = pc_ref.colors.to(torch::kFloat32);
+                pc_new.colors = torch_to_tensor(colors_float);
+            } else {
+                pc_new.colors = torch_to_tensor(pc_ref.colors);
+            }
+        }
+
+        // Copy Gaussian attributes if present
+        if (pc_ref.is_gaussian()) {
+            if (pc_ref.normals.defined()) {
+                pc_new.normals = torch_to_tensor(pc_ref.normals);
+            }
+
+            // CRITICAL: ACTUAL ref format is [N, coeffs, channels], NOT [N, channels, coeffs]!
+            // The documentation in splat_data_ref.hpp is WRONG - the actual storage is different
+            if (pc_ref.sh0.defined()) {
+                // sh0 is [N, 3, 1] in Ref but stored/returned as [N, 1, 3] - direct conversion
+                pc_new.sh0 = torch_to_tensor(pc_ref.sh0);
+            }
+
+            if (pc_ref.shN.defined()) {
+                // shN is [N, 3, coeffs] in Ref but stored/returned as [N, coeffs, 3] - direct conversion
+                pc_new.shN = torch_to_tensor(pc_ref.shN);
+            }
+
+            if (pc_ref.opacity.defined()) {
+                pc_new.opacity = torch_to_tensor(pc_ref.opacity);
+            }
+
+            if (pc_ref.scaling.defined()) {
+                pc_new.scaling = torch_to_tensor(pc_ref.scaling);
+            }
+
+            if (pc_ref.rotation.defined()) {
+                pc_new.rotation = torch_to_tensor(pc_ref.rotation);
+            }
+        }
+
+        pc_new.attribute_names = pc_ref.attribute_names;
+
         return pc_new;
     }
-
-    // Convert torch tensors to gs::Tensor
-    pc_new.means = torch_to_tensor(pc_ref.means);
-
-    // Handle colors (may be uint8 or float32)
-    if (pc_ref.colors.defined()) {
-        if (pc_ref.colors.dtype() == torch::kUInt8) {
-            // Convert uint8 [0, 255] to float32 [0, 255]
-            auto colors_float = pc_ref.colors.to(torch::kFloat32);
-            pc_new.colors = torch_to_tensor(colors_float);
-        } else {
-            pc_new.colors = torch_to_tensor(pc_ref.colors);
-        }
-    }
-
-    // Copy Gaussian attributes if present
-    if (pc_ref.is_gaussian()) {
-        if (pc_ref.normals.defined()) {
-            pc_new.normals = torch_to_tensor(pc_ref.normals);
-        }
-
-        // CRITICAL: ACTUAL ref format is [N, coeffs, channels], NOT [N, channels, coeffs]!
-        // The documentation in splat_data_ref.hpp is WRONG - the actual storage is different
-        if (pc_ref.sh0.defined()) {
-            // sh0 is [N, 3, 1] in Ref but stored/returned as [N, 1, 3] - direct conversion
-            pc_new.sh0 = torch_to_tensor(pc_ref.sh0);
-        }
-
-        if (pc_ref.shN.defined()) {
-            // shN is [N, 3, coeffs] in Ref but stored/returned as [N, coeffs, 3] - direct conversion
-            pc_new.shN = torch_to_tensor(pc_ref.shN);
-        }
-
-        if (pc_ref.opacity.defined()) {
-            pc_new.opacity = torch_to_tensor(pc_ref.opacity);
-        }
-
-        if (pc_ref.scaling.defined()) {
-            pc_new.scaling = torch_to_tensor(pc_ref.scaling);
-        }
-
-        if (pc_ref.rotation.defined()) {
-            pc_new.rotation = torch_to_tensor(pc_ref.rotation);
-        }
-    }
-
-    pc_new.attribute_names = pc_ref.attribute_names;
-
-    return pc_new;
-}
 
 } // anonymous namespace
 
@@ -274,26 +274,26 @@ TEST_F(SplatDataComparisonTest, BasicConstruction_Comparison) {
 
     // Create test data with ACTUAL REF layout [N, coeffs, channels]
     auto means_torch = torch::randn({n_points, 3}, torch::kCUDA);
-    auto sh0_torch = torch::randn({n_points, 1, 3}, torch::kCUDA);   // [N, 1, 3] coeffs, channels
-    auto shN_torch = torch::randn({n_points, 15, 3}, torch::kCUDA);  // [N, 15, 3] coeffs, channels
+    auto sh0_torch = torch::randn({n_points, 1, 3}, torch::kCUDA);  // [N, 1, 3] coeffs, channels
+    auto shN_torch = torch::randn({n_points, 15, 3}, torch::kCUDA); // [N, 15, 3] coeffs, channels
     auto scaling_torch = torch::randn({n_points, 3}, torch::kCUDA);
     auto rotation_torch = torch::randn({n_points, 4}, torch::kCUDA);
     auto opacity_torch = torch::randn({n_points, 1}, torch::kCUDA);
 
     // Convert to gs::Tensor - same layout for both
     auto means_tensor = torch_to_tensor(means_torch);
-    auto sh0_tensor = torch_to_tensor(sh0_torch);    // [N, 1, 3]
-    auto shN_tensor = torch_to_tensor(shN_torch);    // [N, 15, 3]
+    auto sh0_tensor = torch_to_tensor(sh0_torch); // [N, 1, 3]
+    auto shN_tensor = torch_to_tensor(shN_torch); // [N, 15, 3]
     auto scaling_tensor = torch_to_tensor(scaling_torch);
     auto rotation_tensor = torch_to_tensor(rotation_torch);
     auto opacity_tensor = torch_to_tensor(opacity_torch);
 
     // Create SplatData instances - both use [N, coeffs, channels] layout
     gs::SplatDataRef splat_ref(sh_degree, means_torch, sh0_torch, shN_torch,
-                                scaling_torch, rotation_torch, opacity_torch, scene_scale);
+                               scaling_torch, rotation_torch, opacity_torch, scene_scale);
 
     gs::SplatDataNew splat_new(sh_degree, means_tensor, sh0_tensor, shN_tensor,
-                                scaling_tensor, rotation_tensor, opacity_tensor, scene_scale);
+                               scaling_tensor, rotation_tensor, opacity_tensor, scene_scale);
 
     // Compare basic properties
     EXPECT_EQ(splat_ref.size(), splat_new.size());
@@ -315,7 +315,7 @@ TEST_F(SplatDataComparisonTest, InitFromPointCloud_Comparison) {
     // Create scene center
     auto scene_center_torch = torch::tensor({0.0f, 0.0f, 0.0f}, torch::kCUDA);
     auto scene_center_tensor = gs::Tensor::from_vector({0.0f, 0.0f, 0.0f},
-        gs::TensorShape({3}), gs::Device::CUDA);
+                                                       gs::TensorShape({3}), gs::Device::CUDA);
 
     // Initialize SplatData from point clouds
     auto result_ref = gs::SplatDataRef::init_model_from_pointcloud(params, scene_center_torch, pc_ref);
@@ -335,7 +335,7 @@ TEST_F(SplatDataComparisonTest, InitFromPointCloud_Comparison) {
     EXPECT_TRUE(tensors_are_close(splat_ref.get_means(), splat_new.get_means(), FLOAT_TOLERANCE));
 
     std::print("✓ InitFromPointCloud: ref_size={}, new_size={}\n",
-              splat_ref.size(), splat_new.size());
+               splat_ref.size(), splat_new.size());
 }
 
 TEST_F(SplatDataComparisonTest, RandomInitialization_Comparison) {
@@ -364,7 +364,7 @@ TEST_F(SplatDataComparisonTest, RandomInitialization_Comparison) {
     EXPECT_EQ(splat_new.size(), params.optimization.init_num_pts);
 
     std::print("✓ RandomInitialization: both initialized with {} points\n",
-              params.optimization.init_num_pts);
+               params.optimization.init_num_pts);
 }
 
 // ============================================================================
@@ -418,9 +418,9 @@ TEST_F(SplatDataComparisonTest, GetOpacity_Comparison) {
     auto rotation_tensor = torch_to_tensor(rotation_torch);
 
     gs::SplatDataRef splat_ref(3, means_torch, sh0_torch, shN_torch,
-                                scaling_torch, rotation_torch, opacity_raw, 1.0f);
+                               scaling_torch, rotation_torch, opacity_raw, 1.0f);
     gs::SplatDataNew splat_new(3, means_tensor, sh0_tensor, shN_tensor,
-                                scaling_tensor, rotation_tensor, opacity_tensor, 1.0f);
+                               scaling_tensor, rotation_tensor, opacity_tensor, 1.0f);
 
     auto opacity_ref = splat_ref.get_opacity();
     auto opacity_new = splat_new.get_opacity();
@@ -450,9 +450,9 @@ TEST_F(SplatDataComparisonTest, GetScaling_Comparison) {
     auto opacity_tensor = torch_to_tensor(opacity_torch);
 
     gs::SplatDataRef splat_ref(3, means_torch, sh0_torch, shN_torch,
-                                scaling_raw, rotation_torch, opacity_torch, 1.0f);
+                               scaling_raw, rotation_torch, opacity_torch, 1.0f);
     gs::SplatDataNew splat_new(3, means_tensor, sh0_tensor, shN_tensor,
-                                scaling_tensor, rotation_tensor, opacity_tensor, 1.0f);
+                               scaling_tensor, rotation_tensor, opacity_tensor, 1.0f);
 
     auto scaling_ref = splat_ref.get_scaling();
     auto scaling_new = splat_new.get_scaling();
@@ -482,9 +482,9 @@ TEST_F(SplatDataComparisonTest, GetRotation_Comparison) {
     auto opacity_tensor = torch_to_tensor(opacity_torch);
 
     gs::SplatDataRef splat_ref(3, means_torch, sh0_torch, shN_torch,
-                                scaling_torch, rotation_raw, opacity_torch, 1.0f);
+                               scaling_torch, rotation_raw, opacity_torch, 1.0f);
     gs::SplatDataNew splat_new(3, means_tensor, sh0_tensor, shN_tensor,
-                                scaling_tensor, rotation_tensor, opacity_tensor, 1.0f);
+                               scaling_tensor, rotation_tensor, opacity_tensor, 1.0f);
 
     auto rotation_ref = splat_ref.get_rotation();
     auto rotation_new = splat_new.get_rotation();
@@ -599,11 +599,11 @@ TEST_F(SplatDataComparisonTest, Transform_Rotation_Comparison) {
 
     // Create SplatData instances with IDENTICAL data
     auto splat_ref = gs::SplatDataRef(sh_degree, means_torch.clone(), sh0_torch.clone(),
-                                       shN_torch.clone(), scaling_torch.clone(),
-                                       rotation_torch.clone(), opacity_torch.clone(), 10.0f);
+                                      shN_torch.clone(), scaling_torch.clone(),
+                                      rotation_torch.clone(), opacity_torch.clone(), 10.0f);
     auto splat_new = gs::SplatDataNew(sh_degree, means_tensor.clone(), sh0_tensor.clone(),
-                                       shN_tensor.clone(), scaling_tensor.clone(),
-                                       rotation_tensor.clone(), opacity_tensor.clone(), 10.0f);
+                                      shN_tensor.clone(), scaling_tensor.clone(),
+                                      rotation_tensor.clone(), opacity_tensor.clone(), 10.0f);
 
     // Create rotation matrix (45 degrees around Y axis)
     glm::mat4 transform = glm::rotate(glm::mat4(1.0f), glm::radians(45.0f), glm::vec3(0.0f, 1.0f, 0.0f));
@@ -701,11 +701,11 @@ TEST_F(SplatDataComparisonTest, Transform_Scale_Comparison) {
 
     // Create SplatData instances with IDENTICAL data
     auto splat_ref = gs::SplatDataRef(sh_degree, means_torch.clone(), sh0_torch.clone(),
-                                       shN_torch.clone(), scaling_torch.clone(),
-                                       rotation_torch.clone(), opacity_torch.clone(), 10.0f);
+                                      shN_torch.clone(), scaling_torch.clone(),
+                                      rotation_torch.clone(), opacity_torch.clone(), 10.0f);
     auto splat_new = gs::SplatDataNew(sh_degree, means_tensor.clone(), sh0_tensor.clone(),
-                                       shN_tensor.clone(), scaling_tensor.clone(),
-                                       rotation_tensor.clone(), opacity_tensor.clone(), 10.0f);
+                                      shN_tensor.clone(), scaling_tensor.clone(),
+                                      rotation_tensor.clone(), opacity_tensor.clone(), 10.0f);
 
     // Create scale matrix
     glm::mat4 transform = glm::scale(glm::mat4(1.0f), glm::vec3(2.0f, 2.0f, 2.0f));
@@ -989,7 +989,7 @@ protected:
         cudaDeviceSynchronize();
     }
 
-    template<typename Func>
+    template <typename Func>
     double benchmark(Func func, int warmup_runs = 3, int timing_runs = 10) {
         // Warm-up
         for (int i = 0; i < warmup_runs; ++i) {
@@ -1015,12 +1015,12 @@ protected:
         std::print("{}\n\n", std::string(100, '='));
 
         std::print("{:<40} {:>10} {:>8} {:>12} {:>12} {:>12}\n",
-                  "Benchmark", "N Points", "SH Deg", "Ref (ms)", "New (ms)", "Speedup");
+                   "Benchmark", "N Points", "SH Deg", "Ref (ms)", "New (ms)", "Speedup");
         std::print("{}\n", std::string(100, '-'));
 
         for (const auto& r : results) {
             std::print("{:<40} {:>10} {:>8} {:>12.3f} {:>12.3f} {:>11.2f}x\n",
-                      r.name, r.n_points, r.sh_degree, r.time_ms_ref, r.time_ms_new, r.speedup);
+                       r.name, r.n_points, r.sh_degree, r.time_ms_ref, r.time_ms_new, r.speedup);
         }
 
         std::print("{}\n", std::string(100, '='));
@@ -1139,7 +1139,8 @@ TEST_F(SplatDataPerformanceTest, DISABLED_TransformationBenchmark) {
             if (res.has_value()) {
                 res.value().transform(transform);
             }
-        }, 2, 5);
+        },
+                                       2, 5);
 
         // Benchmark new implementation - create fresh copy each time
         result.time_ms_new = benchmark([&]() {
@@ -1148,7 +1149,8 @@ TEST_F(SplatDataPerformanceTest, DISABLED_TransformationBenchmark) {
             if (res.has_value()) {
                 res.value().transform(transform);
             }
-        }, 2, 5);
+        },
+                                       2, 5);
 
         result.speedup = result.time_ms_ref / result.time_ms_new;
         results.push_back(result);

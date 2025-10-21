@@ -2,12 +2,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/logger.hpp"
-#include "core/tensor.hpp"
-#include "core/tensor_broadcast.hpp"
-#include "core/tensor_ops.hpp"
-#include "core/tensor_functors.hpp"
 #include "core/memory_pool.hpp"
 #include "core/pinned_memory_allocator.hpp"
+#include "core/tensor.hpp"
+#include "core/tensor_broadcast.hpp"
+#include "core/tensor_functors.hpp"
+#include "core/tensor_ops.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -39,21 +39,21 @@ namespace gs {
         if ((a == DataType::Int32 || a == DataType::Int64) &&
             (b == DataType::Float32 || b == DataType::Float16)) {
             return (b == DataType::Float16) ? DataType::Float16 : DataType::Float32;
-            }
+        }
         if ((b == DataType::Int32 || b == DataType::Int64) &&
             (a == DataType::Float32 || a == DataType::Float16)) {
             return (a == DataType::Float16) ? DataType::Float16 : DataType::Float32;
-            }
+        }
 
         if ((a == DataType::Int32 && b == DataType::Int64) ||
             (a == DataType::Int64 && b == DataType::Int32)) {
             return DataType::Int64;
-            }
+        }
 
         if ((a == DataType::Float16 && b == DataType::Float32) ||
             (a == DataType::Float32 && b == DataType::Float16)) {
             return DataType::Float32;
-            }
+        }
 
         return DataType::Float32;
     }
@@ -62,61 +62,62 @@ namespace gs {
         Tensor result;
 
         switch (op) {
-            case LoadOp::Empty: {
-                result.shape_ = args.shape;
-                result.strides_ = args.shape.strides();  // Initialize to contiguous strides
-                result.storage_offset_ = 0;
-                result.is_contiguous_ = true;
-                result.device_ = args.device;
-                result.dtype_ = args.dtype;
-                result.id_ = next_id_++;
+        case LoadOp::Empty: {
+            result.shape_ = args.shape;
+            result.strides_ = args.shape.strides(); // Initialize to contiguous strides
+            result.storage_offset_ = 0;
+            result.is_contiguous_ = true;
+            result.device_ = args.device;
+            result.dtype_ = args.dtype;
+            result.id_ = next_id_++;
 
-                size_t bytes = result.shape_.elements() * dtype_size(result.dtype_);
+            size_t bytes = result.shape_.elements() * dtype_size(result.dtype_);
 
-                if (bytes == 0) {
-                    // Create a dummy allocation to hold a valid shared_ptr
-                    // We allocate 1 byte even though we don't need it
-                    if (result.device_ == Device::CUDA) {
-                        void* dummy = CudaMemoryPool::instance().allocate(1, nullptr);
-                        result.data_owner_ = std::shared_ptr<void>(dummy, [](void* p) {
-                            CudaMemoryPool::instance().deallocate(p, nullptr);
-                        });
-                    } else {
-                        // Even dummy allocations use pinned memory
-                        void* dummy = PinnedMemoryAllocator::instance().allocate(1);
-                        result.data_owner_ = std::shared_ptr<void>(dummy, [](void* p) {
-                            if (p) PinnedMemoryAllocator::instance().deallocate(p);
-                        });
-                    }
-                    result.data_ = nullptr;  // Empty tensor has no usable data
-                    return result;
-                }
-
+            if (bytes == 0) {
+                // Create a dummy allocation to hold a valid shared_ptr
+                // We allocate 1 byte even though we don't need it
                 if (result.device_ == Device::CUDA) {
-                    void* ptr = CudaMemoryPool::instance().allocate(bytes, nullptr);
-                    if (!ptr) {
-                        LOG_ERROR("Failed to allocate {} bytes from memory pool", bytes);
-                        return Tensor();
-                    }
-                    result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+                    void* dummy = CudaMemoryPool::instance().allocate(1, nullptr);
+                    result.data_owner_ = std::shared_ptr<void>(dummy, [](void* p) {
                         CudaMemoryPool::instance().deallocate(p, nullptr);
                     });
-                    result.data_ = result.data_owner_.get();
                 } else {
-                    // Use pinned memory for CPU tensors (2-3x faster PCIe bandwidth)
-                    void* ptr = PinnedMemoryAllocator::instance().allocate(bytes);
-                    if (!ptr) {
-                        LOG_ERROR("Failed to allocate {} bytes on CPU (pinned memory)", bytes);
-                        return Tensor();
-                    }
-                    result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+                    // Even dummy allocations use pinned memory
+                    void* dummy = PinnedMemoryAllocator::instance().allocate(1);
+                    result.data_owner_ = std::shared_ptr<void>(dummy, [](void* p) {
                         if (p)
                             PinnedMemoryAllocator::instance().deallocate(p);
                     });
-                    result.data_ = result.data_owner_.get();
                 }
-                break;
+                result.data_ = nullptr; // Empty tensor has no usable data
+                return result;
             }
+
+            if (result.device_ == Device::CUDA) {
+                void* ptr = CudaMemoryPool::instance().allocate(bytes, nullptr);
+                if (!ptr) {
+                    LOG_ERROR("Failed to allocate {} bytes from memory pool", bytes);
+                    return Tensor();
+                }
+                result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+                    CudaMemoryPool::instance().deallocate(p, nullptr);
+                });
+                result.data_ = result.data_owner_.get();
+            } else {
+                // Use pinned memory for CPU tensors (2-3x faster PCIe bandwidth)
+                void* ptr = PinnedMemoryAllocator::instance().allocate(bytes);
+                if (!ptr) {
+                    LOG_ERROR("Failed to allocate {} bytes on CPU (pinned memory)", bytes);
+                    return Tensor();
+                }
+                result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+                    if (p)
+                        PinnedMemoryAllocator::instance().deallocate(p);
+                });
+                result.data_ = result.data_owner_.get();
+            }
+            break;
+        }
 
         case LoadOp::Const: {
             float value = std::get<float>(args.args);
@@ -181,7 +182,7 @@ namespace gs {
             size_t count = static_cast<size_t>(std::ceil((end - start) / step));
 
             result.shape_ = TensorShape{count};
-            result.strides_ = result.shape_.strides();  // Initialize to contiguous strides
+            result.strides_ = result.shape_.strides(); // Initialize to contiguous strides
             result.storage_offset_ = 0;
             result.is_contiguous_ = true;
             result.device_ = args.device;
@@ -222,7 +223,8 @@ namespace gs {
                     return Tensor();
                 }
                 result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
-                    if (p) PinnedMemoryAllocator::instance().deallocate(p);
+                    if (p)
+                        PinnedMemoryAllocator::instance().deallocate(p);
                 });
                 result.data_ = result.data_owner_.get();
 
@@ -322,7 +324,7 @@ namespace gs {
                                                    RandomGenerator::instance().get_next_cuda_seed(), 0);
 
                         tensor_ops::launch_convert_type<int, float>(temp_buffer, result.ptr<float>(),
-                                                result.numel(), 0);
+                                                                    result.numel(), 0);
                         cudaDeviceSynchronize();
 
                         CudaMemoryPool::instance().deallocate(temp_buffer, nullptr);
@@ -507,7 +509,8 @@ namespace gs {
         }
 
         LoadArgs args;
-        args.shape = TensorShape({static_cast<size_t>(num_samples)}); args.device = weights.device();
+        args.shape = TensorShape({static_cast<size_t>(num_samples)});
+        args.device = weights.device();
         args.dtype = DataType::Int32;
         args.args = std::pair<void*, bool>{const_cast<void*>(static_cast<const void*>(&weights)), replacement};
         return load(LoadOp::Multinomial, args);
@@ -524,7 +527,7 @@ namespace gs {
             bool unbiased = args.unbiased;
 
             ReduceArgs mean_args = args;
-            mean_args.args = std::monostate{};  // Clear variant args for mean calculation
+            mean_args.args = std::monostate{}; // Clear variant args for mean calculation
             auto mean_tensor = reduce(ReduceOp::Mean, mean_args);
 
             Tensor mean_broadcast = (mean_tensor.shape() == shape_)
@@ -566,7 +569,6 @@ namespace gs {
                 return variance.sqrt();
             }
         }
-
 
         std::vector<int> axes = args.axes;
         if (axes.empty()) {
@@ -786,21 +788,21 @@ namespace gs {
                     // Apply reduction operation
                     float val = src[in_idx];
                     switch (op) {
-                        case ReduceOp::Sum:
-                        case ReduceOp::Mean:  // Mean accumulates like sum, then divides at end
-                            result_val += val;
-                            break;
-                        case ReduceOp::Max:
-                            result_val = std::max(result_val, val);
-                            break;
-                        case ReduceOp::Min:
-                            result_val = std::min(result_val, val);
-                            break;
-                        case ReduceOp::Prod:
-                            result_val *= val;
-                            break;
-                        default:
-                            break;
+                    case ReduceOp::Sum:
+                    case ReduceOp::Mean: // Mean accumulates like sum, then divides at end
+                        result_val += val;
+                        break;
+                    case ReduceOp::Max:
+                        result_val = std::max(result_val, val);
+                        break;
+                    case ReduceOp::Min:
+                        result_val = std::min(result_val, val);
+                        break;
+                    case ReduceOp::Prod:
+                        result_val *= val;
+                        break;
+                    default:
+                        break;
                     }
                 }
 
@@ -1154,9 +1156,9 @@ namespace gs {
 
                     for (size_t row = 0; row < num_rows; ++row) {
                         const void* src = static_cast<const char*>(t.raw_ptr()) +
-                                         row * tensor_dim_size * element_size;
+                                          row * tensor_dim_size * element_size;
                         void* dst = static_cast<char*>(result.raw_ptr()) +
-                                   row * row_size * element_size + result_offset * element_size;
+                                    row * row_size * element_size + result_offset * element_size;
 
                         std::memcpy(dst, src, tensor_dim_size * element_size);
                     }
@@ -1199,9 +1201,9 @@ namespace gs {
                     size_t copy_size = tensor_dim_size * inner_size * element_size;
 
                     const void* src = static_cast<const char*>(t.raw_ptr()) +
-                                     outer * tensor_dim_size * inner_size * element_size;
+                                      outer * tensor_dim_size * inner_size * element_size;
                     void* dst = static_cast<char*>(result.raw_ptr()) +
-                               (outer * total_size_along_dim * inner_size + result_offset) * element_size;
+                                (outer * total_size_along_dim * inner_size + result_offset) * element_size;
 
                     std::memcpy(dst, src, copy_size);
                     result_offset += tensor_dim_size * inner_size;
@@ -1287,13 +1289,14 @@ namespace gs {
                     // Copy each outer slice
                     for (size_t outer = 0; outer < outer_size; ++outer) {
                         const void* src_ptr = static_cast<const char*>(tensors[i].raw_ptr()) +
-                                             outer * inner_size * dtype_size(first_dtype);
+                                              outer * inner_size * dtype_size(first_dtype);
                         void* dst_ptr = static_cast<char*>(result.raw_ptr()) +
-                                       (outer * result_strides[dim == 0 ? 1 : 0] +
-                                        i * stride_at_dim) * dtype_size(first_dtype);
+                                        (outer * result_strides[dim == 0 ? 1 : 0] +
+                                         i * stride_at_dim) *
+                                            dtype_size(first_dtype);
 
                         cudaMemcpy(dst_ptr, src_ptr, inner_size * dtype_size(first_dtype),
-                                  cudaMemcpyDeviceToDevice);
+                                   cudaMemcpyDeviceToDevice);
                     }
                 }
             }
@@ -1315,10 +1318,11 @@ namespace gs {
 
                     for (size_t outer = 0; outer < outer_size; ++outer) {
                         const void* src_ptr = static_cast<const char*>(tensors[i].raw_ptr()) +
-                                             outer * inner_size * dtype_size(first_dtype);
+                                              outer * inner_size * dtype_size(first_dtype);
                         void* dst_ptr = static_cast<char*>(result.raw_ptr()) +
-                                       (outer * result_strides[dim == 0 ? 1 : 0] +
-                                        i * stride_at_dim) * dtype_size(first_dtype);
+                                        (outer * result_strides[dim == 0 ? 1 : 0] +
+                                         i * stride_at_dim) *
+                                            dtype_size(first_dtype);
 
                         std::memcpy(dst_ptr, src_ptr, inner_size * dtype_size(first_dtype));
                     }
@@ -1332,55 +1336,54 @@ namespace gs {
     // ============= OPTIMIZED CLAMP (FUSED VERSION) =============
 
     Tensor Tensor::clamp(float min_val, float max_val) const {
-    if (!is_valid()) {
-        LOG_ERROR("clamp() on invalid tensor");
-        return Tensor();
-    }
-
-    if (numel() == 0) {
-        return empty(shape_, device_, dtype_);
-    }
-
-    // FUSED VERSION: Allocate output + clamp in one pass (avoids separate clone)
-    auto result = empty(shape_, device_, dtype_);
-
-    if (device_ == Device::CUDA) {
-        if (dtype_ == DataType::Float32) {
-            // Single-pass: read from source, write clamped to destination
-            const float* src = ptr<float>();
-            float* dst = result.ptr<float>();
-            
-            // Use our optimized kernel
-            tensor_ops::launch_clamp_fused(src, dst, min_val, max_val, numel(), 0);
-        } else if (dtype_ == DataType::Int32) {
-            // Fallback: copy then clamp for int
-            cudaMemcpy(result.data_, data_, bytes(), cudaMemcpyDeviceToDevice);
-            tensor_ops::launch_clamp_scalar_int(result.ptr<int>(),
-                                                static_cast<int>(min_val),
-                                                static_cast<int>(max_val),
-                                                numel(), 0);
+        if (!is_valid()) {
+            LOG_ERROR("clamp() on invalid tensor");
+            return Tensor();
         }
-    } else {
-        // CPU: simple loop
-        if (dtype_ == DataType::Float32) {
-            const float* src = ptr<float>();
-            float* dst = result.ptr<float>();
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = std::isnan(src[i]) ? src[i] : std::clamp(src[i], min_val, max_val);
+
+        if (numel() == 0) {
+            return empty(shape_, device_, dtype_);
+        }
+
+        // FUSED VERSION: Allocate output + clamp in one pass (avoids separate clone)
+        auto result = empty(shape_, device_, dtype_);
+
+        if (device_ == Device::CUDA) {
+            if (dtype_ == DataType::Float32) {
+                // Single-pass: read from source, write clamped to destination
+                const float* src = ptr<float>();
+                float* dst = result.ptr<float>();
+
+                // Use our optimized kernel
+                tensor_ops::launch_clamp_fused(src, dst, min_val, max_val, numel(), 0);
+            } else if (dtype_ == DataType::Int32) {
+                // Fallback: copy then clamp for int
+                cudaMemcpy(result.data_, data_, bytes(), cudaMemcpyDeviceToDevice);
+                tensor_ops::launch_clamp_scalar_int(result.ptr<int>(),
+                                                    static_cast<int>(min_val),
+                                                    static_cast<int>(max_val),
+                                                    numel(), 0);
             }
-        } else if (dtype_ == DataType::Int32) {
-            const int* src = ptr<int>();
-            int* dst = result.ptr<int>();
-            int min_int = static_cast<int>(min_val);
-            int max_int = static_cast<int>(max_val);
-            for (size_t i = 0; i < numel(); ++i) {
-                dst[i] = std::clamp(src[i], min_int, max_int);
+        } else {
+            // CPU: simple loop
+            if (dtype_ == DataType::Float32) {
+                const float* src = ptr<float>();
+                float* dst = result.ptr<float>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = std::isnan(src[i]) ? src[i] : std::clamp(src[i], min_val, max_val);
+                }
+            } else if (dtype_ == DataType::Int32) {
+                const int* src = ptr<int>();
+                int* dst = result.ptr<int>();
+                int min_int = static_cast<int>(min_val);
+                int max_int = static_cast<int>(max_val);
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = std::clamp(src[i], min_int, max_int);
+                }
             }
         }
-    }
 
-    return result;
+        return result;
     }
 
 } // namespace gs
-

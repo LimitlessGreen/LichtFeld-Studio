@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/aligned_memory_pool.hpp"
-#include <gtest/gtest.h>
 #include <cuda_runtime.h>
+#include <gtest/gtest.h>
 
 using namespace gs;
 
@@ -40,7 +40,7 @@ TEST_F(AlignedMemoryPoolTest, BasicAllocation) {
 
 TEST_F(AlignedMemoryPoolTest, CacheLineAlignment) {
     size_t bytes = 4096;
-    size_t alignment = 128;  // Cache line size
+    size_t alignment = 128; // Cache line size
 
     void* ptr = AlignedMemoryPool::instance().allocate_aligned(bytes, alignment);
 
@@ -55,7 +55,7 @@ TEST_F(AlignedMemoryPoolTest, CacheLineAlignment) {
 
 TEST_F(AlignedMemoryPoolTest, Float4Alignment) {
     size_t bytes = 256;
-    size_t alignment = 16;  // float4 requires 16-byte alignment
+    size_t alignment = 16; // float4 requires 16-byte alignment
 
     void* ptr = AlignedMemoryPool::instance().allocate_aligned(bytes, alignment);
 
@@ -80,7 +80,7 @@ TEST_F(AlignedMemoryPoolTest, MultipleAllocations) {
     size_t alignment = 128;
 
     for (int i = 0; i < num_allocs; ++i) {
-        size_t bytes = 1024 + i * 64;  // Varying sizes
+        size_t bytes = 1024 + i * 64; // Varying sizes
         void* ptr = AlignedMemoryPool::instance().allocate_aligned(bytes, alignment);
 
         ASSERT_NE(ptr, nullptr);
@@ -101,7 +101,7 @@ TEST_F(AlignedMemoryPoolTest, MultipleAllocations) {
 // ============= Smart Allocation Tests =============
 
 TEST_F(AlignedMemoryPoolTest, SmartAllocationSmallTensor) {
-    size_t bytes = 2048;  // < 4KB threshold
+    size_t bytes = 2048; // < 4KB threshold
     size_t threshold = 4096;
     size_t alignment = 128;
 
@@ -118,7 +118,7 @@ TEST_F(AlignedMemoryPoolTest, SmartAllocationSmallTensor) {
 }
 
 TEST_F(AlignedMemoryPoolTest, SmartAllocationLargeTensor) {
-    size_t bytes = 8192;  // > 4KB threshold
+    size_t bytes = 8192; // > 4KB threshold
     size_t threshold = 4096;
     size_t alignment = 128;
 
@@ -153,7 +153,7 @@ TEST_F(AlignedMemoryPoolTest, VariousAlignments) {
 
 TEST_F(AlignedMemoryPoolTest, InvalidAlignmentReturnsNull) {
     size_t bytes = 1024;
-    size_t alignment = 17;  // Not a power of 2
+    size_t alignment = 17; // Not a power of 2
 
     void* ptr = AlignedMemoryPool::instance().allocate_aligned(bytes, alignment);
 
@@ -268,7 +268,7 @@ TEST_F(AlignedMemoryPoolTest, ZeroByteAllocation) {
 }
 
 TEST_F(AlignedMemoryPoolTest, VeryLargeAllocation) {
-    size_t bytes = 1024 * 1024 * 100;  // 100 MB
+    size_t bytes = 1024 * 1024 * 100; // 100 MB
     size_t alignment = 128;
 
     void* ptr = AlignedMemoryPool::instance().allocate_aligned(bytes, alignment);

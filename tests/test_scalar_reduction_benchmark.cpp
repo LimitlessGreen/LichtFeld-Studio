@@ -2,10 +2,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
-#include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <chrono>
+#include <gtest/gtest.h>
 #include <iomanip>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -14,46 +14,46 @@ using namespace gs;
 
 namespace {
 
-class Timer {
-private:
-    std::chrono::high_resolution_clock::time_point start_;
+    class Timer {
+    private:
+        std::chrono::high_resolution_clock::time_point start_;
 
-public:
-    Timer() {
-        start_ = std::chrono::high_resolution_clock::now();
-    }
-
-    double elapsed_ms() const {
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
-        return duration.count() / 1000.0;
-    }
-};
-
-struct BenchmarkResult {
-    std::string operation;
-    double custom_ms;
-    double torch_ms;
-    double speedup;
-
-    void print() const {
-        std::cout << std::setw(50) << std::left << operation
-                  << "  Custom: " << std::setw(8) << std::right << std::fixed
-                  << std::setprecision(4) << custom_ms << " ms"
-                  << "  Torch: " << std::setw(8) << torch_ms << " ms"
-                  << "  Speedup: " << std::setw(6) << std::setprecision(2)
-                  << speedup << "x";
-
-        if (speedup < 0.8) {
-            std::cout << " ⚠️  SLOWER";
-        } else if (speedup > 1.5) {
-            std::cout << " ✓ FASTER";
-        } else {
-            std::cout << " ~ SIMILAR";
+    public:
+        Timer() {
+            start_ = std::chrono::high_resolution_clock::now();
         }
-        std::cout << std::endl;
-    }
-};
+
+        double elapsed_ms() const {
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
+            return duration.count() / 1000.0;
+        }
+    };
+
+    struct BenchmarkResult {
+        std::string operation;
+        double custom_ms;
+        double torch_ms;
+        double speedup;
+
+        void print() const {
+            std::cout << std::setw(50) << std::left << operation
+                      << "  Custom: " << std::setw(8) << std::right << std::fixed
+                      << std::setprecision(4) << custom_ms << " ms"
+                      << "  Torch: " << std::setw(8) << torch_ms << " ms"
+                      << "  Speedup: " << std::setw(6) << std::setprecision(2)
+                      << speedup << "x";
+
+            if (speedup < 0.8) {
+                std::cout << " ⚠️  SLOWER";
+            } else if (speedup > 1.5) {
+                std::cout << " ✓ FASTER";
+            } else {
+                std::cout << " ~ SIMILAR";
+            }
+            std::cout << std::endl;
+        }
+    };
 
 } // namespace
 
@@ -67,7 +67,8 @@ protected:
     }
 
     void print_separator(const std::string& title = "") {
-        std::cout << "\n" << std::string(110, '=') << std::endl;
+        std::cout << "\n"
+                  << std::string(110, '=') << std::endl;
         if (!title.empty()) {
             std::cout << title << std::endl;
             std::cout << std::string(110, '=') << std::endl;
@@ -82,7 +83,8 @@ TEST_F(ScalarReductionBenchmarkTest, SumScalarReduction) {
 
     std::cout << "\n🎯 OPTIMIZATION: Single-block warp-parallel kernel from calm" << std::endl;
     std::cout << "📊 Pattern: float2 vectorized loads + warp shuffle reductions" << std::endl;
-    std::cout << "💡 Expected: 5-10x speedup for small-medium tensors\n" << std::endl;
+    std::cout << "💡 Expected: 5-10x speedup for small-medium tensors\n"
+              << std::endl;
 
     const int iterations = 100;
 
@@ -101,7 +103,8 @@ TEST_F(ScalarReductionBenchmarkTest, SumScalarReduction) {
         auto tensor_custom = Tensor::rand(TensorShape(shape), Device::CUDA);
 
         std::vector<int64_t> torch_shape;
-        for (auto s : shape) torch_shape.push_back(s);
+        for (auto s : shape)
+            torch_shape.push_back(s);
         auto tensor_torch = torch::rand(torch_shape, torch::kCUDA);
 
         double total_custom = 0.0;
@@ -129,8 +132,7 @@ TEST_F(ScalarReductionBenchmarkTest, SumScalarReduction) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 }
@@ -153,7 +155,8 @@ TEST_F(ScalarReductionBenchmarkTest, MeanScalarReduction) {
         auto tensor_custom = Tensor::rand(TensorShape(shape), Device::CUDA);
 
         std::vector<int64_t> torch_shape;
-        for (auto s : shape) torch_shape.push_back(s);
+        for (auto s : shape)
+            torch_shape.push_back(s);
         auto tensor_torch = torch::rand(torch_shape, torch::kCUDA);
 
         double total_custom = 0.0;
@@ -179,8 +182,7 @@ TEST_F(ScalarReductionBenchmarkTest, MeanScalarReduction) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 }
@@ -202,7 +204,8 @@ TEST_F(ScalarReductionBenchmarkTest, MinMaxScalarReduction) {
         auto tensor_custom = Tensor::rand(TensorShape(shape), Device::CUDA);
 
         std::vector<int64_t> torch_shape;
-        for (auto s : shape) torch_shape.push_back(s);
+        for (auto s : shape)
+            torch_shape.push_back(s);
         auto tensor_torch = torch::rand(torch_shape, torch::kCUDA);
 
         double total_custom_min = 0.0;
@@ -246,16 +249,14 @@ TEST_F(ScalarReductionBenchmarkTest, MinMaxScalarReduction) {
             name + " - MIN",
             total_custom_min / iterations,
             total_torch_min / iterations,
-            total_torch_min / total_custom_min
-        };
+            total_torch_min / total_custom_min};
         result_min.print();
 
         BenchmarkResult result_max{
             name + " - MAX",
             total_custom_max / iterations,
             total_torch_max / iterations,
-            total_torch_max / total_custom_max
-        };
+            total_torch_max / total_custom_max};
         result_max.print();
     }
 }
@@ -278,7 +279,8 @@ TEST_F(ScalarReductionBenchmarkTest, CountNonzeroReduction) {
         auto tensor_custom = (Tensor::rand(TensorShape(shape), Device::CUDA) > 0.5f).to(DataType::Float32);
 
         std::vector<int64_t> torch_shape;
-        for (auto s : shape) torch_shape.push_back(s);
+        for (auto s : shape)
+            torch_shape.push_back(s);
         auto tensor_torch = (torch::rand(torch_shape, torch::kCUDA) > 0.5f).to(torch::kFloat);
 
         double total_custom = 0.0;
@@ -304,8 +306,7 @@ TEST_F(ScalarReductionBenchmarkTest, CountNonzeroReduction) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 }
@@ -327,7 +328,8 @@ TEST_F(ScalarReductionBenchmarkTest, NormReduction) {
         auto tensor_custom = Tensor::rand(TensorShape(shape), Device::CUDA);
 
         std::vector<int64_t> torch_shape;
-        for (auto s : shape) torch_shape.push_back(s);
+        for (auto s : shape)
+            torch_shape.push_back(s);
         auto tensor_torch = torch::rand(torch_shape, torch::kCUDA);
 
         double total_custom_l1 = 0.0;
@@ -371,16 +373,14 @@ TEST_F(ScalarReductionBenchmarkTest, NormReduction) {
             name + " - L1",
             total_custom_l1 / iterations,
             total_torch_l1 / iterations,
-            total_torch_l1 / total_custom_l1
-        };
+            total_torch_l1 / total_custom_l1};
         result_l1.print();
 
         BenchmarkResult result_l2{
             name + " - L2",
             total_custom_l2 / iterations,
             total_torch_l2 / iterations,
-            total_torch_l2 / total_custom_l2
-        };
+            total_torch_l2 / total_custom_l2};
         result_l2.print();
     }
 }
@@ -430,8 +430,7 @@ TEST_F(ScalarReductionBenchmarkTest, DotProductReduction) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 }
@@ -442,10 +441,11 @@ TEST_F(ScalarReductionBenchmarkTest, TrainingLossComputation) {
     print_separator("REAL-WORLD PATTERN - Training Loss Computation");
 
     std::cout << "\n📸 Simulates computing loss + metrics in training loop" << std::endl;
-    std::cout << "Pattern: MSE loss + L2 regularization + gradient norm\n" << std::endl;
+    std::cout << "Pattern: MSE loss + L2 regularization + gradient norm\n"
+              << std::endl;
 
     const int iterations = 50;
-    const size_t N = 1024 * 1024;  // 1M parameters
+    const size_t N = 1024 * 1024; // 1M parameters
 
     auto predictions = Tensor::rand({N}, Device::CUDA);
     auto targets = Tensor::rand({N}, Device::CUDA);
@@ -488,8 +488,7 @@ TEST_F(ScalarReductionBenchmarkTest, TrainingLossComputation) {
         "Loss computation (3 scalar reductions)",
         total_custom / iterations,
         total_torch / iterations,
-        total_torch / total_custom
-    };
+        total_torch / total_custom};
     result.print();
 
     std::cout << "\n📊 ANALYSIS:" << std::endl;

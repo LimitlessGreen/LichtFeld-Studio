@@ -62,7 +62,7 @@ namespace gs {
          * @brief Map output index to input index for broadcasting (CPU fallback)
          * @param out_idx Linear index in output array
          * @param out_shape Shape of output array
-        * @param in_shape Shape of input array
+         * @param in_shape Shape of input array
          * @return Linear index in input array
          * @details Used for CPU fallback when CUDA is not available
          */

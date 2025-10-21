@@ -7,8 +7,8 @@
 
 #include "core/tensor_ops.hpp"
 #include "core/warp_reduce.cuh"
-#include <cuda_runtime.h>
 #include <cfloat>
+#include <cuda_runtime.h>
 
 namespace gs::tensor_ops {
 
@@ -284,7 +284,7 @@ namespace gs::tensor_ops {
     __global__ void count_nonzero_float_kernel(const float* data, size_t* result, int n) {
         int tid = threadIdx.x;
         int blockSize = blockDim.x;
-        float count = 0.0f;  // Use float for warp reduction, convert to size_t at end
+        float count = 0.0f; // Use float for warp reduction, convert to size_t at end
 
         // Vectorized loads with float2
         for (int i = tid * 2; i < n; i += blockSize * 2) {
@@ -309,7 +309,7 @@ namespace gs::tensor_ops {
     __global__ void count_nonzero_bool_kernel(const unsigned char* data, size_t* result, int n) {
         int tid = threadIdx.x;
         int blockSize = blockDim.x;
-        float count = 0.0f;  // Use float for warp reduction
+        float count = 0.0f; // Use float for warp reduction
 
         // Process elements (no vectorization for bool - single byte)
         for (int i = tid; i < n; i += blockSize) {

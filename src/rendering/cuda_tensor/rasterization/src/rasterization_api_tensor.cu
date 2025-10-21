@@ -29,7 +29,7 @@ namespace gs::rendering {
             if (!tensor.is_valid() || tensor.device() != Device::CUDA ||
                 tensor.dtype() != DataType::Float32 || !tensor.is_contiguous()) {
                 throw std::runtime_error("Input tensor '" + std::string(name) +
-                                       "' must be a contiguous CUDA float tensor.");
+                                         "' must be a contiguous CUDA float tensor.");
             }
         }
     }

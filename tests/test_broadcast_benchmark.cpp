@@ -2,10 +2,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
-#include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <chrono>
+#include <gtest/gtest.h>
 #include <iomanip>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -13,46 +13,46 @@ using namespace gs;
 
 namespace {
 
-class Timer {
-private:
-    std::chrono::high_resolution_clock::time_point start_;
+    class Timer {
+    private:
+        std::chrono::high_resolution_clock::time_point start_;
 
-public:
-    Timer() {
-        start_ = std::chrono::high_resolution_clock::now();
-    }
-
-    double elapsed_ms() const {
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
-        return duration.count() / 1000.0;
-    }
-};
-
-struct BenchmarkResult {
-    std::string operation;
-    double custom_ms;
-    double torch_ms;
-    double speedup;
-
-    void print() const {
-        std::cout << std::setw(50) << std::left << operation
-                  << "  Custom: " << std::setw(8) << std::right << std::fixed
-                  << std::setprecision(4) << custom_ms << " ms"
-                  << "  Torch: " << std::setw(8) << torch_ms << " ms"
-                  << "  Speedup: " << std::setw(6) << std::setprecision(2)
-                  << speedup << "×";
-
-        if (speedup < 0.8) {
-            std::cout << " ⚠️  SLOWER";
-        } else if (speedup > 1.5) {
-            std::cout << " ✓ FASTER";
-        } else {
-            std::cout << " ~ SIMILAR";
+    public:
+        Timer() {
+            start_ = std::chrono::high_resolution_clock::now();
         }
-        std::cout << std::endl;
-    }
-};
+
+        double elapsed_ms() const {
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
+            return duration.count() / 1000.0;
+        }
+    };
+
+    struct BenchmarkResult {
+        std::string operation;
+        double custom_ms;
+        double torch_ms;
+        double speedup;
+
+        void print() const {
+            std::cout << std::setw(50) << std::left << operation
+                      << "  Custom: " << std::setw(8) << std::right << std::fixed
+                      << std::setprecision(4) << custom_ms << " ms"
+                      << "  Torch: " << std::setw(8) << torch_ms << " ms"
+                      << "  Speedup: " << std::setw(6) << std::setprecision(2)
+                      << speedup << "×";
+
+            if (speedup < 0.8) {
+                std::cout << " ⚠️  SLOWER";
+            } else if (speedup > 1.5) {
+                std::cout << " ✓ FASTER";
+            } else {
+                std::cout << " ~ SIMILAR";
+            }
+            std::cout << std::endl;
+        }
+    };
 
 } // namespace
 
@@ -66,7 +66,8 @@ protected:
     }
 
     void print_separator(const std::string& title = "") {
-        std::cout << "\n" << std::string(110, '=') << std::endl;
+        std::cout << "\n"
+                  << std::string(110, '=') << std::endl;
         if (!title.empty()) {
             std::cout << title << std::endl;
             std::cout << std::string(110, '=') << std::endl;
@@ -80,15 +81,15 @@ TEST_F(BroadcastBenchmarkTest, BroadcastAddition) {
     print_separator("BROADCAST ADDITION - Memory Pool Impact");
 
     std::cout << "\n🎯 This tests the Phase 2A optimization (binary broadcast ops)" << std::endl;
-    std::cout << "📊 Each operation allocates 3 shape arrays (a_shape, b_shape, c_shape)\n" << std::endl;
+    std::cout << "📊 Each operation allocates 3 shape arrays (a_shape, b_shape, c_shape)\n"
+              << std::endl;
 
     std::vector<std::tuple<std::string, std::vector<int64_t>, std::vector<int64_t>>> test_cases = {
         {"Image broadcast (720×820×3) + (1×1×3)", {720, 820, 3}, {1, 1, 3}},
         {"Matrix broadcast (1024×1024) + (1024×1)", {1024, 1024}, {1024, 1}},
         {"Batch broadcast (32×256×256) + (1×256×256)", {32, 256, 256}, {1, 256, 256}},
         {"Scalar broadcast (1000×1000) + scalar", {1000, 1000}, {1}},
-        {"Vector broadcast (512×512) + (512×1)", {512, 512}, {512, 1}}
-    };
+        {"Vector broadcast (512×512) + (512×1)", {512, 512}, {512, 1}}};
 
     const int iterations = 100;
 
@@ -98,8 +99,10 @@ TEST_F(BroadcastBenchmarkTest, BroadcastAddition) {
 
         // Convert shapes
         std::vector<size_t> custom_shape_a, custom_shape_b;
-        for (auto s : shape_a) custom_shape_a.push_back(s);
-        for (auto s : shape_b) custom_shape_b.push_back(s);
+        for (auto s : shape_a)
+            custom_shape_a.push_back(s);
+        for (auto s : shape_b)
+            custom_shape_b.push_back(s);
 
         // Create tensors
         auto a_custom = Tensor::rand(TensorShape(custom_shape_a), Device::CUDA);
@@ -115,7 +118,7 @@ TEST_F(BroadcastBenchmarkTest, BroadcastAddition) {
             // Custom
             {
                 Timer timer;
-                Tensor result = a_custom + b_custom;  // Force evaluation!
+                Tensor result = a_custom + b_custom; // Force evaluation!
                 cudaDeviceSynchronize();
                 total_custom += timer.elapsed_ms();
             }
@@ -133,8 +136,7 @@ TEST_F(BroadcastBenchmarkTest, BroadcastAddition) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 }
@@ -147,13 +149,14 @@ TEST_F(BroadcastBenchmarkTest, BroadcastMultiplication) {
     std::vector<std::tuple<std::string, std::vector<int64_t>, std::vector<int64_t>>> test_cases = {
         {"Element-wise (1024×1024) * (1024×1024)", {1024, 1024}, {1024, 1024}},
         {"Row broadcast (512×512) * (1×512)", {512, 512}, {1, 512}},
-        {"Channel-wise (128×128×64) * (1×1×64)", {128, 128, 64}, {1, 1, 64}}
-    };
+        {"Channel-wise (128×128×64) * (1×1×64)", {128, 128, 64}, {1, 1, 64}}};
 
     for (const auto& [name, shape_a, shape_b] : test_cases) {
         std::vector<size_t> custom_shape_a, custom_shape_b;
-        for (auto s : shape_a) custom_shape_a.push_back(s);
-        for (auto s : shape_b) custom_shape_b.push_back(s);
+        for (auto s : shape_a)
+            custom_shape_a.push_back(s);
+        for (auto s : shape_b)
+            custom_shape_b.push_back(s);
 
         auto a_custom = Tensor::rand(TensorShape(custom_shape_a), Device::CUDA);
         auto b_custom = Tensor::rand(TensorShape(custom_shape_b), Device::CUDA);
@@ -183,8 +186,7 @@ TEST_F(BroadcastBenchmarkTest, BroadcastMultiplication) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 }
@@ -193,7 +195,8 @@ TEST_F(BroadcastBenchmarkTest, ChainedBroadcastOperations) {
     print_separator("CHAINED BROADCAST OPERATIONS - Real-world Pattern");
 
     std::cout << "\n📸 Simulates image processing pipeline with multiple broadcasts" << std::endl;
-    std::cout << "Pattern: normalize → scale → add bias → clamp\n" << std::endl;
+    std::cout << "Pattern: normalize → scale → add bias → clamp\n"
+              << std::endl;
 
     const int H = 720;
     const int W = 820;
@@ -239,8 +242,7 @@ TEST_F(BroadcastBenchmarkTest, ChainedBroadcastOperations) {
         "Image normalization pipeline (4 broadcast ops)",
         total_custom / iterations,
         total_torch / iterations,
-        total_torch / total_custom
-    };
+        total_torch / total_custom};
     result.print();
 
     std::cout << "\n📊 ANALYSIS:" << std::endl;
@@ -306,8 +308,7 @@ TEST_F(BroadcastBenchmarkTest, ComparisonOperations) {
             name,
             total_custom / iterations,
             total_torch / iterations,
-            total_torch / total_custom
-        };
+            total_torch / total_custom};
         result.print();
     }
 }

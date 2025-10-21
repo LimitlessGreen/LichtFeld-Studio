@@ -23,7 +23,7 @@ namespace gs {
         int num_points,
         cudaStream_t stream);
 #endif
-}
+} // namespace gs
 
 // Include framebuffer after forward declarations
 #include "framebuffer.hpp"

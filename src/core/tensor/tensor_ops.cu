@@ -1,25 +1,24 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "core/tensor.hpp"
-#include "core/tensor_ops.hpp"
-#include "core/tensor_functors.hpp"
-#include "core/memory_pool.hpp"
 #include "core/logger.hpp"
+#include "core/memory_pool.hpp"
+#include "core/tensor.hpp"
+#include "core/tensor_functors.hpp"
+#include "core/tensor_ops.hpp"
 #include "core/warp_reduce.cuh"
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cub/device/device_reduce.cuh>
+#include <cub/device/device_segmented_reduce.cuh>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
-#include <cub/device/device_segmented_reduce.cuh>
-#include <cub/device/device_reduce.cuh>
 #include <limits>
 
 // Thrust headers
 #include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
-#include <thrust/sort.h>
 #include <thrust/execution_policy.h>
 #include <thrust/fill.h>
 #include <thrust/functional.h>
@@ -29,6 +28,7 @@
 #include <thrust/reduce.h>
 #include <thrust/scan.h>
 #include <thrust/sequence.h>
+#include <thrust/sort.h>
 #include <thrust/transform.h>
 #include <thrust/tuple.h>
 
@@ -82,14 +82,15 @@ namespace gs::tensor_ops {
         for (size_t i = idx; i < n; i += stride) {
             // Single precision math, no NaN check (PyTorch doesn't check either)
             float val = data[i];
-            val = fmaxf(val, min_val);  // max(val, min)
-            val = fminf(val, max_val);  // min(result, max)
+            val = fmaxf(val, min_val); // max(val, min)
+            val = fminf(val, max_val); // min(result, max)
             data[i] = val;
         }
     }
 
     void launch_clamp_scalar(float* data, float min_val, float max_val, size_t n, cudaStream_t stream) {
-        if (n == 0) return;
+        if (n == 0)
+            return;
 
         // Check alignment for float4 vectorization
         bool is_aligned = (reinterpret_cast<uintptr_t>(data) % 16) == 0;
@@ -101,7 +102,7 @@ namespace gs::tensor_ops {
         if (is_aligned && n > 1024) {
             // IMPORTANT: Each thread processes up to 4 elements, but we need enough threads
             // to cover all elements. Grid size should ensure ALL elements are processed.
-            int num_threads_needed = (n + 3) / 4;  // Round up
+            int num_threads_needed = (n + 3) / 4; // Round up
             int grid_size = (num_threads_needed + BLOCK_SIZE - 1) / BLOCK_SIZE;
             // Don't cap grid_size - we need to process ALL elements!
 
@@ -117,7 +118,7 @@ namespace gs::tensor_ops {
 
     // Vectorized fused clamp kernel (2-4x faster!)
     __global__ void clamp_kernel_fused_vectorized(const float* __restrict__ src, float* __restrict__ dst,
-                                                   float min_val, float max_val, size_t n) {
+                                                  float min_val, float max_val, size_t n) {
         const size_t vec_idx = blockIdx.x * blockDim.x + threadIdx.x;
         const size_t idx = vec_idx * 4;
 
@@ -130,8 +131,7 @@ namespace gs::tensor_ops {
             vals.w = fminf(fmaxf(vals.w, min_val), max_val);
 
             reinterpret_cast<float4*>(dst)[vec_idx] = vals;
-        }
-        else if (idx < n) {
+        } else if (idx < n) {
             for (size_t i = idx; i < n; ++i) {
                 float val = src[i];
                 val = fmaxf(val, min_val);
@@ -156,8 +156,9 @@ namespace gs::tensor_ops {
     }
 
     void launch_clamp_fused(const float* src, float* dst, float min_val, float max_val,
-                           size_t n, cudaStream_t stream) {
-        if (n == 0) return;
+                            size_t n, cudaStream_t stream) {
+        if (n == 0)
+            return;
 
         bool src_aligned = (reinterpret_cast<uintptr_t>(src) % 16) == 0;
         bool dst_aligned = (reinterpret_cast<uintptr_t>(dst) % 16) == 0;
@@ -179,7 +180,8 @@ namespace gs::tensor_ops {
     }
 
     void launch_clamp_scalar_int(int* data, int min_val, int max_val, size_t n, cudaStream_t stream) {
-        if (n == 0) return;
+        if (n == 0)
+            return;
         auto data_ptr = thrust::device_pointer_cast(data);
 
         run_with_thrust_policy(stream, [&](auto policy) {
@@ -188,10 +190,9 @@ namespace gs::tensor_ops {
         });
     }
 
-
     // ============= TYPE CONVERSIONS (USING FUNCTORS) =============
 
-    template<typename SrcT, typename DstT>
+    template <typename SrcT, typename DstT>
     struct ConvertFunctor {
         __device__ DstT operator()(SrcT x) const {
             return static_cast<DstT>(x);
@@ -199,21 +200,21 @@ namespace gs::tensor_ops {
     };
 
     // Specializations for clamping conversions
-    template<>
+    template <>
     struct ConvertFunctor<float, uint8_t> {
         __device__ uint8_t operator()(float x) const {
             return static_cast<uint8_t>(fminf(fmaxf(roundf(x), 0.0f), 255.0f));
         }
     };
 
-    template<>
+    template <>
     struct ConvertFunctor<int, uint8_t> {
         __device__ uint8_t operator()(int x) const {
             return static_cast<uint8_t>(max(0, min(255, x)));
         }
     };
 
-    template<>
+    template <>
     struct ConvertFunctor<int64_t, uint8_t> {
         __device__ uint8_t operator()(int64_t x) const {
             return static_cast<uint8_t>(max(static_cast<int64_t>(0),
@@ -221,9 +222,10 @@ namespace gs::tensor_ops {
         }
     };
 
-    template<typename SrcT, typename DstT>
+    template <typename SrcT, typename DstT>
     void launch_convert_type(const SrcT* src, DstT* dst, size_t n, cudaStream_t stream) {
-        if (n == 0) return;
+        if (n == 0)
+            return;
         auto src_ptr = thrust::device_pointer_cast(src);
         auto dst_ptr = thrust::device_pointer_cast(dst);
         run_with_thrust_policy(stream, [&](auto policy) {
@@ -237,13 +239,13 @@ namespace gs::tensor_ops {
 
     // ============= OPTIMIZED SEGMENTED REDUCTION =============
 
-    template<typename T, typename Op>
+    template <typename T, typename Op>
     void launch_segmented_reduce(
         const T* input, T* output,
         size_t outer_size, size_t reduce_size, size_t inner_size,
-        T init_value, Op op, cudaStream_t stream)
-    {
-        if (outer_size == 0 || reduce_size == 0 || inner_size == 0) return;
+        T init_value, Op op, cudaStream_t stream) {
+        if (outer_size == 0 || reduce_size == 0 || inner_size == 0)
+            return;
 
         size_t output_size = outer_size * inner_size;
 
@@ -253,10 +255,10 @@ namespace gs::tensor_ops {
             auto out_ptr = thrust::device_pointer_cast(output);
             if (stream) {
                 thrust::copy(thrust::cuda::par.on(stream),
-                            in_ptr, in_ptr + output_size, out_ptr);
+                             in_ptr, in_ptr + output_size, out_ptr);
             } else {
                 thrust::copy(thrust::cuda::par,
-                            in_ptr, in_ptr + output_size, out_ptr);
+                             in_ptr, in_ptr + output_size, out_ptr);
             }
             return;
         }
@@ -266,18 +268,16 @@ namespace gs::tensor_ops {
             // begin_offsets: [0, N, 2N, 3N, ...]
             auto begin_offsets = thrust::make_transform_iterator(
                 thrust::counting_iterator<int>(0),
-                [reduce_size] __host__ __device__ (int i) -> int {
+                [reduce_size] __host__ __device__(int i) -> int {
                     return i * static_cast<int>(reduce_size);
-                }
-            );
+                });
 
             // end_offsets: [N, 2N, 3N, 4N, ...]
             auto end_offsets = thrust::make_transform_iterator(
                 thrust::counting_iterator<int>(1),
-                [reduce_size] __host__ __device__ (int i) -> int {
+                [reduce_size] __host__ __device__(int i) -> int {
                     return i * static_cast<int>(reduce_size);
-                }
-            );
+                });
 
             void* d_temp_storage = nullptr;
             size_t temp_storage_bytes = 0;
@@ -293,14 +293,13 @@ namespace gs::tensor_ops {
                 end_offsets,
                 op,
                 init_value,
-                stream
-            );
+                stream);
 
             // Allocate temp storage from memory pool (fast!)
             d_temp_storage = CudaMemoryPool::instance().allocate(temp_storage_bytes, stream);
             if (!d_temp_storage) {
                 LOG_ERROR("Failed to allocate {} bytes for CUB temp storage from memory pool",
-                         temp_storage_bytes);
+                          temp_storage_bytes);
                 return;
             }
 
@@ -315,8 +314,7 @@ namespace gs::tensor_ops {
                 end_offsets,
                 op,
                 init_value,
-                stream
-            );
+                stream);
 
             // Return temp storage to memory pool (instant, cached for reuse)
             CudaMemoryPool::instance().deallocate(d_temp_storage, stream);
@@ -332,50 +330,48 @@ namespace gs::tensor_ops {
         // TODO: Implement optimized strided reduction kernel or use CUB with proper setup
         if (stream) {
             thrust::for_each(thrust::cuda::par.on(stream),
-                thrust::counting_iterator<size_t>(0),
-                thrust::counting_iterator<size_t>(output_size),
-                [=] __device__ (size_t out_idx) {
-                    size_t outer_idx = out_idx / inner_size;
-                    size_t inner_idx = out_idx % inner_size;
+                             thrust::counting_iterator<size_t>(0),
+                             thrust::counting_iterator<size_t>(output_size),
+                             [=] __device__(size_t out_idx) {
+                                 size_t outer_idx = out_idx / inner_size;
+                                 size_t inner_idx = out_idx % inner_size;
 
-                    T result = init_value;
-                    for (size_t r = 0; r < reduce_size; ++r) {
-                        size_t in_idx = (outer_idx * reduce_size + r) * inner_size + inner_idx;
-                        result = op(result, input[in_idx]);
-                    }
-                    output[out_idx] = result;
-                }
-            );
+                                 T result = init_value;
+                                 for (size_t r = 0; r < reduce_size; ++r) {
+                                     size_t in_idx = (outer_idx * reduce_size + r) * inner_size + inner_idx;
+                                     result = op(result, input[in_idx]);
+                                 }
+                                 output[out_idx] = result;
+                             });
         } else {
             thrust::for_each(thrust::cuda::par,
-                thrust::counting_iterator<size_t>(0),
-                thrust::counting_iterator<size_t>(output_size),
-                [=] __device__ (size_t out_idx) {
-                    size_t outer_idx = out_idx / inner_size;
-                    size_t inner_idx = out_idx % inner_size;
+                             thrust::counting_iterator<size_t>(0),
+                             thrust::counting_iterator<size_t>(output_size),
+                             [=] __device__(size_t out_idx) {
+                                 size_t outer_idx = out_idx / inner_size;
+                                 size_t inner_idx = out_idx % inner_size;
 
-                    T result = init_value;
-                    for (size_t r = 0; r < reduce_size; ++r) {
-                        size_t in_idx = (outer_idx * reduce_size + r) * inner_size + inner_idx;
-                        result = op(result, input[in_idx]);
-                    }
-                    output[out_idx] = result;
-                }
-            );
+                                 T result = init_value;
+                                 for (size_t r = 0; r < reduce_size; ++r) {
+                                     size_t in_idx = (outer_idx * reduce_size + r) * inner_size + inner_idx;
+                                     result = op(result, input[in_idx]);
+                                 }
+                                 output[out_idx] = result;
+                             });
         }
     }
 
     // ============= MULTI-AXIS REDUCTION (USING FUNCTORS) =============
 
-    template<typename Op>
+    template <typename Op>
     __global__ void multi_axis_reduce_kernel(
         const float* input, float* output,
         const size_t* input_shape, const bool* is_reduced_dim,
         size_t input_rank, size_t output_elements, float init_val,
-        Op op)
-    {
+        Op op) {
         size_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (out_idx >= output_elements) return;
+        if (out_idx >= output_elements)
+            return;
 
         size_t input_strides[10];
         input_strides[input_rank - 1] = 1;
@@ -452,32 +448,31 @@ namespace gs::tensor_ops {
         const float* input, float* output,
         const size_t* input_shape, const bool* is_reduced_dim,
         size_t input_rank, size_t output_elements,
-        float init_val, ReduceOp op, cudaStream_t stream)
-    {
+        float init_val, ReduceOp op, cudaStream_t stream) {
         int blocks = (output_elements + 255) / 256;
 
         switch (op) {
-            case ReduceOp::Sum:
-            case ReduceOp::Mean:
-                multi_axis_reduce_kernel<<<blocks, 256, 0, stream>>>(
-                    input, output, input_shape, is_reduced_dim,
-                    input_rank, output_elements, init_val, ops::add_op{});
-                break;
-            case ReduceOp::Max:
-                multi_axis_reduce_kernel<<<blocks, 256, 0, stream>>>(
-                    input, output, input_shape, is_reduced_dim,
-                    input_rank, output_elements, init_val, ops::maximum_op{});
-                break;
-            case ReduceOp::Min:
-                multi_axis_reduce_kernel<<<blocks, 256, 0, stream>>>(
-                    input, output, input_shape, is_reduced_dim,
-                    input_rank, output_elements, init_val, ops::minimum_op{});
-                break;
-            case ReduceOp::Prod:
-                multi_axis_reduce_kernel<<<blocks, 256, 0, stream>>>(
-                    input, output, input_shape, is_reduced_dim,
-                    input_rank, output_elements, init_val, ops::mul_op{});
-                break;
+        case ReduceOp::Sum:
+        case ReduceOp::Mean:
+            multi_axis_reduce_kernel<<<blocks, 256, 0, stream>>>(
+                input, output, input_shape, is_reduced_dim,
+                input_rank, output_elements, init_val, ops::add_op{});
+            break;
+        case ReduceOp::Max:
+            multi_axis_reduce_kernel<<<blocks, 256, 0, stream>>>(
+                input, output, input_shape, is_reduced_dim,
+                input_rank, output_elements, init_val, ops::maximum_op{});
+            break;
+        case ReduceOp::Min:
+            multi_axis_reduce_kernel<<<blocks, 256, 0, stream>>>(
+                input, output, input_shape, is_reduced_dim,
+                input_rank, output_elements, init_val, ops::minimum_op{});
+            break;
+        case ReduceOp::Prod:
+            multi_axis_reduce_kernel<<<blocks, 256, 0, stream>>>(
+                input, output, input_shape, is_reduced_dim,
+                input_rank, output_elements, init_val, ops::mul_op{});
+            break;
         }
     }
 
@@ -492,11 +487,14 @@ namespace gs::tensor_ops {
     void launch_reduce_op(const void* input, void* output, const size_t* shape, size_t rank,
                           const int* axes, size_t num_axes, bool keepdim, ReduceOp op,
                           DataType dtype, cudaStream_t stream) {
-        if (dtype != DataType::Float32) return;
+        if (dtype != DataType::Float32)
+            return;
 
         size_t n = 1;
-        for (size_t i = 0; i < rank; ++i) n *= shape[i];
-        if (n == 0) return;
+        for (size_t i = 0; i < rank; ++i)
+            n *= shape[i];
+        if (n == 0)
+            return;
 
         auto input_ptr = thrust::device_pointer_cast(static_cast<const float*>(input));
         auto output_ptr = thrust::device_pointer_cast(static_cast<float*>(output));
@@ -511,19 +509,19 @@ namespace gs::tensor_ops {
                 // Initialize output to appropriate init value
                 float init_val = 0.0f;
                 switch (op) {
-                    case ReduceOp::Sum:
-                    case ReduceOp::Mean:
-                        init_val = 0.0f;
-                        break;
-                    case ReduceOp::Max:
-                        init_val = -std::numeric_limits<float>::infinity();
-                        break;
-                    case ReduceOp::Min:
-                        init_val = std::numeric_limits<float>::infinity();
-                        break;
-                    case ReduceOp::Prod:
-                        init_val = 1.0f;
-                        break;
+                case ReduceOp::Sum:
+                case ReduceOp::Mean:
+                    init_val = 0.0f;
+                    break;
+                case ReduceOp::Max:
+                    init_val = -std::numeric_limits<float>::infinity();
+                    break;
+                case ReduceOp::Min:
+                    init_val = std::numeric_limits<float>::infinity();
+                    break;
+                case ReduceOp::Prod:
+                    init_val = 1.0f;
+                    break;
                 }
                 cudaMemcpyAsync(d_out, &init_val, sizeof(float), cudaMemcpyHostToDevice, stream);
 
@@ -535,7 +533,7 @@ namespace gs::tensor_ops {
                     auto out_ptr = thrust::device_pointer_cast(d_out);
                     run_with_thrust_policy(stream, [&](auto policy) {
                         thrust::transform(policy, out_ptr, out_ptr + 1, out_ptr,
-                                        DivideByFunctor(static_cast<float>(n)));
+                                          DivideByFunctor(static_cast<float>(n)));
                     });
                 }
                 return;
@@ -564,7 +562,7 @@ namespace gs::tensor_ops {
                 auto out_ptr = thrust::device_pointer_cast(d_out);
                 run_with_thrust_policy(stream, [&](auto policy) {
                     thrust::transform(policy, out_ptr, out_ptr + 1, out_ptr,
-                                    DivideByFunctor(static_cast<float>(n)));
+                                      DivideByFunctor(static_cast<float>(n)));
                 });
                 break;
             }
@@ -590,12 +588,10 @@ namespace gs::tensor_ops {
                     cudaMemcpyAsync(output, &result, sizeof(float), cudaMemcpyHostToDevice, stream);
                 }
                 break;
-            default:
-                {
-                    float zero = 0.0f;
-                    cudaMemcpyAsync(output, &zero, sizeof(float), cudaMemcpyHostToDevice, stream);
-                }
-                break;
+            default: {
+                float zero = 0.0f;
+                cudaMemcpyAsync(output, &zero, sizeof(float), cudaMemcpyHostToDevice, stream);
+            } break;
             }
             return;
         }
@@ -604,10 +600,12 @@ namespace gs::tensor_ops {
         if (num_axes == 1) {
             int dim = axes[0];
             size_t outer_size = 1;
-            for (int i = 0; i < dim; ++i) outer_size *= shape[i];
+            for (int i = 0; i < dim; ++i)
+                outer_size *= shape[i];
             size_t reduce_size = shape[dim];
             size_t inner_size = 1;
-            for (size_t i = dim + 1; i < rank; ++i) inner_size *= shape[i];
+            for (size_t i = dim + 1; i < rank; ++i)
+                inner_size *= shape[i];
 
             const float* input_f = static_cast<const float*>(input);
             float* output_f = static_cast<float*>(output);
@@ -625,7 +623,7 @@ namespace gs::tensor_ops {
                         auto out_ptr = thrust::device_pointer_cast(output_f);
                         run_with_thrust_policy(stream, [&](auto policy) {
                             thrust::transform(policy, out_ptr, out_ptr + outer_size, out_ptr,
-                                            DivideByFunctor(static_cast<float>(reduce_size)));
+                                              DivideByFunctor(static_cast<float>(reduce_size)));
                         });
                     }
                     return;
@@ -650,7 +648,7 @@ namespace gs::tensor_ops {
                         auto out_ptr = thrust::device_pointer_cast(output_f);
                         run_with_thrust_policy(stream, [&](auto policy) {
                             thrust::transform(policy, out_ptr, out_ptr + output_size, out_ptr,
-                                            DivideByFunctor(static_cast<float>(reduce_size)));
+                                              DivideByFunctor(static_cast<float>(reduce_size)));
                         });
                     }
                     return;
@@ -661,41 +659,41 @@ namespace gs::tensor_ops {
             float init_val = 0.0f;
 
             switch (op) {
-                case ReduceOp::Sum:
-                    init_val = 0.0f;
-                    launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
-                                          init_val, ops::add_op{}, stream);
-                    break;
-                case ReduceOp::Mean:
-                    init_val = 0.0f;
-                    launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
-                                          init_val, ops::add_op{}, stream);
-                    {
-                        auto out_ptr = thrust::device_pointer_cast(output_f);
-                        size_t output_size = outer_size * inner_size;
-                        run_with_thrust_policy(stream, [&](auto policy) {
-                            thrust::transform(policy, out_ptr, out_ptr + output_size, out_ptr,
-                                            DivideByFunctor(static_cast<float>(reduce_size)));
-                        });
-                    }
-                    break;
-                case ReduceOp::Max:
-                    init_val = -std::numeric_limits<float>::infinity();
-                    launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
-                                          init_val, ops::maximum_op{}, stream);
-                    break;
-                case ReduceOp::Min:
-                    init_val = std::numeric_limits<float>::infinity();
-                    launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
-                                          init_val, ops::minimum_op{}, stream);
-                    break;
-                case ReduceOp::Prod:
-                    init_val = 1.0f;
-                    launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
-                                          init_val, ops::mul_op{}, stream);
-                    break;
-                default:
-                    break;
+            case ReduceOp::Sum:
+                init_val = 0.0f;
+                launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
+                                        init_val, ops::add_op{}, stream);
+                break;
+            case ReduceOp::Mean:
+                init_val = 0.0f;
+                launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
+                                        init_val, ops::add_op{}, stream);
+                {
+                    auto out_ptr = thrust::device_pointer_cast(output_f);
+                    size_t output_size = outer_size * inner_size;
+                    run_with_thrust_policy(stream, [&](auto policy) {
+                        thrust::transform(policy, out_ptr, out_ptr + output_size, out_ptr,
+                                          DivideByFunctor(static_cast<float>(reduce_size)));
+                    });
+                }
+                break;
+            case ReduceOp::Max:
+                init_val = -std::numeric_limits<float>::infinity();
+                launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
+                                        init_val, ops::maximum_op{}, stream);
+                break;
+            case ReduceOp::Min:
+                init_val = std::numeric_limits<float>::infinity();
+                launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
+                                        init_val, ops::minimum_op{}, stream);
+                break;
+            case ReduceOp::Prod:
+                init_val = 1.0f;
+                launch_segmented_reduce(input_f, output_f, outer_size, reduce_size, inner_size,
+                                        init_val, ops::mul_op{}, stream);
+                break;
+            default:
+                break;
             }
             return;
         }
@@ -711,7 +709,7 @@ namespace gs::tensor_ops {
             std::vector<int> sorted_axes(axes, axes + num_axes);
             std::sort(sorted_axes.begin(), sorted_axes.end());
             for (size_t i = 1; i < num_axes; ++i) {
-                if (sorted_axes[i] != sorted_axes[i-1] + 1) {
+                if (sorted_axes[i] != sorted_axes[i - 1] + 1) {
                     axes_contiguous = false;
                     break;
                 }
@@ -758,19 +756,19 @@ namespace gs::tensor_ops {
                     if (should_use_warp_reduce(n, 1)) {
                         float init_val = 0.0f;
                         switch (op) {
-                            case ReduceOp::Sum:
-                            case ReduceOp::Mean:
-                                init_val = 0.0f;
-                                break;
-                            case ReduceOp::Max:
-                                init_val = -std::numeric_limits<float>::infinity();
-                                break;
-                            case ReduceOp::Min:
-                                init_val = std::numeric_limits<float>::infinity();
-                                break;
-                            case ReduceOp::Prod:
-                                init_val = 1.0f;
-                                break;
+                        case ReduceOp::Sum:
+                        case ReduceOp::Mean:
+                            init_val = 0.0f;
+                            break;
+                        case ReduceOp::Max:
+                            init_val = -std::numeric_limits<float>::infinity();
+                            break;
+                        case ReduceOp::Min:
+                            init_val = std::numeric_limits<float>::infinity();
+                            break;
+                        case ReduceOp::Prod:
+                            init_val = 1.0f;
+                            break;
                         }
                         cudaMemcpyAsync(output_f, &init_val, sizeof(float), cudaMemcpyHostToDevice, stream);
                         launch_warp_reduce_full(input_f, output_f, n, op, stream);
@@ -779,7 +777,7 @@ namespace gs::tensor_ops {
                             auto out_ptr = thrust::device_pointer_cast(output_f);
                             run_with_thrust_policy(stream, [&](auto policy) {
                                 thrust::transform(policy, out_ptr, out_ptr + 1, out_ptr,
-                                                DivideByFunctor(static_cast<float>(reduce_count)));
+                                                  DivideByFunctor(static_cast<float>(reduce_count)));
                             });
                         }
                         return;
@@ -794,7 +792,7 @@ namespace gs::tensor_ops {
                         auto out_ptr = thrust::device_pointer_cast(output_f);
                         run_with_thrust_policy(stream, [&](auto policy) {
                             thrust::transform(policy, out_ptr, out_ptr + outer_size, out_ptr,
-                                            DivideByFunctor(static_cast<float>(reduce_count)));
+                                              DivideByFunctor(static_cast<float>(reduce_count)));
                         });
                     }
                     return;
@@ -824,7 +822,7 @@ namespace gs::tensor_ops {
                         auto out_ptr = thrust::device_pointer_cast(output_f);
                         run_with_thrust_policy(stream, [&](auto policy) {
                             thrust::transform(policy, out_ptr, out_ptr + output_size, out_ptr,
-                                            DivideByFunctor(static_cast<float>(reduce_count)));
+                                              DivideByFunctor(static_cast<float>(reduce_count)));
                         });
                     }
                     return;
@@ -849,19 +847,19 @@ namespace gs::tensor_ops {
 
         float init_val = 0.0f;
         switch (op) {
-            case ReduceOp::Sum:
-            case ReduceOp::Mean:
-                init_val = 0.0f;
-                break;
-            case ReduceOp::Max:
-                init_val = -std::numeric_limits<float>::infinity();
-                break;
-            case ReduceOp::Min:
-                init_val = std::numeric_limits<float>::infinity();
-                break;
-            case ReduceOp::Prod:
-                init_val = 1.0f;
-                break;
+        case ReduceOp::Sum:
+        case ReduceOp::Mean:
+            init_val = 0.0f;
+            break;
+        case ReduceOp::Max:
+            init_val = -std::numeric_limits<float>::infinity();
+            break;
+        case ReduceOp::Min:
+            init_val = std::numeric_limits<float>::infinity();
+            break;
+        case ReduceOp::Prod:
+            init_val = 1.0f;
+            break;
         }
 
         launch_multi_axis_reduce(
@@ -869,8 +867,7 @@ namespace gs::tensor_ops {
             output_f,
             thrust::raw_pointer_cast(d_input_shape.data()),
             thrust::raw_pointer_cast(d_is_reduced.data()),
-            rank, output_elements, init_val, op, stream
-        );
+            rank, output_elements, init_val, op, stream);
 
         if (op == ReduceOp::Mean) {
             size_t reduce_count = 1;
@@ -880,24 +877,26 @@ namespace gs::tensor_ops {
             float scale = 1.0f / reduce_count;
             run_with_thrust_policy(stream, [&](auto policy) {
                 thrust::transform(policy, output_ptr, output_ptr + output_elements,
-                                thrust::make_constant_iterator(scale), output_ptr,
-                                ops::mul_op{});
+                                  thrust::make_constant_iterator(scale), output_ptr,
+                                  ops::mul_op{});
             });
         }
     }
 
     // ============= TERNARY OPERATIONS =============
 
-
     // ============= LOAD OPERATIONS =============
 
     void launch_load_op(void* output, const size_t* shape, size_t rank, LoadOp op,
                         const void* args, DataType dtype, cudaStream_t stream) {
-        if (dtype != DataType::Float32) return;
+        if (dtype != DataType::Float32)
+            return;
 
         size_t n = 1;
-        for (size_t i = 0; i < rank; ++i) n *= shape[i];
-        if (n == 0) return;
+        for (size_t i = 0; i < rank; ++i)
+            n *= shape[i];
+        if (n == 0)
+            return;
 
         if (op == LoadOp::Const && args) {
             float value = *static_cast<const float*>(args);
@@ -910,10 +909,11 @@ namespace gs::tensor_ops {
 
     // ============= OPTIMIZED CUMULATIVE SUM =============
 
-    template<typename T>
+    template <typename T>
     __global__ void cumsum_noncontiguous_kernel(T* data, size_t outer_size, size_t dim_size, size_t inner_size) {
         size_t scan_idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (scan_idx >= outer_size * inner_size) return;
+        if (scan_idx >= outer_size * inner_size)
+            return;
 
         size_t outer_idx = scan_idx / inner_size;
         size_t inner_idx = scan_idx % inner_size;
@@ -927,11 +927,11 @@ namespace gs::tensor_ops {
         }
     }
 
-    template<typename T>
+    template <typename T>
     void launch_cumsum_optimized(T* data, size_t outer_size, size_t dim_size,
-                                 size_t inner_size, cudaStream_t stream)
-    {
-        if (outer_size == 0 || dim_size == 0 || inner_size == 0) return;
+                                 size_t inner_size, cudaStream_t stream) {
+        if (outer_size == 0 || dim_size == 0 || inner_size == 0)
+            return;
 
         if (inner_size == 1 && dim_size > 1) {
             // Contiguous segments - use Thrust's optimized segmented scan
@@ -941,32 +941,28 @@ namespace gs::tensor_ops {
 
             if (stream) {
                 thrust::transform(thrust::cuda::par.on(stream),
-                    thrust::counting_iterator<size_t>(0),
-                    thrust::counting_iterator<size_t>(total_elements),
-                    keys.begin(),
-                    [=] __device__ (size_t idx) -> int {
-                        return static_cast<int>(idx / dim_size);
-                    }
-                );
+                                  thrust::counting_iterator<size_t>(0),
+                                  thrust::counting_iterator<size_t>(total_elements),
+                                  keys.begin(),
+                                  [=] __device__(size_t idx) -> int {
+                                      return static_cast<int>(idx / dim_size);
+                                  });
 
                 thrust::inclusive_scan_by_key(thrust::cuda::par.on(stream),
-                    keys.begin(), keys.end(),
-                    data_ptr, data_ptr
-                );
+                                              keys.begin(), keys.end(),
+                                              data_ptr, data_ptr);
             } else {
                 thrust::transform(thrust::cuda::par,
-                    thrust::counting_iterator<size_t>(0),
-                    thrust::counting_iterator<size_t>(total_elements),
-                    keys.begin(),
-                    [=] __device__ (size_t idx) -> int {
-                        return static_cast<int>(idx / dim_size);
-                    }
-                );
+                                  thrust::counting_iterator<size_t>(0),
+                                  thrust::counting_iterator<size_t>(total_elements),
+                                  keys.begin(),
+                                  [=] __device__(size_t idx) -> int {
+                                      return static_cast<int>(idx / dim_size);
+                                  });
 
                 thrust::inclusive_scan_by_key(thrust::cuda::par,
-                    keys.begin(), keys.end(),
-                    data_ptr, data_ptr
-                );
+                                              keys.begin(), keys.end(),
+                                              data_ptr, data_ptr);
             }
         } else {
             // Non-contiguous - use custom kernel
@@ -978,11 +974,14 @@ namespace gs::tensor_ops {
 
     void launch_cumsum(void* data, const size_t* shape, size_t rank,
                        int dim, DataType dtype, cudaStream_t stream) {
-        if (dtype != DataType::Float32 && dtype != DataType::Int32) return;
+        if (dtype != DataType::Float32 && dtype != DataType::Int32)
+            return;
 
         size_t total = 1;
-        for (size_t i = 0; i < rank; ++i) total *= shape[i];
-        if (total == 0) return;
+        for (size_t i = 0; i < rank; ++i)
+            total *= shape[i];
+        if (total == 0)
+            return;
 
         if (rank == 1) {
             if (dtype == DataType::Float32) {
@@ -1004,10 +1003,12 @@ namespace gs::tensor_ops {
         }
 
         size_t outer_size = 1;
-        for (int i = 0; i < dim; ++i) outer_size *= shape[i];
+        for (int i = 0; i < dim; ++i)
+            outer_size *= shape[i];
         size_t dim_size = shape[dim];
         size_t inner_size = 1;
-        for (size_t i = dim + 1; i < rank; ++i) inner_size *= shape[i];
+        for (size_t i = dim + 1; i < rank; ++i)
+            inner_size *= shape[i];
 
         if (dtype == DataType::Float32) {
             launch_cumsum_optimized<float>(static_cast<float*>(data), outer_size, dim_size, inner_size, stream);
@@ -1018,13 +1019,12 @@ namespace gs::tensor_ops {
 
     // ============= OPTIMIZED PAIRWISE DISTANCE =============
 
-    template<int BLOCK_SIZE = 16>
+    template <int BLOCK_SIZE = 16>
     __global__ void cdist_l2_optimized_kernel(
         const float* __restrict__ a,
         const float* __restrict__ b,
         float* __restrict__ out,
-        size_t N, size_t M, size_t D)
-    {
+        size_t N, size_t M, size_t D) {
         __shared__ float tile_a[BLOCK_SIZE][BLOCK_SIZE + 1];
         __shared__ float tile_b[BLOCK_SIZE][BLOCK_SIZE + 1];
 
@@ -1055,7 +1055,7 @@ namespace gs::tensor_ops {
             size_t d_end = (d_start + BLOCK_SIZE < D) ? (d_start + BLOCK_SIZE) : D;
             size_t tile_size = d_end - d_start;
 
-            #pragma unroll
+#pragma unroll
             for (size_t k = 0; k < BLOCK_SIZE; ++k) {
                 if (k < tile_size) {
                     float diff = tile_a[threadIdx.y][k] - tile_b[k][threadIdx.x];
@@ -1075,12 +1075,12 @@ namespace gs::tensor_ops {
         const float* __restrict__ a,
         const float* __restrict__ b,
         float* __restrict__ out,
-        size_t N, size_t M, size_t D)
-    {
+        size_t N, size_t M, size_t D) {
         size_t i = blockIdx.y * blockDim.y + threadIdx.y;
         size_t j = blockIdx.x * blockDim.x + threadIdx.x;
 
-        if (i >= N || j >= M) return;
+        if (i >= N || j >= M)
+            return;
 
         float sum = 0.0f;
         const float4* a_vec = reinterpret_cast<const float4*>(a + i * D);
@@ -1108,13 +1108,12 @@ namespace gs::tensor_ops {
         out[i * M + j] = sqrtf(sum);
     }
 
-    template<int BLOCK_SIZE = 16>
+    template <int BLOCK_SIZE = 16>
     __global__ void cdist_l1_optimized_kernel(
         const float* __restrict__ a,
         const float* __restrict__ b,
         float* __restrict__ out,
-        size_t N, size_t M, size_t D)
-    {
+        size_t N, size_t M, size_t D) {
         __shared__ float tile_a[BLOCK_SIZE][BLOCK_SIZE + 1];
         __shared__ float tile_b[BLOCK_SIZE][BLOCK_SIZE + 1];
 
@@ -1145,7 +1144,7 @@ namespace gs::tensor_ops {
             size_t d_end = (d_start + BLOCK_SIZE < D) ? (d_start + BLOCK_SIZE) : D;
             size_t tile_size = d_end - d_start;
 
-            #pragma unroll
+#pragma unroll
             for (size_t k = 0; k < BLOCK_SIZE; ++k) {
                 if (k < tile_size) {
                     sum += fabsf(tile_a[threadIdx.y][k] - tile_b[k][threadIdx.x]);
@@ -1164,12 +1163,12 @@ namespace gs::tensor_ops {
         const float* __restrict__ a,
         const float* __restrict__ b,
         float* __restrict__ out,
-        size_t N, size_t M, size_t D, float p)
-    {
+        size_t N, size_t M, size_t D, float p) {
         size_t i = blockIdx.y * blockDim.y + threadIdx.y;
         size_t j = blockIdx.x * blockDim.x + threadIdx.x;
 
-        if (i >= N || j >= M) return;
+        if (i >= N || j >= M)
+            return;
 
         float dist = 0.0f;
         for (size_t d = 0; d < D; ++d) {
@@ -1181,7 +1180,8 @@ namespace gs::tensor_ops {
 
     void launch_cdist(const float* a, const float* b, float* out,
                       size_t N, size_t M, size_t D, float p, cudaStream_t stream) {
-        if (N == 0 || M == 0) return;
+        if (N == 0 || M == 0)
+            return;
 
         constexpr int BLOCK_SIZE = 16;
 
@@ -1209,7 +1209,8 @@ namespace gs::tensor_ops {
     // ============= SORTING =============
 
     void launch_sort_1d(float* values, int64_t* indices, size_t n, bool descending, cudaStream_t stream) {
-        if (n == 0) return;
+        if (n == 0)
+            return;
 
         auto values_ptr = thrust::device_pointer_cast(values);
         auto indices_ptr = thrust::device_pointer_cast(indices);
@@ -1221,25 +1222,25 @@ namespace gs::tensor_ops {
         if (stream) {
             if (descending) {
                 thrust::sort_by_key(thrust::cuda::par.on(stream), values_ptr, values_ptr + n,
-                                   indices_ptr, thrust::greater<float>());
+                                    indices_ptr, thrust::greater<float>());
             } else {
                 thrust::sort_by_key(thrust::cuda::par.on(stream), values_ptr, values_ptr + n,
-                                   indices_ptr, thrust::less<float>());
+                                    indices_ptr, thrust::less<float>());
             }
         } else {
             if (descending) {
                 thrust::sort_by_key(thrust::cuda::par, values_ptr, values_ptr + n,
-                                   indices_ptr, thrust::greater<float>());
+                                    indices_ptr, thrust::greater<float>());
             } else {
                 thrust::sort_by_key(thrust::cuda::par, values_ptr, values_ptr + n,
-                                   indices_ptr, thrust::less<float>());
+                                    indices_ptr, thrust::less<float>());
             }
         }
     }
 
     __global__ void extract_slice_kernel(const float* input, float* output,
-                                     size_t outer_size, size_t dim_size, size_t inner_size,
-                                     size_t outer_idx, size_t inner_idx) {
+                                         size_t outer_size, size_t dim_size, size_t inner_size,
+                                         size_t outer_idx, size_t inner_idx) {
         size_t d = blockIdx.x * blockDim.x + threadIdx.x;
         if (d < dim_size) {
             size_t src_idx = outer_idx * dim_size * inner_size + d * inner_size + inner_idx;
@@ -1262,7 +1263,8 @@ namespace gs::tensor_ops {
     void launch_sort_2d(float* values, int64_t* indices,
                         size_t outer_size, size_t dim_size, size_t inner_size,
                         int dim, bool descending, cudaStream_t stream) {
-        if (dim_size == 0 || outer_size == 0 || inner_size == 0) return;
+        if (dim_size == 0 || outer_size == 0 || inner_size == 0)
+            return;
 
         thrust::device_vector<float> temp_vals(dim_size);
         thrust::device_vector<int64_t> temp_idx(dim_size);
@@ -1272,31 +1274,30 @@ namespace gs::tensor_ops {
             for (size_t inner = 0; inner < inner_size; ++inner) {
                 extract_slice_kernel<<<blocks, 256, 0, stream>>>(
                     values, thrust::raw_pointer_cast(temp_vals.data()),
-                    outer_size, dim_size, inner_size, outer, inner
-                );
+                    outer_size, dim_size, inner_size, outer, inner);
 
                 thrust::sequence(thrust::cuda::par.on(stream), temp_idx.begin(), temp_idx.end(), 0LL);
 
                 if (descending) {
                     thrust::sort_by_key(thrust::cuda::par.on(stream),
-                        temp_vals.begin(), temp_vals.end(), temp_idx.begin(),
-                        thrust::greater<float>());
+                                        temp_vals.begin(), temp_vals.end(), temp_idx.begin(),
+                                        thrust::greater<float>());
                 } else {
                     thrust::sort_by_key(thrust::cuda::par.on(stream),
-                        temp_vals.begin(), temp_vals.end(), temp_idx.begin(),
-                        thrust::less<float>());
+                                        temp_vals.begin(), temp_vals.end(), temp_idx.begin(),
+                                        thrust::less<float>());
                 }
 
                 write_slice_kernel<<<blocks, 256, 0, stream>>>(
                     values, indices,
                     thrust::raw_pointer_cast(temp_vals.data()),
                     thrust::raw_pointer_cast(temp_idx.data()),
-                    outer_size, dim_size, inner_size, outer, inner
-                );
+                    outer_size, dim_size, inner_size, outer, inner);
             }
         }
 
-        if (stream) cudaStreamSynchronize(stream);
+        if (stream)
+            cudaStreamSynchronize(stream);
     }
 
     // ============= CONCATENATION OPERATIONS =============
@@ -1307,10 +1308,10 @@ namespace gs::tensor_ops {
         float* output,
         const float* rgb,
         size_t num_pixels,
-        float alpha_value)
-    {
+        float alpha_value) {
         size_t pixel_idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (pixel_idx >= num_pixels) return;
+        if (pixel_idx >= num_pixels)
+            return;
 
         // Each thread processes one pixel: RGB → RGBA
         const size_t rgb_offset = pixel_idx * 3;
@@ -1319,8 +1320,7 @@ namespace gs::tensor_ops {
         float3 rgb_vals = make_float3(
             rgb[rgb_offset + 0],
             rgb[rgb_offset + 1],
-            rgb[rgb_offset + 2]
-        );
+            rgb[rgb_offset + 2]);
 
         // Check alignment for float4 output
         bool out_aligned = (reinterpret_cast<uintptr_t>(&output[rgba_offset]) % 16) == 0;
@@ -1339,17 +1339,17 @@ namespace gs::tensor_ops {
     }
 
     // Generic vectorized cat kernel
-    template<typename T>
+    template <typename T>
     __global__ void cat_last_dim_kernel_vectorized(
         T* output,
         const T** input_ptrs,
         const size_t* input_sizes,
         size_t num_tensors,
         size_t num_rows,
-        size_t row_size)
-    {
+        size_t row_size) {
         size_t row = blockIdx.x * blockDim.x + threadIdx.x;
-        if (row >= num_rows) return;
+        if (row >= num_rows)
+            return;
 
         size_t result_offset = 0;
         for (size_t t = 0; t < num_tensors; ++t) {
@@ -1393,17 +1393,17 @@ namespace gs::tensor_ops {
     }
 
     // DEPRECATED: Old scalar kernel (kept for compatibility)
-    template<typename T>
+    template <typename T>
     __global__ void cat_last_dim_kernel(
         T* output,
         const T** input_ptrs,
         const size_t* input_sizes,
         size_t num_tensors,
         size_t num_rows,
-        size_t row_size)
-    {
+        size_t row_size) {
         size_t row = blockIdx.x * blockDim.x + threadIdx.x;
-        if (row >= num_rows) return;
+        if (row >= num_rows)
+            return;
 
         size_t result_offset = 0;
         for (size_t t = 0; t < num_tensors; ++t) {
@@ -1426,8 +1426,7 @@ namespace gs::tensor_ops {
         size_t num_rows,
         size_t row_size,
         size_t element_size,
-        cudaStream_t stream)
-    {
+        cudaStream_t stream) {
         size_t num_tensors = tensors.size();
 
         // FAST PATH: RGB→RGBA conversion (adding alpha channel)
@@ -1435,15 +1434,14 @@ namespace gs::tensor_ops {
         if (num_tensors == 2 &&
             tensors[0].shape()[tensors[0].shape().rank() - 1] == 3 &&
             tensors[1].shape()[tensors[1].shape().rank() - 1] == 1 &&
-            element_size == sizeof(float))
-        {
+            element_size == sizeof(float)) {
             // Special case: cat([RGB, alpha]) → RGBA
             size_t num_pixels = num_rows;
             int block_size = 256;
             int grid_size = (num_pixels + block_size - 1) / block_size;
 
             // Assume alpha is constant (most common case)
-            float alpha_value = 1.0f;  // Default alpha = 1.0 for opaque
+            float alpha_value = 1.0f; // Default alpha = 1.0 for opaque
 
             cat_rgb_to_rgba_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<float*>(output),
@@ -1462,8 +1460,10 @@ namespace gs::tensor_ops {
 
         if (!d_input_ptrs || !d_input_sizes) {
             LOG_ERROR("Failed to allocate cat metadata from memory pool");
-            if (d_input_ptrs) CudaMemoryPool::instance().deallocate(const_cast<float**>(d_input_ptrs), stream);
-            if (d_input_sizes) CudaMemoryPool::instance().deallocate(d_input_sizes, stream);
+            if (d_input_ptrs)
+                CudaMemoryPool::instance().deallocate(const_cast<float**>(d_input_ptrs), stream);
+            if (d_input_sizes)
+                CudaMemoryPool::instance().deallocate(d_input_sizes, stream);
             return;
         }
 
@@ -1477,9 +1477,9 @@ namespace gs::tensor_ops {
         }
 
         cudaMemcpyAsync(const_cast<float**>(d_input_ptrs), h_input_ptrs.data(),
-                       num_tensors * sizeof(float*), cudaMemcpyHostToDevice, stream);
+                        num_tensors * sizeof(float*), cudaMemcpyHostToDevice, stream);
         cudaMemcpyAsync(d_input_sizes, h_input_sizes.data(),
-                       num_tensors * sizeof(size_t), cudaMemcpyHostToDevice, stream);
+                        num_tensors * sizeof(size_t), cudaMemcpyHostToDevice, stream);
 
         int block_size = 256;
         int grid_size = (num_rows + block_size - 1) / block_size;
@@ -1498,7 +1498,7 @@ namespace gs::tensor_ops {
         CudaMemoryPool::instance().deallocate(d_input_sizes, stream);
     }
 
-    template<typename T>
+    template <typename T>
     __global__ void cat_middle_dim_kernel(
         T* output,
         const T** input_ptrs,
@@ -1506,12 +1506,12 @@ namespace gs::tensor_ops {
         size_t num_tensors,
         size_t outer_size,
         size_t inner_size,
-        size_t total_dim_size)
-    {
+        size_t total_dim_size) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
         size_t total = outer_size * total_dim_size * inner_size;
 
-        if (idx >= total) return;
+        if (idx >= total)
+            return;
 
         size_t outer_idx = idx / (total_dim_size * inner_size);
         size_t remainder = idx % (total_dim_size * inner_size);
@@ -1523,7 +1523,7 @@ namespace gs::tensor_ops {
             if (dim_idx < accumulated + input_sizes[t]) {
                 size_t tensor_dim_idx = dim_idx - accumulated;
                 size_t src_idx = outer_idx * input_sizes[t] * inner_size +
-                               tensor_dim_idx * inner_size + inner_idx;
+                                 tensor_dim_idx * inner_size + inner_idx;
                 output[idx] = input_ptrs[t][src_idx];
                 return;
             }
@@ -1538,8 +1538,7 @@ namespace gs::tensor_ops {
         size_t inner_size,
         int resolved_dim,
         size_t element_size,
-        cudaStream_t stream)
-    {
+        cudaStream_t stream) {
         size_t num_tensors = tensors.size();
         size_t total_dim_size = 0;
         for (const auto& t : tensors) {
@@ -1556,8 +1555,10 @@ namespace gs::tensor_ops {
 
         if (!d_input_ptrs || !d_input_sizes) {
             LOG_ERROR("Failed to allocate cat_middle_dim metadata from memory pool");
-            if (d_input_ptrs) CudaMemoryPool::instance().deallocate(const_cast<float**>(d_input_ptrs), stream);
-            if (d_input_sizes) CudaMemoryPool::instance().deallocate(d_input_sizes, stream);
+            if (d_input_ptrs)
+                CudaMemoryPool::instance().deallocate(const_cast<float**>(d_input_ptrs), stream);
+            if (d_input_sizes)
+                CudaMemoryPool::instance().deallocate(d_input_sizes, stream);
             return;
         }
 
@@ -1571,9 +1572,9 @@ namespace gs::tensor_ops {
         }
 
         cudaMemcpyAsync(const_cast<float**>(d_input_ptrs), h_input_ptrs.data(),
-                       num_tensors * sizeof(float*), cudaMemcpyHostToDevice, stream);
+                        num_tensors * sizeof(float*), cudaMemcpyHostToDevice, stream);
         cudaMemcpyAsync(d_input_sizes, h_input_sizes.data(),
-                       num_tensors * sizeof(size_t), cudaMemcpyHostToDevice, stream);
+                        num_tensors * sizeof(size_t), cudaMemcpyHostToDevice, stream);
 
         int block_size = 256;
         int grid_size = (total_elements + block_size - 1) / block_size;
@@ -1607,7 +1608,6 @@ namespace gs::tensor_ops {
     template void launch_convert_type<int64_t, uint8_t>(const int64_t*, uint8_t*, size_t, cudaStream_t);
     template void launch_convert_type<int, float>(const int*, float*, size_t, cudaStream_t);
     template void launch_convert_type<float, int>(const float*, int*, size_t, cudaStream_t);
-
 
     // ============= EXPLICIT INSTANTIATIONS FOR C++ FILES =============
     // C++ files (not CUDA) can't see tensor_generic_ops.cuh (which is #ifdef __CUDACC__),

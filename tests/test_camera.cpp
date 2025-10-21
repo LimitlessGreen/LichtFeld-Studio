@@ -2,224 +2,237 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <gtest/gtest.h>
-#include <torch/torch.h>
-#include <cuda_runtime.h>
-#include <cmath>
-#include <vector>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
 #include <iomanip>
-#include <print>
 #include <numbers>
+#include <print>
+#include <torch/torch.h>
+#include <vector>
 
-#include "core/camera_ref.hpp"
 #include "core/camera_new.hpp"
+#include "core/camera_ref.hpp"
 #include "core/tensor.hpp"
 
 namespace {
 
-constexpr float FLOAT_TOLERANCE = 1e-4f;
-constexpr float MATRIX_TOLERANCE = 1e-3f;
-constexpr float INTRINSICS_TOLERANCE = 1e-2f;
+    constexpr float FLOAT_TOLERANCE = 1e-4f;
+    constexpr float MATRIX_TOLERANCE = 1e-3f;
+    constexpr float INTRINSICS_TOLERANCE = 1e-2f;
 
-#define CUDA_CHECK(call) \
-    do { \
-        cudaError_t error = call; \
+#define CUDA_CHECK(call)                                                              \
+    do {                                                                              \
+        cudaError_t error = call;                                                     \
         ASSERT_EQ(error, cudaSuccess) << "CUDA error: " << cudaGetErrorString(error); \
-    } while(0)
+    } while (0)
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
+    // ============================================================================
+    // Helper Functions
+    // ============================================================================
 
-/**
- * @brief Convert torch::Tensor to gs::Tensor
- */
-gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
-    auto cpu_tensor = torch_tensor.cpu().contiguous();
-    std::vector<size_t> shape;
-    for (int i = 0; i < torch_tensor.dim(); ++i) {
-        shape.push_back(torch_tensor.size(i));
-    }
-
-    if (torch_tensor.scalar_type() == torch::kFloat32) {
-        std::vector<float> data(cpu_tensor.data_ptr<float>(),
-                               cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
-        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CPU);
-    } else if (torch_tensor.scalar_type() == torch::kInt32) {
-        std::vector<int> data(cpu_tensor.data_ptr<int>(),
-                             cpu_tensor.data_ptr<int>() + cpu_tensor.numel());
-        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CPU);
-    }
-
-    return gs::Tensor();
-}
-
-/**
- * @brief Convert gs::Tensor to torch::Tensor
- */
-torch::Tensor tensor_to_torch(const gs::Tensor& gs_tensor) {
-    auto cpu_tensor = gs_tensor.cpu();
-    std::vector<int64_t> shape;
-    for (size_t i = 0; i < cpu_tensor.ndim(); ++i) {
-        shape.push_back(cpu_tensor.shape()[i]);
-    }
-
-    if (gs_tensor.dtype() == gs::DataType::Float32) {
-        auto data = cpu_tensor.to_vector();
-        auto torch_tensor = torch::from_blob(data.data(), shape, torch::kFloat32).clone();
-        return torch_tensor;
-    } else if (gs_tensor.dtype() == gs::DataType::Int32) {
-        auto data = cpu_tensor.to_vector_int();
-        auto torch_tensor = torch::from_blob(data.data(), shape, torch::kInt32).clone();
-        return torch_tensor;
-    }
-
-    return torch::Tensor();
-}
-
-/**
- * @brief Compare two tensors (torch vs gs::Tensor)
- */
-bool tensors_are_close(const torch::Tensor& torch_tensor,
-                       const gs::Tensor& gs_tensor,
-                       float tolerance = 1e-4f,
-                       bool verbose = false) {
-    if (torch_tensor.dim() != static_cast<int64_t>(gs_tensor.ndim())) {
-        if (verbose) {
-            std::print("Dimension mismatch: torch={}, gs={}\n",
-                      torch_tensor.dim(), gs_tensor.ndim());
+    /**
+     * @brief Convert torch::Tensor to gs::Tensor
+     */
+    gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
+        auto cpu_tensor = torch_tensor.cpu().contiguous();
+        std::vector<size_t> shape;
+        for (int i = 0; i < torch_tensor.dim(); ++i) {
+            shape.push_back(torch_tensor.size(i));
         }
-        return false;
+
+        if (torch_tensor.scalar_type() == torch::kFloat32) {
+            std::vector<float> data(cpu_tensor.data_ptr<float>(),
+                                    cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
+            return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CPU);
+        } else if (torch_tensor.scalar_type() == torch::kInt32) {
+            std::vector<int> data(cpu_tensor.data_ptr<int>(),
+                                  cpu_tensor.data_ptr<int>() + cpu_tensor.numel());
+            return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CPU);
+        }
+
+        return gs::Tensor();
     }
 
-    for (int i = 0; i < torch_tensor.dim(); ++i) {
-        if (torch_tensor.size(i) != static_cast<int64_t>(gs_tensor.shape()[i])) {
+    /**
+     * @brief Convert gs::Tensor to torch::Tensor
+     */
+    torch::Tensor tensor_to_torch(const gs::Tensor& gs_tensor) {
+        auto cpu_tensor = gs_tensor.cpu();
+        std::vector<int64_t> shape;
+        for (size_t i = 0; i < cpu_tensor.ndim(); ++i) {
+            shape.push_back(cpu_tensor.shape()[i]);
+        }
+
+        if (gs_tensor.dtype() == gs::DataType::Float32) {
+            auto data = cpu_tensor.to_vector();
+            auto torch_tensor = torch::from_blob(data.data(), shape, torch::kFloat32).clone();
+            return torch_tensor;
+        } else if (gs_tensor.dtype() == gs::DataType::Int32) {
+            auto data = cpu_tensor.to_vector_int();
+            auto torch_tensor = torch::from_blob(data.data(), shape, torch::kInt32).clone();
+            return torch_tensor;
+        }
+
+        return torch::Tensor();
+    }
+
+    /**
+     * @brief Compare two tensors (torch vs gs::Tensor)
+     */
+    bool tensors_are_close(const torch::Tensor& torch_tensor,
+                           const gs::Tensor& gs_tensor,
+                           float tolerance = 1e-4f,
+                           bool verbose = false) {
+        if (torch_tensor.dim() != static_cast<int64_t>(gs_tensor.ndim())) {
             if (verbose) {
-                std::print("Shape mismatch at dim {}: torch={}, gs={}\n",
-                          i, torch_tensor.size(i), gs_tensor.shape()[i]);
+                std::print("Dimension mismatch: torch={}, gs={}\n",
+                           torch_tensor.dim(), gs_tensor.ndim());
             }
             return false;
         }
-    }
 
-    auto torch_cpu = torch_tensor.cpu().contiguous();
-    auto gs_cpu = gs_tensor.cpu();
-
-    if (torch_tensor.scalar_type() == torch::kFloat32 &&
-        gs_tensor.dtype() == gs::DataType::Float32) {
-
-        auto torch_data = torch_cpu.data_ptr<float>();
-        auto gs_data = gs_cpu.to_vector();
-
-        size_t mismatch_count = 0;
-        float max_diff = 0.0f;
-
-        for (int64_t i = 0; i < torch_cpu.numel(); ++i) {
-            float diff = std::abs(torch_data[i] - gs_data[i]);
-            max_diff = std::max(max_diff, diff);
-
-            if (diff > tolerance) {
-                mismatch_count++;
-                if (verbose && mismatch_count <= 5) {
-                    std::print("Mismatch at index {}: torch={}, gs={}, diff={}\n",
-                              i, torch_data[i], gs_data[i], diff);
+        for (int i = 0; i < torch_tensor.dim(); ++i) {
+            if (torch_tensor.size(i) != static_cast<int64_t>(gs_tensor.shape()[i])) {
+                if (verbose) {
+                    std::print("Shape mismatch at dim {}: torch={}, gs={}\n",
+                               i, torch_tensor.size(i), gs_tensor.shape()[i]);
                 }
+                return false;
             }
         }
 
-        if (verbose && mismatch_count > 0) {
-            std::print("Total mismatches: {}/{}, max_diff={}\n",
-                      mismatch_count, torch_cpu.numel(), max_diff);
+        auto torch_cpu = torch_tensor.cpu().contiguous();
+        auto gs_cpu = gs_tensor.cpu();
+
+        if (torch_tensor.scalar_type() == torch::kFloat32 &&
+            gs_tensor.dtype() == gs::DataType::Float32) {
+
+            auto torch_data = torch_cpu.data_ptr<float>();
+            auto gs_data = gs_cpu.to_vector();
+
+            size_t mismatch_count = 0;
+            float max_diff = 0.0f;
+
+            for (int64_t i = 0; i < torch_cpu.numel(); ++i) {
+                float diff = std::abs(torch_data[i] - gs_data[i]);
+                max_diff = std::max(max_diff, diff);
+
+                if (diff > tolerance) {
+                    mismatch_count++;
+                    if (verbose && mismatch_count <= 5) {
+                        std::print("Mismatch at index {}: torch={}, gs={}, diff={}\n",
+                                   i, torch_data[i], gs_data[i], diff);
+                    }
+                }
+            }
+
+            if (verbose && mismatch_count > 0) {
+                std::print("Total mismatches: {}/{}, max_diff={}\n",
+                           mismatch_count, torch_cpu.numel(), max_diff);
+            }
+
+            return mismatch_count == 0;
         }
 
-        return mismatch_count == 0;
+        return false;
     }
 
-    return false;
-}
+    /**
+     * @brief Create a rotation matrix around Z axis
+     */
+    torch::Tensor create_rotation_z_torch(float angle_rad) {
+        float c = std::cos(angle_rad);
+        float s = std::sin(angle_rad);
 
-/**
- * @brief Create a rotation matrix around Z axis
- */
-torch::Tensor create_rotation_z_torch(float angle_rad) {
-    float c = std::cos(angle_rad);
-    float s = std::sin(angle_rad);
-
-    auto R = torch::zeros({3, 3}, torch::kFloat32);
-    R[0][0] = c; R[0][1] = -s; R[0][2] = 0.0f;
-    R[1][0] = s; R[1][1] = c;  R[1][2] = 0.0f;
-    R[2][0] = 0.0f; R[2][1] = 0.0f; R[2][2] = 1.0f;
-
-    return R;
-}
-
-gs::Tensor create_rotation_z_tensor(float angle_rad) {
-    float c = std::cos(angle_rad);
-    float s = std::sin(angle_rad);
-
-    std::vector<float> data = {
-        c, -s, 0.0f,
-        s,  c, 0.0f,
-        0.0f, 0.0f, 1.0f
-    };
-
-    return gs::Tensor::from_vector(data, gs::TensorShape({3, 3}), gs::Device::CPU);
-}
-
-/**
- * @brief Create identity rotation
- */
-torch::Tensor create_identity_rotation_torch() {
-    return torch::eye(3, torch::kFloat32);
-}
-
-gs::Tensor create_identity_rotation_tensor() {
-    return gs::Tensor::eye(3, gs::Device::CPU);
-}
-
-/**
- * @brief Create translation vector
- */
-torch::Tensor create_translation_torch(float x, float y, float z) {
-    return torch::tensor({x, y, z}, torch::kFloat32);
-}
-
-gs::Tensor create_translation_tensor(float x, float y, float z) {
-    return gs::Tensor::from_vector({x, y, z}, gs::TensorShape({3}), gs::Device::CPU);
-}
-
-/**
- * @brief Create complex rotation (Euler angles)
- */
-std::pair<torch::Tensor, gs::Tensor> create_complex_rotation(float angle_x, float angle_y, float angle_z) {
-    // Torch version
-    auto Rx_torch = [](float a) {
-        float c = std::cos(a);
-        float s = std::sin(a);
         auto R = torch::zeros({3, 3}, torch::kFloat32);
-        R[0][0] = 1.0f; R[1][1] = c; R[1][2] = -s; R[2][1] = s; R[2][2] = c;
+        R[0][0] = c;
+        R[0][1] = -s;
+        R[0][2] = 0.0f;
+        R[1][0] = s;
+        R[1][1] = c;
+        R[1][2] = 0.0f;
+        R[2][0] = 0.0f;
+        R[2][1] = 0.0f;
+        R[2][2] = 1.0f;
+
         return R;
-    };
+    }
 
-    auto Ry_torch = [](float a) {
-        float c = std::cos(a);
-        float s = std::sin(a);
-        auto R = torch::zeros({3, 3}, torch::kFloat32);
-        R[0][0] = c; R[0][2] = s; R[1][1] = 1.0f; R[2][0] = -s; R[2][2] = c;
-        return R;
-    };
+    gs::Tensor create_rotation_z_tensor(float angle_rad) {
+        float c = std::cos(angle_rad);
+        float s = std::sin(angle_rad);
 
-    auto Rz_torch = [](float a) {
-        return create_rotation_z_torch(a);
-    };
+        std::vector<float> data = {
+            c, -s, 0.0f,
+            s, c, 0.0f,
+            0.0f, 0.0f, 1.0f};
 
-    auto R_torch = Rz_torch(angle_z).mm(Ry_torch(angle_y).mm(Rx_torch(angle_x)));
-    auto R_tensor = torch_to_tensor(R_torch);
+        return gs::Tensor::from_vector(data, gs::TensorShape({3, 3}), gs::Device::CPU);
+    }
 
-    return {R_torch, R_tensor};
-}
+    /**
+     * @brief Create identity rotation
+     */
+    torch::Tensor create_identity_rotation_torch() {
+        return torch::eye(3, torch::kFloat32);
+    }
+
+    gs::Tensor create_identity_rotation_tensor() {
+        return gs::Tensor::eye(3, gs::Device::CPU);
+    }
+
+    /**
+     * @brief Create translation vector
+     */
+    torch::Tensor create_translation_torch(float x, float y, float z) {
+        return torch::tensor({x, y, z}, torch::kFloat32);
+    }
+
+    gs::Tensor create_translation_tensor(float x, float y, float z) {
+        return gs::Tensor::from_vector({x, y, z}, gs::TensorShape({3}), gs::Device::CPU);
+    }
+
+    /**
+     * @brief Create complex rotation (Euler angles)
+     */
+    std::pair<torch::Tensor, gs::Tensor> create_complex_rotation(float angle_x, float angle_y, float angle_z) {
+        // Torch version
+        auto Rx_torch = [](float a) {
+            float c = std::cos(a);
+            float s = std::sin(a);
+            auto R = torch::zeros({3, 3}, torch::kFloat32);
+            R[0][0] = 1.0f;
+            R[1][1] = c;
+            R[1][2] = -s;
+            R[2][1] = s;
+            R[2][2] = c;
+            return R;
+        };
+
+        auto Ry_torch = [](float a) {
+            float c = std::cos(a);
+            float s = std::sin(a);
+            auto R = torch::zeros({3, 3}, torch::kFloat32);
+            R[0][0] = c;
+            R[0][2] = s;
+            R[1][1] = 1.0f;
+            R[2][0] = -s;
+            R[2][2] = c;
+            return R;
+        };
+
+        auto Rz_torch = [](float a) {
+            return create_rotation_z_torch(a);
+        };
+
+        auto R_torch = Rz_torch(angle_z).mm(Ry_torch(angle_y).mm(Rx_torch(angle_x)));
+        auto R_tensor = torch_to_tensor(R_torch);
+
+        return {R_torch, R_tensor};
+    }
 
 } // anonymous namespace
 
@@ -265,8 +278,7 @@ TEST_F(CameraComparisonTest, BasicConstruction_Comparison) {
         "test_image.png",
         "/tmp/test_image.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -277,8 +289,7 @@ TEST_F(CameraComparisonTest, BasicConstruction_Comparison) {
         "test_image.png",
         "/tmp/test_image.png",
         1024, 768,
-        0
-    );
+        0);
 
     // Compare basic properties
     EXPECT_EQ(cam_ref.uid(), cam_new.uid());
@@ -290,12 +301,12 @@ TEST_F(CameraComparisonTest, BasicConstruction_Comparison) {
     EXPECT_NEAR(cam_ref.FoVy(), cam_new.FoVy(), FLOAT_TOLERANCE);
 
     std::print("✓ BasicConstruction: uid={}, size={}x{}, focal=({:.2f}, {:.2f})\n",
-              cam_new.uid(), cam_new.camera_width(), cam_new.camera_height(),
-              cam_new.focal_x(), cam_new.focal_y());
+               cam_new.uid(), cam_new.camera_width(), cam_new.camera_height(),
+               cam_new.focal_x(), cam_new.focal_y());
 }
 
 TEST_F(CameraComparisonTest, RotatedCamera_Comparison) {
-    float angle = std::numbers::pi_v<float> / 2.0f;  // 90 degrees
+    float angle = std::numbers::pi_v<float> / 2.0f; // 90 degrees
     auto R_torch = create_rotation_z_torch(angle);
     auto T_torch = create_translation_torch(1.0f, 2.0f, 3.0f);
     auto R_tensor = create_rotation_z_tensor(angle);
@@ -315,8 +326,7 @@ TEST_F(CameraComparisonTest, RotatedCamera_Comparison) {
         "rotated.png",
         "/tmp/rotated.png",
         800, 600,
-        1
-    );
+        1);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -327,8 +337,7 @@ TEST_F(CameraComparisonTest, RotatedCamera_Comparison) {
         "rotated.png",
         "/tmp/rotated.png",
         800, 600,
-        1
-    );
+        1);
 
     // Compare rotation and translation
     EXPECT_TRUE(tensors_are_close(cam_ref.R(), cam_new.R(), FLOAT_TOLERANCE));
@@ -360,8 +369,7 @@ TEST_F(CameraComparisonTest, ComplexRotation_Comparison) {
         "complex.png",
         "/tmp/complex.png",
         800, 600,
-        5
-    );
+        5);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -372,14 +380,13 @@ TEST_F(CameraComparisonTest, ComplexRotation_Comparison) {
         "complex.png",
         "/tmp/complex.png",
         800, 600,
-        5
-    );
+        5);
 
     // Compare complex rotation results
     EXPECT_TRUE(tensors_are_close(cam_ref.R(), cam_new.R(), FLOAT_TOLERANCE, true));
 
     std::print("✓ ComplexRotation: Euler angles (x={:.2f}, y={:.2f}, z={:.2f}) match\n",
-              angle_x, angle_y, angle_z);
+               angle_x, angle_y, angle_z);
 }
 
 // ============================================================================
@@ -406,8 +413,7 @@ TEST_F(CameraComparisonTest, CameraPosition_Identity_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -418,8 +424,7 @@ TEST_F(CameraComparisonTest, CameraPosition_Identity_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     auto pos_ref = cam_ref.cam_position();
     auto pos_new = cam_new.cam_position();
@@ -433,11 +438,11 @@ TEST_F(CameraComparisonTest, CameraPosition_Identity_Comparison) {
     EXPECT_NEAR(pos_new_cpu[2].item(), 5.0f, FLOAT_TOLERANCE);
 
     std::print("✓ CameraPosition_Identity: position = ({:.3f}, {:.3f}, {:.3f})\n",
-              pos_new_cpu[0].item(), pos_new_cpu[1].item(), pos_new_cpu[2].item());
+               pos_new_cpu[0].item(), pos_new_cpu[1].item(), pos_new_cpu[2].item());
 }
 
 TEST_F(CameraComparisonTest, CameraPosition_Rotated_Comparison) {
-    float angle = std::numbers::pi_v<float> / 4.0f;  // 45 degrees
+    float angle = std::numbers::pi_v<float> / 4.0f; // 45 degrees
     auto R_torch = create_rotation_z_torch(angle);
     auto T_torch = create_translation_torch(3.0f, 4.0f, 5.0f);
     auto R_tensor = create_rotation_z_tensor(angle);
@@ -457,8 +462,7 @@ TEST_F(CameraComparisonTest, CameraPosition_Rotated_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -469,8 +473,7 @@ TEST_F(CameraComparisonTest, CameraPosition_Rotated_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     auto pos_ref = cam_ref.cam_position();
     auto pos_new = cam_new.cam_position();
@@ -500,8 +503,7 @@ TEST_F(CameraComparisonTest, CameraPosition_LargeTranslation_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -512,13 +514,12 @@ TEST_F(CameraComparisonTest, CameraPosition_LargeTranslation_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     auto pos_ref = cam_ref.cam_position();
     auto pos_new = cam_new.cam_position();
 
-    EXPECT_TRUE(tensors_are_close(pos_ref, pos_new, 1e-2f, true));  // Slightly larger tolerance for large numbers
+    EXPECT_TRUE(tensors_are_close(pos_ref, pos_new, 1e-2f, true)); // Slightly larger tolerance for large numbers
 
     std::print("✓ CameraPosition_LargeTranslation: large values handled correctly\n");
 }
@@ -547,8 +548,7 @@ TEST_F(CameraComparisonTest, WorldViewTransform_Structure_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -559,8 +559,7 @@ TEST_F(CameraComparisonTest, WorldViewTransform_Structure_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     auto w2v_ref = cam_ref.world_view_transform();
     auto w2v_new = cam_new.world_view_transform();
@@ -602,8 +601,7 @@ TEST_F(CameraComparisonTest, WorldViewTransform_BottomRow_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -614,8 +612,7 @@ TEST_F(CameraComparisonTest, WorldViewTransform_BottomRow_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     auto w2v_new = cam_new.world_view_transform().cpu();
     auto acc = w2v_new.accessor<float, 3>();
@@ -658,8 +655,7 @@ TEST_F(CameraComparisonTest, IntrinsicMatrix_Structure_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -670,8 +666,7 @@ TEST_F(CameraComparisonTest, IntrinsicMatrix_Structure_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     auto K_ref = cam_ref.K();
     auto K_new = cam_new.K();
@@ -718,8 +713,7 @@ TEST_F(CameraComparisonTest, IntrinsicMatrix_Elements_Comparison) {
         "test.png",
         "/tmp/test.png",
         1280, 960,
-        0
-    );
+        0);
 
     auto K_new = cam_new.K().cpu();
     auto K_acc = K_new.accessor<float, 3>();
@@ -765,8 +759,7 @@ TEST_F(CameraComparisonTest, GetIntrinsics_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -777,8 +770,7 @@ TEST_F(CameraComparisonTest, GetIntrinsics_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     auto [fx_ref, fy_ref, cx_ref, cy_ref] = cam_ref.get_intrinsics();
     auto [fx_new, fy_new, cx_new, cy_new] = cam_new.get_intrinsics();
@@ -816,23 +808,21 @@ TEST_F(CameraComparisonTest, FieldOfView_Calculation_Comparison) {
 
         gs::CameraRef cam_ref(
             R_torch, T_torch,
-            fx, fy, w/2.0f, h/2.0f,
+            fx, fy, w / 2.0f, h / 2.0f,
             radial_torch, tangential_torch,
             gsplat::CameraModelType::PINHOLE,
             "test.png",
             "/tmp/test.png",
-            w, h, 0
-        );
+            w, h, 0);
 
         gs::CameraNew cam_new(
             R_tensor, T_tensor,
-            fx, fy, w/2.0f, h/2.0f,
+            fx, fy, w / 2.0f, h / 2.0f,
             radial_tensor, tangential_tensor,
             gsplat::CameraModelType::PINHOLE,
             "test.png",
             "/tmp/test.png",
-            w, h, 0
-        );
+            w, h, 0);
 
         EXPECT_NEAR(cam_ref.FoVx(), cam_new.FoVx(), FLOAT_TOLERANCE);
         EXPECT_NEAR(cam_ref.FoVy(), cam_new.FoVy(), FLOAT_TOLERANCE);
@@ -851,7 +841,7 @@ TEST_F(CameraComparisonTest, FocalFoVConversion_RoundTrip) {
     EXPECT_NEAR(focal, focal_back, FLOAT_TOLERANCE);
 
     std::print("✓ FocalFoVConversion_RoundTrip: focal={:.2f} -> fov={:.4f} -> focal={:.2f}\n",
-              focal, fov, focal_back);
+               focal, fov, focal_back);
 }
 
 // ============================================================================
@@ -879,8 +869,7 @@ TEST_F(CameraComparisonTest, TransformConstructor_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new_base(
         R_tensor, T_tensor,
@@ -891,8 +880,7 @@ TEST_F(CameraComparisonTest, TransformConstructor_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     // Create new transforms
     auto new_transform_torch = torch::eye(4, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).unsqueeze(0);
@@ -943,8 +931,7 @@ TEST_F(CameraComparisonTest, ValidationTest) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        42
-    );
+        42);
 
     EXPECT_TRUE(cam_new.is_valid());
 
@@ -975,8 +962,7 @@ TEST_F(CameraComparisonTest, ZeroTranslation_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -987,8 +973,7 @@ TEST_F(CameraComparisonTest, ZeroTranslation_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     EXPECT_TRUE(cam_new.is_valid());
 
@@ -1006,7 +991,7 @@ TEST_F(CameraComparisonTest, SmallFocal_Comparison) {
     auto R_tensor = create_identity_rotation_tensor();
     auto T_tensor = create_translation_tensor(0.0f, 0.0f, -5.0f);
 
-    float focal_x = 100.0f;  // Very small focal length
+    float focal_x = 100.0f; // Very small focal length
     float focal_y = 100.0f;
 
     auto radial_torch = torch::zeros({4}, torch::kFloat32);
@@ -1023,8 +1008,7 @@ TEST_F(CameraComparisonTest, SmallFocal_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -1035,17 +1019,16 @@ TEST_F(CameraComparisonTest, SmallFocal_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     EXPECT_TRUE(cam_new.is_valid());
     EXPECT_NEAR(cam_ref.FoVx(), cam_new.FoVx(), FLOAT_TOLERANCE);
 
     // Small focal length should result in large FoV
-    EXPECT_GT(cam_new.FoVx(), 1.0f);  // > ~57 degrees
+    EXPECT_GT(cam_new.FoVx(), 1.0f); // > ~57 degrees
 
     std::print("✓ SmallFocal: small focal length handled correctly, FoV={:.2f} rad\n",
-              cam_new.FoVx());
+               cam_new.FoVx());
 }
 
 TEST_F(CameraComparisonTest, LargeFocal_Comparison) {
@@ -1054,7 +1037,7 @@ TEST_F(CameraComparisonTest, LargeFocal_Comparison) {
     auto R_tensor = create_identity_rotation_tensor();
     auto T_tensor = create_translation_tensor(0.0f, 0.0f, -5.0f);
 
-    float focal_x = 10000.0f;  // Very large focal length
+    float focal_x = 10000.0f; // Very large focal length
     float focal_y = 10000.0f;
 
     auto radial_torch = torch::zeros({4}, torch::kFloat32);
@@ -1071,8 +1054,7 @@ TEST_F(CameraComparisonTest, LargeFocal_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -1083,17 +1065,16 @@ TEST_F(CameraComparisonTest, LargeFocal_Comparison) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     EXPECT_TRUE(cam_new.is_valid());
     EXPECT_NEAR(cam_ref.FoVx(), cam_new.FoVx(), FLOAT_TOLERANCE);
 
     // Large focal length should result in small FoV
-    EXPECT_LT(cam_new.FoVx(), 0.2f);  // < ~11 degrees
+    EXPECT_LT(cam_new.FoVx(), 0.2f); // < ~11 degrees
 
     std::print("✓ LargeFocal: large focal length handled correctly, FoV={:.4f} rad\n",
-              cam_new.FoVx());
+               cam_new.FoVx());
 }
 
 // ============================================================================
@@ -1109,14 +1090,12 @@ TEST_F(CameraComparisonTest, ManyCameras_Comparison) {
         auto T_torch = create_translation_torch(
             std::cos(angle) * 5.0f,
             std::sin(angle) * 5.0f,
-            static_cast<float>(i) * 0.1f
-        );
+            static_cast<float>(i) * 0.1f);
         auto R_tensor = create_rotation_z_tensor(angle);
         auto T_tensor = create_translation_tensor(
             std::cos(angle) * 5.0f,
             std::sin(angle) * 5.0f,
-            static_cast<float>(i) * 0.1f
-        );
+            static_cast<float>(i) * 0.1f);
 
         auto radial_torch = torch::zeros({4}, torch::kFloat32);
         auto tangential_torch = torch::zeros({2}, torch::kFloat32);
@@ -1132,8 +1111,7 @@ TEST_F(CameraComparisonTest, ManyCameras_Comparison) {
             "test_" + std::to_string(i) + ".png",
             "/tmp/test.png",
             1024, 768,
-            i
-        );
+            i);
 
         gs::CameraNew cam_new(
             R_tensor, T_tensor,
@@ -1144,8 +1122,7 @@ TEST_F(CameraComparisonTest, ManyCameras_Comparison) {
             "test_" + std::to_string(i) + ".png",
             "/tmp/test.png",
             1024, 768,
-            i
-        );
+            i);
 
         EXPECT_TRUE(cam_new.is_valid());
         EXPECT_EQ(cam_ref.uid(), cam_new.uid());
@@ -1182,7 +1159,7 @@ protected:
         cudaDeviceSynchronize();
     }
 
-    template<typename Func>
+    template <typename Func>
     double benchmark(Func func, int warmup_runs = 3, int timing_runs = 10) {
         // Warm-up
         for (int i = 0; i < warmup_runs; ++i) {
@@ -1208,12 +1185,12 @@ protected:
         std::print("{}\n\n", std::string(90, '='));
 
         std::print("{:<40} {:>12} {:>12} {:>12} {:>12}\n",
-                  "Benchmark", "N Cameras", "Ref (ms)", "New (ms)", "Speedup");
+                   "Benchmark", "N Cameras", "Ref (ms)", "New (ms)", "Speedup");
         std::print("{}\n", std::string(90, '-'));
 
         for (const auto& r : results) {
             std::print("{:<40} {:>12} {:>12.3f} {:>12.3f} {:>11.2f}x\n",
-                      r.name, r.num_cameras, r.time_ms_ref, r.time_ms_new, r.speedup);
+                       r.name, r.num_cameras, r.time_ms_ref, r.time_ms_new, r.speedup);
         }
 
         std::print("{}\n", std::string(90, '='));
@@ -1256,18 +1233,18 @@ TEST_F(CameraPerformanceTest, DISABLED_ConstructionBenchmark) {
                 auto T = create_translation_torch(
                     std::cos(angle) * 5.0f,
                     std::sin(angle) * 5.0f,
-                    static_cast<float>(i) * 0.1f
-                );
+                    static_cast<float>(i) * 0.1f);
                 auto radial = torch::zeros({4}, torch::kFloat32);
                 auto tangential = torch::zeros({2}, torch::kFloat32);
 
                 gs::CameraRef cam(R, T, 1000.0f, 1000.0f, 512.0f, 384.0f,
-                                 radial, tangential,
-                                 gsplat::CameraModelType::PINHOLE,
-                                 "test.png", "/tmp/test.png",
-                                 1024, 768, i);
+                                  radial, tangential,
+                                  gsplat::CameraModelType::PINHOLE,
+                                  "test.png", "/tmp/test.png",
+                                  1024, 768, i);
             }
-        }, 2, 5);
+        },
+                                       2, 5);
 
         // Benchmark New
         result.time_ms_new = benchmark([&]() {
@@ -1277,18 +1254,18 @@ TEST_F(CameraPerformanceTest, DISABLED_ConstructionBenchmark) {
                 auto T = create_translation_tensor(
                     std::cos(angle) * 5.0f,
                     std::sin(angle) * 5.0f,
-                    static_cast<float>(i) * 0.1f
-                );
+                    static_cast<float>(i) * 0.1f);
                 auto radial = gs::Tensor::zeros({4}, gs::Device::CPU);
                 auto tangential = gs::Tensor::zeros({2}, gs::Device::CPU);
 
                 gs::CameraNew cam(R, T, 1000.0f, 1000.0f, 512.0f, 384.0f,
-                                 radial, tangential,
-                                 gsplat::CameraModelType::PINHOLE,
-                                 "test.png", "/tmp/test.png",
-                                 1024, 768, i);
+                                  radial, tangential,
+                                  gsplat::CameraModelType::PINHOLE,
+                                  "test.png", "/tmp/test.png",
+                                  1024, 768, i);
             }
-        }, 2, 5);
+        },
+                                       2, 5);
 
         result.speedup = result.time_ms_ref / result.time_ms_new;
         results.push_back(result);
@@ -1319,8 +1296,7 @@ TEST_F(CameraPerformanceTest, DISABLED_GettersBenchmark) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -1331,8 +1307,7 @@ TEST_F(CameraPerformanceTest, DISABLED_GettersBenchmark) {
         "test.png",
         "/tmp/test.png",
         1024, 768,
-        0
-    );
+        0);
 
     std::vector<std::pair<std::string, std::function<void()>>> tests_ref = {
         {"WorldViewTransform", [&]() { auto w2v = cam_ref.world_view_transform(); }},
@@ -1388,7 +1363,7 @@ TEST_F(CameraComparisonTest, MultipleResolutions_Comparison) {
         auto R_tensor = create_identity_rotation_tensor();
         auto T_tensor = create_translation_tensor(0.0f, 0.0f, -10.0f);
 
-        float focal = 0.8f * res.width;  // Typical focal length
+        float focal = 0.8f * res.width; // Typical focal length
 
         auto radial_torch = torch::zeros({4}, torch::kFloat32);
         auto tangential_torch = torch::zeros({2}, torch::kFloat32);
@@ -1404,8 +1379,7 @@ TEST_F(CameraComparisonTest, MultipleResolutions_Comparison) {
             res.name + ".png",
             "/tmp/" + res.name + ".png",
             res.width, res.height,
-            0
-        );
+            0);
 
         gs::CameraNew cam_new(
             R_tensor, T_tensor,
@@ -1416,8 +1390,7 @@ TEST_F(CameraComparisonTest, MultipleResolutions_Comparison) {
             res.name + ".png",
             "/tmp/" + res.name + ".png",
             res.width, res.height,
-            0
-        );
+            0);
 
         EXPECT_TRUE(cam_new.is_valid());
         EXPECT_NEAR(cam_ref.FoVx(), cam_new.FoVx(), FLOAT_TOLERANCE);
@@ -1453,8 +1426,7 @@ TEST_F(CameraComparisonTest, AsymmetricFocal_Comparison) {
         "anamorphic.png",
         "/tmp/anamorphic.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -1465,8 +1437,7 @@ TEST_F(CameraComparisonTest, AsymmetricFocal_Comparison) {
         "anamorphic.png",
         "/tmp/anamorphic.png",
         1024, 768,
-        0
-    );
+        0);
 
     EXPECT_TRUE(cam_new.is_valid());
     EXPECT_NEAR(cam_ref.FoVx(), cam_new.FoVx(), FLOAT_TOLERANCE);
@@ -1480,7 +1451,7 @@ TEST_F(CameraComparisonTest, AsymmetricFocal_Comparison) {
     EXPECT_TRUE(tensors_are_close(K_ref, K_new, INTRINSICS_TOLERANCE, true));
 
     std::print("✓ AsymmetricFocal: anamorphic lens (fx={:.0f}, fy={:.0f}) handled correctly\n",
-              focal_x, focal_y);
+               focal_x, focal_y);
 }
 
 TEST_F(CameraComparisonTest, OffCenterPrincipalPoint_Comparison) {
@@ -1492,8 +1463,8 @@ TEST_F(CameraComparisonTest, OffCenterPrincipalPoint_Comparison) {
     // Off-center principal point
     float focal_x = 1000.0f;
     float focal_y = 1000.0f;
-    float center_x = 300.0f;  // Not at center
-    float center_y = 600.0f;  // Not at center
+    float center_x = 300.0f; // Not at center
+    float center_y = 600.0f; // Not at center
 
     auto radial_torch = torch::zeros({4}, torch::kFloat32);
     auto tangential_torch = torch::zeros({2}, torch::kFloat32);
@@ -1509,8 +1480,7 @@ TEST_F(CameraComparisonTest, OffCenterPrincipalPoint_Comparison) {
         "offcenter.png",
         "/tmp/offcenter.png",
         1024, 768,
-        0
-    );
+        0);
 
     gs::CameraNew cam_new(
         R_tensor, T_tensor,
@@ -1521,8 +1491,7 @@ TEST_F(CameraComparisonTest, OffCenterPrincipalPoint_Comparison) {
         "offcenter.png",
         "/tmp/offcenter.png",
         1024, 768,
-        0
-    );
+        0);
 
     auto K_ref = cam_ref.K();
     auto K_new = cam_new.K();
@@ -1536,11 +1505,11 @@ TEST_F(CameraComparisonTest, OffCenterPrincipalPoint_Comparison) {
     EXPECT_NEAR(K_acc(0, 1, 2), center_y, INTRINSICS_TOLERANCE);
 
     std::print("✓ OffCenterPrincipalPoint: principal point ({:.0f}, {:.0f}) handled correctly\n",
-              center_x, center_y);
+               center_x, center_y);
 }
 
 TEST_F(CameraComparisonTest, CircularCameraPath_Comparison) {
-    const int num_cameras = 36;  // 10 degree increments
+    const int num_cameras = 36; // 10 degree increments
     const float radius = 10.0f;
     const float height = 2.0f;
 
@@ -1572,8 +1541,7 @@ TEST_F(CameraComparisonTest, CircularCameraPath_Comparison) {
             "cam_" + std::to_string(i) + ".png",
             "/tmp/cam.png",
             1024, 768,
-            i
-        );
+            i);
 
         gs::CameraNew cam_new(
             R_tensor, T_tensor,
@@ -1584,8 +1552,7 @@ TEST_F(CameraComparisonTest, CircularCameraPath_Comparison) {
             "cam_" + std::to_string(i) + ".png",
             "/tmp/cam.png",
             1024, 768,
-            i
-        );
+            i);
 
         EXPECT_TRUE(cam_new.is_valid());
         EXPECT_TRUE(tensors_are_close(cam_ref.cam_position(),
@@ -1642,8 +1609,7 @@ TEST_F(CameraComparisonTest, NumericalStability_ExtremeCases) {
             test_case.name + ".png",
             "/tmp/test.png",
             1024, 768,
-            0
-        );
+            0);
 
         gs::CameraNew cam_new(
             R_tensor, T_tensor,
@@ -1654,8 +1620,7 @@ TEST_F(CameraComparisonTest, NumericalStability_ExtremeCases) {
             test_case.name + ".png",
             "/tmp/test.png",
             1024, 768,
-            0
-        );
+            0);
 
         EXPECT_TRUE(cam_new.is_valid()) << "Failed for case: " << test_case.name;
 
@@ -1686,14 +1651,12 @@ TEST_F(CameraComparisonTest, MemoryFootprint_Comparison) {
         auto T_torch = create_translation_torch(
             std::cos(angle) * 5.0f,
             std::sin(angle) * 5.0f,
-            static_cast<float>(i) * 0.01f
-        );
+            static_cast<float>(i) * 0.01f);
         auto R_tensor = create_rotation_z_tensor(angle);
         auto T_tensor = create_translation_tensor(
             std::cos(angle) * 5.0f,
             std::sin(angle) * 5.0f,
-            static_cast<float>(i) * 0.01f
-        );
+            static_cast<float>(i) * 0.01f);
 
         auto radial_torch = torch::zeros({4}, torch::kFloat32);
         auto tangential_torch = torch::zeros({2}, torch::kFloat32);
@@ -1709,8 +1672,7 @@ TEST_F(CameraComparisonTest, MemoryFootprint_Comparison) {
             "test.png",
             "/tmp/test.png",
             1024, 768,
-            i
-        ));
+            i));
 
         cameras_new.push_back(std::make_unique<gs::CameraNew>(
             R_tensor, T_tensor,
@@ -1721,8 +1683,7 @@ TEST_F(CameraComparisonTest, MemoryFootprint_Comparison) {
             "test.png",
             "/tmp/test.png",
             1024, 768,
-            i
-        ));
+            i));
     }
 
     // All cameras should be valid
@@ -1752,15 +1713,14 @@ TEST_F(CameraComparisonTest, StringRepresentation) {
         "test_camera.png",
         "/tmp/test_camera.png",
         1024, 768,
-        42
-    );
+        42);
 
     std::string str = cam_new.str();
 
     // Check that string contains key information
     EXPECT_TRUE(str.find("CameraNew") != std::string::npos);
-    EXPECT_TRUE(str.find("42") != std::string::npos);  // uid
-    EXPECT_TRUE(str.find("1024") != std::string::npos);  // width
+    EXPECT_TRUE(str.find("42") != std::string::npos);   // uid
+    EXPECT_TRUE(str.find("1024") != std::string::npos); // width
     EXPECT_TRUE(str.find("768") != std::string::npos);  // height
     EXPECT_TRUE(str.find("test_camera.png") != std::string::npos);
 

@@ -7,8 +7,8 @@
 #endif
 
 #include "core/sogs_new.hpp"
-#include "core/splat_data_new.hpp"
 #include "core/logger.hpp"
+#include "core/splat_data_new.hpp"
 #include "kernels/kmeans_new.cuh"
 #include "kernels/morton_encoding_new.cuh"
 #include <algorithm>
@@ -402,7 +402,7 @@ namespace gs::core {
             // Manual log transform
             for (int64_t i = 0; i < num_splats; ++i) {
                 for (int j = 0; j < 3; ++j) {
-                    float val = means_cpu[i][j];  // Already returns float for 2D access
+                    float val = means_cpu[i][j]; // Already returns float for 2D access
                     means_log[i][j] = log_transform(val);
                 }
             }
@@ -457,8 +457,7 @@ namespace gs::core {
                     rotations_cpu[idx][0],
                     rotations_cpu[idx][1],
                     rotations_cpu[idx][2],
-                    rotations_cpu[idx][3]
-                );
+                    rotations_cpu[idx][3]);
 
                 quats[ti * 4 + 0] = quat[0];
                 quats[ti * 4 + 1] = quat[1];

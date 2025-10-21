@@ -147,113 +147,113 @@ namespace gs {
         return nullptr;
     }
 
-  void Scene::rebuildCacheIfNeeded() const {
-    if (cache_valid_)
-        return;
+    void Scene::rebuildCacheIfNeeded() const {
+        if (cache_valid_)
+            return;
 
-    // Collect visible models
-    auto visible_models = nodes_ | std::views::filter([](const auto& node) {
-                              return node.visible && node.model;
-                          }) |
-                          std::views::transform([](const auto& node) {
-                              return node.model.get();
-                          }) |
-                          std::ranges::to<std::vector>();
+        // Collect visible models
+        auto visible_models = nodes_ | std::views::filter([](const auto& node) {
+                                  return node.visible && node.model;
+                              }) |
+                              std::views::transform([](const auto& node) {
+                                  return node.model.get();
+                              }) |
+                              std::ranges::to<std::vector>();
 
-    if (visible_models.empty()) {
-        cached_combined_.reset();
-        cache_valid_ = true;
-        return;
-    }
-
-    // Calculate totals and find max SH degree
-    struct ModelStats {
-        size_t total_gaussians = 0;
-        int max_sh_degree = 0;
-        float total_scene_scale = 0.0f;
-        bool has_shN = false;
-    };
-
-    auto stats = std::accumulate(
-        visible_models.begin(), visible_models.end(), ModelStats{},
-        [](ModelStats acc, const SplatDataNew* model) {
-            acc.total_gaussians += model->size();
-
-            // Calculate SH degree from shN dimensions
-            int sh_degree = 0;
-            const auto& shN_tensor = model->shN_raw();
-            if (shN_tensor.is_valid() && shN_tensor.ndim() >= 2 && shN_tensor.size(1) > 0) {
-                int shN_coeffs = static_cast<int>(shN_tensor.size(1));
-                sh_degree = static_cast<int>(std::round(std::sqrt(shN_coeffs + 1))) - 1;
-                sh_degree = std::clamp(sh_degree, 0, 3);
-            }
-
-            acc.max_sh_degree = std::max(acc.max_sh_degree, sh_degree);
-            acc.total_scene_scale += model->get_scene_scale();
-            acc.has_shN = acc.has_shN || (shN_tensor.numel() > 0 && shN_tensor.size(1) > 0);
-            return acc;
-        });
-
-    std::println("Scene: Combining {} models, {} gaussians, max SH degree {}",
-                 visible_models.size(), stats.total_gaussians, stats.max_sh_degree);
-
-    // Get device from first model (all should be on CUDA)
-    Device device = visible_models[0]->get_means().device();
-
-    // Calculate SH dimensions
-    int sh0_coeffs = 1;
-    int shN_coeffs = (stats.max_sh_degree > 0) ? ((stats.max_sh_degree + 1) * (stats.max_sh_degree + 1) - 1) : 0;
-
-    // Pre-allocate all tensors
-    Tensor means = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 3}, device);
-    Tensor sh0 = Tensor::empty({static_cast<size_t>(stats.total_gaussians), static_cast<size_t>(sh0_coeffs), 3}, device);
-    Tensor shN = (shN_coeffs > 0) ? Tensor::zeros({static_cast<size_t>(stats.total_gaussians), static_cast<size_t>(shN_coeffs), 3}, device) : Tensor::empty({static_cast<size_t>(stats.total_gaussians), 0, 3}, device);
-    Tensor opacity = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 1}, device);
-    Tensor scaling = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 3}, device);
-    Tensor rotation = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 4}, device);
-
-    // Copy data from each model
-    size_t offset = 0;
-    for (const auto* model : visible_models) {
-        const auto size = model->size();
-
-        // Copy each tensor using slice
-        means.slice(0, offset, offset + size).copy_(model->means_raw());
-        sh0.slice(0, offset, offset + size).copy_(model->sh0_raw());
-        opacity.slice(0, offset, offset + size).copy_(model->opacity_raw());
-        scaling.slice(0, offset, offset + size).copy_(model->scaling_raw());
-        rotation.slice(0, offset, offset + size).copy_(model->rotation_raw());
-
-        // Copy shN if we have coefficients
-        if (shN_coeffs > 0) {
-            const auto& model_shN = model->shN_raw();
-            int model_shN_coeffs = (model_shN.is_valid() && model_shN.ndim() >= 2) ? static_cast<int>(model_shN.size(1)) : 0;
-
-            if (model_shN_coeffs > 0) {
-                int coeffs_to_copy = std::min(model_shN_coeffs, shN_coeffs);
-
-                // Slice in both dimensions: rows and coefficients
-                auto dst_slice = shN.slice(0, offset, offset + size).slice(1, 0, coeffs_to_copy);
-                auto src_slice = model_shN.slice(1, 0, coeffs_to_copy);
-                dst_slice.copy_(src_slice);
-            }
+        if (visible_models.empty()) {
+            cached_combined_.reset();
+            cache_valid_ = true;
+            return;
         }
 
-        offset += size;
+        // Calculate totals and find max SH degree
+        struct ModelStats {
+            size_t total_gaussians = 0;
+            int max_sh_degree = 0;
+            float total_scene_scale = 0.0f;
+            bool has_shN = false;
+        };
+
+        auto stats = std::accumulate(
+            visible_models.begin(), visible_models.end(), ModelStats{},
+            [](ModelStats acc, const SplatDataNew* model) {
+                acc.total_gaussians += model->size();
+
+                // Calculate SH degree from shN dimensions
+                int sh_degree = 0;
+                const auto& shN_tensor = model->shN_raw();
+                if (shN_tensor.is_valid() && shN_tensor.ndim() >= 2 && shN_tensor.size(1) > 0) {
+                    int shN_coeffs = static_cast<int>(shN_tensor.size(1));
+                    sh_degree = static_cast<int>(std::round(std::sqrt(shN_coeffs + 1))) - 1;
+                    sh_degree = std::clamp(sh_degree, 0, 3);
+                }
+
+                acc.max_sh_degree = std::max(acc.max_sh_degree, sh_degree);
+                acc.total_scene_scale += model->get_scene_scale();
+                acc.has_shN = acc.has_shN || (shN_tensor.numel() > 0 && shN_tensor.size(1) > 0);
+                return acc;
+            });
+
+        std::println("Scene: Combining {} models, {} gaussians, max SH degree {}",
+                     visible_models.size(), stats.total_gaussians, stats.max_sh_degree);
+
+        // Get device from first model (all should be on CUDA)
+        Device device = visible_models[0]->get_means().device();
+
+        // Calculate SH dimensions
+        int sh0_coeffs = 1;
+        int shN_coeffs = (stats.max_sh_degree > 0) ? ((stats.max_sh_degree + 1) * (stats.max_sh_degree + 1) - 1) : 0;
+
+        // Pre-allocate all tensors
+        Tensor means = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 3}, device);
+        Tensor sh0 = Tensor::empty({static_cast<size_t>(stats.total_gaussians), static_cast<size_t>(sh0_coeffs), 3}, device);
+        Tensor shN = (shN_coeffs > 0) ? Tensor::zeros({static_cast<size_t>(stats.total_gaussians), static_cast<size_t>(shN_coeffs), 3}, device) : Tensor::empty({static_cast<size_t>(stats.total_gaussians), 0, 3}, device);
+        Tensor opacity = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 1}, device);
+        Tensor scaling = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 3}, device);
+        Tensor rotation = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 4}, device);
+
+        // Copy data from each model
+        size_t offset = 0;
+        for (const auto* model : visible_models) {
+            const auto size = model->size();
+
+            // Copy each tensor using slice
+            means.slice(0, offset, offset + size).copy_(model->means_raw());
+            sh0.slice(0, offset, offset + size).copy_(model->sh0_raw());
+            opacity.slice(0, offset, offset + size).copy_(model->opacity_raw());
+            scaling.slice(0, offset, offset + size).copy_(model->scaling_raw());
+            rotation.slice(0, offset, offset + size).copy_(model->rotation_raw());
+
+            // Copy shN if we have coefficients
+            if (shN_coeffs > 0) {
+                const auto& model_shN = model->shN_raw();
+                int model_shN_coeffs = (model_shN.is_valid() && model_shN.ndim() >= 2) ? static_cast<int>(model_shN.size(1)) : 0;
+
+                if (model_shN_coeffs > 0) {
+                    int coeffs_to_copy = std::min(model_shN_coeffs, shN_coeffs);
+
+                    // Slice in both dimensions: rows and coefficients
+                    auto dst_slice = shN.slice(0, offset, offset + size).slice(1, 0, coeffs_to_copy);
+                    auto src_slice = model_shN.slice(1, 0, coeffs_to_copy);
+                    dst_slice.copy_(src_slice);
+                }
+            }
+
+            offset += size;
+        }
+
+        // Create the combined model
+        cached_combined_ = std::make_unique<SplatDataNew>(
+            stats.max_sh_degree,
+            std::move(means),
+            std::move(sh0),
+            std::move(shN),
+            std::move(scaling),
+            std::move(rotation),
+            std::move(opacity),
+            stats.total_scene_scale / visible_models.size());
+
+        cache_valid_ = true;
     }
-
-    // Create the combined model
-    cached_combined_ = std::make_unique<SplatDataNew>(
-        stats.max_sh_degree,
-        std::move(means),
-        std::move(sh0),
-        std::move(shN),
-        std::move(scaling),
-        std::move(rotation),
-        std::move(opacity),
-        stats.total_scene_scale / visible_models.size());
-
-    cache_valid_ = true;
-}
 
 } // namespace gs

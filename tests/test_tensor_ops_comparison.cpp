@@ -2,113 +2,113 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include <cmath>
+#include <cuda_runtime.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
-#include <cuda_runtime.h>
-#include <cmath>
 #include <vector>
 
 #include "core/tensor.hpp"
 
 namespace {
 
-constexpr float FLOAT_TOLERANCE = 1e-4f;
+    constexpr float FLOAT_TOLERANCE = 1e-4f;
 
-// Helper to convert torch::Tensor to gs::Tensor
-gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
-    auto cpu_tensor = torch_tensor.cpu().contiguous();
-    std::vector<size_t> shape;
-    for (int i = 0; i < torch_tensor.dim(); ++i) {
-        shape.push_back(torch_tensor.size(i));
-    }
-
-    if (torch_tensor.scalar_type() == torch::kFloat32) {
-        std::vector<float> data(cpu_tensor.data_ptr<float>(),
-                               cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
-        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
-    } else if (torch_tensor.scalar_type() == torch::kInt32) {
-        std::vector<int> data(cpu_tensor.data_ptr<int>(),
-                             cpu_tensor.data_ptr<int>() + cpu_tensor.numel());
-        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
-    } else if (torch_tensor.scalar_type() == torch::kBool) {
-        std::vector<bool> data;
-        auto bool_ptr = cpu_tensor.data_ptr<bool>();
-        for (int64_t i = 0; i < cpu_tensor.numel(); ++i) {
-            data.push_back(bool_ptr[i]);
+    // Helper to convert torch::Tensor to gs::Tensor
+    gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
+        auto cpu_tensor = torch_tensor.cpu().contiguous();
+        std::vector<size_t> shape;
+        for (int i = 0; i < torch_tensor.dim(); ++i) {
+            shape.push_back(torch_tensor.size(i));
         }
-        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
+
+        if (torch_tensor.scalar_type() == torch::kFloat32) {
+            std::vector<float> data(cpu_tensor.data_ptr<float>(),
+                                    cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
+            return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
+        } else if (torch_tensor.scalar_type() == torch::kInt32) {
+            std::vector<int> data(cpu_tensor.data_ptr<int>(),
+                                  cpu_tensor.data_ptr<int>() + cpu_tensor.numel());
+            return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
+        } else if (torch_tensor.scalar_type() == torch::kBool) {
+            std::vector<bool> data;
+            auto bool_ptr = cpu_tensor.data_ptr<bool>();
+            for (int64_t i = 0; i < cpu_tensor.numel(); ++i) {
+                data.push_back(bool_ptr[i]);
+            }
+            return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
+        }
+
+        return gs::Tensor();
     }
 
-    return gs::Tensor();
-}
+    // Helper to convert gs::Tensor to torch::Tensor
+    torch::Tensor tensor_to_torch(const gs::Tensor& gs_tensor) {
+        auto cpu_tensor = gs_tensor.cpu();
+        std::vector<int64_t> shape;
+        for (size_t i = 0; i < cpu_tensor.ndim(); ++i) {
+            shape.push_back(cpu_tensor.shape()[i]);
+        }
 
-// Helper to convert gs::Tensor to torch::Tensor
-torch::Tensor tensor_to_torch(const gs::Tensor& gs_tensor) {
-    auto cpu_tensor = gs_tensor.cpu();
-    std::vector<int64_t> shape;
-    for (size_t i = 0; i < cpu_tensor.ndim(); ++i) {
-        shape.push_back(cpu_tensor.shape()[i]);
+        if (gs_tensor.dtype() == gs::DataType::Float32) {
+            auto data = cpu_tensor.to_vector();
+            auto torch_tensor = torch::from_blob(data.data(), shape, torch::kFloat32).clone();
+            return torch_tensor.cuda();
+        } else if (gs_tensor.dtype() == gs::DataType::Int32) {
+            auto data = cpu_tensor.to_vector_int();
+            auto torch_tensor = torch::from_blob(data.data(), shape, torch::kInt32).clone();
+            return torch_tensor.cuda();
+        } else if (gs_tensor.dtype() == gs::DataType::Bool) {
+            auto data = cpu_tensor.to_vector_bool();
+            std::vector<uint8_t> uint8_data(data.begin(), data.end());
+            auto torch_tensor = torch::from_blob(uint8_data.data(), shape, torch::kUInt8).clone().to(torch::kBool);
+            return torch_tensor.cuda();
+        }
+
+        return torch::Tensor();
     }
 
-    if (gs_tensor.dtype() == gs::DataType::Float32) {
-        auto data = cpu_tensor.to_vector();
-        auto torch_tensor = torch::from_blob(data.data(), shape, torch::kFloat32).clone();
-        return torch_tensor.cuda();
-    } else if (gs_tensor.dtype() == gs::DataType::Int32) {
-        auto data = cpu_tensor.to_vector_int();
-        auto torch_tensor = torch::from_blob(data.data(), shape, torch::kInt32).clone();
-        return torch_tensor.cuda();
-    } else if (gs_tensor.dtype() == gs::DataType::Bool) {
-        auto data = cpu_tensor.to_vector_bool();
-        std::vector<uint8_t> uint8_data(data.begin(), data.end());
-        auto torch_tensor = torch::from_blob(uint8_data.data(), shape, torch::kUInt8).clone().to(torch::kBool);
-        return torch_tensor.cuda();
-    }
-
-    return torch::Tensor();
-}
-
-// Helper to compare tensors
-bool tensors_close(const gs::Tensor& a, const torch::Tensor& b, float tol = FLOAT_TOLERANCE) {
-    if (a.numel() != b.numel()) {
-        std::cout << "Size mismatch: " << a.numel() << " vs " << b.numel() << std::endl;
-        return false;
-    }
-
-    auto a_cpu = a.cpu().to_vector();
-    auto b_cpu = b.cpu();
-    auto b_ptr = b_cpu.data_ptr<float>();
-
-    for (size_t i = 0; i < a.numel(); ++i) {
-        float diff = std::abs(a_cpu[i] - b_ptr[i]);
-        if (diff > tol) {
-            std::cout << "Mismatch at index " << i << ": " << a_cpu[i] << " vs " << b_ptr[i]
-                      << " (diff: " << diff << ")" << std::endl;
+    // Helper to compare tensors
+    bool tensors_close(const gs::Tensor& a, const torch::Tensor& b, float tol = FLOAT_TOLERANCE) {
+        if (a.numel() != b.numel()) {
+            std::cout << "Size mismatch: " << a.numel() << " vs " << b.numel() << std::endl;
             return false;
         }
+
+        auto a_cpu = a.cpu().to_vector();
+        auto b_cpu = b.cpu();
+        auto b_ptr = b_cpu.data_ptr<float>();
+
+        for (size_t i = 0; i < a.numel(); ++i) {
+            float diff = std::abs(a_cpu[i] - b_ptr[i]);
+            if (diff > tol) {
+                std::cout << "Mismatch at index " << i << ": " << a_cpu[i] << " vs " << b_ptr[i]
+                          << " (diff: " << diff << ")" << std::endl;
+                return false;
+            }
+        }
+        return true;
     }
-    return true;
-}
 
-// Helper for bool tensor comparison
-bool bool_tensors_equal(const gs::Tensor& a, const torch::Tensor& b) {
-    if (a.numel() != b.numel()) {
-        std::cout << "Size mismatch: " << a.numel() << " vs " << b.numel() << std::endl;
-        return false;
-    }
-
-    auto a_cpu = a.cpu().to_vector_bool();
-    auto b_cpu = b.cpu();
-    auto b_ptr = b_cpu.data_ptr<bool>();
-
-    for (size_t i = 0; i < a.numel(); ++i) {
-        if (a_cpu[i] != b_ptr[i]) {
-            std::cout << "Mismatch at index " << i << ": " << a_cpu[i] << " vs " << b_ptr[i] << std::endl;
+    // Helper for bool tensor comparison
+    bool bool_tensors_equal(const gs::Tensor& a, const torch::Tensor& b) {
+        if (a.numel() != b.numel()) {
+            std::cout << "Size mismatch: " << a.numel() << " vs " << b.numel() << std::endl;
             return false;
         }
+
+        auto a_cpu = a.cpu().to_vector_bool();
+        auto b_cpu = b.cpu();
+        auto b_ptr = b_cpu.data_ptr<bool>();
+
+        for (size_t i = 0; i < a.numel(); ++i) {
+            if (a_cpu[i] != b_ptr[i]) {
+                std::cout << "Mismatch at index " << i << ": " << a_cpu[i] << " vs " << b_ptr[i] << std::endl;
+                return false;
+            }
+        }
+        return true;
     }
-    return true;
-}
 
 } // anonymous namespace
 
@@ -173,7 +173,7 @@ TEST_F(TensorBugHuntingTest, GPUToCPUTransferPreservesData) {
 
 TEST_F(TensorBugHuntingTest, RepeatedCPUGPUTransfers) {
     auto t = gs::Tensor::ones({3, 3}, gs::Device::CPU);
-    t.ptr<float>()[4] = 123.456f;  // Center element
+    t.ptr<float>()[4] = 123.456f; // Center element
 
     // Multiple round trips
     for (int i = 0; i < 5; ++i) {
@@ -273,7 +273,7 @@ TEST_F(TensorBugHuntingTest, TensorRowProxyAssignmentFromAnotherRowDebug) {
     // Perform operation
     std::cout << "\n--- Extracting row 0 ---" << std::endl;
     auto torch_row0 = torch_data[0].clone();
-    gs::Tensor gs_row0_tensor = gs_data[0];  // TensorRowProxy → Tensor conversion
+    gs::Tensor gs_row0_tensor = gs_data[0]; // TensorRowProxy → Tensor conversion
 
     std::vector<float> torch_row0_check(3);
     for (int i = 0; i < 3; ++i) {
@@ -312,8 +312,10 @@ TEST_F(TensorBugHuntingTest, TensorRowProxyAssignmentFromAnotherRowDebug) {
             // Compare row 4 with original row 0
             bool torch_match = true, gs_match = true;
             for (int i = 0; i < 3; ++i) {
-                if (std::abs(torch_row[i] - torch_row0_check[i]) > 0.0001f) torch_match = false;
-                if (std::abs(gs_row[i] - gs_row0_check[i]) > 0.0001f) gs_match = false;
+                if (std::abs(torch_row[i] - torch_row0_check[i]) > 0.0001f)
+                    torch_match = false;
+                if (std::abs(gs_row[i] - gs_row0_check[i]) > 0.0001f)
+                    gs_match = false;
             }
             std::cout << "  PyTorch row 4 matches row 0? " << (torch_match ? "YES" : "NO") << std::endl;
             std::cout << "  GS row 4 matches row 0? " << (gs_match ? "YES" : "NO") << std::endl;
@@ -342,7 +344,7 @@ TEST_F(TensorBugHuntingTest, DiagnosticTensorsCloseFunction) {
 
                 std::vector<float> gs_val(1);
                 cudaMemcpy(gs_val.data(), gs_data.ptr<float>() + row * 3 + col,
-                          sizeof(float), cudaMemcpyDeviceToHost);
+                           sizeof(float), cudaMemcpyDeviceToHost);
 
                 float diff = std::abs(torch_val - gs_val[0]);
                 if (diff > 1e-5) {
@@ -383,7 +385,7 @@ TEST_F(TensorBugHuntingTest, TensorRowProxyAssignmentFromAnotherRowVerbose) {
 
             std::vector<float> gs_val(1);
             cudaMemcpy(gs_val.data(), gs_data.ptr<float>() + row * 3 + col,
-                      sizeof(float), cudaMemcpyDeviceToHost);
+                       sizeof(float), cudaMemcpyDeviceToHost);
 
             float diff = std::abs(torch_val - gs_val[0]);
             if (diff > 1e-3) {
@@ -411,7 +413,7 @@ TEST_F(TensorBugHuntingTest, DiagnosticAutoVsExplicitType) {
     std::cout << "Test 1: Using auto (stays as proxy?)" << std::endl;
     {
         auto torch_row0 = torch_data[0].clone();
-        auto gs_row0 = gs_data[0];  // This might be TensorRowProxy!
+        auto gs_row0 = gs_data[0]; // This might be TensorRowProxy!
 
         std::cout << "  Type of gs_row0: " << typeid(gs_row0).name() << std::endl;
 
@@ -420,7 +422,7 @@ TEST_F(TensorBugHuntingTest, DiagnosticAutoVsExplicitType) {
 
         std::vector<float> gs_row4(3);
         cudaMemcpy(gs_row4.data(), gs_data.ptr<float>() + 12,
-                  3 * sizeof(float), cudaMemcpyDeviceToHost);
+                   3 * sizeof(float), cudaMemcpyDeviceToHost);
 
         std::cout << "  GS row 4 after auto: [" << gs_row4[0] << ", " << gs_row4[1] << ", " << gs_row4[2] << "]" << std::endl;
     }
@@ -431,7 +433,7 @@ TEST_F(TensorBugHuntingTest, DiagnosticAutoVsExplicitType) {
     std::cout << "\nTest 2: Using explicit Tensor type (forces conversion)" << std::endl;
     {
         auto torch_row0 = torch_data[0].clone();
-        gs::Tensor gs_row0 = gs_data[0];  // Explicit type forces conversion!
+        gs::Tensor gs_row0 = gs_data[0]; // Explicit type forces conversion!
 
         std::cout << "  Type of gs_row0: " << typeid(gs_row0).name() << std::endl;
 
@@ -440,7 +442,7 @@ TEST_F(TensorBugHuntingTest, DiagnosticAutoVsExplicitType) {
 
         std::vector<float> gs_row4(3);
         cudaMemcpy(gs_row4.data(), gs_data.ptr<float>() + 12,
-                  3 * sizeof(float), cudaMemcpyDeviceToHost);
+                   3 * sizeof(float), cudaMemcpyDeviceToHost);
 
         std::cout << "  GS row 4 after explicit: [" << gs_row4[0] << ", " << gs_row4[1] << ", " << gs_row4[2] << "]" << std::endl;
     }
@@ -466,7 +468,7 @@ TEST_F(TensorBugHuntingTest, TensorRowProxy1DAccess) {
 
     // Access single element
     float torch_val = torch_1d[5].item<float>();
-    float gs_val = gs_1d[5];  // Should convert proxy to float
+    float gs_val = gs_1d[5]; // Should convert proxy to float
 
     EXPECT_FLOAT_EQ(gs_val, torch_val)
         << "1D TensorRowProxy conversion to float failed!";
@@ -522,7 +524,7 @@ TEST_F(TensorBugHuntingTest, BroadcastAdd) {
     auto gs_a = torch_to_tensor(torch_a);
     auto gs_b = torch_to_tensor(torch_b);
 
-    auto torch_result = torch_a + torch_b;  // Should broadcast to {10, 5}
+    auto torch_result = torch_a + torch_b; // Should broadcast to {10, 5}
     auto gs_result = gs_a + gs_b;
 
     EXPECT_TRUE(tensors_close(gs_result, torch_result))
@@ -592,7 +594,7 @@ TEST_F(TensorBugHuntingTest, PointerAccessRowMajor) {
     auto gs_data = torch_to_tensor(torch_data);
 
     // Access element at [2, 3] via pointer arithmetic
-    size_t idx = 2 * 4 + 3;  // Row-major: row * cols + col
+    size_t idx = 2 * 4 + 3; // Row-major: row * cols + col
 
     std::vector<float> torch_val(1), gs_val(1);
     cudaMemcpy(torch_val.data(), torch_data.data_ptr<float>() + idx, sizeof(float), cudaMemcpyDeviceToHost);
@@ -877,7 +879,8 @@ TEST_F(TensorBugHuntingTest, Sort2DDescending) {
 
 TEST_F(TensorBugHuntingTest, Nonzero2D) {
     auto torch_data = torch::tensor({{0.0f, 1.0f, 0.0f},
-                                     {2.0f, 0.0f, 3.0f}}, torch::kCUDA);
+                                     {2.0f, 0.0f, 3.0f}},
+                                    torch::kCUDA);
     auto gs_data = torch_to_tensor(torch_data);
 
     auto torch_nz = torch_data.nonzero();
@@ -965,7 +968,7 @@ TEST_F(TensorBugHuntingTest, Accessor2D) {
     for (size_t i = 0; i < 5; ++i) {
         for (size_t j = 0; j < 4; ++j) {
             float gs_val = accessor(i, j);
-            float torch_val = torch_accessor[i][j];  // Direct float access
+            float torch_val = torch_accessor[i][j]; // Direct float access
             EXPECT_FLOAT_EQ(gs_val, torch_val)
                 << "Mismatch at [" << i << ", " << j << "]";
         }

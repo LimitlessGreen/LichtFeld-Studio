@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "training/strategies/mcmc_new.hpp"
-#include "strategy_utils_new.hpp"
 #include "core/logger.hpp"
 #include "core/parameters.hpp"
 #include "optimizers/fused_adam.hpp"
 #include "optimizers/scheduler.hpp"
+#include "strategy_utils_new.hpp"
 #include "training_kernels.cuh"
 #include <algorithm>
 #include <chrono>
@@ -362,7 +362,7 @@ namespace gs::training {
             n_max,
             new_opacities.ptr<float>(),
             new_scales.ptr<float>(),
-            nullptr  // default stream
+            nullptr // default stream
         );
 
         // Clamp new opacities
@@ -559,7 +559,8 @@ namespace gs::training {
     }
 
     bool MCMCNew::is_refining(int iter) const {
-        if (!_params) return false;
+        if (!_params)
+            return false;
         return (iter < _params->stop_refine &&
                 iter > _params->start_refine &&
                 iter % _params->refine_every == 0);

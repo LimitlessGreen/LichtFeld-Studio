@@ -3,8 +3,8 @@
 
 #pragma once
 
-#include "core/memory_pool.hpp"
 #include "core/logger.hpp"
+#include "core/memory_pool.hpp"
 #include <cuda_runtime.h>
 #include <type_traits>
 
@@ -15,12 +15,12 @@ namespace gs::tensor_ops {
     // ============================================================================
 
     enum class BroadcastPattern {
-        Scalar,        // One operand is scalar (size 1)
-        Row,           // e.g., (M×N) op (1×N) - broadcast along rows
-        Column,        // e.g., (M×N) op (M×1) - broadcast along columns
-        Channel3D,     // e.g., (H×W×C) op (1×1×C) - channel-wise broadcast (neural rendering)
-        BatchBroadcast3D,  // e.g., (B×H×W) op (1×H×W) - batch broadcast (neural networks)
-        Generic        // Complex pattern - use generic kernel
+        Scalar,           // One operand is scalar (size 1)
+        Row,              // e.g., (M×N) op (1×N) - broadcast along rows
+        Column,           // e.g., (M×N) op (M×1) - broadcast along columns
+        Channel3D,        // e.g., (H×W×C) op (1×1×C) - channel-wise broadcast (neural rendering)
+        BatchBroadcast3D, // e.g., (B×H×W) op (1×H×W) - batch broadcast (neural networks)
+        Generic           // Complex pattern - use generic kernel
     };
 
     // Detect broadcast pattern for binary operations
@@ -30,8 +30,10 @@ namespace gs::tensor_ops {
 
         // Scalar pattern: One operand has size 1
         size_t a_size = 1, b_size = 1;
-        for (size_t i = 0; i < a_rank; ++i) a_size *= a_shape[i];
-        for (size_t i = 0; i < b_rank; ++i) b_size *= b_shape[i];
+        for (size_t i = 0; i < a_rank; ++i)
+            a_size *= a_shape[i];
+        for (size_t i = 0; i < b_rank; ++i)
+            b_size *= b_shape[i];
 
         if (a_size == 1 || b_size == 1) {
             return BroadcastPattern::Scalar;
@@ -67,7 +69,8 @@ namespace gs::tensor_ops {
         }
 
         // 2D patterns only
-        if (c_rank != 2) return BroadcastPattern::Generic;
+        if (c_rank != 2)
+            return BroadcastPattern::Generic;
 
         // Row broadcast: (M×N) op (1×N)
         if (a_rank == 2 && b_rank == 2) {
@@ -96,17 +99,17 @@ namespace gs::tensor_ops {
     // SPECIALIZED BROADCAST KERNELS (tiny-cuda-nn style vectorized)
     // ============================================================================
 
-#ifdef __CUDACC__  // Only compile CUDA kernels with nvcc
+#ifdef __CUDACC__ // Only compile CUDA kernels with nvcc
 
     // Scalar broadcast kernel - Simple version without float4 (safer)
-    template<typename BinaryOp>
+    template <typename BinaryOp>
     __global__ void broadcast_scalar_kernel_float(
         const float* a, const float* b, float* c,
         size_t a_size, size_t b_size, size_t c_elements,
-        BinaryOp op)
-    {
+        BinaryOp op) {
         const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= c_elements) return;
+        if (idx >= c_elements)
+            return;
 
         const float scalar_val = (a_size == 1) ? a[0] : b[0];
         const float* array = (a_size == 1) ? b : a;
@@ -116,12 +119,11 @@ namespace gs::tensor_ops {
     }
 
     // Row broadcast kernel - VECTORIZED with float4 (2-4x faster!)
-    template<typename BinaryOp>
+    template <typename BinaryOp>
     __global__ void broadcast_row_kernel_float(
         const float* a, const float* b, float* c,
         size_t M, size_t N, bool a_is_row,
-        BinaryOp op)
-    {
+        BinaryOp op) {
         const size_t row = blockIdx.y;
         const size_t col_vec = blockIdx.x * blockDim.x + threadIdx.x;
         const size_t col = col_vec * 4;
@@ -159,9 +161,7 @@ namespace gs::tensor_ops {
         else if (col < N) {
             for (size_t i = col; i < N && i < col + 4; ++i) {
                 const size_t idx = row_offset + i;
-                c[idx] = a_is_row ?
-                    op(broadcast_row[i], row_data[idx]) :
-                    op(row_data[idx], broadcast_row[i]);
+                c[idx] = a_is_row ? op(broadcast_row[i], row_data[idx]) : op(row_data[idx], broadcast_row[i]);
             }
         }
     }
@@ -169,12 +169,11 @@ namespace gs::tensor_ops {
     // Row broadcast COMPARISON kernel - VECTORIZED (float->unsigned char)
     // Optimized for comparison operations: <, >, ==, !=
     // Uses float4 loads for inputs, uchar4 stores for outputs
-    template<typename BinaryOp>
+    template <typename BinaryOp>
     __global__ void broadcast_row_comparison_kernel(
         const float* a, const float* b, unsigned char* c,
         size_t M, size_t N, bool a_is_row,
-        BinaryOp op)
-    {
+        BinaryOp op) {
         const size_t row = blockIdx.y;
         const size_t col_vec = blockIdx.x * blockDim.x + threadIdx.x;
         const size_t col = col_vec * 4;
@@ -215,48 +214,44 @@ namespace gs::tensor_ops {
         else if (col < N) {
             for (size_t i = col; i < N && i < col + 4; ++i) {
                 const size_t idx = row_offset + i;
-                c[idx] = a_is_row ?
-                    op(broadcast_row[i], row_data[idx]) :
-                    op(row_data[idx], broadcast_row[i]);
+                c[idx] = a_is_row ? op(broadcast_row[i], row_data[idx]) : op(row_data[idx], broadcast_row[i]);
             }
         }
     }
 
     // Column broadcast kernel - Simple version without float4
-    template<typename BinaryOp>
+    template <typename BinaryOp>
     __global__ void broadcast_column_kernel_float(
         const float* a, const float* b, float* c,
         size_t M, size_t N, bool a_is_col,
-        BinaryOp op)
-    {
+        BinaryOp op) {
         const size_t row = blockIdx.y;
         const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
 
-        if (col >= N) return;
+        if (col >= N)
+            return;
 
         const size_t idx = row * N + col;
         const float* row_data = a_is_col ? b : a;
         const float col_val = a_is_col ? a[row] : b[row];
 
-        c[idx] = a_is_col ?
-            op(col_val, row_data[idx]) :
-            op(row_data[idx], col_val);
+        c[idx] = a_is_col ? op(col_val, row_data[idx]) : op(row_data[idx], col_val);
     }
 
     // Channel3D broadcast kernel - HIGHLY OPTIMIZED for neural rendering
     // Pattern: (H×W×C) op (1×1×C) - extremely common in neural rendering!
     // Uses float4 for RGBA (C=4), manual unrolling for RGB (C=3)
-    template<typename BinaryOp>
+    template <typename BinaryOp>
     __global__ void broadcast_channel3d_kernel_float(
         const float* a, const float* b, float* c,
         size_t H, size_t W, size_t C, bool a_is_broadcast,
-        BinaryOp op)
-    {
+        BinaryOp op) {
         // 2D grid: process pixels in parallel
         const size_t pixel_idx = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
         const size_t total_pixels = H * W;
 
-        if (pixel_idx >= total_pixels) return;
+        if (pixel_idx >= total_pixels)
+            return;
 
         const size_t pixel_offset = pixel_idx * C;
         const float* pixel_data = a_is_broadcast ? b + pixel_offset : a + pixel_offset;
@@ -324,11 +319,11 @@ namespace gs::tensor_ops {
             bool out_aligned = (reinterpret_cast<uintptr_t>(&c[pixel_offset]) % 16) == 0;
 
             if (pixel_aligned && chan_aligned && out_aligned) {
-                const size_t num_vec = C / 4;  // Number of float4 loads needed
+                const size_t num_vec = C / 4; // Number of float4 loads needed
 
                 // Unroll loop for common sizes (C=8, 16, 32, 64)
                 if (C <= 64) {
-                    #pragma unroll
+#pragma unroll
                     for (size_t v = 0; v < num_vec; ++v) {
                         float4 pixel_vals = reinterpret_cast<const float4*>(pixel_data)[v];
                         float4 chan_vals = reinterpret_cast<const float4*>(channel_vals)[v];
@@ -378,18 +373,14 @@ namespace gs::tensor_ops {
         // GENERIC PATH: Any channel count (small C or unaligned)
         // Use loop unrolling for small C (< 16)
         if (C <= 16) {
-            #pragma unroll
+#pragma unroll
             for (size_t ch = 0; ch < C; ++ch) {
-                c[pixel_offset + ch] = a_is_broadcast ?
-                    op(channel_vals[ch], pixel_data[ch]) :
-                    op(pixel_data[ch], channel_vals[ch]);
+                c[pixel_offset + ch] = a_is_broadcast ? op(channel_vals[ch], pixel_data[ch]) : op(pixel_data[ch], channel_vals[ch]);
             }
         } else {
             // No unrolling for large C without vectorization
             for (size_t ch = 0; ch < C; ++ch) {
-                c[pixel_offset + ch] = a_is_broadcast ?
-                    op(channel_vals[ch], pixel_data[ch]) :
-                    op(pixel_data[ch], channel_vals[ch]);
+                c[pixel_offset + ch] = a_is_broadcast ? op(channel_vals[ch], pixel_data[ch]) : op(pixel_data[ch], channel_vals[ch]);
             }
         }
     }
@@ -398,15 +389,14 @@ namespace gs::tensor_ops {
     // Pattern: (H×W×C) op (1×1×C) - OPTIMIZED for memory coalescing
     // Each WARP processes one pixel, threads cooperatively handle channels
     // This achieves COALESCED access: threads in warp load CONSECUTIVE channels!
-    template<typename BinaryOp>
+    template <typename BinaryOp>
     __global__ void broadcast_channel3d_coalesced_kernel_float(
         const float* __restrict__ a,
         const float* __restrict__ b,
         float* __restrict__ c,
         size_t H, size_t W, size_t C,
         bool a_is_broadcast,
-        BinaryOp op)
-    {
+        BinaryOp op) {
         // Shared memory for broadcast channels
         extern __shared__ float s_channels[];
 
@@ -433,8 +423,7 @@ namespace gs::tensor_ops {
         // Assign pixels to warps
         for (size_t pixel = blockIdx.x * num_warps + warp_id;
              pixel < total_pixels;
-             pixel += gridDim.x * num_warps)
-        {
+             pixel += gridDim.x * num_warps) {
             const size_t pixel_offset = pixel * C;
 
             // Process channels in groups of 32 (one per lane)
@@ -447,9 +436,7 @@ namespace gs::tensor_ops {
                     const float chan_val = s_channels[ch];
 
                     // Compute result
-                    const float result = a_is_broadcast ?
-                        op(chan_val, pix_val) :
-                        op(pix_val, chan_val);
+                    const float result = a_is_broadcast ? op(chan_val, pix_val) : op(pix_val, chan_val);
 
                     // COALESCED STORE: All 32 threads write consecutive channels
                     c[pixel_offset + ch] = result;
@@ -462,12 +449,11 @@ namespace gs::tensor_ops {
     // Pattern: (H×W×C) op (1×1×C) where C is small (< 3K floats = 12KB)
     // Loads channel vector ONCE into shared memory, all threads reuse from fast local memory
     // Expected speedup: 2-3× vs global memory version for C <= 128
-    template<typename BinaryOp>
+    template <typename BinaryOp>
     __global__ void broadcast_channel3d_smem_kernel_float(
         const float* a, const float* b, float* c,
         size_t H, size_t W, size_t C, bool a_is_broadcast,
-        BinaryOp op)
-    {
+        BinaryOp op) {
         // STEP 1: Allocate shared memory for channel vector
         extern __shared__ float s_channels[];
 
@@ -491,13 +477,14 @@ namespace gs::tensor_ops {
                 s_channels[ch] = channel_vals_global[ch];
             }
         }
-        __syncthreads();  // Ensure all threads see the loaded data
+        __syncthreads(); // Ensure all threads see the loaded data
 
         // STEP 3: Process pixels (each thread processes one pixel)
         const size_t pixel_idx = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
         const size_t total_pixels = H * W;
 
-        if (pixel_idx >= total_pixels) return;
+        if (pixel_idx >= total_pixels)
+            return;
 
         const size_t pixel_offset = pixel_idx * C;
         const float* pixel_data = a_is_broadcast ? b + pixel_offset : a + pixel_offset;
@@ -566,11 +553,11 @@ namespace gs::tensor_ops {
             bool out_aligned = (reinterpret_cast<uintptr_t>(&c[pixel_offset]) % 16) == 0;
 
             if (pixel_aligned && out_aligned) {
-                const size_t num_vec = C / 4;  // Number of float4 loads needed
+                const size_t num_vec = C / 4; // Number of float4 loads needed
 
                 // Unroll loop for common sizes (C=8, 16, 32, 64)
                 if (C <= 64) {
-                    #pragma unroll
+#pragma unroll
                     for (size_t v = 0; v < num_vec; ++v) {
                         float4 pixel_vals = reinterpret_cast<const float4*>(pixel_data)[v];
                         // SHARED MEMORY ACCESS (100× faster than global!)
@@ -622,20 +609,16 @@ namespace gs::tensor_ops {
         // GENERIC PATH: Any channel count (small C or unaligned)
         // Use loop unrolling for small C (< 16)
         if (C <= 16) {
-            #pragma unroll
+#pragma unroll
             for (size_t ch = 0; ch < C; ++ch) {
                 // SHARED MEMORY ACCESS (100× faster than global!)
-                c[pixel_offset + ch] = a_is_broadcast ?
-                    op(s_channels[ch], pixel_data[ch]) :
-                    op(pixel_data[ch], s_channels[ch]);
+                c[pixel_offset + ch] = a_is_broadcast ? op(s_channels[ch], pixel_data[ch]) : op(pixel_data[ch], s_channels[ch]);
             }
         } else {
             // No unrolling for large C without vectorization
             for (size_t ch = 0; ch < C; ++ch) {
                 // SHARED MEMORY ACCESS (100× faster than global!)
-                c[pixel_offset + ch] = a_is_broadcast ?
-                    op(s_channels[ch], pixel_data[ch]) :
-                    op(pixel_data[ch], s_channels[ch]);
+                c[pixel_offset + ch] = a_is_broadcast ? op(s_channels[ch], pixel_data[ch]) : op(pixel_data[ch], s_channels[ch]);
             }
         }
     }
@@ -643,18 +626,18 @@ namespace gs::tensor_ops {
     // Batch Broadcast 3D kernel - VECTORIZED for neural network patterns
     // Pattern: (B×H×W) op (1×H×W) - broadcast H×W plane across B batches
     // Common in batch normalization, instance normalization
-    template<typename BinaryOp>
+    template <typename BinaryOp>
     __global__ void broadcast_batch3d_kernel_float(
         const float* a, const float* b, float* c,
         size_t B, size_t H, size_t W, bool a_is_broadcast,
-        BinaryOp op)
-    {
+        BinaryOp op) {
         const size_t batch = blockIdx.y;
         const size_t elem_vec = blockIdx.x * blockDim.x + threadIdx.x;
-        const size_t elem = elem_vec * 4;  // Process 4 elements per thread
+        const size_t elem = elem_vec * 4; // Process 4 elements per thread
 
         const size_t plane_size = H * W;
-        if (batch >= B || elem >= plane_size) return;
+        if (batch >= B || elem >= plane_size)
+            return;
 
         const size_t batch_offset = batch * plane_size;
         const float* batch_data = a_is_broadcast ? b + batch_offset : a + batch_offset;
@@ -689,9 +672,7 @@ namespace gs::tensor_ops {
         else if (elem < plane_size) {
             for (size_t i = elem; i < plane_size && i < elem + 4; ++i) {
                 const size_t idx = batch_offset + i;
-                c[idx] = a_is_broadcast ?
-                    op(broadcast_plane[i], batch_data[i]) :
-                    op(batch_data[i], broadcast_plane[i]);
+                c[idx] = a_is_broadcast ? op(broadcast_plane[i], batch_data[i]) : op(batch_data[i], broadcast_plane[i]);
             }
         }
     }
@@ -700,15 +681,15 @@ namespace gs::tensor_ops {
     // BINARY BROADCAST KERNEL (Generic fallback)
     // ============================================================================
 
-    template<typename T, typename OutputT, typename BinaryOp>
+    template <typename T, typename OutputT, typename BinaryOp>
     __global__ void broadcast_binary_kernel(
         const T* a, const T* b, OutputT* c,
         const int* a_shape, const int* b_shape, const int* c_shape,
         int a_rank, int b_rank, int c_rank,
-        size_t c_elements, BinaryOp op)
-    {
+        size_t c_elements, BinaryOp op) {
         size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= c_elements) return;
+        if (idx >= c_elements)
+            return;
 
         // Compute strides inline
         int c_strides[8], a_strides[8], b_strides[8];
@@ -760,18 +741,19 @@ namespace gs::tensor_ops {
         c[idx] = op(a[a_idx], b[b_idx]);
     }
 
-#endif  // __CUDACC__
+#endif // __CUDACC__
 
     // ============================================================================
     // BINARY BROADCAST HOST LAUNCHER TEMPLATE (INLINE FOR CORRECT INSTANTIATION)
     // ============================================================================
 
-    template<typename T, typename OutputT, typename BinaryOp>
+    template <typename T, typename OutputT, typename BinaryOp>
     void launch_broadcast_binary(const T* a, const T* b, OutputT* c,
                                  const size_t* a_shape, const size_t* b_shape, const size_t* c_shape,
                                  size_t a_rank, size_t b_rank, size_t c_rank,
                                  size_t c_elements, BinaryOp op, cudaStream_t stream) {
-        if (c_elements == 0) return;
+        if (c_elements == 0)
+            return;
 
         // DEBUG: Disabled for production - enable only for debugging
         // fprintf(stderr, "BROADCAST CALLED: c_elem=%zu, a_rank=%zu, b_rank=%zu\n", c_elements, a_rank, b_rank);
@@ -822,122 +804,124 @@ namespace gs::tensor_ops {
             //        pattern_names[static_cast<int>(pattern)], c_elements, a_rank, b_rank, c_rank);
 
             switch (pattern) {
-                case BroadcastPattern::Scalar: {
-                    // Scalar broadcast: (M×N) op scalar
-                    size_t a_size = 1, b_size = 1;
-                    for (size_t i = 0; i < a_rank; ++i) a_size *= a_shape[i];
-                    for (size_t i = 0; i < b_rank; ++i) b_size *= b_shape[i];
+            case BroadcastPattern::Scalar: {
+                // Scalar broadcast: (M×N) op scalar
+                size_t a_size = 1, b_size = 1;
+                for (size_t i = 0; i < a_rank; ++i)
+                    a_size *= a_shape[i];
+                for (size_t i = 0; i < b_rank; ++i)
+                    b_size *= b_shape[i];
 
-                    const int grid_size = (c_elements + block_size - 1) / block_size;
-
-#ifdef __CUDACC__
-                    broadcast_scalar_kernel_float<<<grid_size, block_size, 0, stream>>>(
-                        a, b, c, a_size, b_size, c_elements, op);
-#else
-                    static_assert(sizeof(T) == 0, "CUDA compiler required for broadcast operations");
-#endif
-                    return;
-                }
-
-                case BroadcastPattern::Row: {
-                    // Row broadcast: (M×N) op (1×N) - VECTORIZED with float4!
-                    const size_t M = c_shape[0];
-                    const size_t N = c_shape[1];
-                    const bool a_is_row = (a_shape[0] == 1);
-
-                    // Each thread processes 4 elements
-                    const size_t num_vec = (N + 3) / 4;
-                    dim3 grid((num_vec + block_size - 1) / block_size, M);
+                const int grid_size = (c_elements + block_size - 1) / block_size;
 
 #ifdef __CUDACC__
-                    broadcast_row_kernel_float<<<grid, block_size, 0, stream>>>(
-                        a, b, c, M, N, a_is_row, op);
+                broadcast_scalar_kernel_float<<<grid_size, block_size, 0, stream>>>(
+                    a, b, c, a_size, b_size, c_elements, op);
 #else
-                    static_assert(sizeof(T) == 0, "CUDA compiler required for broadcast operations");
+                static_assert(sizeof(T) == 0, "CUDA compiler required for broadcast operations");
 #endif
-                    return;
-                }
+                return;
+            }
 
-                case BroadcastPattern::Column: {
-                    // Column broadcast: (M×N) op (M×1)
-                    const size_t M = c_shape[0];
-                    const size_t N = c_shape[1];
-                    const bool a_is_col = (a_shape[1] == 1);
+            case BroadcastPattern::Row: {
+                // Row broadcast: (M×N) op (1×N) - VECTORIZED with float4!
+                const size_t M = c_shape[0];
+                const size_t N = c_shape[1];
+                const bool a_is_row = (a_shape[0] == 1);
 
-                    dim3 grid((N + block_size - 1) / block_size, M);
+                // Each thread processes 4 elements
+                const size_t num_vec = (N + 3) / 4;
+                dim3 grid((num_vec + block_size - 1) / block_size, M);
 
 #ifdef __CUDACC__
-                    broadcast_column_kernel_float<<<grid, block_size, 0, stream>>>(
-                        a, b, c, M, N, a_is_col, op);
+                broadcast_row_kernel_float<<<grid, block_size, 0, stream>>>(
+                    a, b, c, M, N, a_is_row, op);
 #else
-                    static_assert(sizeof(T) == 0, "CUDA compiler required for broadcast operations");
+                static_assert(sizeof(T) == 0, "CUDA compiler required for broadcast operations");
 #endif
-                    return;
-                }
+                return;
+            }
 
-                case BroadcastPattern::Channel3D: {
-                    // Channel3D broadcast: (H×W×C) op (1×1×C) - VECTORIZED FAST PATH!
-                    // Critical for neural rendering: color transforms, normalization, etc.
-                    const size_t H = c_shape[0];
-                    const size_t W = c_shape[1];
-                    const size_t C = c_shape[2];
-                    const bool a_is_broadcast = (a_shape[0] == 1 && a_shape[1] == 1);
+            case BroadcastPattern::Column: {
+                // Column broadcast: (M×N) op (M×1)
+                const size_t M = c_shape[0];
+                const size_t N = c_shape[1];
+                const bool a_is_col = (a_shape[1] == 1);
 
-                    // Grid: process all pixels in parallel
-                    const size_t total_pixels = H * W;
-                    const int grid_size = (total_pixels + block_size - 1) / block_size;
-                    const int max_grid_dim = 65535; // CUDA limit
-
-                    // Use 2D grid if 1D grid would exceed limit
-                    dim3 grid;
-                    if (grid_size <= max_grid_dim) {
-                        grid = dim3(grid_size, 1);
-                    } else {
-                        // Split into 2D grid
-                        const int grid_x = (grid_size + max_grid_dim - 1) / max_grid_dim;
-                        const int grid_y = (grid_size + grid_x - 1) / grid_x;
-                        grid = dim3(grid_x, grid_y);
-                    }
-
-                    // NOTE: For C >= 16, memory coalescing becomes an issue with (H×W×C) layout
-                    // Each thread processes one pixel (all C channels), causing strided access
-                    // PyTorch likely uses different layout or transpose for better coalescing
-                    // Our kernel is optimized for small C (3,4,8) which are most common in rendering
-                    // For C=64, we're ~20% slower than PyTorch, but 10-12× faster for C=3,4!
+                dim3 grid((N + block_size - 1) / block_size, M);
 
 #ifdef __CUDACC__
-                    broadcast_channel3d_kernel_float<<<grid, block_size, 0, stream>>>(
-                        a, b, c, H, W, C, a_is_broadcast, op);
+                broadcast_column_kernel_float<<<grid, block_size, 0, stream>>>(
+                    a, b, c, M, N, a_is_col, op);
 #else
-                    static_assert(sizeof(T) == 0, "CUDA compiler required for broadcast operations");
+                static_assert(sizeof(T) == 0, "CUDA compiler required for broadcast operations");
 #endif
-                    return;
+                return;
+            }
+
+            case BroadcastPattern::Channel3D: {
+                // Channel3D broadcast: (H×W×C) op (1×1×C) - VECTORIZED FAST PATH!
+                // Critical for neural rendering: color transforms, normalization, etc.
+                const size_t H = c_shape[0];
+                const size_t W = c_shape[1];
+                const size_t C = c_shape[2];
+                const bool a_is_broadcast = (a_shape[0] == 1 && a_shape[1] == 1);
+
+                // Grid: process all pixels in parallel
+                const size_t total_pixels = H * W;
+                const int grid_size = (total_pixels + block_size - 1) / block_size;
+                const int max_grid_dim = 65535; // CUDA limit
+
+                // Use 2D grid if 1D grid would exceed limit
+                dim3 grid;
+                if (grid_size <= max_grid_dim) {
+                    grid = dim3(grid_size, 1);
+                } else {
+                    // Split into 2D grid
+                    const int grid_x = (grid_size + max_grid_dim - 1) / max_grid_dim;
+                    const int grid_y = (grid_size + grid_x - 1) / grid_x;
+                    grid = dim3(grid_x, grid_y);
                 }
 
-                case BroadcastPattern::BatchBroadcast3D: {
-                    // Batch broadcast: (B×H×W) op (1×H×W) - VECTORIZED with float4!
-                    // Common in batch normalization, instance normalization
-                    const size_t B = c_shape[0];
-                    const size_t H = c_shape[1];
-                    const size_t W = c_shape[2];
-                    const bool a_is_broadcast = (a_shape[0] == 1);
-
-                    const size_t plane_size = H * W;
-                    const size_t num_vec = (plane_size + 3) / 4;  // Each thread processes 4 elements
-                    dim3 grid((num_vec + block_size - 1) / block_size, B);
+                // NOTE: For C >= 16, memory coalescing becomes an issue with (H×W×C) layout
+                // Each thread processes one pixel (all C channels), causing strided access
+                // PyTorch likely uses different layout or transpose for better coalescing
+                // Our kernel is optimized for small C (3,4,8) which are most common in rendering
+                // For C=64, we're ~20% slower than PyTorch, but 10-12× faster for C=3,4!
 
 #ifdef __CUDACC__
-                    broadcast_batch3d_kernel_float<<<grid, block_size, 0, stream>>>(
-                        a, b, c, B, H, W, a_is_broadcast, op);
+                broadcast_channel3d_kernel_float<<<grid, block_size, 0, stream>>>(
+                    a, b, c, H, W, C, a_is_broadcast, op);
 #else
-                    static_assert(sizeof(T) == 0, "CUDA compiler required for broadcast operations");
+                static_assert(sizeof(T) == 0, "CUDA compiler required for broadcast operations");
 #endif
-                    return;
-                }
+                return;
+            }
 
-                case BroadcastPattern::Generic:
-                    // Fall through to generic kernel
-                    break;
+            case BroadcastPattern::BatchBroadcast3D: {
+                // Batch broadcast: (B×H×W) op (1×H×W) - VECTORIZED with float4!
+                // Common in batch normalization, instance normalization
+                const size_t B = c_shape[0];
+                const size_t H = c_shape[1];
+                const size_t W = c_shape[2];
+                const bool a_is_broadcast = (a_shape[0] == 1);
+
+                const size_t plane_size = H * W;
+                const size_t num_vec = (plane_size + 3) / 4; // Each thread processes 4 elements
+                dim3 grid((num_vec + block_size - 1) / block_size, B);
+
+#ifdef __CUDACC__
+                broadcast_batch3d_kernel_float<<<grid, block_size, 0, stream>>>(
+                    a, b, c, B, H, W, a_is_broadcast, op);
+#else
+                static_assert(sizeof(T) == 0, "CUDA compiler required for broadcast operations");
+#endif
+                return;
+            }
+
+            case BroadcastPattern::Generic:
+                // Fall through to generic kernel
+                break;
             }
         }
 
@@ -954,9 +938,12 @@ namespace gs::tensor_ops {
 
         if (!d_a_shape || !d_b_shape || !d_c_shape) {
             LOG_ERROR("Failed to allocate shape arrays from memory pool");
-            if (d_a_shape) CudaMemoryPool::instance().deallocate(d_a_shape, stream);
-            if (d_b_shape) CudaMemoryPool::instance().deallocate(d_b_shape, stream);
-            if (d_c_shape) CudaMemoryPool::instance().deallocate(d_c_shape, stream);
+            if (d_a_shape)
+                CudaMemoryPool::instance().deallocate(d_a_shape, stream);
+            if (d_b_shape)
+                CudaMemoryPool::instance().deallocate(d_b_shape, stream);
+            if (d_c_shape)
+                CudaMemoryPool::instance().deallocate(d_c_shape, stream);
             return;
         }
 

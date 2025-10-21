@@ -1,8 +1,8 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "core/tensor.hpp"
 #include "core/memory_pool.hpp"
+#include "core/tensor.hpp"
 #include <algorithm>
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <chrono>
@@ -528,7 +528,7 @@ TEST_F(TensorStressTest, NormalizationStability) {
 
     auto torch_mean = torch_t.mean();
     auto torch_std = torch_t.std(/*unbiased=*/false);
-    auto torch_normalized = (torch_t - torch_mean) / (torch_std + 1e-8f);  // Add epsilon!
+    auto torch_normalized = (torch_t - torch_mean) / (torch_std + 1e-8f); // Add epsilon!
 
     EXPECT_FALSE(custom_normalized.has_nan());
     EXPECT_FALSE(custom_normalized.has_inf());

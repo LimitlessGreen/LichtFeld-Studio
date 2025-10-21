@@ -238,23 +238,23 @@ namespace gs::rendering {
         if (!output.is_valid() || output.size(0) != static_cast<size_t>(height_) ||
             output.size(1) != static_cast<size_t>(width_) || output.size(2) != 3) {
             output = Tensor::empty({static_cast<size_t>(height_),
-                                   static_cast<size_t>(width_),
-                                   3},
-                                  Device::CUDA, DataType::Float32);
+                                    static_cast<size_t>(width_),
+                                    3},
+                                   Device::CUDA, DataType::Float32);
         }
 
         // Allocate temp buffer for RGBA data
         auto rgba_temp = Tensor::empty({static_cast<size_t>(height_),
-                                       static_cast<size_t>(width_),
-                                       4},
-                                      Device::CUDA, DataType::Float32);
+                                        static_cast<size_t>(width_),
+                                        4},
+                                       Device::CUDA, DataType::Float32);
 
         // Copy from CUDA array to temp buffer (RGBA float32)
         err = cudaMemcpy2DFromArray(
             rgba_temp.ptr<float>(),
             width_ * 4 * sizeof(float), // pitch
             cuda_array,
-            0, 0, // offset
+            0, 0,                       // offset
             width_ * 4 * sizeof(float), // width in bytes
             height_,
             cudaMemcpyDeviceToDevice);
@@ -349,7 +349,8 @@ namespace gs::rendering {
             LOG_TIMER_TRACE("CudaGLInteropTextureImpl<true>::channels");
             // Add alpha channel
             rgba_image = Tensor::cat({image, Tensor::ones({static_cast<size_t>(h), static_cast<size_t>(w), 1},
-                        image.device(), image.dtype())}, 2);
+                                                          image.device(), image.dtype())},
+                                     2);
             LOG_TRACE("Added alpha channel to image");
         } else {
             rgba_image = image;

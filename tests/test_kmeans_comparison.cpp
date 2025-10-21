@@ -2,290 +2,291 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <gtest/gtest.h>
-#include <torch/torch.h>
-#include <cuda_runtime.h>
-#include <cmath>
-#include <vector>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
 #include <iomanip>
+#include <torch/torch.h>
+#include <vector>
 
+#include "core/tensor.hpp"
 #include "kernels/kmeans.cuh"
 #include "kernels/kmeans_new.cuh"
-#include "core/tensor.hpp"
 
 namespace {
 
-constexpr float FLOAT_TOLERANCE = 1e-3f;
-constexpr float INERTIA_TOLERANCE = 0.15f;
+    constexpr float FLOAT_TOLERANCE = 1e-3f;
+    constexpr float INERTIA_TOLERANCE = 0.15f;
 
-#define CUDA_CHECK(call) \
-    do { \
-        cudaError_t error = call; \
+#define CUDA_CHECK(call)                                                              \
+    do {                                                                              \
+        cudaError_t error = call;                                                     \
         ASSERT_EQ(error, cudaSuccess) << "CUDA error: " << cudaGetErrorString(error); \
-    } while(0)
+    } while (0)
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
+    // ============================================================================
+    // Helper Functions
+    // ============================================================================
 
-torch::Tensor create_random_data_torch(int n, int d, float min_val = 0.0f, float max_val = 1.0f) {
-    auto data = torch::rand({n, d}, torch::kCUDA) * (max_val - min_val) + min_val;
-    return data;
-}
-
-torch::Tensor create_clustered_data_torch(int n, int k, int d, float separation = 5.0f) {
-    auto data = torch::zeros({n, d}, torch::kCUDA);
-    int points_per_cluster = n / k;
-
-    for (int c = 0; c < k; ++c) {
-        int start = c * points_per_cluster;
-        int end = (c == k - 1) ? n : (c + 1) * points_per_cluster;
-
-        auto cluster_center = torch::full({d}, c * separation, torch::kCUDA);
-        auto noise = torch::randn({end - start, d}, torch::kCUDA) * 0.5f;
-
-        data.slice(0, start, end) = cluster_center + noise;
+    torch::Tensor create_random_data_torch(int n, int d, float min_val = 0.0f, float max_val = 1.0f) {
+        auto data = torch::rand({n, d}, torch::kCUDA) * (max_val - min_val) + min_val;
+        return data;
     }
 
-    return data;
-}
+    torch::Tensor create_clustered_data_torch(int n, int k, int d, float separation = 5.0f) {
+        auto data = torch::zeros({n, d}, torch::kCUDA);
+        int points_per_cluster = n / k;
 
-gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
-    auto cpu_tensor = torch_tensor.cpu().contiguous();
-    std::vector<size_t> shape;
-    for (int i = 0; i < torch_tensor.dim(); ++i) {
-        shape.push_back(torch_tensor.size(i));
+        for (int c = 0; c < k; ++c) {
+            int start = c * points_per_cluster;
+            int end = (c == k - 1) ? n : (c + 1) * points_per_cluster;
+
+            auto cluster_center = torch::full({d}, c * separation, torch::kCUDA);
+            auto noise = torch::randn({end - start, d}, torch::kCUDA) * 0.5f;
+
+            data.slice(0, start, end) = cluster_center + noise;
+        }
+
+        return data;
     }
 
-    if (torch_tensor.scalar_type() == torch::kFloat32) {
-        std::vector<float> data(cpu_tensor.data_ptr<float>(),
-                               cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
-        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
-    } else if (torch_tensor.scalar_type() == torch::kInt32) {
-        std::vector<int> data(cpu_tensor.data_ptr<int>(),
-                             cpu_tensor.data_ptr<int>() + cpu_tensor.numel());
-        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
+    gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
+        auto cpu_tensor = torch_tensor.cpu().contiguous();
+        std::vector<size_t> shape;
+        for (int i = 0; i < torch_tensor.dim(); ++i) {
+            shape.push_back(torch_tensor.size(i));
+        }
+
+        if (torch_tensor.scalar_type() == torch::kFloat32) {
+            std::vector<float> data(cpu_tensor.data_ptr<float>(),
+                                    cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
+            return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
+        } else if (torch_tensor.scalar_type() == torch::kInt32) {
+            std::vector<int> data(cpu_tensor.data_ptr<int>(),
+                                  cpu_tensor.data_ptr<int>() + cpu_tensor.numel());
+            return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
+        }
+
+        return gs::Tensor();
     }
 
-    return gs::Tensor();
-}
+    torch::Tensor tensor_to_torch(const gs::Tensor& gs_tensor) {
+        auto cpu_tensor = gs_tensor.cpu();
+        std::vector<int64_t> shape;
+        for (size_t i = 0; i < cpu_tensor.ndim(); ++i) {
+            shape.push_back(cpu_tensor.shape()[i]);
+        }
 
-torch::Tensor tensor_to_torch(const gs::Tensor& gs_tensor) {
-    auto cpu_tensor = gs_tensor.cpu();
-    std::vector<int64_t> shape;
-    for (size_t i = 0; i < cpu_tensor.ndim(); ++i) {
-        shape.push_back(cpu_tensor.shape()[i]);
+        if (gs_tensor.dtype() == gs::DataType::Float32) {
+            auto data = cpu_tensor.to_vector();
+            auto torch_tensor = torch::from_blob(data.data(), shape, torch::kFloat32).clone();
+            return torch_tensor.cuda();
+        } else if (gs_tensor.dtype() == gs::DataType::Int32) {
+            auto data = cpu_tensor.to_vector_int();
+            auto torch_tensor = torch::from_blob(data.data(), shape, torch::kInt32).clone();
+            return torch_tensor.cuda();
+        }
+
+        return torch::Tensor();
     }
 
-    if (gs_tensor.dtype() == gs::DataType::Float32) {
-        auto data = cpu_tensor.to_vector();
-        auto torch_tensor = torch::from_blob(data.data(), shape, torch::kFloat32).clone();
-        return torch_tensor.cuda();
-    } else if (gs_tensor.dtype() == gs::DataType::Int32) {
-        auto data = cpu_tensor.to_vector_int();
-        auto torch_tensor = torch::from_blob(data.data(), shape, torch::kInt32).clone();
-        return torch_tensor.cuda();
-    }
+    bool tensors_are_equal(const torch::Tensor& torch_tensor,
+                           const gs::Tensor& gs_tensor,
+                           float tolerance = 1e-6f) {
+        if (torch_tensor.dim() != static_cast<int64_t>(gs_tensor.ndim())) {
+            return false;
+        }
 
-    return torch::Tensor();
-}
+        for (int i = 0; i < torch_tensor.dim(); ++i) {
+            if (torch_tensor.size(i) != static_cast<int64_t>(gs_tensor.shape()[i])) {
+                return false;
+            }
+        }
 
-bool tensors_are_equal(const torch::Tensor& torch_tensor,
-                       const gs::Tensor& gs_tensor,
-                       float tolerance = 1e-6f) {
-    if (torch_tensor.dim() != static_cast<int64_t>(gs_tensor.ndim())) {
+        auto torch_cpu = torch_tensor.cpu().contiguous();
+        auto gs_cpu = gs_tensor.cpu();
+
+        if (torch_tensor.scalar_type() == torch::kFloat32 &&
+            gs_tensor.dtype() == gs::DataType::Float32) {
+
+            auto torch_data = torch_cpu.data_ptr<float>();
+            auto gs_data = gs_cpu.to_vector();
+
+            if (torch_cpu.numel() != static_cast<int64_t>(gs_data.size())) {
+                return false;
+            }
+
+            for (int64_t i = 0; i < torch_cpu.numel(); ++i) {
+                float diff = std::abs(torch_data[i] - gs_data[i]);
+                if (diff > tolerance) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        if (torch_tensor.scalar_type() == torch::kInt32 &&
+            gs_tensor.dtype() == gs::DataType::Int32) {
+
+            auto torch_data = torch_cpu.data_ptr<int>();
+            auto gs_data = gs_cpu.to_vector_int();
+
+            if (torch_cpu.numel() != static_cast<int64_t>(gs_data.size())) {
+                return false;
+            }
+
+            for (int64_t i = 0; i < torch_cpu.numel(); ++i) {
+                if (torch_data[i] != gs_data[i]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         return false;
     }
 
-    for (int i = 0; i < torch_tensor.dim(); ++i) {
-        if (torch_tensor.size(i) != static_cast<int64_t>(gs_tensor.shape()[i])) {
-            return false;
-        }
-    }
+    std::vector<int> find_cluster_permutation(
+        const torch::Tensor& torch_centroids,
+        const gs::Tensor& gs_centroids) {
 
-    auto torch_cpu = torch_tensor.cpu().contiguous();
-    auto gs_cpu = gs_tensor.cpu();
+        int k = torch_centroids.size(0);
+        int d = torch_centroids.size(1);
+        std::vector<int> perm(k);
+        std::vector<bool> used(k, false);
 
-    if (torch_tensor.scalar_type() == torch::kFloat32 &&
-        gs_tensor.dtype() == gs::DataType::Float32) {
+        auto torch_cpu = torch_centroids.cpu();
+        auto gs_cpu = gs_centroids.cpu();
 
-        auto torch_data = torch_cpu.data_ptr<float>();
-        auto gs_data = gs_cpu.to_vector();
+        for (int i = 0; i < k; ++i) {
+            float min_dist = std::numeric_limits<float>::max();
+            int best_j = -1;
 
-        if (torch_cpu.numel() != static_cast<int64_t>(gs_data.size())) {
-            return false;
-        }
+            for (int j = 0; j < k; ++j) {
+                if (used[j])
+                    continue;
 
-        for (int64_t i = 0; i < torch_cpu.numel(); ++i) {
-            float diff = std::abs(torch_data[i] - gs_data[i]);
-            if (diff > tolerance) {
-                return false;
+                float dist = 0.0f;
+                for (int dim = 0; dim < d; ++dim) {
+                    float torch_val = torch_cpu[i][dim].item<float>();
+                    float gs_val = static_cast<float>(gs_cpu[j][dim]);
+                    float diff = torch_val - gs_val;
+                    dist += diff * diff;
+                }
+
+                if (dist < min_dist) {
+                    min_dist = dist;
+                    best_j = j;
+                }
             }
+
+            perm[i] = best_j;
+            used[best_j] = true;
         }
-        return true;
+
+        return perm;
     }
 
-    if (torch_tensor.scalar_type() == torch::kInt32 &&
-        gs_tensor.dtype() == gs::DataType::Int32) {
+    float compute_inertia_torch(const torch::Tensor& data,
+                                const torch::Tensor& centroids,
+                                const torch::Tensor& labels) {
+        auto n = data.size(0);
+        auto d = data.size(1);
 
-        auto torch_data = torch_cpu.data_ptr<int>();
-        auto gs_data = gs_cpu.to_vector_int();
+        float inertia = 0.0f;
+        auto data_cpu = data.cpu();
+        auto centroids_cpu = centroids.cpu();
+        auto labels_cpu = labels.cpu();
 
-        if (torch_cpu.numel() != static_cast<int64_t>(gs_data.size())) {
-            return false;
-        }
-
-        for (int64_t i = 0; i < torch_cpu.numel(); ++i) {
-            if (torch_data[i] != gs_data[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    return false;
-}
-
-std::vector<int> find_cluster_permutation(
-    const torch::Tensor& torch_centroids,
-    const gs::Tensor& gs_centroids) {
-
-    int k = torch_centroids.size(0);
-    int d = torch_centroids.size(1);
-    std::vector<int> perm(k);
-    std::vector<bool> used(k, false);
-
-    auto torch_cpu = torch_centroids.cpu();
-    auto gs_cpu = gs_centroids.cpu();
-
-    for (int i = 0; i < k; ++i) {
-        float min_dist = std::numeric_limits<float>::max();
-        int best_j = -1;
-
-        for (int j = 0; j < k; ++j) {
-            if (used[j]) continue;
-
+        for (int i = 0; i < n; ++i) {
+            int cluster = labels_cpu[i].item<int>();
             float dist = 0.0f;
-            for (int dim = 0; dim < d; ++dim) {
-                float torch_val = torch_cpu[i][dim].item<float>();
-                float gs_val = static_cast<float>(gs_cpu[j][dim]);
-                float diff = torch_val - gs_val;
+            for (int j = 0; j < d; ++j) {
+                float diff = data_cpu[i][j].item<float>() - centroids_cpu[cluster][j].item<float>();
                 dist += diff * diff;
             }
+            inertia += dist;
+        }
 
-            if (dist < min_dist) {
-                min_dist = dist;
-                best_j = j;
+        return inertia;
+    }
+
+    float compute_inertia_tensor(const gs::Tensor& data,
+                                 const gs::Tensor& centroids,
+                                 const gs::Tensor& labels,
+                                 const std::vector<int>& perm = {}) {
+        auto n = data.shape()[0];
+        auto d = data.shape()[1];
+
+        float inertia = 0.0f;
+        auto data_cpu = data.cpu();
+        auto centroids_cpu = centroids.cpu();
+        auto labels_cpu = labels.cpu();
+        auto labels_vec = labels_cpu.to_vector_int();
+
+        for (size_t i = 0; i < n; ++i) {
+            int cluster = labels_vec[i];
+
+            if (!perm.empty() && cluster >= 0 && cluster < static_cast<int>(perm.size())) {
+                cluster = perm[cluster];
+            }
+
+            float dist = 0.0f;
+            for (size_t j = 0; j < d; ++j) {
+                float data_val = static_cast<float>(data_cpu[i][j]);
+                float centroid_val = static_cast<float>(centroids_cpu[cluster][j]);
+                float diff = data_val - centroid_val;
+                dist += diff * diff;
+            }
+            inertia += dist;
+        }
+
+        return inertia;
+    }
+
+    bool verify_labels_valid(const torch::Tensor& labels, int k) {
+        auto labels_cpu = labels.cpu();
+        for (int i = 0; i < labels.size(0); ++i) {
+            int label = labels_cpu[i].item<int>();
+            if (label < 0 || label >= k) {
+                return false;
             }
         }
-
-        perm[i] = best_j;
-        used[best_j] = true;
+        return true;
     }
 
-    return perm;
-}
-
-float compute_inertia_torch(const torch::Tensor& data,
-                            const torch::Tensor& centroids,
-                            const torch::Tensor& labels) {
-    auto n = data.size(0);
-    auto d = data.size(1);
-
-    float inertia = 0.0f;
-    auto data_cpu = data.cpu();
-    auto centroids_cpu = centroids.cpu();
-    auto labels_cpu = labels.cpu();
-
-    for (int i = 0; i < n; ++i) {
-        int cluster = labels_cpu[i].item<int>();
-        float dist = 0.0f;
-        for (int j = 0; j < d; ++j) {
-            float diff = data_cpu[i][j].item<float>() - centroids_cpu[cluster][j].item<float>();
-            dist += diff * diff;
+    bool verify_labels_valid(const gs::Tensor& labels, int k) {
+        auto labels_cpu = labels.cpu();
+        for (size_t i = 0; i < labels.numel(); ++i) {
+            int label = static_cast<int>(static_cast<float>(labels_cpu[i]));
+            if (label < 0 || label >= k) {
+                return false;
+            }
         }
-        inertia += dist;
+        return true;
     }
 
-    return inertia;
-}
-
-float compute_inertia_tensor(const gs::Tensor& data,
-                             const gs::Tensor& centroids,
-                             const gs::Tensor& labels,
-                             const std::vector<int>& perm = {}) {
-    auto n = data.shape()[0];
-    auto d = data.shape()[1];
-
-    float inertia = 0.0f;
-    auto data_cpu = data.cpu();
-    auto centroids_cpu = centroids.cpu();
-    auto labels_cpu = labels.cpu();
-    auto labels_vec = labels_cpu.to_vector_int();
-
-    for (size_t i = 0; i < n; ++i) {
-        int cluster = labels_vec[i];
-
-        if (!perm.empty() && cluster >= 0 && cluster < static_cast<int>(perm.size())) {
-            cluster = perm[cluster];
+    int count_unique_labels(const torch::Tensor& labels) {
+        auto labels_cpu = labels.cpu();
+        std::vector<int> label_vec;
+        for (int i = 0; i < labels.size(0); ++i) {
+            label_vec.push_back(labels_cpu[i].item<int>());
         }
-
-        float dist = 0.0f;
-        for (size_t j = 0; j < d; ++j) {
-            float data_val = static_cast<float>(data_cpu[i][j]);
-            float centroid_val = static_cast<float>(centroids_cpu[cluster][j]);
-            float diff = data_val - centroid_val;
-            dist += diff * diff;
-        }
-        inertia += dist;
+        std::sort(label_vec.begin(), label_vec.end());
+        auto last = std::unique(label_vec.begin(), label_vec.end());
+        return std::distance(label_vec.begin(), last);
     }
 
-    return inertia;
-}
+    int count_unique_labels(const gs::Tensor& labels) {
+        auto labels_cpu = labels.cpu();
+        auto label_vec = labels_cpu.to_vector_int();
 
-bool verify_labels_valid(const torch::Tensor& labels, int k) {
-    auto labels_cpu = labels.cpu();
-    for (int i = 0; i < labels.size(0); ++i) {
-        int label = labels_cpu[i].item<int>();
-        if (label < 0 || label >= k) {
-            return false;
-        }
+        std::sort(label_vec.begin(), label_vec.end());
+        auto last = std::unique(label_vec.begin(), label_vec.end());
+        return std::distance(label_vec.begin(), last);
     }
-    return true;
-}
-
-bool verify_labels_valid(const gs::Tensor& labels, int k) {
-    auto labels_cpu = labels.cpu();
-    for (size_t i = 0; i < labels.numel(); ++i) {
-        int label = static_cast<int>(static_cast<float>(labels_cpu[i]));
-        if (label < 0 || label >= k) {
-            return false;
-        }
-    }
-    return true;
-}
-
-int count_unique_labels(const torch::Tensor& labels) {
-    auto labels_cpu = labels.cpu();
-    std::vector<int> label_vec;
-    for (int i = 0; i < labels.size(0); ++i) {
-        label_vec.push_back(labels_cpu[i].item<int>());
-    }
-    std::sort(label_vec.begin(), label_vec.end());
-    auto last = std::unique(label_vec.begin(), label_vec.end());
-    return std::distance(label_vec.begin(), last);
-}
-
-int count_unique_labels(const gs::Tensor& labels) {
-    auto labels_cpu = labels.cpu();
-    auto label_vec = labels_cpu.to_vector_int();
-
-    std::sort(label_vec.begin(), label_vec.end());
-    auto last = std::unique(label_vec.begin(), label_vec.end());
-    return std::distance(label_vec.begin(), last);
-}
 
 } // anonymous namespace
 
@@ -374,8 +375,8 @@ TEST_F(KMeansComparisonTest, BasicClustering1D_Comparison) {
     auto centroids_new_vec = centroids_new_cpu.to_vector();
 
     for (int i = 1; i < k; ++i) {
-        EXPECT_GE(centroids_old_cpu[i].item<float>(), centroids_old_cpu[i-1].item<float>());
-        EXPECT_GE(centroids_new_vec[i], centroids_new_vec[i-1]);
+        EXPECT_GE(centroids_old_cpu[i].item<float>(), centroids_old_cpu[i - 1].item<float>());
+        EXPECT_GE(centroids_new_vec[i], centroids_new_vec[i - 1]);
     }
 
     EXPECT_TRUE(verify_labels_valid(labels_old, k));
@@ -466,13 +467,13 @@ TEST_F(KMeansComparisonTest, OneDimensionalOrdering_Comparison) {
     auto centroids_new_vec = centroids_new_squeezed.to_vector();
 
     for (int i = 1; i < k; ++i) {
-        float prev = centroids_old_vec[i-1].item<float>();
+        float prev = centroids_old_vec[i - 1].item<float>();
         float curr = centroids_old_vec[i].item<float>();
         EXPECT_GT(curr, prev);
     }
 
     for (int i = 1; i < k; ++i) {
-        EXPECT_GT(centroids_new_vec[i], centroids_new_vec[i-1]);
+        EXPECT_GT(centroids_new_vec[i], centroids_new_vec[i - 1]);
     }
 }
 
@@ -657,8 +658,8 @@ TEST_F(KMeansComparisonTest, LargeOneDimensionalDataset_Comparison) {
     auto centroids_new_vec = centroids_new_cpu.to_vector();
 
     for (int i = 1; i < k; ++i) {
-        EXPECT_GE(centroids_old_cpu[i].item<float>(), centroids_old_cpu[i-1].item<float>());
-        EXPECT_GE(centroids_new_vec[i], centroids_new_vec[i-1]);
+        EXPECT_GE(centroids_old_cpu[i].item<float>(), centroids_old_cpu[i - 1].item<float>());
+        EXPECT_GE(centroids_new_vec[i], centroids_new_vec[i - 1]);
     }
 
     EXPECT_TRUE(verify_labels_valid(labels_old, k));
@@ -711,8 +712,8 @@ TEST_F(KMeansComparisonTest, SOGTypical256Clusters_Comparison) {
     auto centroids_new_vec = centroids_new_cpu.to_vector();
 
     for (int i = 1; i < 256; ++i) {
-        EXPECT_GE(centroids_old_cpu[i].item<float>(), centroids_old_cpu[i-1].item<float>());
-        EXPECT_GE(centroids_new_vec[i], centroids_new_vec[i-1]);
+        EXPECT_GE(centroids_old_cpu[i].item<float>(), centroids_old_cpu[i - 1].item<float>());
+        EXPECT_GE(centroids_new_vec[i], centroids_new_vec[i - 1]);
     }
 }
 
@@ -740,14 +741,14 @@ protected:
         torch::manual_seed(42);
         torch::cuda::manual_seed(42);
         gs::Tensor::manual_seed(42);
-        
+
         // Warm-up GPU
         auto warmup = torch::randn({1000, 10}, torch::kCUDA);
         warmup.sum();
         cudaDeviceSynchronize();
     }
 
-    template<typename Func>
+    template <typename Func>
     double benchmark(Func func, int warmup_runs = 3, int timing_runs = 10) {
         // Warm-up
         for (int i = 0; i < warmup_runs; ++i) {
@@ -768,7 +769,8 @@ protected:
     }
 
     void print_results(const std::vector<BenchmarkResult>& results) {
-        std::cout << "\n" << std::string(120, '=') << "\n";
+        std::cout << "\n"
+                  << std::string(120, '=') << "\n";
         std::cout << "K-MEANS PERFORMANCE COMPARISON: kmeans.cu vs kmeans_new.cu\n";
         std::cout << std::string(120, '=') << "\n\n";
 
@@ -785,8 +787,8 @@ protected:
         std::cout << std::string(120, '-') << "\n";
 
         for (const auto& r : results) {
-            float inertia_diff = std::abs(r.inertia_old - r.inertia_new) / 
-                                std::max(r.inertia_old, r.inertia_new) * 100.0f;
+            float inertia_diff = std::abs(r.inertia_old - r.inertia_new) /
+                                 std::max(r.inertia_old, r.inertia_new) * 100.0f;
 
             std::cout << std::left << std::setw(30) << r.name
                       << std::right << std::setw(8) << r.n_points
@@ -993,13 +995,15 @@ TEST_F(KMeansPerformanceTest, DISABLED_IterationScalingBenchmark) {
         torch::Tensor centroids_old, labels_old;
         result.time_ms_old = benchmark([&]() {
             std::tie(centroids_old, labels_old) = gs::cuda::kmeans(data_torch, k, iters, 1e-4f);
-        }, 2, 5);
+        },
+                                       2, 5);
         result.inertia_old = compute_inertia_torch(data_torch, centroids_old, labels_old);
 
         gs::Tensor centroids_new, labels_new;
         result.time_ms_new = benchmark([&]() {
             std::tie(centroids_new, labels_new) = gs::cuda::kmeans_new(data_tensor, k, iters, 1e-4f);
-        }, 2, 5);
+        },
+                                       2, 5);
         result.inertia_new = compute_inertia_tensor(data_tensor, centroids_new, labels_new);
 
         result.speedup = result.time_ms_old / result.time_ms_new;
@@ -1032,13 +1036,15 @@ TEST_F(KMeansPerformanceTest, DISABLED_ClusterCountScalingBenchmark) {
         torch::Tensor centroids_old, labels_old;
         result.time_ms_old = benchmark([&]() {
             std::tie(centroids_old, labels_old) = gs::cuda::kmeans(data_torch, k, iterations, 1e-4f);
-        }, 2, 5);
+        },
+                                       2, 5);
         result.inertia_old = compute_inertia_torch(data_torch, centroids_old, labels_old);
 
         gs::Tensor centroids_new, labels_new;
         result.time_ms_new = benchmark([&]() {
             std::tie(centroids_new, labels_new) = gs::cuda::kmeans_new(data_tensor, k, iterations, 1e-4f);
-        }, 2, 5);
+        },
+                                       2, 5);
         result.inertia_new = compute_inertia_tensor(data_tensor, centroids_new, labels_new);
 
         result.speedup = result.time_ms_old / result.time_ms_new;
@@ -1086,7 +1092,8 @@ TEST_F(KMeansPerformanceTest, DISABLED_RealWorldScenarios) {
             } else {
                 std::tie(centroids_old, labels_old) = gs::cuda::kmeans(data_torch, scenario.k, scenario.iterations, 1e-4f);
             }
-        }, 2, 5);
+        },
+                                       2, 5);
         result.inertia_old = compute_inertia_torch(data_torch, centroids_old, labels_old);
 
         gs::Tensor centroids_new, labels_new;
@@ -1096,7 +1103,8 @@ TEST_F(KMeansPerformanceTest, DISABLED_RealWorldScenarios) {
             } else {
                 std::tie(centroids_new, labels_new) = gs::cuda::kmeans_new(data_tensor, scenario.k, scenario.iterations, 1e-4f);
             }
-        }, 2, 5);
+        },
+                                       2, 5);
         result.inertia_new = compute_inertia_tensor(data_tensor, centroids_new, labels_new);
 
         result.speedup = result.time_ms_old / result.time_ms_new;

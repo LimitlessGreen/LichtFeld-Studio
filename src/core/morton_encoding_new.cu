@@ -2,17 +2,17 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "kernels/morton_encoding_new.cuh"
 #include "core/logger.hpp"
+#include "kernels/morton_encoding_new.cuh"
+#include <cstdint>
 #include <cuda_runtime.h>
+#include <limits>
 #include <thrust/device_ptr.h>
 #include <thrust/extrema.h>
-#include <thrust/sort.h>
-#include <thrust/sequence.h>
-#include <thrust/transform_reduce.h>
 #include <thrust/functional.h>
-#include <limits>
-#include <cstdint>
+#include <thrust/sequence.h>
+#include <thrust/sort.h>
+#include <thrust/transform_reduce.h>
 
 namespace gs {
 
@@ -70,15 +70,17 @@ namespace gs {
 
         __host__ __device__
         float3_minmax() : min_val{INFINITY, INFINITY, INFINITY},
-                         max_val{-INFINITY, -INFINITY, -INFINITY} {}
+                          max_val{-INFINITY, -INFINITY, -INFINITY} {}
 
         __host__ __device__
-        float3_minmax(float3 min_v, float3 max_v) : min_val(min_v), max_val(max_v) {}
+        float3_minmax(float3 min_v, float3 max_v) : min_val(min_v),
+                                                    max_val(max_v) {}
     };
 
     struct minmax_op {
         __host__ __device__
-        float3_minmax operator()(const float3_minmax& a, const float3_minmax& b) const {
+            float3_minmax
+            operator()(const float3_minmax& a, const float3_minmax& b) const {
             float3_minmax result;
             result.min_val.x = fminf(a.min_val.x, b.min_val.x);
             result.min_val.y = fminf(a.min_val.y, b.min_val.y);
@@ -92,12 +94,13 @@ namespace gs {
 
     struct position_to_minmax {
         const float* positions;
-        
+
         __host__ __device__
         position_to_minmax(const float* pos) : positions(pos) {}
 
         __host__ __device__
-        float3_minmax operator()(int idx) const {
+            float3_minmax
+            operator()(int idx) const {
             float3 pos;
             pos.x = positions[idx * 3 + 0];
             pos.y = positions[idx * 3 + 1];
@@ -115,7 +118,7 @@ namespace gs {
 
         if (positions.ndim() != 2 || positions.size(1) != 3) {
             LOG_ERROR("morton_encode_new: Positions must have shape [N, 3], got {}",
-                     positions.shape().str());
+                      positions.shape().str());
             return Tensor();
         }
 
@@ -134,30 +137,29 @@ namespace gs {
         // Compute bounding box in a single pass using thrust
         thrust::counting_iterator<int> first(0);
         thrust::counting_iterator<int> last(n_positions);
-        
+
         position_to_minmax transform_op(positions.ptr<float>());
         float3_minmax init;
-        
+
         float3_minmax bbox = thrust::transform_reduce(
             first, last,
             transform_op,
             init,
-            minmax_op()
-        );
+            minmax_op());
 
         // Compute cube size (maximum range across all dimensions)
         float range_x = bbox.max_val.x - bbox.min_val.x;
         float range_y = bbox.max_val.y - bbox.min_val.y;
         float range_z = bbox.max_val.z - bbox.min_val.z;
         float cube_size = fmaxf(fmaxf(range_x, range_y), range_z);
-        
+
         // Add small epsilon to avoid division by zero
         cube_size = fmaxf(cube_size, 1e-7f);
 
         // Allocate output tensor for Morton codes
-        auto morton_codes = Tensor::empty({static_cast<size_t>(n_positions)}, 
-                                         Device::CUDA, 
-                                         DataType::Int64);
+        auto morton_codes = Tensor::empty({static_cast<size_t>(n_positions)},
+                                          Device::CUDA,
+                                          DataType::Int64);
 
         // Launch kernel
         constexpr int block_size = 256;
@@ -211,7 +213,7 @@ namespace gs {
 
         // Create indices tensor [0, 1, 2, ..., n-1]
         auto indices = Tensor::empty({n}, Device::CUDA, DataType::Int64);
-        
+
         // Use thrust to initialize sequence
         thrust::device_ptr<int64_t> indices_ptr(indices.ptr<int64_t>());
         thrust::sequence(indices_ptr, indices_ptr + n, 0LL);

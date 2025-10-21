@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "training/training_manager.hpp"
-#include "core/logger.hpp"
 #include "core/events.hpp"
+#include "core/logger.hpp"
 #include "training/training_setup.hpp"
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <stdexcept>

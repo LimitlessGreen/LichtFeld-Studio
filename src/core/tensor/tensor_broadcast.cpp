@@ -1,8 +1,8 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "core/tensor.hpp"
 #include "core/tensor_broadcast.hpp"
+#include "core/tensor.hpp"
 #include "core/tensor_ops.hpp"
 
 namespace gs {

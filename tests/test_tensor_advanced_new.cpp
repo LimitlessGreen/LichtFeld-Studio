@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/tensor.hpp"
-#include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <cmath>
+#include <gtest/gtest.h>
 #include <random>
+#include <torch/torch.h>
 
 using namespace gs;
 
@@ -23,10 +23,10 @@ torch::Tensor to_torch(const Tensor& t) {
     }
 
     auto torch_tensor = torch::from_blob(
-        vec.data(),
-        shape_vec,
-        torch::TensorOptions().dtype(torch::kFloat32)
-    ).clone();
+                            vec.data(),
+                            shape_vec,
+                            torch::TensorOptions().dtype(torch::kFloat32))
+                            .clone();
 
     return torch_tensor;
 }
@@ -35,7 +35,7 @@ torch::Tensor to_torch(const Tensor& t) {
 Tensor from_torch(const torch::Tensor& t, Device device = Device::CUDA) {
     auto cpu_t = t.cpu();
     std::vector<float> vec(cpu_t.data_ptr<float>(),
-                          cpu_t.data_ptr<float>() + cpu_t.numel());
+                           cpu_t.data_ptr<float>() + cpu_t.numel());
 
     std::vector<size_t> shape_vec;
     for (int64_t i = 0; i < cpu_t.dim(); ++i) {
@@ -66,8 +66,7 @@ std::vector<int64_t> tensor_to_int64_vector(const Tensor& t) {
 
     if (cpu_t.dtype() != DataType::Int64) {
         throw std::runtime_error(
-            std::string("Expected Int64 tensor, got ") + dtype_name(cpu_t.dtype())
-        );
+            std::string("Expected Int64 tensor, got ") + dtype_name(cpu_t.dtype()));
     }
 
     // Use the proper API from tensor.cpp
@@ -87,7 +86,7 @@ protected:
 // FIXED: Test shallow copy behavior (LibTorch-like)
 TEST_F(TensorCopyTest, CopyConstructorCPU) {
     auto a = Tensor::arange(0, 10, 1).to(Device::CPU);
-    Tensor b(a);  // Copy constructor - SHALLOW COPY
+    Tensor b(a); // Copy constructor - SHALLOW COPY
 
     // Verify metadata matches
     EXPECT_EQ(a.shape(), b.shape());
@@ -114,7 +113,7 @@ TEST_F(TensorCopyTest, CopyConstructorCPU) {
 
 TEST_F(TensorCopyTest, CopyConstructorCUDA) {
     auto a = Tensor::arange(0, 10, 1).to(Device::CUDA);
-    Tensor b(a);  // Copy constructor - SHALLOW COPY
+    Tensor b(a); // Copy constructor - SHALLOW COPY
 
     EXPECT_EQ(a.shape(), b.shape());
     EXPECT_EQ(a.device(), b.device());
@@ -123,7 +122,7 @@ TEST_F(TensorCopyTest, CopyConstructorCUDA) {
 
     // With shallow copy, both point to same data
     b.fill_(42.0f);
-    EXPECT_TRUE(a.all_close(b));  // Both should be 42
+    EXPECT_TRUE(a.all_close(b)); // Both should be 42
 
     // Verify b is actually 42
     auto b_vec = b.to_vector();
@@ -142,7 +141,7 @@ TEST_F(TensorCopyTest, CopyAssignmentCPU) {
         EXPECT_NEAR(val, 0.0f, 1e-5f);
     }
 
-    b = a;  // Copy assignment - SHALLOW COPY
+    b = a; // Copy assignment - SHALLOW COPY
 
     EXPECT_EQ(a.shape(), b.shape());
     EXPECT_EQ(a.device(), b.device());
@@ -150,14 +149,14 @@ TEST_F(TensorCopyTest, CopyAssignmentCPU) {
 
     // With shallow copy, both point to same data
     b.fill_(42.0f);
-    EXPECT_TRUE(a.all_close(b));  // Both should be 42
+    EXPECT_TRUE(a.all_close(b)); // Both should be 42
 }
 
 TEST_F(TensorCopyTest, CopyAssignmentCUDA) {
     auto a = Tensor::arange(0, 10, 1).to(Device::CUDA);
     auto b = Tensor::zeros({5}, Device::CUDA);
 
-    b = a;  // Copy assignment - SHALLOW COPY
+    b = a; // Copy assignment - SHALLOW COPY
 
     EXPECT_EQ(a.shape(), b.shape());
     EXPECT_EQ(a.device(), b.device());
@@ -182,7 +181,7 @@ TEST_F(TensorCopyTest, CopyAssignmentSelfAssignment) {
     auto a = Tensor::arange(0, 10, 1);
     auto original_values = a.to_vector();
 
-    a = a;  // Self-assignment
+    a = a; // Self-assignment
 
     auto after_values = a.to_vector();
     EXPECT_EQ(original_values.size(), after_values.size());
@@ -194,7 +193,7 @@ TEST_F(TensorCopyTest, CopyAssignmentSelfAssignment) {
 // NEW TEST: Verify clone() creates independent copy
 TEST_F(TensorCopyTest, CloneCreatesDeepCopy) {
     auto a = Tensor::arange(0, 10, 1).to(Device::CPU);
-    auto b = a.clone();  // Deep copy via clone()
+    auto b = a.clone(); // Deep copy via clone()
 
     EXPECT_EQ(a.shape(), b.shape());
     EXPECT_TRUE(a.all_close(b));
@@ -220,7 +219,7 @@ TEST_F(TensorCopyTest, CopyUnderscoreMethod) {
     auto a = Tensor::arange(0, 10, 1);
     auto b = Tensor::zeros({10});
 
-    b.copy_(a);  // Using copy_() method - deep copy into b
+    b.copy_(a); // Using copy_() method - deep copy into b
 
     EXPECT_TRUE(a.all_close(b));
 
@@ -240,13 +239,13 @@ TEST_F(TensorCopyTest, CopyEmptyTensor) {
 
 TEST_F(TensorCopyTest, CopyLargeTensor) {
     auto a = Tensor::randn({1000, 1000});
-    Tensor b(a);  // Shallow copy
+    Tensor b(a); // Shallow copy
 
     EXPECT_TRUE(a.all_close(b, 1e-5f, 1e-5f));
 
     // With shallow copy, modifying b affects a
     b.add_(1.0f);
-    EXPECT_TRUE(a.all_close(b));  // Both should have the same values
+    EXPECT_TRUE(a.all_close(b)); // Both should have the same values
 
     // Verify they both increased by 1.0
     // (Can't directly test this without saving original, but the fact
@@ -259,12 +258,12 @@ TEST_F(TensorCopyTest, LibTorchParityShallowCopy) {
 
     // Our implementation
     auto gs_a = Tensor::arange(0, 5, 1).to(Device::CPU);
-    auto gs_b = gs_a;  // Shallow copy
+    auto gs_b = gs_a; // Shallow copy
     gs_b.fill_(99.0f);
 
     // LibTorch
     auto torch_a = torch::arange(0, 5, 1);
-    auto torch_b = torch_a;  // Shallow copy in LibTorch
+    auto torch_b = torch_a; // Shallow copy in LibTorch
     torch_b.fill_(99.0f);
 
     // Both should show same behavior: a is also 99
@@ -277,12 +276,12 @@ TEST_F(TensorCopyTest, LibTorchParityClone) {
 
     // Our implementation
     auto gs_a = Tensor::arange(0, 5, 1).to(Device::CPU);
-    auto gs_b = gs_a.clone();  // Deep copy
+    auto gs_b = gs_a.clone(); // Deep copy
     gs_b.fill_(99.0f);
 
     // LibTorch
     auto torch_a = torch::arange(0, 5, 1);
-    auto torch_b = torch_a.clone();  // Deep copy in LibTorch
+    auto torch_b = torch_a.clone(); // Deep copy in LibTorch
     torch_b.fill_(99.0f);
 
     // Both should show same behavior: a is unchanged
@@ -381,7 +380,7 @@ TEST_F(TensorCdistTest, CdistHighDimensional) {
 
 TEST_F(TensorCdistTest, CdistInvalidShapes) {
     auto a = Tensor::randn({5, 3});
-    auto b = Tensor::randn({7, 4});  // Different feature dimension
+    auto b = Tensor::randn({7, 4}); // Different feature dimension
 
     auto result = a.cdist(b);
     EXPECT_FALSE(result.is_valid());
@@ -440,7 +439,7 @@ TEST_F(TensorMinMaxIndicesTest, MinWithIndices1D) {
     auto idx_vec = tensor_to_int64_vector(idx);
     EXPECT_EQ(idx_vec.size(), 1);
     EXPECT_EQ(idx_vec[0], torch_idx.item<int64_t>());
-    EXPECT_EQ(idx_vec[0], 3);  // Min is at index 3
+    EXPECT_EQ(idx_vec[0], 3); // Min is at index 3
 }
 
 TEST_F(TensorMinMaxIndicesTest, MaxWithIndices1D) {
@@ -459,7 +458,7 @@ TEST_F(TensorMinMaxIndicesTest, MaxWithIndices1D) {
     auto idx_vec = tensor_to_int64_vector(idx);
     EXPECT_EQ(idx_vec.size(), 1);
     EXPECT_EQ(idx_vec[0], torch_idx.item<int64_t>());
-    EXPECT_EQ(idx_vec[0], 4);  // Max is at index 4
+    EXPECT_EQ(idx_vec[0], 4); // Max is at index 4
 }
 
 TEST_F(TensorMinMaxIndicesTest, MinWithIndices2D) {
@@ -573,10 +572,11 @@ TEST_F(TensorMinMaxIndicesTest, MinMaxNegativeDim) {
 TEST_F(TensorMinMaxIndicesTest, VerifyCorrectness) {
     // Create a tensor with known min/max positions
     auto t = Tensor::from_vector({
-        1.0f, 5.0f, 3.0f,  // row 0: min=1 (idx 0), max=5 (idx 1)
-        4.0f, 2.0f, 9.0f,  // row 1: min=2 (idx 1), max=9 (idx 2)
-        7.0f, 0.0f, 6.0f   // row 2: min=0 (idx 1), max=7 (idx 0)
-    }, {3, 3});
+                                     1.0f, 5.0f, 3.0f, // row 0: min=1 (idx 0), max=5 (idx 1)
+                                     4.0f, 2.0f, 9.0f, // row 1: min=2 (idx 1), max=9 (idx 2)
+                                     7.0f, 0.0f, 6.0f  // row 2: min=0 (idx 1), max=7 (idx 0)
+                                 },
+                                 {3, 3});
 
     auto [min_vals, min_idx] = t.min_with_indices(1);
     auto [max_vals, max_idx] = t.max_with_indices(1);
@@ -637,7 +637,7 @@ TEST_F(TensorSortTest, Sort1DAscending) {
 
     // Verify it's actually sorted
     for (size_t i = 1; i < sorted_vec.size(); ++i) {
-        EXPECT_LE(sorted_vec[i-1], sorted_vec[i]);
+        EXPECT_LE(sorted_vec[i - 1], sorted_vec[i]);
     }
 }
 
@@ -662,7 +662,7 @@ TEST_F(TensorSortTest, Sort1DDescending) {
 
     // Verify it's actually sorted descending
     for (size_t i = 1; i < sorted_vec.size(); ++i) {
-        EXPECT_GE(sorted_vec[i-1], sorted_vec[i]);
+        EXPECT_GE(sorted_vec[i - 1], sorted_vec[i]);
     }
 }
 
@@ -679,7 +679,7 @@ TEST_F(TensorSortTest, SortRandom) {
     // Verify sorted property
     auto sorted_vec = sorted.to_vector();
     for (size_t i = 1; i < sorted_vec.size(); ++i) {
-        EXPECT_LE(sorted_vec[i-1], sorted_vec[i])
+        EXPECT_LE(sorted_vec[i - 1], sorted_vec[i])
             << "Sort order violated at index " << i;
     }
 }
@@ -695,7 +695,7 @@ TEST_F(TensorSortTest, SortCPU) {
     // Verify sorted property
     auto sorted_vec = sorted.to_vector();
     for (size_t i = 1; i < sorted_vec.size(); ++i) {
-        EXPECT_LE(sorted_vec[i-1], sorted_vec[i]);
+        EXPECT_LE(sorted_vec[i - 1], sorted_vec[i]);
     }
 }
 
@@ -804,7 +804,7 @@ TEST_F(TensorBoolReductionTest, AnyAllEmpty) {
     auto t = Tensor::empty({0});
 
     EXPECT_FALSE(t.any_scalar());
-    EXPECT_TRUE(t.all_scalar());  // Vacuously true for empty
+    EXPECT_TRUE(t.all_scalar()); // Vacuously true for empty
 }
 
 TEST_F(TensorBoolReductionTest, AnyAllLargeTensor) {
@@ -813,7 +813,7 @@ TEST_F(TensorBoolReductionTest, AnyAllLargeTensor) {
 
     // Set one element in the middle
     auto cpu_t = t.to(Device::CPU);
-    cpu_t.ptr<float>()[500*1000 + 500] = 1.0f;
+    cpu_t.ptr<float>()[500 * 1000 + 500] = 1.0f;
     t = cpu_t.to(Device::CUDA);
 
     EXPECT_TRUE(t.any_scalar());
@@ -960,9 +960,9 @@ TEST_F(TensorIntegrationTest, CopyAndModify) {
     auto original = Tensor::randn({100});
 
     // IMPORTANT: Use clone() for independent copy
-    auto copy1 = original.clone();  // Deep copy
+    auto copy1 = original.clone(); // Deep copy
     auto copy2 = Tensor::empty_like(original);
-    copy2.copy_(original);  // copy_() also does deep copy
+    copy2.copy_(original); // copy_() also does deep copy
 
     EXPECT_TRUE(original.all_close(copy1));
     EXPECT_TRUE(original.all_close(copy2));
@@ -1011,7 +1011,7 @@ TEST_F(TensorIntegrationTest, SortAndSelect) {
     // Verify they are the actual smallest values
     auto top_10_vec = top_10.to_vector();
     for (size_t i = 0; i < 9; ++i) {
-        EXPECT_LE(top_10_vec[i], top_10_vec[i+1])
+        EXPECT_LE(top_10_vec[i], top_10_vec[i + 1])
             << "Top 10 should be sorted at index " << i;
     }
 
@@ -1058,7 +1058,7 @@ protected:
         torch::manual_seed(42);
     }
 
-    template<typename Func>
+    template <typename Func>
     double measure_time(Func&& func, int iterations = 10) {
         cudaDeviceSynchronize();
         auto start = std::chrono::high_resolution_clock::now();
@@ -1121,14 +1121,15 @@ TEST_F(TensorPerformanceTest, CopyPerformance) {
     auto large = Tensor::randn({10000, 1000});
 
     double copy_time = measure_time([&]() {
-        Tensor copy = large;  // Shallow copy (very fast!)
-    }, 5);
+        Tensor copy = large; // Shallow copy (very fast!)
+    },
+                                    5);
 
     std::cout << "Copy Performance (10000x1000):\n";
     std::cout << "  Time: " << copy_time << " ms\n";
 
     // Shallow copy should be very fast
-    EXPECT_LT(copy_time, 1.0)  // Should be under 1ms
+    EXPECT_LT(copy_time, 1.0) // Should be under 1ms
         << "Shallow copy operation should be very fast";
 }
 
@@ -1173,7 +1174,7 @@ TEST_F(TensorEdgeCasesTest, SortInvalidDimension) {
 
     // Sort along invalid dimension should handle gracefully
     // This is implementation-dependent behavior
-    auto [sorted, indices] = t.sort(5);  // Invalid dimension
+    auto [sorted, indices] = t.sort(5); // Invalid dimension
 
     // Should either return empty or handle the error
     // We don't specify exact behavior, just that it shouldn't crash

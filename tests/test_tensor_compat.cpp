@@ -5,9 +5,9 @@
 #include <chrono>
 #include <gtest/gtest.h>
 #include <numeric>
+#include <print>
 #include <random>
 #include <torch/torch.h>
-#include <print>
 
 using namespace gs;
 
@@ -290,7 +290,7 @@ TEST_F(TensorTorchCompatTest, BatchProcessing) {
 
     auto torch_mean = torch_batch.mean();
     auto torch_std = torch_batch.std(/*unbiased=*/false);
-    auto torch_normalized = (torch_batch - torch_mean) / (torch_std + 1e-8f);  // Match epsilon!
+    auto torch_normalized = (torch_batch - torch_mean) / (torch_std + 1e-8f); // Match epsilon!
 
     auto custom_relu = custom_normalized.relu();
     auto torch_relu = torch::relu(torch_normalized);
@@ -648,112 +648,112 @@ TEST_F(TensorTorchCompatTest, ZerosAndOnesOperations) {
 
 TEST_F(TensorTorchCompatTest, Cat2D_Dim0) {
     // Test concatenating along dimension 0 (rows)
-    std::vector<float> data1 = {1, 2, 3, 4, 5, 6};  // [2, 3]
+    std::vector<float> data1 = {1, 2, 3, 4, 5, 6};    // [2, 3]
     std::vector<float> data2 = {7, 8, 9, 10, 11, 12}; // [2, 3]
-    
+
     auto custom_a = Tensor::from_vector(data1, {2, 3}, Device::CUDA);
     auto custom_b = Tensor::from_vector(data2, {2, 3}, Device::CUDA);
-    
+
     auto torch_a = torch::tensor(data1, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 3});
     auto torch_b = torch::tensor(data2, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 3});
-    
+
     auto custom_result = custom_a.cat(custom_b, 0);
     auto torch_result = torch::cat({torch_a, torch_b}, 0);
-    
+
     compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "Cat2D_Dim0");
 }
 
 TEST_F(TensorTorchCompatTest, Cat2D_Dim1) {
     // Test concatenating along dimension 1 (columns)
-    std::vector<float> data1 = {1, 2, 3, 4, 5, 6};  // [2, 3]
-    std::vector<float> data2 = {7, 8, 9, 10}; // [2, 2]
-    
+    std::vector<float> data1 = {1, 2, 3, 4, 5, 6}; // [2, 3]
+    std::vector<float> data2 = {7, 8, 9, 10};      // [2, 2]
+
     auto custom_a = Tensor::from_vector(data1, {2, 3}, Device::CUDA);
     auto custom_b = Tensor::from_vector(data2, {2, 2}, Device::CUDA);
-    
+
     auto torch_a = torch::tensor(data1, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 3});
     auto torch_b = torch::tensor(data2, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 2});
-    
+
     auto custom_result = custom_a.cat(custom_b, 1);
     auto torch_result = torch::cat({torch_a, torch_b}, 1);
-    
+
     compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "Cat2D_Dim1");
 }
 
 TEST_F(TensorTorchCompatTest, Cat3D_Dim0) {
     // Test 3D concatenation along dimension 0
-    std::vector<float> data1(2 * 3 * 4, 1.0f);  // [2, 3, 4]
-    std::vector<float> data2(3 * 3 * 4, 2.0f);  // [3, 3, 4]
-    
+    std::vector<float> data1(2 * 3 * 4, 1.0f); // [2, 3, 4]
+    std::vector<float> data2(3 * 3 * 4, 2.0f); // [3, 3, 4]
+
     auto custom_a = Tensor::from_vector(data1, {2, 3, 4}, Device::CUDA);
     auto custom_b = Tensor::from_vector(data2, {3, 3, 4}, Device::CUDA);
-    
+
     auto torch_a = torch::tensor(data1, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 3, 4});
     auto torch_b = torch::tensor(data2, torch::TensorOptions().device(torch::kCUDA)).reshape({3, 3, 4});
-    
+
     auto custom_result = custom_a.cat(custom_b, 0);
     auto torch_result = torch::cat({torch_a, torch_b}, 0);
-    
+
     compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "Cat3D_Dim0");
 }
 
 TEST_F(TensorTorchCompatTest, Cat3D_Dim1_CRITICAL) {
     // THIS IS THE CRITICAL TEST - This is what get_shs() does!
     // Concatenating [100, 1, 3] + [100, 8, 3] along dim 1
-    
+
     std::vector<float> data1(100 * 1 * 3);
     std::vector<float> data2(100 * 8 * 3);
-    
+
     // Fill with recognizable patterns
     for (size_t i = 0; i < data1.size(); ++i) {
-        data1[i] = -1.0f - (i % 3) * 0.1f;  // -1.0, -1.1, -1.2, -1.0, ...
+        data1[i] = -1.0f - (i % 3) * 0.1f; // -1.0, -1.1, -1.2, -1.0, ...
     }
     for (size_t i = 0; i < data2.size(); ++i) {
-        data2[i] = 0.0f;  // All zeros
+        data2[i] = 0.0f; // All zeros
     }
-    
+
     auto custom_a = Tensor::from_vector(data1, {100, 1, 3}, Device::CUDA);
     auto custom_b = Tensor::from_vector(data2, {100, 8, 3}, Device::CUDA);
-    
+
     auto torch_a = torch::tensor(data1, torch::TensorOptions().device(torch::kCUDA)).reshape({100, 1, 3});
     auto torch_b = torch::tensor(data2, torch::TensorOptions().device(torch::kCUDA)).reshape({100, 8, 3});
-    
+
     auto custom_result = custom_a.cat(custom_b, 1);
     auto torch_result = torch::cat({torch_a, torch_b}, 1);
-    
+
     // Debug print first few values
     auto custom_cpu = custom_result.cpu();
     auto custom_vec = custom_cpu.to_vector();
     auto torch_cpu = torch_result.to(torch::kCPU).contiguous();
     auto torch_flat = torch_cpu.flatten();
     auto torch_acc = torch_flat.accessor<float, 1>();
-    
+
     std::println("\n=== Cat3D_Dim1_CRITICAL Debug ===");
     std::println("Expected layout: [point0_coeff0_ch0, point0_coeff0_ch1, point0_coeff0_ch2,");
     std::println("                  point0_coeff1_ch0, point0_coeff1_ch1, point0_coeff1_ch2, ...]");
     std::println("\nFirst 27 values (point 0, all 9 coeffs, 3 channels each):");
     for (size_t i = 0; i < std::min(size_t(27), custom_vec.size()); ++i) {
-        std::println("  [{}] custom={:.6f}, torch={:.6f}, diff={:.6f}", 
-                    i, custom_vec[i], torch_acc[i], std::abs(custom_vec[i] - torch_acc[i]));
+        std::println("  [{}] custom={:.6f}, torch={:.6f}, diff={:.6f}",
+                     i, custom_vec[i], torch_acc[i], std::abs(custom_vec[i] - torch_acc[i]));
     }
-    
+
     compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "Cat3D_Dim1_CRITICAL");
 }
 
 TEST_F(TensorTorchCompatTest, Cat3D_Dim2) {
     // Test 3D concatenation along dimension 2
-    std::vector<float> data1(2 * 3 * 4, 1.0f);  // [2, 3, 4]
-    std::vector<float> data2(2 * 3 * 5, 2.0f);  // [2, 3, 5]
-    
+    std::vector<float> data1(2 * 3 * 4, 1.0f); // [2, 3, 4]
+    std::vector<float> data2(2 * 3 * 5, 2.0f); // [2, 3, 5]
+
     auto custom_a = Tensor::from_vector(data1, {2, 3, 4}, Device::CUDA);
     auto custom_b = Tensor::from_vector(data2, {2, 3, 5}, Device::CUDA);
-    
+
     auto torch_a = torch::tensor(data1, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 3, 4});
     auto torch_b = torch::tensor(data2, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 3, 5});
-    
+
     auto custom_result = custom_a.cat(custom_b, 2);
     auto torch_result = torch::cat({torch_a, torch_b}, 2);
-    
+
     compare_tensors(custom_result, torch_result, 1e-6f, 1e-7f, "Cat3D_Dim2");
 }
 
@@ -762,21 +762,21 @@ TEST_F(TensorTorchCompatTest, Cat_MultipleSmallTensors) {
     std::vector<float> data1 = {1, 2, 3};
     std::vector<float> data2 = {4, 5, 6};
     std::vector<float> data3 = {7, 8, 9};
-    
+
     auto custom_a = Tensor::from_vector(data1, {1, 3}, Device::CUDA);
     auto custom_b = Tensor::from_vector(data2, {1, 3}, Device::CUDA);
     auto custom_c = Tensor::from_vector(data3, {1, 3}, Device::CUDA);
-    
+
     auto torch_a = torch::tensor(data1, torch::TensorOptions().device(torch::kCUDA)).reshape({1, 3});
     auto torch_b = torch::tensor(data2, torch::TensorOptions().device(torch::kCUDA)).reshape({1, 3});
     auto torch_c = torch::tensor(data3, torch::TensorOptions().device(torch::kCUDA)).reshape({1, 3});
-    
+
     // Cat all three
     auto custom_ab = custom_a.cat(custom_b, 0);
     auto custom_abc = custom_ab.cat(custom_c, 0);
-    
+
     auto torch_result = torch::cat({torch_a, torch_b, torch_c}, 0);
-    
+
     compare_tensors(custom_abc, torch_result, 1e-6f, 1e-7f, "Cat_MultipleSmall");
 }
 
@@ -784,19 +784,19 @@ TEST_F(TensorTorchCompatTest, Cat_WithComputation) {
     // Test concatenation as part of a computation pipeline
     std::vector<float> data1(10 * 2, 1.0f);
     std::vector<float> data2(10 * 3, 2.0f);
-    
+
     auto custom_a = Tensor::from_vector(data1, {10, 2}, Device::CUDA);
     auto custom_b = Tensor::from_vector(data2, {10, 3}, Device::CUDA);
-    
+
     auto torch_a = torch::tensor(data1, torch::TensorOptions().device(torch::kCUDA)).reshape({10, 2});
     auto torch_b = torch::tensor(data2, torch::TensorOptions().device(torch::kCUDA)).reshape({10, 3});
-    
+
     // Compute, concatenate, then compute more
     auto custom_result = (custom_a.relu() + 1.0f).cat((custom_b.sigmoid() * 2.0f), 1).sum({1}, false);
     auto torch_result = torch::sum(
-        torch::cat({torch::relu(torch_a) + 1.0f, torch::sigmoid(torch_b) * 2.0f}, 1), 
+        torch::cat({torch::relu(torch_a) + 1.0f, torch::sigmoid(torch_b) * 2.0f}, 1),
         1, false);
-    
+
     compare_tensors(custom_result, torch_result, 1e-4f, 1e-5f, "Cat_WithComputation");
 }
 
@@ -804,81 +804,81 @@ TEST_F(TensorTorchCompatTest, Cat_SplatDataScenario) {
     // Exact scenario from SplatDataNew::get_shs()
     // sh0 is [100, 1, 3], shN is [100, 8, 3]
     // Result should be [100, 9, 3]
-    
+
     std::vector<float> sh0_data(100 * 1 * 3);
     std::vector<float> shN_data(100 * 8 * 3);
-    
+
     // Fill sh0 with DC values (like RGB->SH conversion would produce)
     for (size_t point = 0; point < 100; ++point) {
         for (size_t ch = 0; ch < 3; ++ch) {
             sh0_data[point * 3 + ch] = -1.77f + (point * 0.001f) + (ch * 0.01f);
         }
     }
-    
+
     // Fill shN with zeros (higher order SH coefficients start at zero)
     std::fill(shN_data.begin(), shN_data.end(), 0.0f);
-    
+
     auto custom_sh0 = Tensor::from_vector(sh0_data, {100, 1, 3}, Device::CUDA);
     auto custom_shN = Tensor::from_vector(shN_data, {100, 8, 3}, Device::CUDA);
-    
+
     auto torch_sh0 = torch::tensor(sh0_data, torch::TensorOptions().device(torch::kCUDA)).reshape({100, 1, 3});
     auto torch_shN = torch::tensor(shN_data, torch::TensorOptions().device(torch::kCUDA)).reshape({100, 8, 3});
-    
+
     auto custom_shs = custom_sh0.cat(custom_shN, 1);
     auto torch_shs = torch::cat({torch_sh0, torch_shN}, 1);
-    
+
     EXPECT_EQ(custom_shs.shape().str(), "[100, 9, 3]");
     EXPECT_EQ(torch_shs.sizes()[0], 100);
     EXPECT_EQ(torch_shs.sizes()[1], 9);
     EXPECT_EQ(torch_shs.sizes()[2], 3);
-    
+
     // Verify the layout is correct
     auto custom_cpu = custom_shs.cpu();
     auto custom_vec = custom_cpu.to_vector();
     auto torch_cpu = torch_shs.to(torch::kCPU).contiguous();
     auto torch_flat = torch_cpu.flatten();
     auto torch_acc = torch_flat.accessor<float, 1>();
-    
+
     std::println("\n=== Cat_SplatDataScenario Debug ===");
     std::println("For point 0, the layout should be:");
     std::println("  [0-2]:   DC values for RGB (from sh0)");
     std::println("  [3-26]:  Zeros for higher-order coeffs (from shN)");
     std::println("\nActual values for point 0:");
-    for (size_t i = 0; i < 27; ++i) {  // 9 coeffs * 3 channels
+    for (size_t i = 0; i < 27; ++i) { // 9 coeffs * 3 channels
         std::println("  [{}] custom={:.6f}, torch={:.6f}", i, custom_vec[i], torch_acc[i]);
     }
-    
+
     // Check specific values
     EXPECT_NEAR(custom_vec[0], sh0_data[0], 1e-6f) << "First DC value should match";
     EXPECT_NEAR(custom_vec[1], sh0_data[1], 1e-6f) << "Second DC value should match";
     EXPECT_NEAR(custom_vec[2], sh0_data[2], 1e-6f) << "Third DC value should match";
     EXPECT_NEAR(custom_vec[3], 0.0f, 1e-6f) << "First shN value should be 0";
-    
+
     compare_tensors(custom_shs, torch_shs, 1e-6f, 1e-7f, "Cat_SplatDataScenario");
 }
 
 TEST_F(TensorTorchCompatTest, Cat_EdgeCases) {
     // Test edge cases
-    
+
     // Single element concatenation
     auto custom_single = Tensor::ones({1, 1}, Device::CUDA);
     auto torch_single = torch::ones({1, 1}, torch::TensorOptions().device(torch::kCUDA));
-    
+
     auto custom_double = custom_single.cat(custom_single, 0);
     auto torch_double = torch::cat({torch_single, torch_single}, 0);
-    
+
     compare_tensors(custom_double, torch_double, 1e-6f, 1e-7f, "Cat_Single");
-    
+
     // Large dimension difference
     auto custom_small = Tensor::ones({5, 1, 3}, Device::CUDA);
     auto custom_large = Tensor::ones({5, 100, 3}, Device::CUDA);
-    
+
     auto torch_small = torch::ones({5, 1, 3}, torch::TensorOptions().device(torch::kCUDA));
     auto torch_large = torch::ones({5, 100, 3}, torch::TensorOptions().device(torch::kCUDA));
-    
+
     auto custom_cat = custom_small.cat(custom_large, 1);
     auto torch_cat = torch::cat({torch_small, torch_large}, 1);
-    
+
     compare_tensors(custom_cat, torch_cat, 1e-6f, 1e-7f, "Cat_LargeDiff");
 }
 
@@ -886,93 +886,93 @@ TEST_F(TensorTorchCompatTest, Stack_Basic) {
     // Stack creates a new dimension
     std::vector<float> data1 = {1, 2, 3};
     std::vector<float> data2 = {4, 5, 6};
-    
+
     auto custom_a = Tensor::from_vector(data1, {3}, Device::CUDA);
     auto custom_b = Tensor::from_vector(data2, {3}, Device::CUDA);
-    
+
     auto torch_a = torch::tensor(data1, torch::TensorOptions().device(torch::kCUDA));
     auto torch_b = torch::tensor(data2, torch::TensorOptions().device(torch::kCUDA));
-    
+
     // Stack along dimension 0
     auto custom_stacked = Tensor::stack({custom_a, custom_b}, 0);
     auto torch_stacked = torch::stack({torch_a, torch_b}, 0);
-    
+
     compare_tensors(custom_stacked, torch_stacked, 1e-6f, 1e-7f, "Stack_Dim0");
-    
+
     // Stack along dimension 1
     custom_stacked = Tensor::stack({custom_a, custom_b}, 1);
     torch_stacked = torch::stack({torch_a, torch_b}, 1);
-    
+
     compare_tensors(custom_stacked, torch_stacked, 1e-6f, 1e-7f, "Stack_Dim1");
 }
 
 TEST_F(TensorTorchCompatTest, IndexCopy_Column_Single) {
     // Test index_copy_ for updating a single column
-    std::vector<float> data(12, 0.0f);  // [3, 4] filled with zeros
-    std::vector<float> update_data = {10.0f, 20.0f, 30.0f};  // [3, 1]
-    
+    std::vector<float> data(12, 0.0f);                      // [3, 4] filled with zeros
+    std::vector<float> update_data = {10.0f, 20.0f, 30.0f}; // [3, 1]
+
     auto custom_tensor = Tensor::from_vector(data, {3, 4}, Device::CUDA);
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({3, 4});
-    
+
     auto custom_update = Tensor::from_vector(update_data, {3, 1}, Device::CUDA);
     auto torch_update = torch::tensor(update_data, torch::TensorOptions().device(torch::kCUDA)).reshape({3, 1});
-    
+
     // Update column 2 (index 2)
     auto custom_idx = Tensor::from_vector({2}, {1}, Device::CUDA).to(DataType::Int32);
-    auto torch_idx = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));  // Changed to Int64
-    
+    auto torch_idx = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA)); // Changed to Int64
+
     custom_tensor.index_copy_(1, custom_idx, custom_update);
     torch_tensor.index_copy_(1, torch_idx, torch_update);
-    
+
     compare_tensors(custom_tensor, torch_tensor, 1e-6f, 1e-7f, "IndexCopy_Column_Single");
 }
 
 TEST_F(TensorTorchCompatTest, IndexCopy_Column_Multiple) {
     // Test index_copy_ for updating multiple columns sequentially
     // This mimics what the rotation transformation does
-    std::vector<float> data(12, 0.0f);  // [3, 4] filled with zeros
-    
+    std::vector<float> data(12, 0.0f); // [3, 4] filled with zeros
+
     auto custom_tensor = Tensor::from_vector(data, {3, 4}, Device::CUDA);
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({3, 4});
-    
+
     // Update columns 0, 1, 2, 3 with different values
     std::vector<float> col0_data = {1.0f, 2.0f, 3.0f};
     std::vector<float> col1_data = {4.0f, 5.0f, 6.0f};
     std::vector<float> col2_data = {7.0f, 8.0f, 9.0f};
     std::vector<float> col3_data = {10.0f, 11.0f, 12.0f};
-    
+
     auto custom_col0 = Tensor::from_vector(col0_data, {3, 1}, Device::CUDA);
     auto custom_col1 = Tensor::from_vector(col1_data, {3, 1}, Device::CUDA);
     auto custom_col2 = Tensor::from_vector(col2_data, {3, 1}, Device::CUDA);
     auto custom_col3 = Tensor::from_vector(col3_data, {3, 1}, Device::CUDA);
-    
+
     auto torch_col0 = torch::tensor(col0_data, torch::TensorOptions().device(torch::kCUDA)).reshape({3, 1});
     auto torch_col1 = torch::tensor(col1_data, torch::TensorOptions().device(torch::kCUDA)).reshape({3, 1});
     auto torch_col2 = torch::tensor(col2_data, torch::TensorOptions().device(torch::kCUDA)).reshape({3, 1});
     auto torch_col3 = torch::tensor(col3_data, torch::TensorOptions().device(torch::kCUDA)).reshape({3, 1});
-    
+
     auto idx0 = Tensor::from_vector({0}, {1}, Device::CUDA).to(DataType::Int32);
     auto idx1 = Tensor::from_vector({1}, {1}, Device::CUDA).to(DataType::Int32);
     auto idx2 = Tensor::from_vector({2}, {1}, Device::CUDA).to(DataType::Int32);
     auto idx3 = Tensor::from_vector({3}, {1}, Device::CUDA).to(DataType::Int32);
-    
-    auto torch_idx0 = torch::tensor({0}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));  // Changed to Int64
-    auto torch_idx1 = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));  // Changed to Int64
-    auto torch_idx2 = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));  // Changed to Int64
-    auto torch_idx3 = torch::tensor({3}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));  // Changed to Int64
-    
+
+    auto torch_idx0 = torch::tensor({0}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA)); // Changed to Int64
+    auto torch_idx1 = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA)); // Changed to Int64
+    auto torch_idx2 = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA)); // Changed to Int64
+    auto torch_idx3 = torch::tensor({3}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA)); // Changed to Int64
+
     // Custom implementation
     custom_tensor.index_copy_(1, idx0, custom_col0);
     custom_tensor.index_copy_(1, idx1, custom_col1);
     custom_tensor.index_copy_(1, idx2, custom_col2);
     custom_tensor.index_copy_(1, idx3, custom_col3);
-    
+
     // PyTorch reference
     torch_tensor.index_copy_(1, torch_idx0, torch_col0);
     torch_tensor.index_copy_(1, torch_idx1, torch_col1);
     torch_tensor.index_copy_(1, torch_idx2, torch_col2);
     torch_tensor.index_copy_(1, torch_idx3, torch_col3);
-    
+
     compare_tensors(custom_tensor, torch_tensor, 1e-6f, 1e-7f, "IndexCopy_Column_Multiple");
 }
 
@@ -980,52 +980,53 @@ TEST_F(TensorTorchCompatTest, IndexCopy_QuaternionScenario) {
     // Exact scenario from rotation transformation
     // [N, 4] tensor where we update each column with computed values
     const int N = 100;
-    
+
     std::vector<float> rotation_data(N * 4);
-    for (auto& val : rotation_data) val = dist(gen);
-    
+    for (auto& val : rotation_data)
+        val = dist(gen);
+
     auto custom_rotation = Tensor::from_vector(rotation_data, {static_cast<size_t>(N), 4}, Device::CUDA);
     auto torch_rotation = torch::tensor(rotation_data, torch::TensorOptions().device(torch::kCUDA)).reshape({N, 4});
-    
+
     // Compute new quaternion components (simplified)
     auto custom_w = custom_rotation.slice(1, 0, 1).squeeze(1);
     auto custom_x = custom_rotation.slice(1, 1, 2).squeeze(1);
     auto custom_y = custom_rotation.slice(1, 2, 3).squeeze(1);
     auto custom_z = custom_rotation.slice(1, 3, 4).squeeze(1);
-    
+
     auto torch_w = torch_rotation.index({torch::indexing::Slice(), 0});
     auto torch_x = torch_rotation.index({torch::indexing::Slice(), 1});
     auto torch_y = torch_rotation.index({torch::indexing::Slice(), 2});
     auto torch_z = torch_rotation.index({torch::indexing::Slice(), 3});
-    
+
     // Apply some transformation (multiply by 2, add 1)
     auto custom_w_new = custom_w.mul(2.0f).add(1.0f);
     auto custom_x_new = custom_x.mul(2.0f).add(1.0f);
     auto custom_y_new = custom_y.mul(2.0f).add(1.0f);
     auto custom_z_new = custom_z.mul(2.0f).add(1.0f);
-    
+
     auto torch_w_new = torch_w * 2.0f + 1.0f;
     auto torch_x_new = torch_x * 2.0f + 1.0f;
     auto torch_y_new = torch_y * 2.0f + 1.0f;
     auto torch_z_new = torch_z * 2.0f + 1.0f;
-    
+
     // Update using index_copy_
     auto idx0 = Tensor::from_vector({0}, {1}, Device::CUDA).to(DataType::Int32);
     auto idx1 = Tensor::from_vector({1}, {1}, Device::CUDA).to(DataType::Int32);
     auto idx2 = Tensor::from_vector({2}, {1}, Device::CUDA).to(DataType::Int32);
     auto idx3 = Tensor::from_vector({3}, {1}, Device::CUDA).to(DataType::Int32);
-    
+
     custom_rotation.index_copy_(1, idx0, custom_w_new.unsqueeze(1));
     custom_rotation.index_copy_(1, idx1, custom_x_new.unsqueeze(1));
     custom_rotation.index_copy_(1, idx2, custom_y_new.unsqueeze(1));
     custom_rotation.index_copy_(1, idx3, custom_z_new.unsqueeze(1));
-    
+
     // PyTorch reference using index_put_
     torch_rotation.index_put_({torch::indexing::Slice(), 0}, torch_w_new);
     torch_rotation.index_put_({torch::indexing::Slice(), 1}, torch_x_new);
     torch_rotation.index_put_({torch::indexing::Slice(), 2}, torch_y_new);
     torch_rotation.index_put_({torch::indexing::Slice(), 3}, torch_z_new);
-    
+
     compare_tensors(custom_rotation, torch_rotation, 1e-5f, 1e-6f, "IndexCopy_QuaternionScenario");
 }
 
@@ -1033,13 +1034,13 @@ TEST_F(TensorTorchCompatTest, IndexCopy_SpecificFailingCase) {
     // Use the EXACT data from the failing test run
     // Point 0 had: w2=-1.26822, x2=-0.0382963, y2=-0.102942, z2=1.43998
 
-    const int N = 3;  // Just test first 3 points
+    const int N = 3; // Just test first 3 points
 
     // Exact data from the failing run
     std::vector<float> rotation_data = {
-        -1.2682f, -0.0383f, -0.1029f,  1.4400f,  // Point 0
-        -0.4705f,  1.1624f,  0.3058f,  0.5276f,  // Point 1
-        -0.5726f,  1.8732f, -0.6816f, -0.2104f   // Point 2
+        -1.2682f, -0.0383f, -0.1029f, 1.4400f, // Point 0
+        -0.4705f, 1.1624f, 0.3058f, 0.5276f,   // Point 1
+        -0.5726f, 1.8732f, -0.6816f, -0.2104f  // Point 2
     };
 
     auto custom_rotation = Tensor::from_vector(rotation_data, {static_cast<size_t>(N), 4}, Device::CUDA);
@@ -1112,8 +1113,7 @@ TEST_F(TensorTorchCompatTest, IndexCopy_SpecificFailingCase) {
         w_new.unsqueeze(1),
         x_new.unsqueeze(1),
         y_new.unsqueeze(1),
-        z_new.unsqueeze(1)
-    };
+        z_new.unsqueeze(1)};
     auto custom_rot_cat = Tensor::cat(components, 1);
 
     // PyTorch reference
@@ -1129,30 +1129,30 @@ TEST_F(TensorTorchCompatTest, IndexCopy_SpecificFailingCase) {
 
 TEST_F(TensorTorchCompatTest, Expand_Contiguity) {
     // Check if expand() creates contiguous tensors
-    
+
     auto base = Tensor::from_vector({1.0f, 2.0f, 3.0f, 4.0f}, {4}, Device::CUDA);
-    
+
     std::cout << "base.is_contiguous() = " << base.is_contiguous() << std::endl;
-    
+
     auto unsqueezed = base.unsqueeze(0);
     std::cout << "unsqueezed.is_contiguous() = " << unsqueezed.is_contiguous() << std::endl;
-    
+
     std::vector<int> expand_shape = {100, 4};
     auto expanded = unsqueezed.expand(std::span<const int>(expand_shape));
     std::cout << "expanded.is_contiguous() = " << expanded.is_contiguous() << std::endl;
     std::cout << "expanded.shape() = " << expanded.shape().str() << std::endl;
-    
+
     // Try to extract a column
     auto col0 = expanded.slice(1, 0, 1);
     std::cout << "col0.is_contiguous() = " << col0.is_contiguous() << std::endl;
-    
+
     auto col0_squeezed = col0.squeeze(1);
     std::cout << "col0_squeezed.is_contiguous() = " << col0_squeezed.is_contiguous() << std::endl;
-    
+
     // Now try operations on it
     auto col0_doubled = col0_squeezed.mul(2.0f);
     std::cout << "col0_doubled.is_contiguous() = " << col0_doubled.is_contiguous() << std::endl;
-    
+
     // Check if the values are correct
     auto col0_doubled_vec = col0_doubled.cpu().to_vector();
     std::cout << "Expected all values to be 2.0, got: ";
@@ -1160,7 +1160,7 @@ TEST_F(TensorTorchCompatTest, Expand_Contiguity) {
         std::cout << col0_doubled_vec[i] << " ";
     }
     std::cout << std::endl;
-    
+
     // All should be 2.0 since base[0] = 1.0
     for (size_t i = 0; i < col0_doubled_vec.size(); ++i) {
         EXPECT_FLOAT_EQ(col0_doubled_vec[i], 2.0f) << "Mismatch at index " << i;
@@ -1169,62 +1169,64 @@ TEST_F(TensorTorchCompatTest, Expand_Contiguity) {
 
 TEST_F(TensorTorchCompatTest, SliceVsIndex_ColumnExtraction) {
     // Test if our slice+squeeze matches torch's indexing for column extraction
-    
+
     std::vector<float> data = {
         1.0f, 2.0f, 3.0f, 4.0f,
         5.0f, 6.0f, 7.0f, 8.0f,
-        9.0f, 10.0f, 11.0f, 12.0f
-    };
-    
+        9.0f, 10.0f, 11.0f, 12.0f};
+
     auto custom_tensor = Tensor::from_vector(data, {3, 4}, Device::CUDA);
     auto torch_tensor = torch::tensor(data, torch::TensorOptions().device(torch::kCUDA)).reshape({3, 4});
-    
+
     // Extract column 0 using our method
     auto custom_col0 = custom_tensor.slice(1, 0, 1).squeeze(1);
-    
+
     // Extract column 0 using torch method (what the reference does)
     auto torch_col0 = torch_tensor.index({torch::indexing::Slice(), 0});
-    
+
     std::cout << "Custom column 0 shape: " << custom_col0.shape().str() << std::endl;
     std::cout << "Torch column 0 shape: " << torch_col0.sizes() << std::endl;
-    
+
     std::cout << "Custom values: ";
     auto custom_vec = custom_col0.cpu().to_vector();
-    for (auto v : custom_vec) std::cout << v << " ";
+    for (auto v : custom_vec)
+        std::cout << v << " ";
     std::cout << std::endl;
-    
+
     std::cout << "Torch values: ";
     auto torch_vec = torch_col0.cpu();
     for (int i = 0; i < torch_vec.size(0); ++i) {
         std::cout << torch_vec[i].item<float>() << " ";
     }
     std::cout << std::endl;
-    
+
     compare_tensors(custom_col0, torch_col0, 1e-6f, 1e-7f, "ColumnExtraction");
-    
+
     // Now test expand
     auto base = Tensor::from_vector({1.0f, 2.0f, 3.0f, 4.0f}, {4}, Device::CUDA);
     auto torch_base = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}, torch::TensorOptions().device(torch::kCUDA));
-    
+
     std::vector<int> expand_shape = {100, 4};
     auto custom_expanded = base.unsqueeze(0).expand(std::span<const int>(expand_shape));
     auto torch_expanded = torch_base.unsqueeze(0).expand({100, 4});
-    
+
     // Extract column from expanded
     auto custom_exp_col0 = custom_expanded.slice(1, 0, 1).squeeze(1);
     auto torch_exp_col0 = torch_expanded.index({torch::indexing::Slice(), 0});
-    
+
     std::cout << "\nExpanded column extraction:" << std::endl;
     std::cout << "Custom first 5: ";
     auto custom_exp_vec = custom_exp_col0.cpu().to_vector();
-    for (int i = 0; i < 5; ++i) std::cout << custom_exp_vec[i] << " ";
+    for (int i = 0; i < 5; ++i)
+        std::cout << custom_exp_vec[i] << " ";
     std::cout << std::endl;
-    
+
     std::cout << "Torch first 5: ";
     auto torch_exp_vec = torch_exp_col0.cpu();
-    for (int i = 0; i < 5; ++i) std::cout << torch_exp_vec[i].item<float>() << " ";
+    for (int i = 0; i < 5; ++i)
+        std::cout << torch_exp_vec[i].item<float>() << " ";
     std::cout << std::endl;
-    
+
     compare_tensors(custom_exp_col0, torch_exp_col0, 1e-6f, 1e-7f, "ExpandedColumnExtraction");
 }
 
@@ -1233,16 +1235,16 @@ TEST_F(TensorTorchCompatTest, SliceVsIndex_ColumnExtraction) {
 TEST_F(TensorTorchCompatTest, ToUInt8_Basic) {
     // Basic test: Float32 -> UInt8 conversion
     std::vector<float> data = {0.0f, 0.5f, 1.0f, 0.25f, 0.75f};
-    
+
     auto custom_tensor = Tensor::from_vector(data, {5}, Device::CPU);
-    
+
     // Test that conversion works
     auto custom_uint8 = custom_tensor.to(DataType::UInt8);
-    
+
     EXPECT_TRUE(custom_uint8.is_valid()) << "UInt8 tensor should be valid";
     EXPECT_NE(custom_uint8.ptr<uint8_t>(), nullptr) << "UInt8 pointer should not be null";
     EXPECT_EQ(custom_uint8.dtype(), DataType::UInt8) << "Dtype should be UInt8";
-    
+
     // Check values (0.5 * 255 = 127.5 -> 127, etc)
     auto uint8_vec = custom_uint8.to_vector_bool(); // Gets raw bytes
     EXPECT_EQ(uint8_vec.size(), 5);
@@ -1251,18 +1253,18 @@ TEST_F(TensorTorchCompatTest, ToUInt8_Basic) {
 TEST_F(TensorTorchCompatTest, ToUInt8_AfterClamp) {
     // Test the exact sequence used in image saving: clamp -> mul -> to(UInt8)
     std::vector<float> data = {-0.5f, 0.0f, 0.5f, 1.0f, 1.5f};
-    
+
     auto custom_tensor = Tensor::from_vector(data, {5}, Device::CPU);
-    
+
     // Step by step like in save_image
     auto clamped = custom_tensor.clamp(0.0f, 1.0f);
     EXPECT_TRUE(clamped.is_valid()) << "Clamped tensor should be valid";
     EXPECT_NE(clamped.ptr<float>(), nullptr) << "Clamped pointer should not be null";
-    
+
     auto scaled = clamped.mul(255.0f);
     EXPECT_TRUE(scaled.is_valid()) << "Scaled tensor should be valid";
     EXPECT_NE(scaled.ptr<float>(), nullptr) << "Scaled pointer should not be null";
-    
+
     auto uint8_result = scaled.to(DataType::UInt8);
     EXPECT_TRUE(uint8_result.is_valid()) << "UInt8 result should be valid";
     EXPECT_NE(uint8_result.ptr<uint8_t>(), nullptr) << "UInt8 pointer should not be null";
@@ -1271,21 +1273,21 @@ TEST_F(TensorTorchCompatTest, ToUInt8_AfterClamp) {
 TEST_F(TensorTorchCompatTest, ToUInt8_ChainedOperations) {
     // Test chained operations like save_image does
     std::vector<float> data = {0.0f, 0.5f, 1.0f};
-    
+
     auto custom_tensor = Tensor::from_vector(data, {3}, Device::CPU);
-    
+
     // Method 1: Chained (like original code)
     auto chained_uint8 = custom_tensor.clamp(0.0f, 1.0f).mul(255.0f).to(DataType::UInt8);
     EXPECT_TRUE(chained_uint8.is_valid()) << "Chained UInt8 should be valid";
     EXPECT_NE(chained_uint8.ptr<uint8_t>(), nullptr) << "Chained pointer should not be null";
-    
+
     // Method 2: Separate steps with named variables
     auto step1 = custom_tensor.clamp(0.0f, 1.0f);
     auto step2 = step1.mul(255.0f);
     auto step3 = step2.to(DataType::UInt8);
     EXPECT_TRUE(step3.is_valid()) << "Step3 UInt8 should be valid";
     EXPECT_NE(step3.ptr<uint8_t>(), nullptr) << "Step3 pointer should not be null";
-    
+
     // Both should give same result
     EXPECT_EQ(chained_uint8.numel(), step3.numel());
 }
@@ -1293,12 +1295,12 @@ TEST_F(TensorTorchCompatTest, ToUInt8_ChainedOperations) {
 TEST_F(TensorTorchCompatTest, ToUInt8_AfterContiguous) {
     // Test with contiguous call (like save_image)
     std::vector<float> data = {0.0f, 0.5f, 1.0f};
-    
+
     auto custom_tensor = Tensor::from_vector(data, {3}, Device::CPU);
-    
+
     auto uint8_temp = custom_tensor.clamp(0.0f, 1.0f).mul(255.0f).to(DataType::UInt8);
     auto uint8_final = uint8_temp.contiguous();
-    
+
     EXPECT_TRUE(uint8_final.is_valid()) << "Final UInt8 should be valid";
     EXPECT_NE(uint8_final.ptr<uint8_t>(), nullptr) << "Final pointer should not be null";
 }
@@ -1307,15 +1309,14 @@ TEST_F(TensorTorchCompatTest, ToUInt8_MultiDimensional) {
     // Test with 2D tensor (like image data)
     std::vector<float> data = {
         0.0f, 0.25f, 0.5f,
-        0.75f, 1.0f, 0.5f
-    };
-    
+        0.75f, 1.0f, 0.5f};
+
     auto custom_tensor = Tensor::from_vector(data, {2, 3}, Device::CPU);
-    
+
     auto clamped = custom_tensor.clamp(0.0f, 1.0f);
     auto scaled = clamped.mul(255.0f);
     auto uint8_result = scaled.to(DataType::UInt8);
-    
+
     EXPECT_TRUE(uint8_result.is_valid()) << "2D UInt8 should be valid";
     EXPECT_NE(uint8_result.ptr<uint8_t>(), nullptr) << "2D pointer should not be null";
     EXPECT_EQ(uint8_result.shape()[0], 2);
@@ -1326,19 +1327,17 @@ TEST_F(TensorTorchCompatTest, ToUInt8_3DImage) {
     // Test with actual image-like 3D tensor [H, W, C]
     const int h = 4, w = 4, c = 3;
     std::vector<float> data(h * w * c, 0.5f);
-    
-    auto custom_tensor = Tensor::from_vector(data, {static_cast<size_t>(h), 
-                                                     static_cast<size_t>(w), 
-                                                     static_cast<size_t>(c)}, 
+
+    auto custom_tensor = Tensor::from_vector(data, {static_cast<size_t>(h), static_cast<size_t>(w), static_cast<size_t>(c)},
                                              Device::CPU);
-    
+
     // Exact sequence from save_image
     Tensor img = custom_tensor.clone();
     Tensor img_clamped = img.clamp(0.0f, 1.0f);
     Tensor img_scaled = img_clamped.mul(255.0f);
     Tensor img_uint8_temp = img_scaled.to(DataType::UInt8);
     Tensor img_uint8 = img_uint8_temp.contiguous();
-    
+
     EXPECT_TRUE(img_uint8.is_valid()) << "3D image UInt8 should be valid";
     EXPECT_NE(img_uint8.ptr<uint8_t>(), nullptr) << "3D image pointer should not be null";
     EXPECT_EQ(img_uint8.numel(), h * w * c);
@@ -1347,13 +1346,13 @@ TEST_F(TensorTorchCompatTest, ToUInt8_3DImage) {
 TEST_F(TensorTorchCompatTest, ToUInt8_CUDA) {
     // Test on CUDA device
     std::vector<float> data = {0.0f, 0.5f, 1.0f};
-    
+
     auto custom_tensor = Tensor::from_vector(data, {3}, Device::CUDA);
-    
+
     auto clamped = custom_tensor.clamp(0.0f, 1.0f);
     auto scaled = clamped.mul(255.0f);
     auto uint8_result = scaled.to(DataType::UInt8);
-    
+
     EXPECT_TRUE(uint8_result.is_valid()) << "CUDA UInt8 should be valid";
     EXPECT_NE(uint8_result.ptr<uint8_t>(), nullptr) << "CUDA pointer should not be null";
     EXPECT_EQ(uint8_result.device(), Device::CUDA);
@@ -1362,12 +1361,12 @@ TEST_F(TensorTorchCompatTest, ToUInt8_CUDA) {
 TEST_F(TensorTorchCompatTest, ToUInt8_ThenCPU) {
     // Test converting to UInt8 on CUDA, then moving to CPU
     std::vector<float> data = {0.0f, 0.5f, 1.0f};
-    
+
     auto custom_tensor = Tensor::from_vector(data, {3}, Device::CUDA);
-    
+
     auto uint8_cuda = custom_tensor.clamp(0.0f, 1.0f).mul(255.0f).to(DataType::UInt8);
     EXPECT_TRUE(uint8_cuda.is_valid()) << "CUDA UInt8 should be valid";
-    
+
     auto uint8_cpu = uint8_cuda.cpu();
     EXPECT_TRUE(uint8_cpu.is_valid()) << "CPU UInt8 should be valid after transfer";
     EXPECT_NE(uint8_cpu.ptr<uint8_t>(), nullptr) << "CPU UInt8 pointer should not be null";
@@ -1376,12 +1375,12 @@ TEST_F(TensorTorchCompatTest, ToUInt8_ThenCPU) {
 TEST_F(TensorTorchCompatTest, ToUInt8_AfterPermute) {
     // Test after permute (CHW -> HWC conversion)
     std::vector<float> data(3 * 4 * 5, 0.5f);
-    
+
     auto custom_tensor = Tensor::from_vector(data, {3, 4, 5}, Device::CPU);
-    
+
     auto permuted = custom_tensor.permute({1, 2, 0}).contiguous();
     auto uint8_result = permuted.clamp(0.0f, 1.0f).mul(255.0f).to(DataType::UInt8);
-    
+
     EXPECT_TRUE(uint8_result.is_valid()) << "Permuted UInt8 should be valid";
     EXPECT_NE(uint8_result.ptr<uint8_t>(), nullptr) << "Permuted pointer should not be null";
 }
@@ -1389,19 +1388,19 @@ TEST_F(TensorTorchCompatTest, ToUInt8_AfterPermute) {
 TEST_F(TensorTorchCompatTest, ToUInt8_LifetimeTest) {
     // Test that demonstrates the lifetime issue
     const uint8_t* ptr = nullptr;
-    
+
     {
         std::vector<float> data = {0.5f};
         auto custom_tensor = Tensor::from_vector(data, {1}, Device::CPU);
-        
+
         // This creates temporaries
         auto temp_result = custom_tensor.clamp(0.0f, 1.0f).mul(255.0f).to(DataType::UInt8);
         ptr = temp_result.ptr<uint8_t>();
-        
+
         // ptr should be valid here
         EXPECT_NE(ptr, nullptr) << "Pointer should be valid inside scope";
     }
-    
+
     // After scope, the tensor is destroyed, but we're not accessing ptr anymore
     // This test just ensures we can get the pointer while the tensor is alive
 }
@@ -1409,16 +1408,16 @@ TEST_F(TensorTorchCompatTest, ToUInt8_LifetimeTest) {
 TEST_F(TensorTorchCompatTest, ToUInt8_CloneBeforeConversion) {
     // Test that cloning before conversion helps
     std::vector<float> data = {0.0f, 0.5f, 1.0f};
-    
+
     auto custom_tensor = Tensor::from_vector(data, {3}, Device::CPU);
-    
+
     // Clone first to ensure ownership
     auto cloned = custom_tensor.clone();
     auto clamped = cloned.clamp(0.0f, 1.0f);
     auto scaled = clamped.mul(255.0f);
     auto cloned_scaled = scaled.clone(); // Clone again before conversion
     auto uint8_result = cloned_scaled.to(DataType::UInt8);
-    
+
     EXPECT_TRUE(uint8_result.is_valid()) << "Cloned UInt8 should be valid";
     EXPECT_NE(uint8_result.ptr<uint8_t>(), nullptr) << "Cloned pointer should not be null";
 }
@@ -1427,22 +1426,22 @@ TEST_F(TensorTorchCompatTest, DataTypeConversion_AllTypes) {
     // Test all data type conversions to ensure they work
     std::vector<float> data = {-1.5f, 0.0f, 1.5f, 255.5f};
     auto custom_tensor = Tensor::from_vector(data, {4}, Device::CPU);
-    
+
     // Float32 (identity)
     auto float32 = custom_tensor.to(DataType::Float32);
     EXPECT_TRUE(float32.is_valid());
     EXPECT_NE(float32.ptr<float>(), nullptr);
-    
+
     // Int32
     auto int32 = custom_tensor.to(DataType::Int32);
     EXPECT_TRUE(int32.is_valid());
     EXPECT_NE(int32.ptr<int>(), nullptr);
-    
+
     // UInt8 - THE PROBLEMATIC ONE
     auto uint8 = custom_tensor.to(DataType::UInt8);
     EXPECT_TRUE(uint8.is_valid()) << "UInt8 conversion failed";
     EXPECT_NE(uint8.ptr<uint8_t>(), nullptr) << "UInt8 pointer is null";
-    
+
     // Bool
     auto bool_tensor = custom_tensor.to(DataType::Bool);
     EXPECT_TRUE(bool_tensor.is_valid());

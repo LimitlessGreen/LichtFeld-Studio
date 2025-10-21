@@ -35,13 +35,13 @@ namespace gs {
 
         // Constructor
         SplatDataRef(int sh_degree,
-                  torch::Tensor means,
-                  torch::Tensor sh0,
-                  torch::Tensor shN,
-                  torch::Tensor scaling,
-                  torch::Tensor rotation,
-                  torch::Tensor opacity,
-                  float scene_scale);
+                     torch::Tensor means,
+                     torch::Tensor sh0,
+                     torch::Tensor shN,
+                     torch::Tensor scaling,
+                     torch::Tensor rotation,
+                     torch::Tensor opacity,
+                     float scene_scale);
 
         // Static factory method to create from PointCloud
         static std::expected<SplatDataRef, std::string> init_model_from_pointcloud(

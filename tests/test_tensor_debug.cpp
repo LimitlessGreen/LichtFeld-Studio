@@ -2,118 +2,118 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include "core/tensor.hpp"
+#include <cuda_runtime.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
-#include <cuda_runtime.h>
-#include "core/tensor.hpp"
 
 namespace {
 
-constexpr float FLOAT_TOLERANCE = 1e-4f;
+    constexpr float FLOAT_TOLERANCE = 1e-4f;
 
-void print_comparison(const std::string& test_name, bool passed) {
-    std::cout << (passed ? "✓ PASS" : "✗ FAIL") << ": " << test_name << std::endl;
-}
-
-// Helper to convert torch::Tensor to gs::Tensor
-gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
-    auto cpu_tensor = torch_tensor.cpu().contiguous();
-    std::vector<size_t> shape;
-    for (int i = 0; i < torch_tensor.dim(); ++i) {
-        shape.push_back(torch_tensor.size(i));
+    void print_comparison(const std::string& test_name, bool passed) {
+        std::cout << (passed ? "✓ PASS" : "✗ FAIL") << ": " << test_name << std::endl;
     }
 
-    if (torch_tensor.scalar_type() == torch::kFloat32) {
-        std::vector<float> data(cpu_tensor.data_ptr<float>(),
-                               cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
-        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
-    } else if (torch_tensor.scalar_type() == torch::kInt32) {
-        std::vector<int> data(cpu_tensor.data_ptr<int>(),
-                             cpu_tensor.data_ptr<int>() + cpu_tensor.numel());
-        return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
-    } else if (torch_tensor.scalar_type() == torch::kInt64) {
-        std::vector<int64_t> data(cpu_tensor.data_ptr<int64_t>(),
-                                  cpu_tensor.data_ptr<int64_t>() + cpu_tensor.numel());
-        std::vector<int> data_int32(data.begin(), data.end());
-        return gs::Tensor::from_vector(data_int32, gs::TensorShape(shape), gs::Device::CUDA);
+    // Helper to convert torch::Tensor to gs::Tensor
+    gs::Tensor torch_to_tensor(const torch::Tensor& torch_tensor) {
+        auto cpu_tensor = torch_tensor.cpu().contiguous();
+        std::vector<size_t> shape;
+        for (int i = 0; i < torch_tensor.dim(); ++i) {
+            shape.push_back(torch_tensor.size(i));
+        }
+
+        if (torch_tensor.scalar_type() == torch::kFloat32) {
+            std::vector<float> data(cpu_tensor.data_ptr<float>(),
+                                    cpu_tensor.data_ptr<float>() + cpu_tensor.numel());
+            return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
+        } else if (torch_tensor.scalar_type() == torch::kInt32) {
+            std::vector<int> data(cpu_tensor.data_ptr<int>(),
+                                  cpu_tensor.data_ptr<int>() + cpu_tensor.numel());
+            return gs::Tensor::from_vector(data, gs::TensorShape(shape), gs::Device::CUDA);
+        } else if (torch_tensor.scalar_type() == torch::kInt64) {
+            std::vector<int64_t> data(cpu_tensor.data_ptr<int64_t>(),
+                                      cpu_tensor.data_ptr<int64_t>() + cpu_tensor.numel());
+            std::vector<int> data_int32(data.begin(), data.end());
+            return gs::Tensor::from_vector(data_int32, gs::TensorShape(shape), gs::Device::CUDA);
+        }
+
+        return gs::Tensor();
     }
 
-    return gs::Tensor();
-}
-
-// Helper to compare float tensors
-bool compare_float_tensors(const gs::Tensor& gs_t, const torch::Tensor& torch_t,
-                          float tol = FLOAT_TOLERANCE) {
-    if (gs_t.numel() != torch_t.numel()) {
-        std::cout << "  Size mismatch: gs=" << gs_t.numel()
-                  << " torch=" << torch_t.numel() << std::endl;
-        return false;
-    }
-
-    auto gs_cpu = gs_t.cpu().to_vector();
-    auto torch_cpu = torch_t.cpu();
-    auto torch_ptr = torch_cpu.data_ptr<float>();
-
-    for (size_t i = 0; i < gs_t.numel(); ++i) {
-        float diff = std::abs(gs_cpu[i] - torch_ptr[i]);
-        if (diff > tol) {
-            std::cout << "  Mismatch at index " << i << ": gs=" << gs_cpu[i]
-                      << " torch=" << torch_ptr[i] << " diff=" << diff << std::endl;
+    // Helper to compare float tensors
+    bool compare_float_tensors(const gs::Tensor& gs_t, const torch::Tensor& torch_t,
+                               float tol = FLOAT_TOLERANCE) {
+        if (gs_t.numel() != torch_t.numel()) {
+            std::cout << "  Size mismatch: gs=" << gs_t.numel()
+                      << " torch=" << torch_t.numel() << std::endl;
             return false;
         }
-    }
-    return true;
-}
 
-// Helper to compare int tensors
-bool compare_int_tensors(const gs::Tensor& gs_t, const torch::Tensor& torch_t) {
-    if (gs_t.numel() != torch_t.numel()) {
-        std::cout << "  Size mismatch: gs=" << gs_t.numel()
-                  << " torch=" << torch_t.numel() << std::endl;
-        return false;
-    }
+        auto gs_cpu = gs_t.cpu().to_vector();
+        auto torch_cpu = torch_t.cpu();
+        auto torch_ptr = torch_cpu.data_ptr<float>();
 
-    auto gs_cpu = gs_t.cpu();
-    auto torch_cpu = torch_t.cpu();
-
-    // Get gs tensor data based on its dtype
-    std::vector<int64_t> gs_data;
-    if (gs_cpu.dtype() == gs::DataType::Int64) {
-        gs_data = gs_cpu.to_vector_int64();
-    } else if (gs_cpu.dtype() == gs::DataType::Int32) {
-        auto gs_int32 = gs_cpu.to_vector_int();
-        gs_data.assign(gs_int32.begin(), gs_int32.end());
-    } else {
-        std::cout << "  Unsupported gs dtype: " << gs::dtype_name(gs_cpu.dtype()) << std::endl;
-        return false;
-    }
-
-    // Compare against torch tensor
-    if (torch_t.scalar_type() == torch::kInt32) {
-        auto torch_ptr = torch_cpu.data_ptr<int>();
         for (size_t i = 0; i < gs_t.numel(); ++i) {
-            if (gs_data[i] != torch_ptr[i]) {
-                std::cout << "  Mismatch at index " << i << ": gs=" << gs_data[i]
-                          << " torch=" << torch_ptr[i] << std::endl;
+            float diff = std::abs(gs_cpu[i] - torch_ptr[i]);
+            if (diff > tol) {
+                std::cout << "  Mismatch at index " << i << ": gs=" << gs_cpu[i]
+                          << " torch=" << torch_ptr[i] << " diff=" << diff << std::endl;
                 return false;
             }
         }
-    } else if (torch_t.scalar_type() == torch::kInt64) {
-        auto torch_ptr = torch_cpu.data_ptr<int64_t>();
-        for (size_t i = 0; i < gs_t.numel(); ++i) {
-            if (gs_data[i] != torch_ptr[i]) {
-                std::cout << "  Mismatch at index " << i << ": gs=" << gs_data[i]
-                          << " torch=" << torch_ptr[i] << std::endl;
-                return false;
-            }
-        }
-    } else {
-        std::cout << "  Unsupported torch dtype" << std::endl;
-        return false;
+        return true;
     }
 
-    return true;
-}
+    // Helper to compare int tensors
+    bool compare_int_tensors(const gs::Tensor& gs_t, const torch::Tensor& torch_t) {
+        if (gs_t.numel() != torch_t.numel()) {
+            std::cout << "  Size mismatch: gs=" << gs_t.numel()
+                      << " torch=" << torch_t.numel() << std::endl;
+            return false;
+        }
+
+        auto gs_cpu = gs_t.cpu();
+        auto torch_cpu = torch_t.cpu();
+
+        // Get gs tensor data based on its dtype
+        std::vector<int64_t> gs_data;
+        if (gs_cpu.dtype() == gs::DataType::Int64) {
+            gs_data = gs_cpu.to_vector_int64();
+        } else if (gs_cpu.dtype() == gs::DataType::Int32) {
+            auto gs_int32 = gs_cpu.to_vector_int();
+            gs_data.assign(gs_int32.begin(), gs_int32.end());
+        } else {
+            std::cout << "  Unsupported gs dtype: " << gs::dtype_name(gs_cpu.dtype()) << std::endl;
+            return false;
+        }
+
+        // Compare against torch tensor
+        if (torch_t.scalar_type() == torch::kInt32) {
+            auto torch_ptr = torch_cpu.data_ptr<int>();
+            for (size_t i = 0; i < gs_t.numel(); ++i) {
+                if (gs_data[i] != torch_ptr[i]) {
+                    std::cout << "  Mismatch at index " << i << ": gs=" << gs_data[i]
+                              << " torch=" << torch_ptr[i] << std::endl;
+                    return false;
+                }
+            }
+        } else if (torch_t.scalar_type() == torch::kInt64) {
+            auto torch_ptr = torch_cpu.data_ptr<int64_t>();
+            for (size_t i = 0; i < gs_t.numel(); ++i) {
+                if (gs_data[i] != torch_ptr[i]) {
+                    std::cout << "  Mismatch at index " << i << ": gs=" << gs_data[i]
+                              << " torch=" << torch_ptr[i] << std::endl;
+                    return false;
+                }
+            }
+        } else {
+            std::cout << "  Unsupported torch dtype" << std::endl;
+            return false;
+        }
+
+        return true;
+    }
 
 } // namespace
 
@@ -256,10 +256,10 @@ TEST_F(TensorDebugTest, Item_AfterIndexing_Int32) {
     auto gs_data = torch_to_tensor(torch_data);
 
     for (int i = 0; i < 5; ++i) {
-        auto torch_slice = torch_data.slice(0, i, i+1);
+        auto torch_slice = torch_data.slice(0, i, i + 1);
         int torch_val = torch_slice.item<int>();
 
-        auto gs_slice = gs_data.slice(0, i, i+1);
+        auto gs_slice = gs_data.slice(0, i, i + 1);
         int gs_val = gs_slice.item<int>();
 
         std::cout << "Index " << i << ": torch=" << torch_val << " gs=" << gs_val << std::endl;
@@ -288,7 +288,7 @@ TEST_F(TensorDebugTest, Unsqueeze) {
                   << ", " << gs_unsq.shape()[1] << "]" << std::endl;
 
         bool shape_match = (torch_unsq.size(0) == gs_unsq.shape()[0] &&
-                           torch_unsq.size(1) == gs_unsq.shape()[1]);
+                            torch_unsq.size(1) == gs_unsq.shape()[1]);
         bool data_match = compare_float_tensors(gs_unsq, torch_unsq);
 
         print_comparison("Unsqueeze shape", shape_match);
@@ -421,7 +421,7 @@ TEST_F(TensorDebugTest, Equality_Int32) {
     std::cout << "\n=== TEST: Equality Int32 ===" << std::endl;
 
     auto torch_labels = torch::tensor({0, 1, 2, 1, 0, 2},
-                                     torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+                                      torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     auto gs_labels = torch_to_tensor(torch_labels);
 
     auto torch_mask = torch_labels == 1;
@@ -534,7 +534,7 @@ TEST_F(TensorDebugTest, ZeroInplace_Int32) {
     std::cout << "\n=== TEST: Zero In-place Int32 ===" << std::endl;
 
     auto torch_data = torch::randint(1, 100, {5},
-                                    torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+                                     torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     auto gs_data = torch_to_tensor(torch_data);
 
     torch_data.zero_();
