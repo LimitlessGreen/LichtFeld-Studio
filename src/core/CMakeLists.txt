@@ -95,15 +95,18 @@ if(CORE_CUDA_SOURCES)
         )
     endif()
 
-    # Windows NVCC ICE workaround: Reduce optimization for tensor_broadcast_ops.cu
+    # Windows NVCC ICE workaround: Reduce optimization for files with complex templates
     # NVCC 12.8 on Windows hits an internal compiler error with -O3 on complex template code
     # Error: "unexpected expression with aggregate type!" during codegen
-    # Workaround: Use -O2 instead of -O3 for this file only
+    # Workaround: Use -O1 instead of -O3 for problematic files (-O2 still causes ICE)
     if(WIN32)
         set_source_files_properties(
             tensor/tensor_broadcast_ops.cu
+            tensor/tensor_ops.cu
+            morton_encoding_new.cu
+            kmeans_new.cu
             PROPERTIES
-            COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2;--ptxas-options=-v>"
+            COMPILE_FLAGS "-O1"
         )
     endif()
 endif()
