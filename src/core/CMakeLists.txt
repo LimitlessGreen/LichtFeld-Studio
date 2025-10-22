@@ -2,11 +2,6 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# ============================================================================
-# Add lfs_tensor library as subdirectory
-# ============================================================================
-add_subdirectory(tensor)
-
 # Core module - fundamental data structures and utilities
 set(CORE_SOURCES
         application.cpp
@@ -60,7 +55,6 @@ endif()
 
 target_link_libraries(gs_core
     PUBLIC
-        lfs_tensor      # LFS Tensor library (includes lfs_tensor_kernels)
         ${TORCH_LIBRARIES}
         TBB::tbb
         nlohmann_json::nlohmann_json
@@ -140,11 +134,6 @@ endfunction()
 
 configure_build_type(gs_core)
 
-message(STATUS "╔════════════════════════════════════════════════════════════════╗")
-message(STATUS "║  gs_core - Core Application Library                           ║")
-message(STATUS "╚════════════════════════════════════════════════════════════════╝")
-message(STATUS "  • Core library: C++23 (gs_core)")
-message(STATUS "  • Tensor library: lfs_tensor (from tensor/ subdirectory)")
-message(STATUS "  • Build type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "  • WebP library: ${WEBP_LIB}")
-message(STATUS "  • Archive library: ${ARCHIVE_LIB}")
+message(STATUS "Core module configured with ${CMAKE_BUILD_TYPE} build type")
+message(STATUS "  WebP library: ${WEBP_LIB}")
+message(STATUS "  Archive library: ${ARCHIVE_LIB}")
