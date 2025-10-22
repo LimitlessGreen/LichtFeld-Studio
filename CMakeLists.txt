@@ -401,8 +401,13 @@ if(KERNEL_SOURCES)
     )
 
     target_compile_options(gs_kernels PRIVATE
-            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-O0 -g -G -lineinfo>
-            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-O3 -use_fast_math --ptxas-options=-v>
+            # CUDA device code + MSVC host compiler flags (Windows only)
+            $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Debug>>:-O0 -g -G -lineinfo -Xcompiler=/Od -Xcompiler=/Z7>
+            $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:-O3 -use_fast_math --ptxas-options=-v -Xcompiler=/O2 -Xcompiler=/DNDEBUG>
+
+            # CUDA device code for non-Windows
+            $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<CXX_COMPILER_ID:MSVC>>,$<CONFIG:Debug>>:-O0 -g -G -lineinfo>
+            $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<CXX_COMPILER_ID:MSVC>>,$<CONFIG:Release>>:-O3 -use_fast_math --ptxas-options=-v>
     )
 else()
     # Create empty interface library if no kernels
@@ -520,91 +525,8 @@ configure_build_type(${PROJECT_NAME})
 # =============================================================================
 if(BUILD_TESTS)
     enable_testing()
-    find_package(GTest CONFIG REQUIRED)
-
-    set(TEST_SOURCES
-            tests/test_default_strategy.cpp
-            tests/test_mcmc.cpp
-            tests/test_basic.cpp
-            tests/test_rasterization.cpp
-            tests/test_gsplat_ops.cpp
-            tests/test_intersect_debug.cpp
-            tests/test_autograd.cpp
-            tests/test_numerical_gradients.cpp
-            tests/test_garden_data.cpp
-            tests/torch_impl.cpp
-            tests/test_geometry.cpp
-            tests/test_management.cpp
-    )
-
-    add_executable(lichtfeld_tests ${TEST_SOURCES})
-
-    set_target_properties(lichtfeld_tests PROPERTIES
-            CUDA_ARCHITECTURES "${LichtFeld-Studio_CUDA_ARCH}"
-            CUDA_SEPARABLE_COMPILATION ON
-            CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    )
-
-    target_include_directories(lichtfeld_tests PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
-            ${CMAKE_CURRENT_BINARY_DIR}/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests
-
-            ${CUDAToolkit_INCLUDE_DIRS}
-            ${OPENGL_INCLUDE_DIRS}
-    )
-
-    target_link_libraries(lichtfeld_tests PRIVATE
-            gs_core
-            gs_geometry
-            gs_project
-            gs_kernels
-            gs_loader
-            gs_training
-            gs_rendering
-            gs_visualizer
-            gsplat_backend
-            fastgs_backend
-            GTest::gtest
-            GTest::gtest_main
-
-            ${OPENGL_LIBRARIES}
-            CUDA::cudart
-            spdlog::spdlog
-    )
-
-    target_compile_options(lichtfeld_tests PRIVATE
-            $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G -lineinfo -Xcudafe --device-debug>
-    )
-
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_data")
-        add_custom_command(TARGET lichtfeld_tests POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "${CMAKE_CURRENT_SOURCE_DIR}/test_data"
-                "$<TARGET_FILE_DIR:lichtfeld_tests>/test_data"
-        )
-    endif()
-
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/test_garden_data.pt")
-        add_custom_command(TARGET lichtfeld_tests POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E make_directory
-                "$<TARGET_FILE_DIR:lichtfeld_tests>/tests/data"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/test_garden_data.pt"
-                "$<TARGET_FILE_DIR:lichtfeld_tests>/tests/data/"
-        )
-    endif()
-
-    include(GoogleTest)
-    gtest_discover_tests(lichtfeld_tests)
-
-    add_custom_target(run_tests
-            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-            DEPENDS lichtfeld_tests
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-    )
-
-    message(STATUS "Tests enabled. Build with 'make lichtfeld_tests' and run with 'make run_tests' or 'ctest'")
+    add_subdirectory(tests)
+    message(STATUS "Tests enabled. Build with 'ninja lichtfeld_tests' and run with 'ninja run_tests' or 'ctest'")
 endif()
 
 # =============================================================================
