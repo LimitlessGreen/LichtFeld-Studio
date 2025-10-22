@@ -8,6 +8,7 @@
 #include <NvInfer.h>
 #include <NvInferRuntime.h>
 #include <cuda_runtime.h>
+#include <c10/cuda/CUDAStream.h>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -253,6 +254,9 @@ float LPIPSTensorRT::compute(const torch::Tensor& pred, const torch::Tensor& tar
     auto pred_normalized = (2.0f * pred - 1.0f).to(torch::kCUDA).contiguous();
     auto target_normalized = (2.0f * target - 1.0f).to(torch::kCUDA).contiguous();
 
+    // Get the CUDA stream from PyTorch to avoid default stream synchronization
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream(pred_normalized.device().index()).stream();
+
     // Copy data to GPU buffers
     const size_t input_size = batch_size * 3 * height * width * sizeof(float);
 
@@ -282,14 +286,14 @@ float LPIPSTensorRT::compute(const torch::Tensor& pred, const torch::Tensor& tar
     context_->setTensorAddress(input_name_2, input_buffer_2_);
     context_->setTensorAddress(output_name, output_buffer_);
 
-    // Execute inference
-    const bool success = context_->enqueueV3(nullptr); // Use default CUDA stream
+    // Execute inference using PyTorch's CUDA stream
+    const bool success = context_->enqueueV3(stream);
     if (!success) {
         throw std::runtime_error("TensorRT inference failed");
     }
 
-    // Synchronize to ensure inference is complete
-    cudaDeviceSynchronize();
+    // Synchronize the stream to ensure inference is complete
+    cudaStreamSynchronize(stream);
 
     // Copy output back to host
     std::vector<float> output_host(batch_size);

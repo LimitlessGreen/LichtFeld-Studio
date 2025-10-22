@@ -5,6 +5,7 @@
 #include "metrics.hpp"
 #include "metrics/lpips_tensorrt.hpp"
 #include "core/image_io.hpp"
+#include "core/logger.hpp"
 #include "core/splat_data.hpp"
 #include "rasterization/fast_rasterizer.hpp"
 #include "rasterization/rasterizer.hpp"
@@ -149,7 +150,7 @@ namespace gs::training {
             model_.eval();
             model_.to(torch::kCUDA);
             model_loaded_ = true;
-            std::cout << "LPIPS model loaded from: " << model_path << std::endl;
+            LOG_INFO("LPIPS model loaded from: {}", model_path);
         } catch (const c10::Error& e) {
             throw std::runtime_error(
                 "Failed to load LPIPS model from " + model_path + ": " + e.what());
@@ -213,7 +214,7 @@ namespace gs::training {
     void MetricsReporter::save_report() const {
         std::ofstream report_file(txt_path_);
         if (!report_file.is_open()) {
-            std::cerr << "Failed to open report file: " << txt_path_ << std::endl;
+            LOG_ERROR("Failed to open report file: {}", txt_path_.string());
             return;
         }
 
@@ -242,26 +243,20 @@ namespace gs::training {
                                                     [](const EvalMetrics& a, const EvalMetrics& b) {
                                                         return a.ssim < b.ssim;
                                                     });
+            // Find best LPIPS (lower is better, skip -1 values)
             const auto best_lpips = std::min_element(all_metrics_.begin(), all_metrics_.end(),
                                                      [](const EvalMetrics& a, const EvalMetrics& b) {
+                                                         if (a.lpips < 0 && b.lpips < 0) return false;
+                                                         if (a.lpips < 0) return false;
+                                                         if (b.lpips < 0) return true;
                                                          return a.lpips > b.lpips;
                                                      });
-
-            // Find best TensorRT LPIPS (only if available)
-            const auto best_lpips_trt = std::min_element(all_metrics_.begin(), all_metrics_.end(),
-                                                         [](const EvalMetrics& a, const EvalMetrics& b) {
-                                                             if (a.lpips_trt < 0 && b.lpips_trt < 0) return false;
-                                                             if (a.lpips_trt < 0) return false;
-                                                             if (b.lpips_trt < 0) return true;
-                                                             return a.lpips_trt > b.lpips_trt;
-                                                         });
 
             report_file << std::fixed << std::setprecision(4);
             report_file << "Best PSNR:       " << best_psnr->psnr << " (at iteration " << best_psnr->iteration << ")\n";
             report_file << "Best SSIM:       " << best_ssim->ssim << " (at iteration " << best_ssim->iteration << ")\n";
-            report_file << "Best LPIPS:      " << best_lpips->lpips << " (at iteration " << best_lpips->iteration << ")\n";
-            if (best_lpips_trt->lpips_trt >= 0) {
-                report_file << "Best LPIPS-TRT:  " << best_lpips_trt->lpips_trt << " (at iteration " << best_lpips_trt->iteration << ")\n";
+            if (best_lpips->lpips >= 0) {
+                report_file << "Best LPIPS:      " << best_lpips->lpips << " (at iteration " << best_lpips->iteration << ")\n";
             }
 
             // Final metrics
@@ -269,9 +264,8 @@ namespace gs::training {
             report_file << "\nFinal Metrics (iteration " << final.iteration << "):\n";
             report_file << "PSNR:       " << final.psnr << "\n";
             report_file << "SSIM:       " << final.ssim << "\n";
-            report_file << "LPIPS:      " << final.lpips << "\n";
-            if (final.lpips_trt >= 0) {
-                report_file << "LPIPS-TRT:  " << final.lpips_trt << "\n";
+            if (final.lpips >= 0) {
+                report_file << "LPIPS:      " << final.lpips << "\n";
             }
             report_file << "Time per image: " << final.elapsed_time << " seconds\n";
             report_file << "Number of Gaussians: " << final.num_gaussians << "\n";
@@ -281,53 +275,27 @@ namespace gs::training {
         report_file << "\nDetailed Results:\n";
         report_file << "-----------------\n";
 
-        // Check if any metrics have TensorRT LPIPS
-        const bool has_trt = std::any_of(all_metrics_.begin(), all_metrics_.end(),
-                                          [](const EvalMetrics& m) { return m.lpips_trt >= 0; });
+        report_file << std::setw(10) << "Iteration"
+                    << std::setw(10) << "PSNR"
+                    << std::setw(10) << "SSIM"
+                    << std::setw(10) << "LPIPS"
+                    << std::setw(15) << "Time(s/img)"
+                    << std::setw(15) << "#Gaussians"
+                    << "\n";
+        report_file << std::string(70, '-') << "\n";
 
-        if (has_trt) {
-            report_file << std::setw(10) << "Iteration"
-                        << std::setw(10) << "PSNR"
-                        << std::setw(10) << "SSIM"
-                        << std::setw(10) << "LPIPS"
-                        << std::setw(12) << "LPIPS-TRT"
-                        << std::setw(15) << "Time(s/img)"
-                        << std::setw(15) << "#Gaussians"
-                        << "\n";
-            report_file << std::string(87, '-') << "\n";
-
-            for (const auto& m : all_metrics_) {
-                report_file << std::setw(10) << m.iteration
-                            << std::setw(10) << std::fixed << std::setprecision(4) << m.psnr
-                            << std::setw(10) << m.ssim
-                            << std::setw(10) << m.lpips
-                            << std::setw(12) << (m.lpips_trt >= 0 ? std::to_string(m.lpips_trt).substr(0, 10) : "N/A")
-                            << std::setw(15) << m.elapsed_time
-                            << std::setw(15) << m.num_gaussians << "\n";
-            }
-        } else {
-            report_file << std::setw(10) << "Iteration"
-                        << std::setw(10) << "PSNR"
-                        << std::setw(10) << "SSIM"
-                        << std::setw(10) << "LPIPS"
-                        << std::setw(15) << "Time(s/img)"
-                        << std::setw(15) << "#Gaussians"
-                        << "\n";
-            report_file << std::string(75, '-') << "\n";
-
-            for (const auto& m : all_metrics_) {
-                report_file << std::setw(10) << m.iteration
-                            << std::setw(10) << std::fixed << std::setprecision(4) << m.psnr
-                            << std::setw(10) << m.ssim
-                            << std::setw(10) << m.lpips
-                            << std::setw(15) << m.elapsed_time
-                            << std::setw(15) << m.num_gaussians << "\n";
-            }
+        for (const auto& m : all_metrics_) {
+            report_file << std::setw(10) << m.iteration
+                        << std::setw(10) << std::fixed << std::setprecision(4) << m.psnr
+                        << std::setw(10) << m.ssim
+                        << std::setw(10) << (m.lpips >= 0 ? std::to_string(m.lpips).substr(0, 10) : "N/A")
+                        << std::setw(15) << m.elapsed_time
+                        << std::setw(15) << m.num_gaussians << "\n";
         }
 
         report_file.close();
-        std::cout << "Evaluation report saved to: " << txt_path_ << std::endl;
-        std::cout << "Metrics CSV saved to: " << csv_path_ << std::endl;
+        LOG_INFO("Evaluation report saved to: {}", txt_path_.string());
+        LOG_INFO("Metrics CSV saved to: {}", csv_path_.string());
     }
 
     // MetricsEvaluator Implementation
@@ -341,30 +309,31 @@ namespace gs::training {
         _psnr_metric = std::make_unique<PSNR>(1.0f);
         _ssim_metric = std::make_unique<SSIM>(11, 3);
 
-        // Load TensorRT LPIPS (required for evaluation)
+        // Try to load TensorRT LPIPS (optional - will report -1 if unavailable)
         std::filesystem::path lpips_trt_path = params.dataset.output_path.parent_path() / "weights" / "lpips_vgg.trt";
         if (!std::filesystem::exists(lpips_trt_path)) {
             lpips_trt_path = "weights/lpips_vgg.trt";
         }
 
-        if (!std::filesystem::exists(lpips_trt_path)) {
-            throw std::runtime_error(
-                "TensorRT LPIPS engine not found!\n"
-                "  Searched: " + lpips_trt_path.string() + "\n"
-                "  Run: python3 scripts/convert_lpips_to_tensorrt.py --max-image-size 1536");
-        }
-
-        try {
-            _lpips_trt_metric = std::make_unique<LPIPSTensorRT>(lpips_trt_path.string());
-            if (!_lpips_trt_metric->is_loaded()) {
-                throw std::runtime_error("TensorRT LPIPS engine failed to load!");
+        if (std::filesystem::exists(lpips_trt_path)) {
+            try {
+                _lpips_trt_metric = std::make_unique<LPIPSTensorRT>(lpips_trt_path.string());
+                if (_lpips_trt_metric->is_loaded()) {
+                    LOG_INFO("TensorRT LPIPS loaded successfully");
+                } else {
+                    LOG_WARN("TensorRT LPIPS failed to load - LPIPS will be -1");
+                    LOG_WARN("  Run: python3 scripts/convert_lpips_to_tensorrt.py --max-image-size 1536");
+                    _lpips_trt_metric.reset();
+                }
+            } catch (const std::exception& e) {
+                LOG_WARN("TensorRT LPIPS error: {} - LPIPS will be -1", e.what());
+                LOG_WARN("  Run: python3 scripts/convert_lpips_to_tensorrt.py --max-image-size 1536");
+                _lpips_trt_metric.reset();
             }
-            std::cout << "✓ TensorRT LPIPS loaded successfully" << std::endl;
-        } catch (const std::exception& e) {
-            throw std::runtime_error(
-                std::string("Failed to load TensorRT LPIPS: ") + e.what() + "\n"
-                "  This might be due to version mismatch.\n"
-                "  Run: python3 scripts/convert_lpips_to_tensorrt.py --max-image-size 1536");
+        } else {
+            LOG_WARN("TensorRT LPIPS engine not found - LPIPS will be -1");
+            LOG_WARN("  Searched: {}", lpips_trt_path.string());
+            LOG_WARN("  Run: python3 scripts/convert_lpips_to_tensorrt.py --max-image-size 1536");
         }
 
         // Initialize reporter
@@ -511,8 +480,11 @@ namespace gs::training {
                 const float psnr = _psnr_metric->compute(r_output.image, gt_image);
                 const float ssim = _ssim_metric->compute(r_output.image, gt_image);
 
-                // Compute LPIPS using TensorRT (guaranteed to be loaded)
-                const float lpips = _lpips_trt_metric->compute(r_output.image, gt_image);
+                // Compute LPIPS using TensorRT (if available, otherwise -1)
+                float lpips = -1.0f;
+                if (_lpips_trt_metric) {
+                    lpips = _lpips_trt_metric->compute(r_output.image, gt_image);
+                }
 
                 psnr_values.push_back(psnr);
                 ssim_values.push_back(ssim);
@@ -582,15 +554,11 @@ namespace gs::training {
             result.psnr = std::accumulate(psnr_values.begin(), psnr_values.end(), 0.0f) / psnr_values.size();
             result.ssim = std::accumulate(ssim_values.begin(), ssim_values.end(), 0.0f) / ssim_values.size();
             result.lpips = std::accumulate(lpips_values.begin(), lpips_values.end(), 0.0f) / lpips_values.size();
-
-            // Set lpips_trt to same value (both use TensorRT now)
-            result.lpips_trt = result.lpips;
         } else {
             // Set default values for depth-only modes
             result.psnr = 0.0f;
             result.ssim = 0.0f;
-            result.lpips = 0.0f;
-            result.lpips_trt = -1.0f;
+            result.lpips = -1.0f;
         }
         result.elapsed_time = elapsed / val_dataset_size;
 
@@ -598,9 +566,9 @@ namespace gs::training {
         _reporter->add_metrics(result);
 
         if (_params.optimization.enable_save_eval_images) {
-            std::cout << "Saved " << image_idx << " evaluation images to: " << eval_dir << std::endl;
+            LOG_INFO("Saved {} evaluation images to: {}", image_idx, eval_dir.string());
             if (has_depth()) {
-                std::cout << "Saved depth maps to: " << depth_dir << std::endl;
+                LOG_INFO("Saved depth maps to: {}", depth_dir.string());
             }
         }
 
