@@ -122,8 +122,9 @@ namespace gs::loader {
         auto cache_base = gs::management::GetLichtFeldBaseTemporaryFolder() / "cache";
 
         if (!std::filesystem::exists(cache_base)) {
-            bool success = std::filesystem::create_directories(cache_base);
-            if (!success) {
+            // create_directories returns false if directory already exists, which is not an error
+            std::filesystem::create_directories(cache_base);
+            if (!std::filesystem::exists(cache_base)) {
                 throw std::runtime_error("failed to create cache base directory " + cache_base.string());
             }
         }
@@ -131,8 +132,9 @@ namespace gs::loader {
         std::string unique_cache_path = LFS_CACHE_PREFIX + gs::management::generateShortHash();
         std::filesystem::path cache_folder = cache_base / unique_cache_path;
 
-        bool success = std::filesystem::create_directories(cache_folder);
-        if (!success) {
+        // create_directories returns false if directory already exists, which is not an error
+        std::filesystem::create_directories(cache_folder);
+        if (!std::filesystem::exists(cache_folder)) {
             throw std::runtime_error("failed to create cache directory " + cache_folder.string());
         }
         cache_folder_ = cache_folder;

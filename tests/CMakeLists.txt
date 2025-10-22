@@ -61,6 +61,7 @@ set(OPTIONAL_TEST_FILES
     benchmark_strided_tensors.cpp
     test_scalar_reduction_benchmark.cpp
     test_permute_upload_benchmark.cpp
+    test_lpips_comparison.cpp
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})

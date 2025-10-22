@@ -275,6 +275,29 @@ message(STATUS "CUDA Toolkit ${CUDAToolkit_VERSION} found at ${CUDAToolkit_TARGE
 
 # Find packages
 find_package(Torch REQUIRED)
+
+# Find TensorRT for LPIPS inference (REQUIRED - LibTorch LPIPS removed)
+find_library(TENSORRT_LIBRARY nvinfer
+    PATHS /usr/lib/x86_64-linux-gnu
+    NO_DEFAULT_PATH
+)
+find_path(TENSORRT_INCLUDE_DIR NvInfer.h
+    PATHS /usr/include/x86_64-linux-gnu
+    NO_DEFAULT_PATH
+)
+
+if(TENSORRT_LIBRARY AND TENSORRT_INCLUDE_DIR)
+    message(STATUS "TensorRT found:")
+    message(STATUS "  Library: ${TENSORRT_LIBRARY}")
+    message(STATUS "  Include: ${TENSORRT_INCLUDE_DIR}")
+    set(TENSORRT_FOUND TRUE)
+else()
+    message(WARNING "TensorRT not found - LPIPS metric will not be available!")
+    message(WARNING "  Install TensorRT to enable LPIPS evaluation")
+    message(WARNING "  On Ubuntu: sudo apt-get install tensorrt tensorrt-dev")
+    set(TENSORRT_FOUND FALSE)
+endif()
+
 find_package(TBB REQUIRED)
 find_package(Threads REQUIRED)
 find_package(OpenGL REQUIRED)

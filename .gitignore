@@ -29,4 +29,7 @@ build*/**
 CLAUDE.md
 
 *.pt
+*.trt
 !weights/*.pt
+!weights/*.trt
+

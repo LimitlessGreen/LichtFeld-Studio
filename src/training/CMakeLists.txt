@@ -24,6 +24,7 @@ set(TRAINING_HOST_SOURCES
 
         # Metrics
         metrics/metrics.cpp
+        metrics/lpips_tensorrt.cpp
 
         # Components
         components/bilateral_grid.cpp
@@ -94,6 +95,7 @@ target_include_directories(gs_training
         ${CMAKE_SOURCE_DIR}/fastgs
         ${CUDAToolkit_INCLUDE_DIRS}
         ${OPENGL_INCLUDE_DIRS}
+        ${TENSORRT_INCLUDE_DIR}
 )
 
 target_link_libraries(gs_training
@@ -111,6 +113,7 @@ target_link_libraries(gs_training
         Threads::Threads
         CUDA::cudart
         spdlog::spdlog
+        ${TENSORRT_LIBRARY}
         PRIVATE
         ${OPENGL_LIBRARIES}
 )

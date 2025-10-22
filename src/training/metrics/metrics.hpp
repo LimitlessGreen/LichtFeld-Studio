@@ -7,6 +7,7 @@
 #include "../dataset.hpp"
 #include "core/parameters.hpp"
 #include "core/splat_data.hpp"
+#include "lpips_tensorrt.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -71,6 +72,7 @@ namespace gs::training {
         float psnr;
         float ssim;
         float lpips;
+        float lpips_trt;
         float elapsed_time;
         int num_gaussians;
         int iteration;
@@ -81,13 +83,14 @@ namespace gs::training {
             ss << "PSNR: " << psnr
                << ", SSIM: " << ssim
                << ", LPIPS: " << lpips
+               << ", LPIPS-TRT: " << lpips_trt
                << ", Time: " << elapsed_time << "s/image"
                << ", #GS: " << num_gaussians;
             return ss.str();
         }
 
         static std::string to_csv_header() {
-            return "iteration,psnr,ssim,lpips,time_per_image,num_gaussians";
+            return "iteration,psnr,ssim,lpips,lpips_trt,time_per_image,num_gaussians";
         }
 
         [[nodiscard]] std::string to_csv_row() const {
@@ -97,6 +100,7 @@ namespace gs::training {
                << psnr << ","
                << ssim << ","
                << lpips << ","
+               << lpips_trt << ","
                << elapsed_time << ","
                << num_gaussians;
             return ss.str();
@@ -155,7 +159,7 @@ namespace gs::training {
         // Metrics
         std::unique_ptr<PSNR> _psnr_metric;
         std::unique_ptr<SSIM> _ssim_metric;
-        std::unique_ptr<LPIPS> _lpips_metric;
+        std::unique_ptr<LPIPSTensorRT> _lpips_trt_metric;
         std::unique_ptr<MetricsReporter> _reporter;
 
         // Helper functions
