@@ -5,6 +5,33 @@
 # Build the tensor library first
 add_subdirectory(tensor)
 
+# Core CUDA kernels library (kmeans, morton encoding)
+add_library(lfs_core_kernels STATIC
+    kernels/kmeans_new.cu
+    kernels/morton_encoding_new.cu
+)
+
+target_include_directories(lfs_core_kernels
+    PUBLIC
+        ${CMAKE_SOURCE_DIR}/include
+        ${CUDAToolkit_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/src/core_new/tensor/internal  # For memory_pool.hpp and other internal headers
+)
+
+target_link_libraries(lfs_core_kernels
+    PUBLIC
+        lfs_tensor
+        CUDA::cudart
+)
+
+set_target_properties(lfs_core_kernels PROPERTIES
+    CUDA_STANDARD 20
+    CUDA_STANDARD_REQUIRED ON
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+)
+
 # Core module - fundamental data structures and utilities
 # Note: lfs_tensor library is now in src/core_new/tensor
 set(CORE_SOURCES
@@ -13,8 +40,7 @@ set(CORE_SOURCES
         image_io.cpp
         parameters.cpp
         splat_data.cpp
-        # sogs.cpp  # Commented out temporarily - has unimplemented dependencies
-        sogs_stub.cpp  # Stub implementation for write_sog
+        sogs.cpp  # Full SOG implementation with kmeans and morton encoding
         tinyply.cpp
 )
 
@@ -60,6 +86,7 @@ endif()
 target_link_libraries(lfs_core
     PUBLIC
         lfs_tensor      # LFS Tensor library (includes lfs_tensor_kernels)
+        lfs_core_kernels # Core CUDA kernels (kmeans, morton encoding)
         TBB::tbb
         nlohmann_json::nlohmann_json
         glm::glm

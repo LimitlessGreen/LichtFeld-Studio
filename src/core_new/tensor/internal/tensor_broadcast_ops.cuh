@@ -4,7 +4,7 @@
 #pragma once
 
 #include "core_new/logger.hpp"
-#include "internal/memory_pool.hpp"
+#include "memory_pool.hpp"
 #include <cuda_runtime.h>
 #include <type_traits>
 

@@ -48,6 +48,7 @@ set(OPTIONAL_TEST_FILES
     test_tensor_vs_torch.cpp
     test_tensor_move.cpp
     test_mcmc.cpp
+    test_loader_comparison.cpp  # Comprehensive comparison between old and new loaders
     test_tensor_benchmark.cpp
     test_memory_pool_benchmark.cpp  # benchmarks CudaMemoryPool (now internal)
     test_broadcast_benchmark.cpp
@@ -93,6 +94,11 @@ target_include_directories(lichtfeld_tests PRIVATE
     ${OPENGL_INCLUDE_DIRS}
 )
 
+# Define TEST_DATA_DIR for tests
+target_compile_definitions(lichtfeld_tests PRIVATE
+    TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+)
+
 # Link libraries - Fix linking order and add missing dependencies
 target_link_libraries(lichtfeld_tests PRIVATE
     # Core libraries (in dependency order)
@@ -100,21 +106,28 @@ target_link_libraries(lichtfeld_tests PRIVATE
     gs_rendering
     gs_training
     gs_training_kernels
-    gs_loader
     gs_project
     gs_geometry
     gs_core
+    gs_loader  # After gs_core since gs_core depends on gs_loader
     gs_kernels
-    
+
+    # New torch-free modules (for comparison tests)
+    lfs_training
+    lfs_core
+    lfs_loader  # After lfs_core since lfs_core depends on lfs_loader
+    lfs_tensor
+
     # Backend libraries
     gsplat_backend
     fastgs_backend
-    
+
     # External libraries (using custom test_main.cpp instead of gtest_main)
     GTest::gtest
     ${TORCH_LIBRARIES}
     ${OPENGL_LIBRARIES}
-    
+    OpenImageIO::OpenImageIO
+
     # CUDA libraries
     CUDA::cudart
     CUDA::cublas
