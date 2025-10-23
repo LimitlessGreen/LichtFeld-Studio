@@ -349,7 +349,7 @@ endif()
 # Kernel libs
 # =============================================================================
 add_subdirectory(gsplat)
-add_subdirectory(fastgs)
+add_subdirectory(src/training/fastgs)
 
 set_target_properties(gsplat_backend PROPERTIES CUDA_ARCHITECTURES "${LichtFeld-Studio_CUDA_ARCH}")
 set_target_properties(fastgs_backend PROPERTIES CUDA_ARCHITECTURES "${LichtFeld-Studio_CUDA_ARCH}")

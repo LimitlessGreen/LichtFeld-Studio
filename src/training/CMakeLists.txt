@@ -57,7 +57,7 @@ target_include_directories(gs_training_kernels
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_BINARY_DIR}/include
         ${CMAKE_SOURCE_DIR}/gsplat
-        ${CMAKE_SOURCE_DIR}/fastgs
+        ${CMAKE_CURRENT_SOURCE_DIR}/fastgs
         ${CUDAToolkit_INCLUDE_DIRS}
 )
 
@@ -91,7 +91,7 @@ target_include_directories(gs_training
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_BINARY_DIR}/include
         ${CMAKE_SOURCE_DIR}/gsplat
-        ${CMAKE_SOURCE_DIR}/fastgs
+        ${CMAKE_CURRENT_SOURCE_DIR}/fastgs
         ${CUDAToolkit_INCLUDE_DIRS}
         ${OPENGL_INCLUDE_DIRS}
 )
