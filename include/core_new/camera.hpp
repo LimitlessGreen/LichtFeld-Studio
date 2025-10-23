@@ -70,6 +70,8 @@ namespace lfs::core {
         int camera_width() const noexcept { return _camera_width; }
         float focal_x() const noexcept { return _focal_x; }
         float focal_y() const noexcept { return _focal_y; }
+        float center_x() const noexcept { return _center_x; }
+        float center_y() const noexcept { return _center_y; }
         Tensor radial_distortion() const noexcept { return _radial_distortion; }
         Tensor tangential_distortion() const noexcept { return _tangential_distortion; }
         gsplat::CameraModelType camera_model_type() const noexcept { return _camera_model_type; }
