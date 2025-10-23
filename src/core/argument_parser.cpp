@@ -75,6 +75,8 @@ namespace {
             return gs::core::LogLevel::Debug;
         if (level_str == "info")
             return gs::core::LogLevel::Info;
+        if (level_str == "perf" || level_str == "performance")
+            return gs::core::LogLevel::Performance;
         if (level_str == "warn" || level_str == "warning")
             return gs::core::LogLevel::Warn;
         if (level_str == "error")
@@ -142,7 +144,7 @@ namespace {
             ::args::ValueFlag<int> sog_iterations(parser, "sog_iterations", "K-means iterations for SOG compression (default: 10)", {"sog-iterations"});
 
             // Logging options
-            ::args::ValueFlag<std::string> log_level(parser, "level", "Log level: trace, debug, info, warn, error, critical, off (default: info)", {"log-level"});
+            ::args::ValueFlag<std::string> log_level(parser, "level", "Log level: trace, debug, info, perf, warn, error, critical, off (default: info)", {"log-level"});
             ::args::ValueFlag<std::string> log_file(parser, "file", "Optional log file path", {"log-file"});
 
             // Optional flag arguments
