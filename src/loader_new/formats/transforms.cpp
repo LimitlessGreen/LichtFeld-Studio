@@ -64,7 +64,7 @@ namespace lfs::loader {
 
     // Function to create a 3x3 rotation matrix around Y-axis embeded in 4x4 matrix
     lfs::core::Tensor createYRotationMatrix(float angle_radians) {
-        lfs::core::Tensor rotMat = lfs::core::Tensor::eye(4);
+        lfs::core::Tensor rotMat = lfs::core::Tensor::eye(4, Device::CPU);
         float cos_angle = std::cos(angle_radians);
         float sin_angle = std::sin(angle_radians);
 
@@ -282,6 +282,8 @@ namespace lfs::loader {
 
                 camdata._T = T;
                 camdata._R = R;
+                camdata._radial_distortion = lfs::core::Tensor::empty({0}, Device::CPU, DataType::Float32);
+                camdata._tangential_distortion = lfs::core::Tensor::empty({0}, Device::CPU, DataType::Float32);
 
                 camdata._focal_x = fl_x;
                 camdata._focal_y = fl_y;

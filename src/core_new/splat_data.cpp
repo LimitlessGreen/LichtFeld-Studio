@@ -242,7 +242,7 @@ namespace lfs::core {
                          Tensor opacity_,
                          float scene_scale_)
         : _max_sh_degree(sh_degree),
-          _active_sh_degree(sh_degree),
+          _active_sh_degree(0),  // Start at 0, increases during training to match old behavior
           _scene_scale(scene_scale_),
           _means(std::move(means_)),
           _sh0(std::move(sh0_)),
@@ -782,7 +782,8 @@ namespace lfs::core {
                 }
 
                 positions = pcd.means.cuda();
-                colors = pcd.colors.cuda(); // Already normalized to [0, 1] by loader
+                // Normalize colors from uint8 [0,255] to float32 [0,1] to match old behavior
+                colors = pcd.colors.to(DataType::Float32).div(255.0f).cuda();
             }
 
             auto scene_center_device = scene_center.to(positions.device());

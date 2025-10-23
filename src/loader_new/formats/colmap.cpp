@@ -378,7 +378,7 @@ namespace lfs::loader {
         LOG_DEBUG("Reading {} 3D points from binary file", N);
 
         std::vector<float> positions(N * 3);
-        std::vector<float> colors(N * 3);
+        std::vector<uint8_t> colors(N * 3);
 
         for (uint64_t i = 0; i < N; ++i) {
             cur += 8; // skip point ID
@@ -387,10 +387,10 @@ namespace lfs::loader {
             positions[i * 3 + 1] = static_cast<float>(read_f64(cur));
             positions[i * 3 + 2] = static_cast<float>(read_f64(cur));
 
-            // Convert uint8 [0,255] to float [0,1]
-            colors[i * 3 + 0] = static_cast<uint8_t>(*cur++) / 255.0f;
-            colors[i * 3 + 1] = static_cast<uint8_t>(*cur++) / 255.0f;
-            colors[i * 3 + 2] = static_cast<uint8_t>(*cur++) / 255.0f;
+            // Store colors as uint8 [0,255] to match old loader
+            colors[i * 3 + 0] = static_cast<uint8_t>(*cur++);
+            colors[i * 3 + 1] = static_cast<uint8_t>(*cur++);
+            colors[i * 3 + 2] = static_cast<uint8_t>(*cur++);
 
             cur += 8;                                    // skip reprojection error
             cur += read_u64(cur) * sizeof(uint32_t) * 2; // skip track
@@ -402,7 +402,8 @@ namespace lfs::loader {
         }
 
         Tensor means = Tensor::from_vector(positions, {N, 3}, Device::CUDA);
-        Tensor colors_tensor = Tensor::from_vector(colors, {N, 3}, Device::CUDA);
+        Tensor colors_tensor = Tensor::from_blob(colors.data(), {N, 3}, Device::CPU, DataType::UInt8)
+                                   .to(Device::CUDA).contiguous();
 
         return PointCloud(std::move(means), std::move(colors_tensor));
     }
@@ -557,7 +558,7 @@ namespace lfs::loader {
         LOG_DEBUG("Reading {} 3D points from text file", N);
 
         std::vector<float> positions(N * 3);
-        std::vector<float> colors(N * 3);
+        std::vector<uint8_t> colors(N * 3);
 
         for (uint64_t i = 0; i < N; ++i) {
             const auto& line = lines[i];
@@ -572,14 +573,15 @@ namespace lfs::loader {
             positions[i * 3 + 1] = std::stof(tokens[2]);
             positions[i * 3 + 2] = std::stof(tokens[3]);
 
-            // Convert uint8 [0,255] to float [0,1]
-            colors[i * 3 + 0] = std::stoi(tokens[4]) / 255.0f;
-            colors[i * 3 + 1] = std::stoi(tokens[5]) / 255.0f;
-            colors[i * 3 + 2] = std::stoi(tokens[6]) / 255.0f;
+            // Store colors as uint8 [0,255] to match old loader
+            colors[i * 3 + 0] = static_cast<uint8_t>(std::stoi(tokens[4]));
+            colors[i * 3 + 1] = static_cast<uint8_t>(std::stoi(tokens[5]));
+            colors[i * 3 + 2] = static_cast<uint8_t>(std::stoi(tokens[6]));
         }
 
         Tensor means = Tensor::from_vector(positions, {N, 3}, Device::CUDA);
-        Tensor colors_tensor = Tensor::from_vector(colors, {N, 3}, Device::CUDA);
+        Tensor colors_tensor = Tensor::from_blob(colors.data(), {N, 3}, Device::CPU, DataType::UInt8)
+                                   .to(Device::CUDA).contiguous();
 
         return PointCloud(std::move(means), std::move(colors_tensor));
     }

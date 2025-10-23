@@ -5,7 +5,7 @@
 #include "core_new/camera.hpp"
 #include "core_new/image_io.hpp"
 #include "core_new/logger.hpp"
-#include "loader/cache_image_loader.hpp"
+#include "loader_new/cache_image_loader.hpp"
 #include <cuda_runtime.h>
 
 namespace lfs::core {
@@ -65,6 +65,16 @@ namespace lfs::core {
           _camera_height(camera_height),
           _image_width(camera_width),
           _image_height(camera_height) {
+
+        // Validate inputs
+        if (!R.is_valid() || R.numel() == 0) {
+            LOG_ERROR("Camera constructor: R tensor is invalid or empty");
+            throw std::runtime_error("Camera constructor: R tensor is invalid or empty");
+        }
+        if (!T.is_valid() || T.numel() == 0) {
+            LOG_ERROR("Camera constructor: T tensor is invalid or empty");
+            throw std::runtime_error("Camera constructor: T tensor is invalid or empty");
+        }
 
         // Compute world-to-view transform
         _world_view_transform = world_to_view(R, T);
@@ -148,9 +158,9 @@ namespace lfs::core {
     Tensor Camera::load_and_get_image(int resize_factor, int max_width) {
         unsigned char* data;
         int w, h, c;
-        auto& loader = gs::loader::CacheLoader::getInstance();
+        auto& loader = lfs::loader::CacheLoader::getInstance();
         // Load image synchronously
-        gs::loader::LoadParams params{.resize_factor = resize_factor, .max_width = max_width};
+        lfs::loader::LoadParams params{.resize_factor = resize_factor, .max_width = max_width};
 
         auto result = loader.load_cached_image(_image_path, params);
 

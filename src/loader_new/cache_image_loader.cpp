@@ -75,6 +75,20 @@ namespace lfs::loader {
     std::unique_ptr<CacheLoader> CacheLoader::instance_ = nullptr;
     std::once_flag CacheLoader::init_flag_;
 
+    CacheLoader& CacheLoader::getInstance(bool use_cpu_memory, bool use_fs_cache) {
+        std::call_once(init_flag_, [&]() {
+            instance_.reset(new CacheLoader(use_cpu_memory, use_fs_cache));
+        });
+        return *instance_;
+    }
+
+    CacheLoader& CacheLoader::getInstance() {
+        if (!instance_) {
+            throw std::runtime_error("CacheLoader not initialized. Call getInstance with parameters first.");
+        }
+        return *instance_;
+    }
+
     static bool create_done_file(const std::filesystem::path& img_path) {
         try {
             auto done_path = img_path;

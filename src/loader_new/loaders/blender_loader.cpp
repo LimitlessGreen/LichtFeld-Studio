@@ -135,23 +135,28 @@ namespace lfs::loader {
             for (size_t i = 0; i < camera_infos.size(); ++i) {
                 const auto& info = camera_infos[i];
 
-                auto cam = std::make_shared<lfs::core::Camera>(
-                    info._R,
-                    info._T,
-                    info._focal_x,
-                    info._focal_y,
-                    info._center_x,
-                    info._center_y,
-                    Tensor::empty({0}, Device::CPU, DataType::Float32), // radial_distortion
-                    Tensor::empty({0}, Device::CPU, DataType::Float32), // tangential_distortion
-                    info._camera_model_type,
-                    info._image_name,
-                    info._image_path,
-                    info._width,
-                    info._height,
-                    static_cast<int>(i));
+                try {
+                    auto cam = std::make_shared<lfs::core::Camera>(
+                        info._R,
+                        info._T,
+                        info._focal_x,
+                        info._focal_y,
+                        info._center_x,
+                        info._center_y,
+                        info._radial_distortion,
+                        info._tangential_distortion,
+                        info._camera_model_type,
+                        info._image_name,
+                        info._image_path,
+                        info._width,
+                        info._height,
+                        static_cast<int>(i));
 
-                cameras.push_back(cam);
+                    cameras.push_back(cam);
+                } catch (const std::exception& e) {
+                    LOG_ERROR("Failed to create camera {}: {}", i, e.what());
+                    throw;
+                }
             }
 
             // Create dataset configuration
@@ -189,6 +194,9 @@ namespace lfs::loader {
             auto scene_center_cpu = scene_center.cpu();
             const float* sc_ptr = scene_center_cpu.template ptr<float>();
 
+            // Save dataset size before moving
+            size_t num_cameras = dataset->size();
+
             LoadResult result{
                 .data = LoadedScene{
                     .cameras = std::move(dataset),
@@ -199,7 +207,7 @@ namespace lfs::loader {
                 .warnings = {"Using random point cloud initialization"}};
 
             LOG_INFO("Blender/NeRF dataset loaded successfully in {}ms", load_time.count());
-            LOG_INFO("  - {} cameras", dataset->size());
+            LOG_INFO("  - {} cameras", num_cameras);
             LOG_DEBUG("  - Scene center: [{:.3f}, {:.3f}, {:.3f}]",
                       sc_ptr[0], sc_ptr[1], sc_ptr[2]);
 

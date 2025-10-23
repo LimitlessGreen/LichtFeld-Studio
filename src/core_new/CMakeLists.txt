@@ -13,7 +13,8 @@ set(CORE_SOURCES
         image_io.cpp
         parameters.cpp
         splat_data.cpp
-        sogs.cpp
+        # sogs.cpp  # Commented out temporarily - has unimplemented dependencies
+        sogs_stub.cpp  # Stub implementation for write_sog
         tinyply.cpp
 )
 
@@ -67,6 +68,7 @@ target_link_libraries(lfs_core
         spdlog::spdlog
         ${WEBP_LIB}     # WebP for SOG compression
         ${ARCHIVE_LIB}  # LibArchive for SOG bundle support
+        lfs_loader      # For CacheLoader used in camera.cpp
     PRIVATE
         taywee::args    # Only used in argument_parser.cpp
 )

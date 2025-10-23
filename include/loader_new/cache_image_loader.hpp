@@ -52,22 +52,10 @@ namespace lfs::loader {
         CacheLoader& operator=(const CacheLoader&) = delete;
 
         // Static method to get the singleton instance
-        static CacheLoader& getInstance(
-            bool use_cpu_memory,
-            bool use_fs_cache) {
-            std::call_once(init_flag_, [&]() {
-                instance_.reset(new CacheLoader(use_cpu_memory, use_fs_cache));
-            });
-            return *instance_;
-        }
+        static CacheLoader& getInstance(bool use_cpu_memory, bool use_fs_cache);
 
         // Static method to get existing instance (throws if not initialized)
-        static CacheLoader& getInstance() {
-            if (!instance_) {
-                throw std::runtime_error("CacheLoader not initialized. Call getInstance with parameters first.");
-            }
-            return *instance_;
-        }
+        static CacheLoader& getInstance();
 
         // Main method - to be implemented
         [[nodiscard]] std::tuple<unsigned char*, int, int, int> load_cached_image(const std::filesystem::path& path, const LoadParams& params);

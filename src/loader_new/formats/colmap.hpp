@@ -25,8 +25,8 @@ namespace lfs::loader {
     struct CameraData {
         // Static data loaded from COLMAP/transforms
         uint32_t _camera_ID = 0;
-        Tensor _R = Tensor::eye(3);
-        Tensor _T = Tensor::zeros({3}, Device::CPU, DataType::Float32);
+        Tensor _R;
+        Tensor _T;
         float _focal_x = 0.f;
         float _focal_y = 0.f;
         float _center_x = 0.f;
@@ -36,6 +36,17 @@ namespace lfs::loader {
         gsplat::CameraModelType _camera_model_type = gsplat::CameraModelType::PINHOLE;
         int _width = 0;
         int _height = 0;
+        Tensor _radial_distortion;
+        Tensor _tangential_distortion;
+
+        // Default constructor - tensors will be assigned later
+        CameraData() = default;
+
+        // Explicitly defaulted copy/move to ensure tensor semantics are preserved
+        CameraData(const CameraData&) = default;
+        CameraData(CameraData&&) = default;
+        CameraData& operator=(const CameraData&) = default;
+        CameraData& operator=(CameraData&&) = default;
     };
 
     /**
