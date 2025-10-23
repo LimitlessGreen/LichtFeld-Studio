@@ -6,7 +6,7 @@
 
 #include "gui/ui_context.hpp"
 
-namespace gs::gui::panels {
+namespace lfs::vis::gui::panels {
 
     void DrawCropBoxControls(const UIContext& ctx);
 
@@ -23,4 +23,4 @@ namespace gs::gui::panels {
 
     // Access for GuiManager - Add this declaration
     const CropBoxState& getCropBoxState();
-} // namespace gs::gui::panels
+} // namespace lfs::vis::gui::panels

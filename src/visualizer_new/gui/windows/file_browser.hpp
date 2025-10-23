@@ -8,7 +8,7 @@
 #include <functional>
 #include <string>
 
-namespace gs::gui {
+namespace lfs::vis::gui {
 
     class FileBrowser {
     public:
@@ -25,4 +25,4 @@ namespace gs::gui {
         std::function<void(const std::filesystem::path&, bool)> on_file_selected_;
     };
 
-} // namespace gs::gui
+} // namespace lfs::vis::gui

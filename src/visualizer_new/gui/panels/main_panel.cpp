@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "gui/panels/main_panel.hpp"
-#include "core/events.hpp"
+#include "core_new/events.hpp"
 #include "gui/panels/tools_panel.hpp"
 #include "gui/panels/training_panel.hpp"
 #include "gui/ui_widgets.hpp"
@@ -14,7 +14,7 @@
 #include <windows.h>
 #endif
 
-namespace gs::gui::panels {
+namespace lfs::vis::gui::panels {
 
     void DrawWindowControls(const UIContext& ctx) {
 
@@ -134,7 +134,7 @@ namespace gs::gui::panels {
         // Camera Rotation
         if (ImGui::Checkbox("Lock Gimbal", &settings.lock_gimbal)) {
             settings_changed = true;
-            events::cmd::ToggleGimbalLock{
+            lfs::core::events::cmd::ToggleGimbalLock{
                 .locked = settings.lock_gimbal}
                 .emit();
         }
@@ -352,4 +352,4 @@ namespace gs::gui::panels {
                                   min_val, max_val, loss_label);
         }
     }
-} // namespace gs::gui::panels
+} // namespace lfs::vis::gui::panels

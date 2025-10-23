@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "core/image_io.hpp"
+#include "core_new/image_io.hpp"
 #include <atomic>
 #include <filesystem>
 #include <glad/glad.h>
@@ -17,7 +17,7 @@
 // Forward declarations
 struct GLFWwindow;
 
-namespace gs::gui {
+namespace lfs::vis::gui {
 
     /**
      * @brief RAII wrapper for raw image data
@@ -228,4 +228,4 @@ namespace gs::gui {
         GLint max_texture_size_ = 4096;
     };
 
-} // namespace gs::gui
+} // namespace lfs::vis::gui

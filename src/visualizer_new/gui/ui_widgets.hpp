@@ -8,7 +8,7 @@
 #include <glm/glm.hpp>
 #include <string>
 
-namespace gs::gui::widgets {
+namespace lfs::vis::gui::widgets {
 
     // Reusable UI widgets
     bool SliderWithReset(const char* label, float* v, float min, float max, float reset_value);
@@ -22,4 +22,4 @@ namespace gs::gui::widgets {
     void DrawModeStatusWithContentSwitch(const UIContext& ctx);
     // Mode display helpers
     void DrawModeStatus(const UIContext& ctx);
-} // namespace gs::gui::widgets
+} // namespace lfs::vis::gui::widgets

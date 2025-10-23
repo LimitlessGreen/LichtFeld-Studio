@@ -19,7 +19,7 @@ namespace gs::management {
     class Project;
 }
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     struct ViewerOptions {
         std::string title = "LichtFeld Studio";
@@ -35,7 +35,7 @@ namespace gs::visualizer {
         static std::unique_ptr<Visualizer> create(const ViewerOptions& options = {});
 
         virtual void run() = 0;
-        virtual void setParameters(const param::TrainingParameters& params) = 0;
+        virtual void setParameters(const lfs::core::param::TrainingParameters& params) = 0;
         virtual std::expected<void, std::string> loadPLY(const std::filesystem::path& path) = 0;
         virtual std::expected<void, std::string> loadDataset(const std::filesystem::path& path) = 0;
 
@@ -50,4 +50,4 @@ namespace gs::visualizer {
         virtual ~Visualizer() = default;
     };
 
-} // namespace gs::visualizer
+} // namespace lfs::vis

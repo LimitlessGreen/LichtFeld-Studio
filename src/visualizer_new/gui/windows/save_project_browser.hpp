@@ -12,7 +12,7 @@
 #include <windows.h>
 #endif
 
-namespace gs::gui {
+namespace lfs::vis::gui {
 
     class SaveProjectBrowser {
     public:
@@ -30,4 +30,4 @@ namespace gs::gui {
         std::string project_dir_name_;
     };
 
-} // namespace gs::gui
+} // namespace lfs::vis::gui

@@ -4,7 +4,7 @@
 
 #include "visualizer_impl.hpp"
 #include "core/data_loading_service.hpp"
-#include "core/logger.hpp"
+#include "core_new/logger.hpp"
 #include "scene/scene_manager.hpp"
 #include "tools/translation_gizmo_tool.hpp"
 #include <stdexcept>
@@ -12,7 +12,7 @@
 #include <windows.h>
 #endif
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     VisualizerImpl::VisualizerImpl(const ViewerOptions& options)
         : options_(options),
@@ -106,12 +106,12 @@ namespace gs::visualizer {
         main_loop_->setShouldCloseCallback([this]() { return allowclose(); });
 
         gui_manager_->setFileSelectedCallback([this](const std::filesystem::path& path, bool is_dataset) {
-            events::cmd::LoadFile{.path = path, .is_dataset = is_dataset}.emit();
+            lfs::core::events::cmd::LoadFile{.path = path, .is_dataset = is_dataset}.emit();
         });
     }
 
     void VisualizerImpl::setupEventHandlers() {
-        using namespace events;
+        using namespace lfs::core::events;
 
         // Training commands
         cmd::StartTraining::when([this](const auto&) {
@@ -400,7 +400,7 @@ namespace gs::visualizer {
                 // write to project file on every change - maybe configurable in the future?
                 project_->setUpdateFileOnChange(true);
                 // slicing intended
-                auto dataset = static_cast<const param::DatasetConfig&>(project_->getProjectData().data_set_info);
+                auto dataset = static_cast<const lfs::core::param::DatasetConfig&>(project_->getProjectData().data_set_info);
                 if (!dataset.data_path.empty()) {
                     LOG_DEBUG("Loading dataset from project: {}", dataset.data_path.string());
                     auto result = data_loader_->loadDataset(dataset.data_path);
@@ -437,7 +437,7 @@ namespace gs::visualizer {
 
         // sort according to iter numbers
         std::sort(plys.begin(), plys.end(),
-                  [](const gs::management::PlyData& a, const gs::management::PlyData& b) {
+                  [](const gs::lfs::core::management::PlyData& a, const gs::lfs::core::management::PlyData& b) {
                       return a.ply_training_iter_number < b.ply_training_iter_number;
                   });
 
@@ -471,7 +471,7 @@ namespace gs::visualizer {
         main_loop_->run();
     }
 
-    void VisualizerImpl::setParameters(const param::TrainingParameters& params) {
+    void VisualizerImpl::setParameters(const lfs::core::param::TrainingParameters& params) {
         data_loader_->setParameters(params);
     }
 
@@ -505,7 +505,7 @@ namespace gs::visualizer {
                 data_config.data_path = path;
                 project_->setDataInfo(data_config);
             } else {
-                project_ = gs::management::CreateTempNewProject(data_config, project_->getOptimizationParams());
+                project_ = gs::lfs::core::management::CreateTempNewProject(data_config, project_->getOptimizationParams());
                 updateProjectOnModules();
             }
         }
@@ -520,7 +520,7 @@ namespace gs::visualizer {
     bool VisualizerImpl::openProject(const std::filesystem::path& path) {
         LOG_TIMER("OpenProject");
 
-        auto project = std::make_shared<gs::management::Project>();
+        auto project = std::make_shared<gs::lfs::core::lfs::core::management::Project>();
 
         if (!project) {
             LOG_ERROR("Failed to create project object");
@@ -563,16 +563,16 @@ namespace gs::visualizer {
         return success;
     }
 
-    void VisualizerImpl::attachProject(std::shared_ptr<gs::management::Project> _project) {
+    void VisualizerImpl::attachProject(std::shared_ptr<gs::lfs::core::lfs::core::management::Project> _project) {
         project_ = _project;
         updateProjectOnModules();
     }
 
-    std::shared_ptr<gs::management::Project> VisualizerImpl::getProject() {
+    std::shared_ptr<gs::lfs::core::lfs::core::management::Project> VisualizerImpl::getProject() {
         return project_;
     }
 
-    void VisualizerImpl::handleLoadProjectCommand(const events::cmd::LoadProject& cmd) {
+    void VisualizerImpl::handleLoadProjectCommand(const lfs::core::events::cmd::LoadProject& cmd) {
         try {
             bool success = openProject(cmd.path);
             if (!success) {
@@ -591,14 +591,14 @@ namespace gs::visualizer {
         }
     }
 
-    void VisualizerImpl::handleLoadFileCommand(const events::cmd::LoadFile& cmd) {
+    void VisualizerImpl::handleLoadFileCommand(const lfs::core::events::cmd::LoadFile& cmd) {
         if (cmd.is_dataset && project_) {
             auto data_config = project_->getProjectData().data_set_info;
             data_config.data_path = cmd.path;
 
             if (project_->getIsTempProject()) {
                 data_config.output_path.clear();
-                project_ = gs::management::CreateTempNewProject(data_config, project_->getOptimizationParams());
+                project_ = gs::lfs::core::management::CreateTempNewProject(data_config, project_->getOptimizationParams());
             } else { // else: project already exits (with output dir) - only need to replace data path
                 project_->setDataInfo(data_config);
             }
@@ -607,7 +607,7 @@ namespace gs::visualizer {
         }
     }
 
-    void VisualizerImpl::handleSaveProject(const events::cmd::SaveProject& cmd) {
+    void VisualizerImpl::handleSaveProject(const lfs::core::events::cmd::SaveProject& cmd) {
         if (project_) {
             const auto& dst_dir = cmd.project_dir;
             if (!std::filesystem::exists(dst_dir)) {
@@ -663,4 +663,4 @@ namespace gs::visualizer {
             scene_manager_->setProject(project_);
         }
     }
-} // namespace gs::visualizer
+} // namespace lfs::vis

@@ -6,7 +6,7 @@
 
 #include <functional>
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     class MainLoop {
     public:
@@ -32,4 +32,4 @@ namespace gs::visualizer {
         ShouldCloseCallback should_close_callback_;
     };
 
-} // namespace gs::visualizer
+} // namespace lfs::vis

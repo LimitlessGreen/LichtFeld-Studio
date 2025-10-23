@@ -6,8 +6,8 @@
 
 #include "gui/ui_context.hpp"
 
-namespace gs::gui::panels {
+namespace lfs::vis::gui::panels {
 
     void DrawWorldTransformControls(const UIContext& ctx);
 
-} // namespace gs::gui::panels
+} // namespace lfs::vis::gui::panels

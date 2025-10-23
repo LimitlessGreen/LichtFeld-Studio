@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "gui/panels/training_panel.hpp"
-#include "core/events.hpp"
-#include "core/logger.hpp"
+#include "core_new/events.hpp"
+#include "core_new/logger.hpp"
 #include "gui/ui_widgets.hpp"
 #include "gui/utils/windows_utils.hpp"
 #include "visualizer_impl.hpp"
@@ -13,7 +13,7 @@
 #include <deque>
 #include <imgui.h>
 
-namespace gs::gui::panels {
+namespace lfs::vis::gui::panels {
 
     // Iteration rate tracking
     struct IterationRateTracker {
@@ -70,9 +70,9 @@ namespace gs::gui::panels {
     void SaveProjectFileDialog(bool* p_open) {
         // show native windows file dialog for project directory selection
         PWSTR filePath = nullptr;
-        if (SUCCEEDED(gs::gui::utils::selectFileNative(filePath, nullptr, 0, true))) {
+        if (SUCCEEDED(lfs::vis::gui::utils::selectFileNative(filePath, nullptr, 0, true))) {
             std::filesystem::path project_path(filePath);
-            events::cmd::SaveProject{project_path}.emit();
+            lfs::core::events::cmd::SaveProject{project_path}.emit();
             LOG_INFO("Saving project file into : {}", std::filesystem::path(project_path).string());
             *p_open = false;
         }
@@ -96,8 +96,8 @@ namespace gs::gui::panels {
         }
 
         // Get parameters - either from project (if Ready) or from trainer (if training/completed)
-        param::OptimizationParameters opt_params;
-        param::DatasetConfig dataset_params;
+        lfs::core::param::OptimizationParameters opt_params;
+        lfs::core::param::DatasetConfig dataset_params;
 
         if (trainer_state == TrainerManager::State::Ready) {
             // Before training - get from project (editable)
@@ -718,7 +718,7 @@ namespace gs::gui::panels {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.3f, 1.0f));
             if (ImGui::Button("Start Training", ImVec2(-1, 0))) {
-                events::cmd::StartTraining{}.emit();
+                lfs::core::events::cmd::StartTraining{}.emit();
             }
             ImGui::PopStyleColor(2);
 
@@ -737,7 +737,7 @@ namespace gs::gui::panels {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.5f, 0.1f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.6f, 0.2f, 1.0f));
             if (ImGui::Button("Pause", ImVec2(-1, 0))) {
-                events::cmd::PauseTraining{}.emit();
+                lfs::core::events::cmd::PauseTraining{}.emit();
             }
             ImGui::PopStyleColor(2);
             break;
@@ -746,7 +746,7 @@ namespace gs::gui::panels {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.3f, 1.0f));
             if (ImGui::Button("Resume", ImVec2(-1, 0))) {
-                events::cmd::ResumeTraining{}.emit();
+                lfs::core::events::cmd::ResumeTraining{}.emit();
             }
             ImGui::PopStyleColor(2);
 
@@ -761,7 +761,7 @@ namespace gs::gui::panels {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.3f, 0.3f, 1.0f));
             if (ImGui::Button("Stop Permanently", ImVec2(-1, 0))) {
-                events::cmd::StopTraining{}.emit();
+                lfs::core::events::cmd::StopTraining{}.emit();
             }
             ImGui::PopStyleColor(2);
             break;
@@ -808,7 +808,7 @@ namespace gs::gui::panels {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.4f, 0.7f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.5f, 0.8f, 1.0f));
             if (ImGui::Button("Save Checkpoint", ImVec2(-1, 0))) {
-                events::cmd::SaveCheckpoint{}.emit();
+                lfs::core::events::cmd::SaveCheckpoint{}.emit();
                 state.save_in_progress = true;
                 state.save_start_time = std::chrono::steady_clock::now();
             }
@@ -877,4 +877,4 @@ namespace gs::gui::panels {
         ImGui::TextColored(memColor, "Used GPU Memory: %.1f%% (%.1f/%.1f GB)", pctUsed, used_t / 1e9f, total_t / 1e9f);
     }
 
-} // namespace gs::gui::panels
+} // namespace lfs::vis::gui::panels

@@ -3,16 +3,16 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "scene/scene.hpp"
-#include "core/logger.hpp"
+#include "core_new/logger.hpp"
 
 #include <algorithm>
 #include <print>
 #include <ranges>
 #include <torch/torch.h>
 
-namespace gs {
+namespace lfs::vis {
 
-    void Scene::addNode(const std::string& name, std::unique_ptr<SplatData> model) {
+    void Scene::addNode(const std::string& name, std::unique_ptr<lfs::core::SplatData> model) {
         // Calculate gaussian count before moving
         size_t gaussian_count = static_cast<size_t>(model->size());
 
@@ -98,7 +98,7 @@ namespace gs {
         return {hidden_name, shown_name};
     }
 
-    const SplatData* Scene::getCombinedModel() const {
+    const lfs::core::SplatData* Scene::getCombinedModel() const {
         rebuildCacheIfNeeded();
         return cached_combined_.get();
     }
@@ -177,7 +177,7 @@ namespace gs {
 
         auto stats = std::accumulate(
             visible_models.begin(), visible_models.end(), ModelStats{},
-            [](ModelStats acc, const SplatData* model) {
+            [](ModelStats acc, const lfs::core::SplatData* model) {
                 acc.total_gaussians += model->size();
 
                 // Calculate SH degree from the actual shN tensor dimensions
@@ -317,4 +317,4 @@ namespace gs {
         LOG_WARN("Scene: Cannot find node '{}' to rename", old_name);
         return false;
     }
-} // namespace gs
+} // namespace lfs::vis

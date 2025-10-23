@@ -4,20 +4,20 @@
 
 #pragma once
 
-#include "core/splat_data.hpp"
+#include "core_new/splat_data.hpp"
 #include <glm/glm.hpp>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-namespace gs {
+namespace lfs::vis {
 
     class Scene {
     public:
         struct Node {
             std::string name;
-            std::unique_ptr<SplatData> model;
+            std::unique_ptr<lfs::core::SplatData> model;
             glm::mat4 transform{1.0f};
             bool visible = true;
             size_t gaussian_count = 0;
@@ -35,7 +35,7 @@ namespace gs {
         Scene& operator=(Scene&&) = default;
 
         // Node management
-        void addNode(const std::string& name, std::unique_ptr<SplatData> model);
+        void addNode(const std::string& name, std::unique_ptr<lfs::core::SplatData> model);
         void removeNode(const std::string& name);
         void setNodeVisibility(const std::string& name, bool visible);
         bool renameNode(const std::string& old_name, const std::string& new_name);
@@ -43,7 +43,7 @@ namespace gs {
         std::pair<std::string, std::string> cycleVisibilityWithNames();
 
         // Get combined model for rendering
-        const SplatData* getCombinedModel() const;
+        const lfs::core::lfs::core::SplatData* getCombinedModel() const;
 
         // Direct queries
         size_t getNodeCount() const { return nodes_.size(); }
@@ -60,11 +60,11 @@ namespace gs {
         std::vector<Node> nodes_;
 
         // Caching for combined model
-        mutable std::unique_ptr<SplatData> cached_combined_;
+        mutable std::unique_ptr<lfs::core::SplatData> cached_combined_;
         mutable bool cache_valid_ = false;
 
         void invalidateCache() { cache_valid_ = false; }
         void rebuildCacheIfNeeded() const;
     };
 
-} // namespace gs
+} // namespace lfs::vis

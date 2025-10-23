@@ -4,17 +4,17 @@
 
 #pragma once
 
-#include "core/events.hpp"
-#include "core/parameters.hpp"
+#include "core_new/events.hpp"
+#include "core_new/parameters.hpp"
 #include <expected>
 #include <filesystem>
 #include <string>
 
-namespace gs {
+namespace lfs::vis {
     class SceneManager;
 }
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     class DataLoadingService {
     public:
@@ -22,8 +22,8 @@ namespace gs::visualizer {
         ~DataLoadingService();
 
         // Set parameters for dataset loading
-        void setParameters(const param::TrainingParameters& params) { params_ = params; }
-        const param::TrainingParameters& getParameters() const { return params_; }
+        void setParameters(const lfs::core::param::TrainingParameters& params) { params_ = params; }
+        const lfs::core::param::TrainingParameters& getParameters() const { return params_; }
 
         // Loading operations
         std::expected<void, std::string> loadPLY(const std::filesystem::path& path);
@@ -44,7 +44,7 @@ namespace gs::visualizer {
         bool isPLYFile(const std::filesystem::path& path) const;
 
         SceneManager* scene_manager_;
-        param::TrainingParameters params_;
+        lfs::core::param::TrainingParameters params_;
     };
 
-} // namespace gs::visualizer
+} // namespace lfs::vis

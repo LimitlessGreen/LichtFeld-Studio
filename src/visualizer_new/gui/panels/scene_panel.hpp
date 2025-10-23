@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "core/events.hpp"
+#include "core_new/events.hpp"
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -13,7 +13,7 @@
 
 #include "training/training_manager.hpp"
 
-namespace gs {
+namespace lfs::vis {
     namespace gui {
 
         // Scene panel that integrates with existing GUI
@@ -94,8 +94,8 @@ namespace gs {
             void handleSceneCleared();
             void handlePLYAdded(const events::state::PLYAdded& event);
             void handlePLYRemoved(const events::state::PLYRemoved& event);
-            void handlePLYRenamed(const events::cmd::RenamePLY& event);
-            void handleGoToCamView(const events::cmd::GoToCamView& event);
+            void handlePLYRenamed(const lfs::core::events::cmd::RenamePLY& event);
+            void handleGoToCamView(const lfs::core::events::cmd::GoToCamView& event);
             void loadImageCams(const std::filesystem::path& path);
             void onImageSelected(const std::filesystem::path& imagePath);
             void onImageDoubleClicked(size_t imageIndex);
@@ -112,4 +112,4 @@ namespace gs {
         };
 
     } // namespace gui
-} // namespace gs
+} // namespace lfs::vis

@@ -8,7 +8,7 @@
 #include <functional>
 #include <string>
 
-namespace gs::gui {
+namespace lfs::vis::gui {
 
     class ProjectChangedDialogBox {
     public:
@@ -21,4 +21,4 @@ namespace gs::gui {
         std::function<void(bool)> result_;
     };
 
-} // namespace gs::gui
+} // namespace lfs::vis::gui

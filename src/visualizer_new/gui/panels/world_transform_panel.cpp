@@ -10,7 +10,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
 
-namespace gs::gui::panels {
+namespace lfs::vis::gui::panels {
     // Helper function to wrap angles to 0-360 range
     static float wrapAngle(float angle) {
         while (angle < 0.0f) {
@@ -211,4 +211,4 @@ namespace gs::gui::panels {
             ImGui::TreePop();
         }
     }
-} // namespace gs::gui::panels
+} // namespace lfs::vis::gui::panels

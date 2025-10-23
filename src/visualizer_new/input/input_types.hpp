@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace gs {
+namespace lfs::vis {
 
     // Input event types shared across the system
     struct MouseButtonEvent {
@@ -47,4 +47,4 @@ namespace gs {
     using KeyCallback = std::function<void(const KeyEvent&)>;
     using FileDropCallback = std::function<void(const FileDropEvent&)>;
 
-} // namespace gs
+} // namespace lfs::vis

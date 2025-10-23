@@ -8,7 +8,7 @@
 #include <string>
 #include <unordered_map>
 
-namespace gs {
+namespace lfs::vis {
     // Forward declarations
     namespace visualizer {
         class VisualizerImpl;
@@ -24,4 +24,4 @@ namespace gs {
             std::unordered_map<std::string, bool>* window_states;
         };
     } // namespace gui
-} // namespace gs
+} // namespace lfs::vis

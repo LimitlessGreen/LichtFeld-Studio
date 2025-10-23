@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "gui/windows/image_preview.hpp"
-#include "core/events.hpp"
-#include "core/image_io.hpp"
-#include "core/logger.hpp"
+#include "core_new/events.hpp"
+#include "core_new/image_io.hpp"
+#include "core_new/logger.hpp"
 #include <algorithm>
 #include <format>
 #include <future>
@@ -14,7 +14,7 @@
 #include <stdexcept>
 #include <thread>
 
-namespace gs::gui {
+namespace lfs::vis::gui {
 
     ImagePreview::ImagePreview() = default;
 
@@ -668,4 +668,4 @@ namespace gs::gui {
         ImGui::End();
     }
 
-} // namespace gs::gui
+} // namespace lfs::vis::gui

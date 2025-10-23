@@ -7,7 +7,7 @@
 #include <core/logger.hpp>
 #include <imgui.h>
 
-namespace gs::gui {
+namespace lfs::vis::gui {
 
     ProjectChangedDialogBox::ProjectChangedDialogBox() {
         // current_path_ = std::filesystem::current_path().string();
@@ -62,4 +62,4 @@ namespace gs::gui {
     void ProjectChangedDialogBox::setOnDialogClose(std::function<void(bool)> callback) {
         result_ = callback;
     }
-} // namespace gs::gui
+} // namespace lfs::vis::gui

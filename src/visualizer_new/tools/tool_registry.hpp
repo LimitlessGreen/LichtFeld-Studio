@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     class ToolRegistry {
     public:
@@ -56,4 +56,4 @@ namespace gs::visualizer {
         std::unordered_map<std::string, ToolFactory> tool_factories_;
     };
 
-} // namespace gs::visualizer
+} // namespace lfs::vis

@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "gui/gui_manager.hpp"
-#include "core/image_io.hpp"
-#include "core/logger.hpp"
+#include "core_new/image_io.hpp"
+#include "core_new/logger.hpp"
 #include "gui/panels/main_panel.hpp"
 #include "gui/panels/scene_panel.hpp"
 #include "gui/panels/tools_panel.hpp"
@@ -25,7 +25,7 @@
 #include <imgui_impl_opengl3.h>
 #include <imgui_internal.h>
 
-namespace gs::gui {
+namespace lfs::vis::gui {
 
     GuiManager::GuiManager(visualizer::VisualizerImpl* viewer)
         : viewer_(viewer) {
@@ -68,7 +68,7 @@ namespace gs::gui {
             OpenDatasetFolderDialog();
 
             // hide the file browser
-            events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
+            lfs::core::events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
 #endif // WIN32
         });
 
@@ -79,7 +79,7 @@ namespace gs::gui {
             OpenProjectFileDialog();
 
             // hide the file browser
-            events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
+            lfs::core::events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
 #endif // WIN32
         });
 
@@ -90,7 +90,7 @@ namespace gs::gui {
             OpenPlyFileDialog();
 
             // hide the file browser
-            events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
+            lfs::core::events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
 #endif // WIN32
         });
 
@@ -100,7 +100,7 @@ namespace gs::gui {
 
         menu_bar_->setOnSaveProject([this]() {
             if (viewer_->project_) {
-                events::cmd::SaveProject{viewer_->project_->getProjectOutputFolder().string()}.emit();
+                lfs::core::events::cmd::SaveProject{viewer_->project_->getProjectOutputFolder().string()}.emit();
             }
         });
 
@@ -131,7 +131,7 @@ namespace gs::gui {
 
         // Set application icon - use the resource path helper
         try {
-            const auto icon_path = gs::visualizer::getAssetPath("lichtfeld-icon.png");
+            const auto icon_path = lfs::vis::getAssetPath("lichtfeld-icon.png");
             const auto [data, width, height, channels] = load_image_with_alpha(icon_path);
 
             GLFWimage image{width, height, data};
@@ -143,7 +143,7 @@ namespace gs::gui {
 
         // Load fonts - use the resource path helper
         try {
-            auto font_path = gs::visualizer::getAssetPath("JetBrainsMono-Regular.ttf");
+            auto font_path = lfs::vis::getAssetPath("JetBrainsMono-Regular.ttf");
             io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 14.0f * xscale);
         } catch (const std::exception& e) {
             // If font loading fails, just use the default font
@@ -155,10 +155,10 @@ namespace gs::gui {
 
         // Configure file browser callback
         setFileSelectedCallback([this](const std::filesystem::path& path, bool is_dataset) {
-            if (path.extension() == gs::management::Project::EXTENSION) {
-                events::cmd::LoadProject{.path = path}.emit();
+            if (path.extension() == gs::lfs::core::lfs::core::management::Project::EXTENSION) {
+                lfs::core::events::cmd::LoadProject{.path = path}.emit();
             } else {
-                events::cmd::LoadFile{.path = path, .is_dataset = is_dataset}.emit();
+                lfs::core::events::cmd::LoadFile{.path = path, .is_dataset = is_dataset}.emit();
             }
 
             window_states_["file_browser"] = false;
@@ -179,7 +179,7 @@ namespace gs::gui {
             if (path.empty()) {
                 window_states_["file_browser"] = true;
             } else {
-                events::cmd::LoadFile{.path = path, .is_dataset = true}.emit();
+                lfs::core::events::cmd::LoadFile{.path = path, .is_dataset = true}.emit();
             }
         });
 
@@ -693,7 +693,7 @@ namespace gs::gui {
     }
 
     void GuiManager::setupEventHandlers() {
-        using namespace events;
+        using namespace lfs::core::events;
 
         // Handle window visibility
         cmd::ShowWindow::when([this](const auto& e) {
@@ -748,4 +748,4 @@ namespace gs::gui {
             project_changed_dialog_box_->setOnDialogClose(callback);
         }
     }
-} // namespace gs::gui
+} // namespace lfs::vis::gui

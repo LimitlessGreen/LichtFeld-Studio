@@ -9,7 +9,7 @@
 #include <cstdarg>
 #include <imgui.h>
 
-namespace gs::gui::widgets {
+namespace lfs::vis::gui::widgets {
 
     bool SliderWithReset(const char* label, float* v, float min, float max, float reset_value) {
         bool changed = ImGui::SliderFloat(label, v, min, max);
@@ -209,4 +209,4 @@ namespace gs::gui::widgets {
         // draw the mode status
         widgets::DrawModeStatus(ctx);
     }
-} // namespace gs::gui::widgets
+} // namespace lfs::vis::gui::widgets

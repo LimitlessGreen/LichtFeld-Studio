@@ -5,17 +5,17 @@
 #pragma once
 
 #include "core/main_loop.hpp"
-#include "core/parameters.hpp"
+#include "core_new/parameters.hpp"
 #include "gui/gui_manager.hpp"
 #include "input/input_controller.hpp"
 #include "internal/viewport.hpp"
 #include "project/project.hpp"
-#include "rendering/rendering.hpp"
+#include "rendering_new/rendering.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "scene/scene_manager.hpp"
 #include "tools/tool_base.hpp"
 #include "training/training_manager.hpp"
-#include "visualizer/visualizer.hpp"
+#include "visualizer_new/visualizer.hpp"
 #include "window/window_manager.hpp"
 #include <memory>
 #include <string>
@@ -23,11 +23,11 @@
 // Forward declaration for GLFW
 struct GLFWwindow;
 
-namespace gs {
+namespace lfs::vis {
     class SceneManager;
-} // namespace gs
+} // namespace lfs::vis
 
-namespace gs::visualizer {
+namespace lfs::vis {
     class DataLoadingService;
 
     namespace tools {
@@ -40,7 +40,7 @@ namespace gs::visualizer {
         ~VisualizerImpl() override;
 
         void run() override;
-        void setParameters(const param::TrainingParameters& params) override;
+        void setParameters(const lfs::core::param::TrainingParameters& params) override;
         std::expected<void, std::string> loadPLY(const std::filesystem::path& path) override;
         std::expected<void, std::string> loadDataset(const std::filesystem::path& path) override;
         void clearScene() override;
@@ -48,8 +48,8 @@ namespace gs::visualizer {
         // open project file and attach it to viewer
         bool openProject(const std::filesystem::path& path) override;
         bool closeProject(const std::filesystem::path& path = {}) override;
-        std::shared_ptr<gs::management::Project> getProject() override;
-        void attachProject(std::shared_ptr<gs::management::Project> _project) override;
+        std::shared_ptr<gs::lfs::core::lfs::core::management::Project> getProject() override;
+        void attachProject(std::shared_ptr<gs::lfs::core::lfs::core::management::Project> _project) override;
         // load project content to viewer
         bool LoadProject();
         void LoadProjectPlys();
@@ -117,10 +117,10 @@ namespace gs::visualizer {
         // Event system
         void setupEventHandlers();
         void setupComponentConnections();
-        void handleLoadProjectCommand(const events::cmd::LoadProject& cmd);
+        void handleLoadProjectCommand(const lfs::core::events::cmd::LoadProject& cmd);
         void handleTrainingCompleted(const events::state::TrainingCompleted& event);
-        void handleLoadFileCommand(const events::cmd::LoadFile& cmd);
-        void handleSaveProject(const events::cmd::SaveProject& cmd);
+        void handleLoadFileCommand(const lfs::core::events::cmd::LoadFile& cmd);
+        void handleSaveProject(const lfs::core::events::cmd::SaveProject& cmd);
 
         // Tool initialization
         void initializeTools();
@@ -146,8 +146,8 @@ namespace gs::visualizer {
         bool gui_initialized_ = false;
         bool tools_initialized_ = false; // Added this member!
         // Project
-        std::shared_ptr<gs::management::Project> project_ = nullptr;
+        std::shared_ptr<gs::lfs::core::lfs::core::management::Project> project_ = nullptr;
         void updateProjectOnModules();
     };
 
-} // namespace gs::visualizer
+} // namespace lfs::vis

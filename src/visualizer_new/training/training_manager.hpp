@@ -12,7 +12,7 @@
 #include <stop_token>
 #include <thread>
 
-namespace gs {
+namespace lfs::vis {
 
     // Forward declarations
     namespace visualizer {
@@ -99,9 +99,9 @@ namespace gs {
         std::shared_ptr<const Camera> getCamById(int camId) const;
         std::vector<std::shared_ptr<const Camera>> getCamList() const;
 
-        void setProject(std::shared_ptr<gs::management::Project> project);
+        void setProject(std::shared_ptr<gs::lfs::core::lfs::core::management::Project> project);
 
-        std::shared_ptr<gs::management::Project> getProject() const { return project_; }
+        std::shared_ptr<gs::lfs::core::lfs::core::management::Project> getProject() const { return project_; }
 
     private:
         // Helper method to avoid duplicated initialization logic
@@ -136,7 +136,7 @@ namespace gs {
         mutable std::mutex loss_buffer_mutex_;
 
         // project
-        std::shared_ptr<gs::management::Project> project_ = nullptr;
+        std::shared_ptr<gs::lfs::core::lfs::core::management::Project> project_ = nullptr;
     };
 
-} // namespace gs
+} // namespace lfs::vis

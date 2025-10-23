@@ -3,14 +3,14 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "tools/translation_gizmo_tool.hpp"
-#include "core/events.hpp"
+#include "core_new/events.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "scene/scene_manager.hpp"
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <print>
 
-namespace gs::visualizer::tools {
+namespace lfs::vis::tools {
 
     TranslationGizmoTool::TranslationGizmoTool() {
         // Initialize with identity transform
@@ -170,7 +170,7 @@ namespace gs::visualizer::tools {
         return false;
     }
 
-    void TranslationGizmoTool::renderUI([[maybe_unused]] const gs::gui::UIContext& ui_ctx, bool* p_open) {
+    void TranslationGizmoTool::renderUI([[maybe_unused]] const lfs::vis::gui::UIContext& ui_ctx, bool* p_open) {
         if (ImGui::Begin("Translation Gizmo", p_open)) {
             ImGui::Text("Gizmo Settings");
             ImGui::Separator();
@@ -260,4 +260,4 @@ namespace gs::visualizer::tools {
         events::ui::RenderSettingsChanged{}.emit();
     }
 
-} // namespace gs::visualizer::tools
+} // namespace lfs::vis::tools

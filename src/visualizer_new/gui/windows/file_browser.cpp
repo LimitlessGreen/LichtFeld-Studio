@@ -3,16 +3,16 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "gui/windows/file_browser.hpp"
-#include "loader/loader.hpp"
+#include "loader_new/loader.hpp"
 #include "project/project.hpp"
 #include <algorithm>
 #include <imgui.h>
 
-namespace gs::gui {
-    using management::Project;
+namespace lfs::vis::gui {
+    using lfs::core::lfs::core::management::Project;
 }
 
-namespace gs::gui {
+namespace lfs::vis::gui {
 
     FileBrowser::FileBrowser() {
         current_path_ = std::filesystem::current_path().string();
@@ -97,13 +97,13 @@ namespace gs::gui {
             });
 
             // Create a Loader instance to check if paths can be loaded
-            auto loader = gs::loader::Loader::create();
+            auto loader = lfs::loader::Loader::create();
 
             for (const auto& dir : dirs) {
                 std::string dirname = "[DIR] " + dir.path().filename().string();
                 bool is_selected = (selected_file_ == dir.path().string());
 
-                bool is_dataset = gs::loader::Loader::isDatasetPath(dir.path());
+                bool is_dataset = lfs::loader::Loader::isDatasetPath(dir.path());
                 bool is_sog_dir = false;
 
                 // Check if it's a SOG directory (has meta.json and WebP files)
@@ -202,7 +202,7 @@ namespace gs::gui {
             std::filesystem::path selected_path(selected_file_);
 
             if (std::filesystem::is_directory(selected_path)) {
-                bool is_dataset = gs::loader::Loader::isDatasetPath(selected_path);
+                bool is_dataset = lfs::loader::Loader::isDatasetPath(selected_path);
 
                 // Check if it's a SOG directory
                 bool is_sog_dir = false;
@@ -228,8 +228,8 @@ namespace gs::gui {
 
                     ImGui::SameLine();
 
-                    auto dataset_type = gs::loader::Loader::getDatasetType(selected_path);
-                    const char* type_str = (dataset_type == gs::loader::DatasetType::COLMAP) ? "(COLMAP)" : (dataset_type == gs::loader::DatasetType::Transforms) ? "(Transforms)"
+                    auto dataset_type = lfs::loader::Loader::getDatasetType(selected_path);
+                    const char* type_str = (dataset_type == lfs::loader::DatasetType::COLMAP) ? "(COLMAP)" : (dataset_type == lfs::loader::DatasetType::Transforms) ? "(Transforms)"
                                                                                                                                                                   : "(Dataset)";
                     ImGui::TextDisabled(type_str);
                 } else if (is_sog_dir) {
@@ -346,4 +346,4 @@ namespace gs::gui {
             current_path_ = path.parent_path().string();
         }
     }
-} // namespace gs::gui
+} // namespace lfs::vis::gui

@@ -3,17 +3,17 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "rendering_manager.hpp"
-#include "core/image_io.hpp" // Use existing image_io utilities
-#include "core/logger.hpp"
-#include "core/splat_data.hpp"
+#include "core_new/image_io.hpp" // Use existing image_io utilities
+#include "core_new/logger.hpp"
+#include "core_new/splat_data.hpp"
 #include "geometry/euclidean_transform.hpp"
-#include "rendering/rendering.hpp"
+#include "rendering_new/rendering.hpp"
 #include "scene/scene_manager.hpp"
 #include "training/training_manager.hpp"
 #include <glad/glad.h>
 #include <stdexcept>
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     // GTTextureCache Implementation
     GTTextureCache::GTTextureCache() {
@@ -198,7 +198,7 @@ namespace gs::visualizer {
 
     void RenderingManager::setupEventHandlers() {
         // Listen for split view toggle
-        events::cmd::ToggleSplitView::when([this](const auto&) {
+        lfs::core::events::cmd::ToggleSplitView::when([this](const auto&) {
             std::lock_guard<std::mutex> lock(settings_mutex_);
 
             // V key toggles between Disabled and PLYComparison only
@@ -216,7 +216,7 @@ namespace gs::visualizer {
         });
 
         // Listen for GT comparison toggle (G key - for camera/GT comparison)
-        events::cmd::ToggleGTComparison::when([this](const auto&) {
+        lfs::core::events::cmd::ToggleGTComparison::when([this](const auto&) {
             std::lock_guard<std::mutex> lock(settings_mutex_);
 
             // G key toggles between Disabled and GTComparison only
@@ -245,7 +245,7 @@ namespace gs::visualizer {
         });
 
         // Listen for camera view changes
-        events::cmd::GoToCamView::when([this](const auto& event) {
+        lfs::core::events::cmd::GoToCamView::when([this](const auto& event) {
             setCurrentCameraId(event.cam_id);
             LOG_DEBUG("Current camera ID set to: {}", event.cam_id);
 
@@ -336,7 +336,7 @@ namespace gs::visualizer {
         });
 
         // PLY visibility changes
-        events::cmd::SetPLYVisibility::when([this](const auto&) {
+        lfs::core::events::cmd::SetPLYVisibility::when([this](const auto&) {
             markDirty();
         });
 
@@ -1087,4 +1087,4 @@ namespace gs::visualizer {
             }
         }
     }
-} // namespace gs::visualizer
+} // namespace lfs::vis

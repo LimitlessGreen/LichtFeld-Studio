@@ -4,14 +4,14 @@
 
 #pragma once
 
-#include "core/events.hpp"
-#include "core/parameters.hpp"
+#include "core_new/events.hpp"
+#include "core_new/parameters.hpp"
 #include "scene/scene.hpp"
 #include <filesystem>
 #include <mutex>
 #include <project/project.hpp>
 
-namespace gs {
+namespace lfs::vis {
 
     // Forward declarations
     class Trainer;
@@ -106,7 +106,7 @@ namespace gs {
         void setPLYVisibility(const std::string& name, bool visible);
 
         void loadDataset(const std::filesystem::path& path,
-                         const param::TrainingParameters& params);
+                         const lfs::core::param::TrainingParameters& params);
         void clear();
 
         // For rendering - gets appropriate model
@@ -123,9 +123,9 @@ namespace gs {
 
         SceneInfo getSceneInfo() const;
 
-        void setProject(std::shared_ptr<gs::management::Project> project) { lfs_project_ = project; }
+        void setProject(std::shared_ptr<gs::lfs::core::lfs::core::management::Project> project) { lfs_project_ = project; }
 
-        [[nodiscard]] std::shared_ptr<gs::management::Project> getProject() const { return lfs_project_; }
+        [[nodiscard]] std::shared_ptr<gs::lfs::core::lfs::core::management::Project> getProject() const { return lfs_project_; }
 
         bool renamePLY(const std::string& old_name, const std::string& new_name);
         void updatePlyPath(const std::string& ply_name, const std::filesystem::path& ply_path);
@@ -134,7 +134,7 @@ namespace gs {
         void setupEventHandlers();
         void emitSceneChanged();
         void handleCropActivePly(const gs::geometry::BoundingBox& crop_box);
-        void handleRenamePly(const events::cmd::RenamePLY& event);
+        void handleRenamePly(const lfs::core::events::cmd::RenamePLY& event);
 
         Scene scene_;
         mutable std::mutex state_mutex_;
@@ -151,9 +151,9 @@ namespace gs {
         visualizer::RenderingManager* rendering_manager_ = nullptr;
 
         // Cache for parameters
-        std::optional<param::TrainingParameters> cached_params_;
+        std::optional<lfs::core::param::TrainingParameters> cached_params_;
         // project
-        std::shared_ptr<gs::management::Project> lfs_project_ = nullptr;
+        std::shared_ptr<gs::lfs::core::lfs::core::management::Project> lfs_project_ = nullptr;
     };
 
-} // namespace gs
+} // namespace lfs::vis

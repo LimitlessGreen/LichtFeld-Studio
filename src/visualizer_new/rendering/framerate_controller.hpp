@@ -7,7 +7,7 @@
 #include <chrono>
 #include <deque>
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     struct FramerateSettings {
         float target_fps = 30.0f;
@@ -75,4 +75,4 @@ namespace gs::visualizer {
         std::chrono::high_resolution_clock::time_point last_non_dropped_training_frame_time_;
     };
 
-} // namespace gs::visualizer
+} // namespace lfs::vis

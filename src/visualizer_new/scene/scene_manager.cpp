@@ -3,14 +3,14 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "scene/scene_manager.hpp"
-#include "core/logger.hpp"
-#include "loader/loader.hpp"
+#include "core_new/logger.hpp"
+#include "loader_new/loader.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "training/training_manager.hpp"
 #include "training_setup.hpp"
 #include <stdexcept>
 
-namespace gs {
+namespace lfs::vis {
 
     SceneManager::SceneManager() {
         setupEventHandlers();
@@ -20,7 +20,7 @@ namespace gs {
     SceneManager::~SceneManager() = default;
 
     void SceneManager::setupEventHandlers() {
-        using namespace events;
+        using namespace lfs::core::events;
 
         // Handle PLY commands
         cmd::AddPLY::when([this](const auto& cmd) {
@@ -57,10 +57,10 @@ namespace gs {
                 auto [hidden, shown] = scene_.cycleVisibilityWithNames();
 
                 if (!hidden.empty()) {
-                    events::cmd::SetPLYVisibility{.name = hidden, .visible = false}.emit();
+                    lfs::core::events::cmd::SetPLYVisibility{.name = hidden, .visible = false}.emit();
                 }
                 if (!shown.empty()) {
-                    events::cmd::SetPLYVisibility{.name = shown, .visible = true}.emit();
+                    lfs::core::events::cmd::SetPLYVisibility{.name = shown, .visible = true}.emit();
                     LOG_DEBUG("Cycled to: {}", shown);
                 }
 
@@ -98,8 +98,8 @@ namespace gs {
 
             // Load the file
             LOG_DEBUG("Creating loader for splat file");
-            auto loader = gs::loader::Loader::create();
-            gs::loader::LoadOptions options{
+            auto loader = lfs::loader::Loader::create();
+            lfs::loader::LoadOptions options{
                 .resize_factor = -1,
                 .max_width = 3840,
                 .images_folder = "images",
@@ -178,8 +178,8 @@ namespace gs {
             LOG_INFO("Adding splat file to scene: {}", path.string());
 
             // Load the file
-            auto loader = gs::loader::Loader::create();
-            gs::loader::LoadOptions options{
+            auto loader = lfs::loader::Loader::create();
+            lfs::loader::LoadOptions options{
                 .resize_factor = -1,
                 .max_width = 3840,
                 .images_folder = "images",
@@ -270,7 +270,7 @@ namespace gs {
     }
 
     void SceneManager::loadDataset(const std::filesystem::path& path,
-                                   const param::TrainingParameters& params) {
+                                   const lfs::core::param::TrainingParameters& params) {
         LOG_TIMER("SceneManager::loadDataset");
 
         try {
@@ -354,7 +354,7 @@ namespace gs {
         // Stop training if active
         if (trainer_manager_ && content_type_ == ContentType::Dataset) {
             LOG_DEBUG("Stopping training before clearing");
-            events::cmd::StopTraining{}.emit();
+            lfs::core::events::cmd::StopTraining{}.emit();
             trainer_manager_->clearTrainer();
         }
 
@@ -373,7 +373,7 @@ namespace gs {
         LOG_INFO("Scene cleared");
     }
 
-    const SplatData* SceneManager::getModelForRendering() const {
+    const lfs::core::SplatData* SceneManager::getModelForRendering() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
 
         if (content_type_ == ContentType::SplatFiles) {
@@ -461,7 +461,7 @@ namespace gs {
 
         for (const auto* node : visible_nodes) {
             const std::string& node_name = node->name;
-            const SplatData* node_data = node->model.get();
+            const lfs::core::SplatData* node_data = node->model.get();
 
             try {
 
@@ -601,7 +601,7 @@ namespace gs {
 
         return success;
     }
-    void SceneManager::handleRenamePly(const events::cmd::RenamePLY& event) {
+    void SceneManager::handleRenamePly(const lfs::core::events::cmd::RenamePLY& event) {
         renamePLY(event.old_name, event.new_name);
     }
-} // namespace gs
+} // namespace lfs::vis

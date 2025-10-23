@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-add_library(gs_visualizer STATIC
+add_library(lfs_visualizer STATIC
         # Core
         visualizer.cpp
         visualizer_impl.cpp
@@ -48,7 +48,7 @@ add_library(gs_visualizer STATIC
 )
 
 # Set include directories
-target_include_directories(gs_visualizer
+target_include_directories(lfs_visualizer
         PUBLIC
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
@@ -59,15 +59,15 @@ target_include_directories(gs_visualizer
 )
 
 # Link dependencies
-target_link_libraries(gs_visualizer
+target_link_libraries(lfs_visualizer
         PRIVATE
-        gs_core            # Use modular core library
+        lfs_core           # Use modular core library
         gs_geometry        # If needed for geometry operations
         gs_project         # For project management
         gs_kernels         # Use modular kernels library
-        gs_loader
-        gs_rendering
-        gs_training
+        lfs_loader
+        lfs_rendering
+        lfs_training
         ${TORCH_LIBRARIES}
         glad::glad
         glfw
@@ -81,10 +81,10 @@ target_link_libraries(gs_visualizer
 )
 
 # Set C++ standard
-target_compile_features(gs_visualizer PUBLIC cxx_std_23)
+target_compile_features(lfs_visualizer PUBLIC cxx_std_23)
 
 # Compiler options
-target_compile_options(gs_visualizer PRIVATE
+target_compile_options(lfs_visualizer PRIVATE
         $<$<CXX_COMPILER_FRONTEND_VARIANT:GNU>:-Wall -Wextra -Wpedantic>
         $<$<CXX_COMPILER_FRONTEND_VARIANT:MSVC>:/W4>
         $<$<AND:$<CONFIG:Debug>,$<CXX_COMPILER_ID:GNU,Clang>>:-O0 -g>
@@ -126,7 +126,7 @@ foreach (GUI_ASSET_FILE ${GUI_ASSET_FILES})
 endforeach ()
 
 # Compile definitions
-target_compile_definitions(gs_visualizer PRIVATE
+target_compile_definitions(lfs_visualizer PRIVATE
         $<$<BOOL:${CUDA_GL_INTEROP_ENABLED}>:CUDA_GL_INTEROP_ENABLED>
         PROJECT_ROOT_PATH="${PROJECT_SOURCE_DIR}"
         VISUALIZER_SHADER_PATH="${VISUALIZER_BUILD_RESOURCE_DIR}/shaders"
@@ -139,12 +139,12 @@ target_compile_definitions(gs_visualizer PRIVATE
 
 # Platform-specific settings
 if (WIN32)
-    target_compile_definitions(gs_visualizer PRIVATE
+    target_compile_definitions(lfs_visualizer PRIVATE
             NOMINMAX
             _USE_MATH_DEFINES
     )
 elseif (UNIX AND NOT APPLE)
-    target_link_libraries(gs_visualizer PRIVATE
+    target_link_libraries(lfs_visualizer PRIVATE
             GL
             GLU
             X11
@@ -152,8 +152,8 @@ elseif (UNIX AND NOT APPLE)
 endif ()
 
 # Export only the public header
-install(FILES ${CMAKE_SOURCE_DIR}/include/visualizer/visualizer.hpp
-        DESTINATION include/visualizer
+install(FILES ${CMAKE_SOURCE_DIR}/include/visualizer_new/visualizer.hpp
+        DESTINATION include/visualizer_new
 )
 
 # Optionally install resources

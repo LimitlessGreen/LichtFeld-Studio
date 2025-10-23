@@ -6,7 +6,7 @@
 
 #include <functional>
 
-namespace gs::gui {
+namespace lfs::vis::gui {
 
     class MenuBar {
     public:
@@ -50,4 +50,4 @@ namespace gs::gui {
         bool is_project_temp_ = true;
     };
 
-} // namespace gs::gui
+} // namespace lfs::vis::gui

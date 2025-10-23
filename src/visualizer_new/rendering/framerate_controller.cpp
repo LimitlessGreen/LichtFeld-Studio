@@ -4,7 +4,7 @@
 
 #include "framerate_controller.hpp"
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     FramerateController::FramerateController() {
         auto now = std::chrono::high_resolution_clock::now();
@@ -142,4 +142,4 @@ namespace gs::visualizer {
         frame_start_time_ = now;
         last_frame_time_ = now;
     }
-} // namespace gs::visualizer
+} // namespace lfs::vis

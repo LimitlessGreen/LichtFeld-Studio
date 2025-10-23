@@ -9,7 +9,7 @@
 #include "visualizer_impl.hpp"
 #include <imgui.h>
 
-namespace gs::gui::panels {
+namespace lfs::vis::gui::panels {
 
     void DrawToolsPanel(const UIContext& ctx) {
         ImGui::Text("Visualization Tools");
@@ -21,4 +21,4 @@ namespace gs::gui::panels {
         DrawWorldTransformControls(ctx);
     }
 
-} // namespace gs::gui::panels
+} // namespace lfs::vis::gui::panels

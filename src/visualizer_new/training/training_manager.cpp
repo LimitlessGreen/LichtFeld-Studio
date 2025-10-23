@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "training/training_manager.hpp"
-#include "core/logger.hpp"
-#include "training/training_setup.hpp"
+#include "core_new/logger.hpp"
+#include "training_new/training_setup.hpp"
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <stdexcept>
 
-namespace gs {
+namespace lfs::vis {
 
     TrainerManager::TrainerManager() {
         setupEventHandlers();
@@ -42,7 +42,7 @@ namespace gs {
             setState(State::Ready);
 
             // Trainer is ready
-            events::internal::TrainerReady{}.emit();
+            lfs::core::events::internal::TrainerReady{}.emit();
             LOG_INFO("Trainer ready for training");
         }
     }
@@ -54,7 +54,7 @@ namespace gs {
     void TrainerManager::clearTrainer() {
         LOG_DEBUG("Clearing trainer");
 
-        events::cmd::StopTraining{}.emit();
+        lfs::core::events::cmd::StopTraining{}.emit();
         // Stop any ongoing training first
         if (isTrainingActive()) {
             LOG_INFO("Stopping active training before clearing trainer");
@@ -104,7 +104,7 @@ namespace gs {
         }
 
         // Create training parameters from project
-        param::TrainingParameters params;
+        lfs::core::param::TrainingParameters params;
         params.dataset = project_->getProjectData().data_set_info;
         params.optimization = project_->getOptimizationParams();
         params.dataset.output_path = project_->getProjectOutputFolder();
@@ -417,7 +417,7 @@ namespace gs {
     }
 
     void TrainerManager::setupEventHandlers() {
-        using namespace events;
+        using namespace lfs::core::events;
 
         // Listen for training progress events - only update loss buffer
         state::TrainingProgress::when([this](const auto& event) {
@@ -444,11 +444,11 @@ namespace gs {
         return {};
     }
 
-    void TrainerManager::setProject(std::shared_ptr<gs::management::Project> project) {
+    void TrainerManager::setProject(std::shared_ptr<gs::lfs::core::lfs::core::management::Project> project) {
         project_ = project;
         if (trainer_) {
             trainer_->setProject(project);
         }
     }
 
-} // namespace gs
+} // namespace lfs::vis

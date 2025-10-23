@@ -4,12 +4,12 @@
 
 #pragma once
 
-#include "rendering/rendering.hpp"
+#include "rendering_new/rendering.hpp"
 #include "tool_base.hpp"
 #include <glm/glm.hpp>
 #include <memory>
 
-namespace gs::visualizer::tools {
+namespace lfs::vis::tools {
 
     class TranslationGizmoTool : public ToolBase {
     public:
@@ -24,7 +24,7 @@ namespace gs::visualizer::tools {
         bool initialize(const ToolContext& ctx) override;
         void shutdown() override;
         void update(const ToolContext& ctx) override;
-        void renderUI(const gs::gui::UIContext& ui_ctx, bool* p_open) override;
+        void renderUI(const lfs::vis::gui::UIContext& ui_ctx, bool* p_open) override;
 
         // Gizmo-specific methods
         bool isInteracting() const { return is_dragging_; }
@@ -66,4 +66,4 @@ namespace gs::visualizer::tools {
         void updateWorldTransform(const ToolContext& ctx);
     };
 
-} // namespace gs::visualizer::tools
+} // namespace lfs::vis::tools

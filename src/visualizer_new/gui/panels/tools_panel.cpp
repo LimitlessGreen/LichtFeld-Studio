@@ -7,7 +7,7 @@
 #include "gui/panels/world_transform_panel.hpp"
 #include <imgui.h>
 
-namespace gs::gui::panels {
+namespace lfs::vis::gui::panels {
 
     void DrawToolsPanel(const UIContext& ctx) {
 
@@ -18,4 +18,4 @@ namespace gs::gui::panels {
         DrawWorldTransformControls(ctx);
     }
 
-} // namespace gs::gui::panels
+} // namespace lfs::vis::gui::panels

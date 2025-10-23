@@ -12,7 +12,7 @@
 #include <windows.h>
 #endif
 
-namespace gs::gui::panels {
+namespace lfs::vis::gui::panels {
 
     void DrawTrainingControls(const UIContext& ctx);
 
@@ -28,4 +28,4 @@ namespace gs::gui::panels {
             return instance;
         }
     };
-} // namespace gs::gui::panels
+} // namespace lfs::vis::gui::panels

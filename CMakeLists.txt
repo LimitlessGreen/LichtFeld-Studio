@@ -421,6 +421,7 @@ add_subdirectory(src/core_new)     # New core module (lfs::core namespace)
 add_subdirectory(src/training_new) # New training module (lfs::training namespace)
 add_subdirectory(src/loader_new)   # New loader module (lfs::loader namespace)
 add_subdirectory(src/rendering_new) # New rendering module (lfs::rendering namespace)
+add_subdirectory(src/visualizer_new) # New visualizer module (lfs::vis namespace)
 add_subdirectory(src/core)         # Foundation module
 add_subdirectory(src/geometry)     # Geometry utilities
 add_subdirectory(src/project)      # Project management

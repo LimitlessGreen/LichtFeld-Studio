@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     inline std::filesystem::path getAssetPath(const std::string& asset_name) {
         std::vector<std::filesystem::path> search_paths;
@@ -83,4 +83,4 @@ namespace gs::visualizer {
         throw std::runtime_error(error_msg);
     }
 
-} // namespace gs::visualizer
+} // namespace lfs::vis

@@ -8,7 +8,7 @@
 #include <Windows.h>
 #endif
 
-namespace gs::gui {
+namespace lfs::vis::gui {
 
 #ifdef WIN32
 
@@ -34,4 +34,4 @@ namespace gs::gui {
     // in windows- open file browser that search directories
     void OpenDatasetFolderDialog();
 #endif
-} // namespace gs::gui
+} // namespace lfs::vis::gui

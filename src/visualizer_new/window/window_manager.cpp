@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "window_manager.hpp"
-#include "core/events.hpp"
+#include "core_new/events.hpp"
 // clang-format off
 // CRITICAL: GLAD must be included before GLFW to avoid OpenGL header conflicts
 #include <glad/glad.h>
@@ -12,13 +12,13 @@
 #include <iostream>
 #include <print>
 
-namespace gs {
+namespace lfs::vis {
 
     void* WindowManager::callback_handler_ = nullptr;
 
     static void window_focus_callback(GLFWwindow*, int focused) {
         if (!focused) {
-            events::internal::WindowFocusLost{}.emit();
+            lfs::core::events::internal::WindowFocusLost{}.emit();
             std::println("[WindowManager] Window lost focus");
         } else {
             std::println("[WindowManager] Window gained focus");
@@ -136,4 +136,4 @@ namespace gs {
         return result;
     }
 
-} // namespace gs
+} // namespace lfs::vis

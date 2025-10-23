@@ -9,7 +9,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <imgui.h>
 
-namespace gs::gui::panels {
+namespace lfs::vis::gui::panels {
 
     // Apply rotation to crop box transform
     static void updateRotationMatrix(geometry::EuclideanTransform& transform,
@@ -60,7 +60,7 @@ namespace gs::gui::panels {
             geometry::EuclideanTransform transform(settings.crop_transform.inv());
             crop_box.setworld2BBox(transform);
             // Emit event for bounds change
-            events::cmd::CropPLY{
+            lfs::core::events::cmd::CropPLY{
                 .crop_box = crop_box}
                 .emit();
         }
@@ -304,4 +304,4 @@ namespace gs::gui::panels {
     const CropBoxState& getCropBoxState() {
         return CropBoxState::getInstance();
     }
-} // namespace gs::gui::panels
+} // namespace lfs::vis::gui::panels

@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "core/events.hpp"
+#include "core_new/events.hpp"
 #include "gui/panels/menu_bar.hpp"
 #include "gui/ui_context.hpp"
 #include "gui/windows/save_project_browser.hpp"
@@ -16,7 +16,7 @@
 #include <string>
 #include <unordered_map>
 
-namespace gs {
+namespace lfs::vis {
     namespace visualizer {
         class VisualizerImpl;
     }
@@ -98,4 +98,4 @@ namespace gs {
             std::unique_ptr<MenuBar> menu_bar_;
         };
     } // namespace gui
-} // namespace gs
+} // namespace lfs::vis

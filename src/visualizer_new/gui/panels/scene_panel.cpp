@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "gui/panels/scene_panel.hpp"
-#include "core/logger.hpp"
+#include "core_new/logger.hpp"
 #include "gui/utils/windows_utils.hpp"
 #include "gui/windows/image_preview.hpp"
 
@@ -13,7 +13,7 @@
 #include <imgui.h>
 #include <stdexcept>
 
-namespace gs::gui {
+namespace lfs::vis::gui {
 
     // ScenePanel Implementation
     ScenePanel::ScenePanel(std::shared_ptr<const TrainerManager> trainer_manager) : m_trainer_manager(trainer_manager) {
@@ -46,7 +46,7 @@ namespace gs::gui {
         });
 
         // Listen for PLY visibility changes to update checkboxes
-        events::cmd::SetPLYVisibility::when([this](const auto& event) {
+        lfs::core::events::cmd::SetPLYVisibility::when([this](const auto& event) {
             // Update the visibility state in our local PLY nodes
             auto it = std::find_if(m_plyNodes.begin(), m_plyNodes.end(),
                                    [&event](const PLYNode& node) { return node.name == event.name; });
@@ -57,11 +57,11 @@ namespace gs::gui {
         });
 
         // Listen for GoToCamView to sync selection
-        events::cmd::GoToCamView::when([this](const auto& event) {
+        lfs::core::events::cmd::GoToCamView::when([this](const auto& event) {
             handleGoToCamView(event);
         });
 
-        events::cmd::RenamePLY::when([this](const auto& event) {
+        lfs::core::events::cmd::RenamePLY::when([this](const auto& event) {
             handlePLYRenamed(event);
         });
     }
@@ -147,7 +147,7 @@ namespace gs::gui {
         updateModeFromTab();
     }
 
-    void ScenePanel::handleGoToCamView(const events::cmd::GoToCamView& event) {
+    void ScenePanel::handleGoToCamView(const lfs::core::events::cmd::GoToCamView& event) {
         // Find the image path for this camera ID
         for (const auto& [path, cam_id] : m_PathToCamId) {
             if (cam_id == event.cam_id) {
@@ -227,7 +227,7 @@ namespace gs::gui {
             OpenDatasetFolderDialog();
 
             // hide the file browser
-            events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
+            lfs::core::events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
 #endif // WIN32
         }
 
@@ -244,7 +244,7 @@ namespace gs::gui {
             OpenPlyFileDialog();
 
             // hide the file browser
-            events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
+            lfs::core::events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
 #endif // WIN32
         }
 
@@ -266,7 +266,7 @@ namespace gs::gui {
             handleSceneCleared();
 
             // Also clear the actual scene data
-            events::cmd::ClearScene{}.emit();
+            lfs::core::events::cmd::ClearScene{}.emit();
         }
 
         ImGui::Separator();
@@ -357,7 +357,7 @@ namespace gs::gui {
                     LOG_WARN("Name '{}' already exists, keeping original name '{}'", new_name, old_name);
                 } else {
                     // Emit rename command
-                    events::cmd::RenamePLY{
+                    lfs::core::events::cmd::RenamePLY{
                         .old_name = old_name,
                         .new_name = new_name}
                         .emit();
@@ -390,13 +390,13 @@ namespace gs::gui {
         // Add PLY button
         if (ImGui::Button("Add PLY", ImVec2(-1, 0))) {
             // Open file browser for adding PLY
-            events::cmd::ShowWindow{.window_name = "file_browser", .show = true}.emit();
+            lfs::core::events::cmd::ShowWindow{.window_name = "file_browser", .show = true}.emit();
             LOG_DEBUG("Opening file browser to add PLY");
 #ifdef WIN32
             // show native windows file dialog for folder selection
             OpenPlyFileDialog();
             // hide the file browser
-            events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
+            lfs::core::events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
 #endif // WIN32
         }
 
@@ -437,7 +437,7 @@ namespace gs::gui {
                 bool visible = node.visible;
                 if (ImGui::Checkbox("##vis", &visible)) {
                     node.visible = visible;
-                    events::cmd::SetPLYVisibility{
+                    lfs::core::events::cmd::SetPLYVisibility{
                         .name = node.name,
                         .visible = visible}
                         .emit();
@@ -516,7 +516,7 @@ namespace gs::gui {
                         }
                         if (ImGui::MenuItem("Remove PLY")) {
                             LOG_INFO("Removing PLY '{}' via context menu", node.name);
-                            events::cmd::RemovePLY{.name = node.name}.emit();
+                            lfs::core::events::cmd::RemovePLY{.name = node.name}.emit();
                         }
                         ImGui::EndPopup();
                     }
@@ -604,7 +604,7 @@ namespace gs::gui {
                         auto cam_data_it = m_PathToCamId.find(imagePath);
                         if (cam_data_it != m_PathToCamId.end()) {
                             // Emit the new GoToCamView command event with camera data
-                            events::cmd::GoToCamView{
+                            lfs::core::events::cmd::GoToCamView{
                                 .cam_id = cam_data_it->second}
                                 .emit();
 
@@ -694,7 +694,7 @@ namespace gs::gui {
         }
     }
 
-    void ScenePanel::handlePLYRenamed(const events::cmd::RenamePLY& event) {
+    void ScenePanel::handlePLYRenamed(const lfs::core::events::cmd::RenamePLY& event) {
         LOG_DEBUG("PLY renamed from '{}' to '{}'", event.old_name, event.new_name);
 
         // Update the node name in our list
@@ -710,4 +710,4 @@ namespace gs::gui {
         cancelRenaming();
     }
 
-} // namespace gs::gui
+} // namespace lfs::vis::gui

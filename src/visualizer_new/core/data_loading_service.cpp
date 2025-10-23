@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/data_loading_service.hpp"
-#include "core/logger.hpp"
+#include "core_new/logger.hpp"
 #include "scene/scene_manager.hpp"
 #include <algorithm>
 #include <stdexcept>
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     DataLoadingService::DataLoadingService(SceneManager* scene_manager)
         : scene_manager_(scene_manager) {
@@ -18,7 +18,7 @@ namespace gs::visualizer {
     DataLoadingService::~DataLoadingService() = default;
 
     void DataLoadingService::setupEventHandlers() {
-        using namespace events;
+        using namespace lfs::core::events;
 
         // Listen for file load commands
         cmd::LoadFile::when([this](const auto& cmd) {
@@ -243,4 +243,4 @@ namespace gs::visualizer {
         }
     }
 
-} // namespace gs::visualizer
+} // namespace lfs::vis

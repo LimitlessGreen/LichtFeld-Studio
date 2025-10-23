@@ -6,7 +6,7 @@
 
 #include "gui/ui_context.hpp"
 
-namespace gs::gui::panels {
+namespace lfs::vis::gui::panels {
 
     // Main panel rendering
     void DrawMainPanel(const UIContext& ctx);
@@ -16,4 +16,4 @@ namespace gs::gui::panels {
     void DrawRenderingSettings(const UIContext& ctx);
     void DrawProgressInfo(const UIContext& ctx);
     void DrawSystemConsoleButton(const UIContext& ctx);
-} // namespace gs::gui::panels
+} // namespace lfs::vis::gui::panels

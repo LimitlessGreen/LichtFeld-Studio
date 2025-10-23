@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "input/input_controller.hpp"
-#include "core/logger.hpp"
+#include "core_new/logger.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "tools/tool_base.hpp"
 #include "tools/translation_gizmo_tool.hpp"
@@ -12,24 +12,24 @@
 #include <format>
 #include <imgui.h>
 
-namespace gs::visualizer {
+namespace lfs::vis {
     InputController* InputController::instance_ = nullptr;
 
     InputController::InputController(GLFWwindow* window, Viewport& viewport)
         : window_(window),
           viewport_(viewport) {
         // Subscribe to GoToCamView events
-        events::cmd::GoToCamView::when([this](const auto& e) {
+        lfs::core::events::cmd::GoToCamView::when([this](const auto& e) {
             handleGoToCamView(e);
         });
         // Subscribe to WindowFocusLost to reset states
-        events::internal::WindowFocusLost::when([this](const auto&) {
+        lfs::core::events::internal::WindowFocusLost::when([this](const auto&) {
             drag_mode_ = DragMode::None;
             std::fill(std::begin(keys_wasd_), std::end(keys_wasd_), false);
             hovered_camera_id_ = -1;
         });
         // Subscribe to GimbalLock events
-        events::cmd::ToggleGimbalLock::when([this](const events::cmd::ToggleGimbalLock& e) {
+        lfs::core::events::cmd::ToggleGimbalLock::when([this](const lfs::core::events::cmd::ToggleGimbalLock& e) {
             gimbal_locked = e.locked;
         });
 
@@ -168,7 +168,7 @@ namespace gs::visualizer {
                     instance_->current_cursor_ = CursorType::Default;
                 }
             }
-            events::internal::WindowFocusLost{}.emit();
+            lfs::core::events::internal::WindowFocusLost{}.emit();
             LOG_DEBUG("Window lost focus - input states reset");
         } else {
             LOG_DEBUG("Window gained focus");
@@ -206,7 +206,7 @@ namespace gs::visualizer {
             if (hovered_camera_id_ >= 0) {
                 if (is_double_click && hovered_camera_id_ == last_clicked_camera_id_) {
                     LOG_INFO("Double-clicked on camera ID: {}", hovered_camera_id_);
-                    events::cmd::GoToCamView{.cam_id = hovered_camera_id_}.emit();
+                    lfs::core::events::cmd::GoToCamView{.cam_id = hovered_camera_id_}.emit();
 
                     // Reset click tracking to prevent triple-click
                     last_click_time_ = std::chrono::steady_clock::time_point();
@@ -490,17 +490,17 @@ namespace gs::visualizer {
         }
 
         if (key == GLFW_KEY_T && action == GLFW_PRESS && !ImGui::GetIO().WantCaptureKeyboard) {
-            events::cmd::CyclePLY{}.emit();
+            lfs::core::events::cmd::CyclePLY{}.emit();
             return;
         }
 
         if (key == GLFW_KEY_V && action == GLFW_PRESS && !ImGui::GetIO().WantCaptureKeyboard) {
-            events::cmd::ToggleSplitView{}.emit();
+            lfs::core::events::cmd::ToggleSplitView{}.emit();
             return;
         }
 
         if (key == GLFW_KEY_G && action == GLFW_PRESS && !ImGui::GetIO().WantCaptureKeyboard) {
-            events::cmd::ToggleGTComparison{}.emit();
+            lfs::core::events::cmd::ToggleGTComparison{}.emit();
             LOG_DEBUG("Toggled GT comparison mode");
             return;
         }
@@ -520,7 +520,7 @@ namespace gs::visualizer {
                 last_camview = 0; // Wrap to beginning
             }
 
-            events::cmd::GoToCamView{
+            lfs::core::events::cmd::GoToCamView{
                 .cam_id = last_camview}
                 .emit();
             return;
@@ -541,7 +541,7 @@ namespace gs::visualizer {
                 last_camview = num_cams - 1; // Wrap to end
             }
 
-            events::cmd::GoToCamView{
+            lfs::core::events::cmd::GoToCamView{
                 .cam_id = last_camview}
                 .emit();
             return;
@@ -674,7 +674,7 @@ namespace gs::visualizer {
             } else if (!dataset_path && std::filesystem::is_directory(filepath)) {
                 // Check for dataset markers
                 LOG_TRACE("Checking directory for dataset markers: {}", filepath.string());
-                if (gs::loader::Loader::isDatasetPath(filepath)) {
+                if (lfs::loader::Loader::isDatasetPath(filepath)) {
                     dataset_path = filepath;
                     LOG_DEBUG("Dataset detected in dropped directory");
                 }
@@ -683,27 +683,27 @@ namespace gs::visualizer {
 
         // Load splat files (PLY or SOG)
         for (const auto& splat : splat_files) {
-            events::cmd::LoadFile{.path = splat, .is_dataset = false}.emit();
+            lfs::core::events::cmd::LoadFile{.path = splat, .is_dataset = false}.emit();
             LOG_INFO("Loading {} via drag-and-drop: {}",
                      splat.extension().string(), splat.filename().string());
         }
 
         // Load dataset if found
         if (dataset_path) {
-            events::cmd::LoadFile{.path = *dataset_path, .is_dataset = true}.emit();
+            lfs::core::events::cmd::LoadFile{.path = *dataset_path, .is_dataset = true}.emit();
             LOG_INFO("Loading dataset via drag-and-drop: {}", dataset_path->filename().string());
         }
 
         if (paths.size() == 1) {
             auto project_path = std::filesystem::path(paths[0]);
-            if (project_path.extension() == gs::management::Project::EXTENSION) {
-                events::cmd::LoadProject{.path = project_path}.emit();
+            if (project_path.extension() == gs::lfs::core::lfs::core::management::Project::EXTENSION) {
+                lfs::core::events::cmd::LoadProject{.path = project_path}.emit();
                 LOG_INFO("Loading LS Project via drag-and-drop: {}", project_path.filename().string());
             }
         }
     }
 
-    void InputController::handleGoToCamView(const events::cmd::GoToCamView& event) {
+    void InputController::handleGoToCamView(const lfs::core::events::cmd::GoToCamView& event) {
         LOG_TIMER_TRACE("HandleGoToCamView");
 
         if (!training_manager_) {
@@ -862,4 +862,4 @@ namespace gs::visualizer {
             last_camera_publish_ = now;
         }
     }
-} // namespace gs::visualizer
+} // namespace lfs::vis

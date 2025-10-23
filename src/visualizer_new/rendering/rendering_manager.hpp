@@ -6,7 +6,7 @@
 
 #include "framerate_controller.hpp"
 #include "internal/viewport.hpp"
-#include "rendering/rendering.hpp"
+#include "rendering_new/rendering.hpp"
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -15,11 +15,11 @@
 #include <optional>
 #include <unordered_map>
 
-namespace gs {
+namespace lfs::vis {
     class SceneManager;
-} // namespace gs
+} // namespace lfs::vis
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     enum class SplitViewMode {
         Disabled,
@@ -236,4 +236,4 @@ namespace gs::visualizer {
         uint64_t pick_count_ = 0;
     };
 
-} // namespace gs::visualizer
+} // namespace lfs::vis

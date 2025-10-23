@@ -4,7 +4,7 @@
 
 #include "gui/panels/menu_bar.hpp"
 #include "config.h"
-#include "core/logger.hpp"
+#include "core_new/logger.hpp"
 #include <imgui.h>
 
 #include <cstdlib> // for system()
@@ -12,7 +12,7 @@
 #include <windows.h> // for ShellExecuteA
 #endif
 
-namespace gs::gui {
+namespace lfs::vis::gui {
 
     MenuBar::MenuBar() {
         LOG_DEBUG("MenuBar created");
@@ -592,4 +592,4 @@ namespace gs::gui {
         on_exit_ = std::move(callback);
     }
 
-} // namespace gs::gui
+} // namespace lfs::vis::gui

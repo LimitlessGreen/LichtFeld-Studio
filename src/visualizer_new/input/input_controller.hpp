@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "core/events.hpp"
+#include "core_new/events.hpp"
 #include "input/input_types.hpp"
 #include "internal/viewport.hpp"
 #include "training/training_manager.hpp"
@@ -13,7 +13,7 @@
 #include <glm/glm.hpp>
 #include <memory>
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     // Forward declarations
     namespace tools {
@@ -88,7 +88,7 @@ namespace gs::visualizer {
         void handleScroll(double xoff, double yoff);
         void handleKey(int key, int action, int mods);
         void handleFileDrop(const std::vector<std::string>& paths);
-        void handleGoToCamView(const events::cmd::GoToCamView& event);
+        void handleGoToCamView(const lfs::core::events::cmd::GoToCamView& event);
 
         // WASD processing with proper frame timing
         void processWASDMovement();
@@ -168,4 +168,4 @@ namespace gs::visualizer {
         static InputController* instance_;
     };
 
-} // namespace gs::visualizer
+} // namespace lfs::vis

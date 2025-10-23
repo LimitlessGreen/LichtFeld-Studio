@@ -12,7 +12,7 @@
 // Forward declarations
 struct GLFWwindow;
 
-namespace gs {
+namespace lfs::vis {
 
     class WindowManager {
     public:
@@ -64,4 +64,4 @@ namespace gs {
         static void dropCallback(GLFWwindow* window, int count, const char** paths);
     };
 
-} // namespace gs
+} // namespace lfs::vis

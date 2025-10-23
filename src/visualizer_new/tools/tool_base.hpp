@@ -12,29 +12,29 @@
 // Forward declaration for GLFW
 struct GLFWwindow;
 
-namespace gs {
+namespace lfs::vis {
     // Forward declarations
     class SceneManager;
     namespace visualizer {
         class RenderingManager;
     }
-} // namespace gs
+} // namespace lfs::vis
 
 // Forward declaration for Viewport (check your viewport.hpp for actual namespace)
 class Viewport;
 
-namespace gs::gui {
+namespace lfs::vis::gui {
     struct UIContext; // UIContext is in gs::gui namespace
 }
 
-namespace gs::visualizer {
+namespace lfs::vis {
 
     // Forward declarations
     class ToolContext;
 
     // C++23 concept defining what a tool must provide
     template <typename T>
-    concept Tool = requires(T t, const ToolContext& ctx, const gs::gui::UIContext& ui_ctx, bool* p_open) {
+    concept Tool = requires(T t, const ToolContext& ctx, const lfs::vis::gui::UIContext& ui_ctx, bool* p_open) {
         { t.getName() } -> std::convertible_to<std::string_view>;
         { t.getDescription() } -> std::convertible_to<std::string_view>;
         { t.isEnabled() } -> std::convertible_to<bool>;
@@ -95,7 +95,7 @@ namespace gs::visualizer {
         virtual bool initialize([[maybe_unused]] const ToolContext& ctx) { return true; }
         virtual void shutdown() {}
         virtual void update([[maybe_unused]] const ToolContext& ctx) {}
-        virtual void renderUI(const gs::gui::UIContext& ui_ctx, bool* p_open) = 0;
+        virtual void renderUI(const lfs::vis::gui::UIContext& ui_ctx, bool* p_open) = 0;
 
     protected:
         virtual void onEnabledChanged([[maybe_unused]] bool enabled) {}
@@ -104,4 +104,4 @@ namespace gs::visualizer {
         bool enabled_ = false;
     };
 
-} // namespace gs::visualizer
+} // namespace lfs::vis
