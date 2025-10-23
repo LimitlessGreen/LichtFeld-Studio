@@ -71,19 +71,20 @@ namespace lfs::core {
                 }
 
                 // Format: [timestamp] [perf] file:line message
-                std::string formatted = std::format(
-                    "[{:02d}:{:02d}:{:02d}.{:03d}] {}[perf]{} {}:{}  {}\n",
+                char time_buf[64];
+                std::snprintf(time_buf, sizeof(time_buf),
+                    "[%02d:%02d:%02d.%03d] %s[perf]%s %.*s:%d  ",
                     tm.tm_hour,
                     tm.tm_min,
                     tm.tm_sec,
                     static_cast<int>(millis),
-                    perf_color_,
-                    reset_color_,
-                    filename,
-                    msg.source.line,
-                    clean_msg);
+                    perf_color_.c_str(),
+                    reset_color_.c_str(),
+                    static_cast<int>(filename.size()),
+                    filename.data(),
+                    msg.source.line);
 
-                std::cout << formatted << std::flush;
+                std::cout << time_buf << clean_msg << "\n" << std::flush;
             } else {
                 // Standard formatting for non-performance logs
                 std::string level_str;
@@ -120,20 +121,24 @@ namespace lfs::core {
                     break;
                 }
 
-                std::string formatted = std::format(
-                    "[{:02d}:{:02d}:{:02d}.{:03d}] {}[{}]{} {}:{}  {}\n",
+                // Use snprintf for nvcc compatibility
+                char time_buf[64];
+                std::snprintf(time_buf, sizeof(time_buf),
+                    "[%02d:%02d:%02d.%03d] %s[%s]%s %.*s:%d  ",
                     tm.tm_hour,
                     tm.tm_min,
                     tm.tm_sec,
                     static_cast<int>(millis),
-                    color,
-                    level_str,
-                    reset_color_,
-                    filename,
-                    msg.source.line,
-                    std::string_view(msg.payload.data(), msg.payload.size()));
+                    color.c_str(),
+                    level_str.c_str(),
+                    reset_color_.c_str(),
+                    static_cast<int>(filename.size()),
+                    filename.data(),
+                    msg.source.line);
 
-                std::cout << formatted << std::flush;
+                std::cout << time_buf
+                    << std::string_view(msg.payload.data(), msg.payload.size())
+                    << "\n" << std::flush;
             }
         }
 
