@@ -1,9 +1,8 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
-
 #pragma once
 
-#include "core/logger.hpp"
+#include "core_new/logger.hpp"
 #include <array>
 #include <atomic>
 #include <chrono>

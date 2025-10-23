@@ -66,6 +66,7 @@ target_link_libraries(gs_core
         spdlog::spdlog
         ${WEBP_LIB}     # WebP for SOG compression
         ${ARCHIVE_LIB}  # LibArchive for SOG bundle support
+        gs_loader       # For CacheLoader used in camera.cpp
     PRIVATE
         taywee::args    # Only used in argument_parser.cpp
 )

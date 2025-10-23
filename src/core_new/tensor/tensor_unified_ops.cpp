@@ -1,12 +1,12 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "core/logger.hpp"
+#include "core_new/logger.hpp"
 #include "core_new/pinned_memory_allocator.hpp"
 #include "internal/memory_pool.hpp"
-#include "internal/tensor_impl.hpp"
 #include "internal/tensor_broadcast.hpp"
 #include "internal/tensor_functors.hpp"
+#include "internal/tensor_impl.hpp"
 #include "internal/tensor_ops.hpp"
 #include <algorithm>
 #include <cmath>
@@ -331,6 +331,22 @@ namespace lfs::core {
                     } else {
                         LOG_ERROR("Failed to allocate temp buffer from memory pool");
                     }
+                } else if (result.dtype_ == DataType::UInt8) {
+                    int* temp_buffer = static_cast<int*>(
+                        CudaMemoryPool::instance().allocate(result.numel() * sizeof(int), nullptr));
+
+                    if (temp_buffer) {
+                        tensor_ops::launch_randint(temp_buffer, result.numel(), low, high,
+                                                   RandomGenerator::instance().get_next_cuda_seed(), 0);
+
+                        tensor_ops::launch_convert_type<int, uint8_t>(temp_buffer, result.ptr<uint8_t>(),
+                                                                       result.numel(), 0);
+                        cudaDeviceSynchronize();
+
+                        CudaMemoryPool::instance().deallocate(temp_buffer, nullptr);
+                    } else {
+                        LOG_ERROR("Failed to allocate temp buffer from memory pool");
+                    }
                 }
             } else {
                 auto& gen = *static_cast<std::mt19937_64*>(
@@ -346,6 +362,11 @@ namespace lfs::core {
                     float* data = result.ptr<float>();
                     for (size_t i = 0; i < result.numel(); ++i) {
                         data[i] = static_cast<float>(dist(gen));
+                    }
+                } else if (result.dtype_ == DataType::UInt8) {
+                    uint8_t* data = result.ptr<uint8_t>();
+                    for (size_t i = 0; i < result.numel(); ++i) {
+                        data[i] = static_cast<uint8_t>(dist(gen));
                     }
                 }
             }

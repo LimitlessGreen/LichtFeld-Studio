@@ -74,6 +74,7 @@ target_link_libraries(gs_loader
         PUBLIC
         gs_core            # Link to modular core library for SplatData, Camera, etc.
         PRIVATE
+        gs_project         # For management functions (GetLichtFeldBaseTemporaryFolder, generateShortHash)
         TBB::tbb
         spdlog::spdlog
         nlohmann_json::nlohmann_json
