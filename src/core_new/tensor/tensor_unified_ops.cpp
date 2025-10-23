@@ -1,7 +1,7 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "core/logger.hpp"
+#include "core_new/logger.hpp"
 #include "core_new/pinned_memory_allocator.hpp"
 #include "internal/memory_pool.hpp"
 #include "internal/tensor_impl.hpp"

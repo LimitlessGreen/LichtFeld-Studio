@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "core/logger.hpp"
+#include "core_new/logger.hpp"
 #include <cuda_runtime.h>
 
 namespace lfs::core {

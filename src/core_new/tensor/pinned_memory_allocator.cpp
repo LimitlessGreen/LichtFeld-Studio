@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core_new/pinned_memory_allocator.hpp"
-#include "core/logger.hpp"
+#include "core_new/logger.hpp"
 #include <chrono>
 #include <cmath>
 #include <cuda_runtime.h>

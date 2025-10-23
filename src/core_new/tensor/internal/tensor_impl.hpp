@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "core/logger.hpp"
+#include "core_new/logger.hpp"
 #include <array>
 #include <atomic>
 #include <chrono>
