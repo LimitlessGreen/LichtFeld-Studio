@@ -86,7 +86,11 @@ namespace gs::core {
         // Internal log implementation
         template <typename... Args>
         void log_internal(LogLevel level, const std::source_location& loc,
+#ifdef __CUDACC__
                           const char* fmt, Args&&... args) {
+#else
+                          std::format_string<Args...> fmt, Args&&... args) {
+#endif
             if (!logger_)
                 return;
 
@@ -101,7 +105,8 @@ namespace gs::core {
                 return;
             }
 
-            // Format message using snprintf
+#ifdef __CUDACC__
+            // Format message using snprintf (for CUDA/nvcc compatibility)
             char buffer[1024];
             int written = std::snprintf(buffer, sizeof(buffer), fmt, std::forward<Args>(args)...);
             if (written < 0) {
@@ -117,6 +122,10 @@ namespace gs::core {
             } else {
                 msg.assign(buffer, written);
             }
+#else
+            // Format message using std::format (C++20)
+            auto msg = std::format(fmt, std::forward<Args>(args)...);
+#endif
 
             logger_->log(
                 spdlog::source_loc{loc.file_name(),
