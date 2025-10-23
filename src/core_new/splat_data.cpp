@@ -234,13 +234,13 @@ namespace lfs::core {
     // ========== CONSTRUCTOR & DESTRUCTOR ==========
 
     SplatData::SplatData(int sh_degree,
-                               Tensor means_,
-                               Tensor sh0_,
-                               Tensor shN_,
-                               Tensor scaling_,
-                               Tensor rotation_,
-                               Tensor opacity_,
-                               float scene_scale_)
+                         Tensor means_,
+                         Tensor sh0_,
+                         Tensor shN_,
+                         Tensor scaling_,
+                         Tensor rotation_,
+                         Tensor opacity_,
+                         float scene_scale_)
         : _max_sh_degree(sh_degree),
           _active_sh_degree(sh_degree),
           _scene_scale(scene_scale_),
@@ -312,8 +312,8 @@ namespace lfs::core {
         // _rotation is [N, 4], we want to normalize each quaternion
         // norm = sqrt(sum(x^2)) along dim=1, keepdim=true to get [N, 1]
         auto squared = _rotation.square();
-        auto sum_squared = squared.sum({1}, true);   // [N, 1]
-        auto norm = sum_squared.sqrt();              // [N, 1]
+        auto sum_squared = squared.sum({1}, true);    // [N, 1]
+        auto norm = sum_squared.sqrt();               // [N, 1]
         return _rotation.div(norm.clamp_min(1e-12f)); // Avoid division by zero
     }
 
@@ -475,50 +475,50 @@ namespace lfs::core {
         return a;
     }
 
-//     bool SplatData::is_valid() const {
-//         if (!_means.is_valid()) {
-//             LOG_ERROR("SplatData: _means tensor is invalid");
-//             return false;
-//         }
-// 
-//         size_t n = _means.size(0);
-// 
-//         if (_means.ndim() != 2 || _means.size(1) != 3) {
-//             LOG_ERROR("SplatData: _means must be [N, 3], got {}", _means.shape().str());
-//             return false;
-//         }
-// 
-//         if (_sh0.is_valid() && (_sh0.ndim() != 3 || _sh0.size(0) != n || _sh0.size(2) != 3)) {
-//             LOG_ERROR("SplatData: _sh0 must be [N, 1, 3], got {}", _sh0.shape().str());
-//             return false;
-//         }
-// 
-//         if (_shN.is_valid() && (_shN.ndim() != 3 || _shN.size(0) != n || _shN.size(2) != 3)) {
-//             LOG_ERROR("SplatData: _shN must be [N, coeffs, 3], got {}", _shN.shape().str());
-//             return false;
-//         }
-// 
-//         if (_scaling.is_valid() &&
-//             (_scaling.ndim() != 2 || _scaling.size(0) != n || _scaling.size(1) != 3)) {
-//             LOG_ERROR("SplatData: _scaling must be [N, 3], got {}", _scaling.shape().str());
-//             return false;
-//         }
-// 
-//         if (_rotation.is_valid() &&
-//             (_rotation.ndim() != 2 || _rotation.size(0) != n || _rotation.size(1) != 4)) {
-//             LOG_ERROR("SplatData: _rotation must be [N, 4], got {}", _rotation.shape().str());
-//             return false;
-//         }
-// 
-//         if (_opacity.is_valid() &&
-//             (_opacity.ndim() != 2 || _opacity.size(0) != n || _opacity.size(1) != 1)) {
-//             LOG_ERROR("SplatData: _opacity must be [N, 1], got {}", _opacity.shape().str());
-//             return false;
-//         }
-// 
-//         return true;
-//     }
-// 
+    //     bool SplatData::is_valid() const {
+    //         if (!_means.is_valid()) {
+    //             LOG_ERROR("SplatData: _means tensor is invalid");
+    //             return false;
+    //         }
+    //
+    //         size_t n = _means.size(0);
+    //
+    //         if (_means.ndim() != 2 || _means.size(1) != 3) {
+    //             LOG_ERROR("SplatData: _means must be [N, 3], got {}", _means.shape().str());
+    //             return false;
+    //         }
+    //
+    //         if (_sh0.is_valid() && (_sh0.ndim() != 3 || _sh0.size(0) != n || _sh0.size(2) != 3)) {
+    //             LOG_ERROR("SplatData: _sh0 must be [N, 1, 3], got {}", _sh0.shape().str());
+    //             return false;
+    //         }
+    //
+    //         if (_shN.is_valid() && (_shN.ndim() != 3 || _shN.size(0) != n || _shN.size(2) != 3)) {
+    //             LOG_ERROR("SplatData: _shN must be [N, coeffs, 3], got {}", _shN.shape().str());
+    //             return false;
+    //         }
+    //
+    //         if (_scaling.is_valid() &&
+    //             (_scaling.ndim() != 2 || _scaling.size(0) != n || _scaling.size(1) != 3)) {
+    //             LOG_ERROR("SplatData: _scaling must be [N, 3], got {}", _scaling.shape().str());
+    //             return false;
+    //         }
+    //
+    //         if (_rotation.is_valid() &&
+    //             (_rotation.ndim() != 2 || _rotation.size(0) != n || _rotation.size(1) != 4)) {
+    //             LOG_ERROR("SplatData: _rotation must be [N, 4], got {}", _rotation.shape().str());
+    //             return false;
+    //         }
+    //
+    //         if (_opacity.is_valid() &&
+    //             (_opacity.ndim() != 2 || _opacity.size(0) != n || _opacity.size(1) != 1)) {
+    //             LOG_ERROR("SplatData: _opacity must be [N, 1], got {}", _opacity.shape().str());
+    //             return false;
+    //         }
+    //
+    //         return true;
+    //     }
+    //
     // ========== ASYNC SAVE MANAGEMENT ==========
 
     void SplatData::wait_for_saves() const {
@@ -558,9 +558,9 @@ namespace lfs::core {
     // ========== EXPORT METHODS ==========
 
     void SplatData::save_ply(const std::filesystem::path& root,
-                                int iteration,
-                                bool join_threads,
-                                std::string stem) const {
+                             int iteration,
+                             bool join_threads,
+                             std::string stem) const {
         auto pc = to_point_cloud();
 
         if (join_threads) {
@@ -585,9 +585,9 @@ namespace lfs::core {
     }
 
     std::filesystem::path SplatData::save_sog(const std::filesystem::path& root,
-                                                 int iteration,
-                                                 int kmeans_iterations,
-                                                 bool join_threads) const {
+                                              int iteration,
+                                              int kmeans_iterations,
+                                              bool join_threads) const {
         // SOG must always be synchronous - k-_means clustering is too heavy for async
         return write_sog_impl(*this, root, iteration, kmeans_iterations);
     }
@@ -890,48 +890,48 @@ namespace lfs::core {
         }
     }
 
-//     void SplatData::ensure_grad_allocated() {
-//         // Allocate gradient tensors with same shapes as parameters
-//         if (!means_grad.is_valid()) {
-//             means_grad = Tensor::zeros(_means.shape(), _means.device());
-//         }
-//         if (!sh0_grad.is_valid()) {
-//             sh0_grad = Tensor::zeros(_sh0.shape(), _sh0.device());
-//         }
-//         if (!shN_grad.is_valid()) {
-//             shN_grad = Tensor::zeros(_shN.shape(), _shN.device());
-//         }
-//         if (!scaling_grad.is_valid()) {
-//             scaling_grad = Tensor::zeros(_scaling.shape(), _scaling.device());
-//         }
-//         if (!rotation_grad.is_valid()) {
-//             rotation_grad = Tensor::zeros(_rotation.shape(), _rotation.device());
-//         }
-//         if (!opacity_grad.is_valid()) {
-//             opacity_grad = Tensor::zeros(_opacity.shape(), _opacity.device());
-//         }
-//     }
-// 
-//     void SplatData::zero_grad() {
-//         // Zero out all gradient tensors if they exist
-//         if (means_grad.is_valid()) {
-//             means_grad.zero_();
-//         }
-//         if (sh0_grad.is_valid()) {
-//             sh0_grad.zero_();
-//         }
-//         if (shN_grad.is_valid()) {
-//             shN_grad.zero_();
-//         }
-//         if (scaling_grad.is_valid()) {
-//             scaling_grad.zero_();
-//         }
-//         if (rotation_grad.is_valid()) {
-//             rotation_grad.zero_();
-//         }
-//         if (opacity_grad.is_valid()) {
-//             opacity_grad.zero_();
-//         }
-//     }
+    //     void SplatData::ensure_grad_allocated() {
+    //         // Allocate gradient tensors with same shapes as parameters
+    //         if (!means_grad.is_valid()) {
+    //             means_grad = Tensor::zeros(_means.shape(), _means.device());
+    //         }
+    //         if (!sh0_grad.is_valid()) {
+    //             sh0_grad = Tensor::zeros(_sh0.shape(), _sh0.device());
+    //         }
+    //         if (!shN_grad.is_valid()) {
+    //             shN_grad = Tensor::zeros(_shN.shape(), _shN.device());
+    //         }
+    //         if (!scaling_grad.is_valid()) {
+    //             scaling_grad = Tensor::zeros(_scaling.shape(), _scaling.device());
+    //         }
+    //         if (!rotation_grad.is_valid()) {
+    //             rotation_grad = Tensor::zeros(_rotation.shape(), _rotation.device());
+    //         }
+    //         if (!opacity_grad.is_valid()) {
+    //             opacity_grad = Tensor::zeros(_opacity.shape(), _opacity.device());
+    //         }
+    //     }
+    //
+    //     void SplatData::zero_grad() {
+    //         // Zero out all gradient tensors if they exist
+    //         if (means_grad.is_valid()) {
+    //             means_grad.zero_();
+    //         }
+    //         if (sh0_grad.is_valid()) {
+    //             sh0_grad.zero_();
+    //         }
+    //         if (shN_grad.is_valid()) {
+    //             shN_grad.zero_();
+    //         }
+    //         if (scaling_grad.is_valid()) {
+    //             scaling_grad.zero_();
+    //         }
+    //         if (rotation_grad.is_valid()) {
+    //             rotation_grad.zero_();
+    //         }
+    //         if (opacity_grad.is_valid()) {
+    //             opacity_grad.zero_();
+    //         }
+    //     }
 
 } // namespace lfs::core

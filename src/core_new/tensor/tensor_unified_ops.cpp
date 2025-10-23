@@ -4,9 +4,9 @@
 #include "core_new/logger.hpp"
 #include "core_new/pinned_memory_allocator.hpp"
 #include "internal/memory_pool.hpp"
-#include "internal/tensor_impl.hpp"
 #include "internal/tensor_broadcast.hpp"
 #include "internal/tensor_functors.hpp"
+#include "internal/tensor_impl.hpp"
 #include "internal/tensor_ops.hpp"
 #include <algorithm>
 #include <cmath>
