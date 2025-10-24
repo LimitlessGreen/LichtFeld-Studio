@@ -120,8 +120,7 @@ namespace lfs::loader {
                std::filesystem::exists(done_path);
     }
 
-    CacheLoader::CacheLoader(bool use_cpu_memory, bool use_fs_cache) : use_cpu_memory_(use_cpu_memory),
-                                                                       use_fs_cache_(use_fs_cache) {
+    CacheLoader::CacheLoader(bool use_cpu_memory, bool use_fs_cache) : use_cpu_memory_(use_cpu_memory), use_fs_cache_(use_fs_cache) {
         create_new_cache_folder();
         if (min_cpu_free_memory_ratio_ < 0 || min_cpu_free_memory_ratio_ > 1) {
             LOG_WARN("min_cpu_free_memory_ratio_ is outside [0,1] interval = {}", min_cpu_free_memory_ratio_);
@@ -135,22 +134,42 @@ namespace lfs::loader {
         }
 
         auto cache_base = gs::management::GetLichtFeldBaseTemporaryFolder() / "cache";
-
-        if (!std::filesystem::exists(cache_base)) {
-            bool success = std::filesystem::create_directories(cache_base);
-            if (!success) {
-                throw std::runtime_error("failed to create cache base directory " + cache_base.string());
-            }
-        }
-
         std::string unique_cache_path = LFS_CACHE_PREFIX + gs::management::generateShortHash();
         std::filesystem::path cache_folder = cache_base / unique_cache_path;
 
-        bool success = std::filesystem::create_directories(cache_folder);
-        if (!success) {
-            throw std::runtime_error("failed to create cache directory " + cache_folder.string());
+        std::error_code ec;
+
+        // Check if parent path exists and is valid
+        if (!std::filesystem::exists(cache_base.parent_path())) {
+            LOG_ERROR("Cache base path does not exist: {}. Disabling filesystem cache.",
+                     cache_base.parent_path().string());
+            use_fs_cache_ = false;
+            return;
         }
+
+        // If cache folder already exists, wipe it
+        if (std::filesystem::exists(cache_folder)) {
+            LOG_DEBUG("Cache folder {} already exists, wiping it", cache_folder.string());
+            std::filesystem::remove_all(cache_folder, ec);
+            if (ec) {
+                LOG_ERROR("Failed to wipe existing cache folder {}: {}. Disabling filesystem cache.",
+                         cache_folder.string(), ec.message());
+                use_fs_cache_ = false;
+                return;
+            }
+        }
+
+        // Create the cache folder
+        std::filesystem::create_directories(cache_folder, ec);
+        if (ec) {
+            LOG_ERROR("Failed to create cache directory {}: {}. Disabling filesystem cache.",
+                     cache_folder.string(), ec.message());
+            use_fs_cache_ = false;
+            return;
+        }
+
         cache_folder_ = cache_folder;
+        LOG_DEBUG("Created cache directory: {}", cache_folder.string());
     }
 
     void CacheLoader::reset_cache() {
@@ -488,11 +507,11 @@ namespace lfs::loader {
             double memory_ratio = get_memory_usage_ratio();
             double cache_ratio = (double)get_cpu_cache_size() / (double)get_total_physical_memory();
 
-            LOG_INFO("CacheInfo: Num images in cache {}", cpu_cache_.size());
-            LOG_INFO("CacheInfo: total memory {:.2f}GB", total_memory_gb);
-            LOG_INFO("CacheInfo: used memory {:.2f}%", 100 * memory_ratio);
-            LOG_INFO("CacheInfo: cache memory occupancy {:.2f}%", 100 * cache_ratio);
-            LOG_INFO("*****"); // seperator
+            LOG_TRACE("CacheInfo: Num images in cache {}", cpu_cache_.size());
+            LOG_TRACE("CacheInfo: total memory {:.2f}GB", total_memory_gb);
+            LOG_TRACE("CacheInfo: used memory {:.2f}%", 100 * memory_ratio);
+            LOG_TRACE("CacheInfo: cache memory occupancy {:.2f}%", 100 * cache_ratio);
+            LOG_TRACE("*****"); // seperator
         }
     }
 
