@@ -11,7 +11,6 @@ set(TRAINING_HOST_SOURCES
         rasterization/rasterizer.cpp
         rasterization/fast_rasterizer.cpp
         rasterization/rasterizer_autograd.cpp
-        rasterization/fast_rasterizer_autograd.cpp
 
         # Strategies
         strategies/strategy_utils.cpp

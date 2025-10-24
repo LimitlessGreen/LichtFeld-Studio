@@ -133,6 +133,82 @@ namespace gs::training {
         }
     }
 
+    // Compute photometric loss AND gradient manually (no autograd)
+    std::expected<std::pair<float, torch::Tensor>, std::string> Trainer::compute_photometric_loss_with_gradient(
+        const torch::Tensor& rendered,
+        const torch::Tensor& gt_image,
+        const param::OptimizationParameters& opt_params) {
+        try {
+            torch::Tensor rendered_4d = rendered.dim() == 3 ? rendered.unsqueeze(0) : rendered;
+            torch::Tensor gt_4d = gt_image.dim() == 3 ? gt_image.unsqueeze(0) : gt_image;
+
+            TORCH_CHECK(rendered_4d.sizes() == gt_4d.sizes(),
+                        "ERROR: size mismatch – rendered ", rendered_4d.sizes(),
+                        " vs. ground truth ", gt_4d.sizes());
+
+            // Compute L1 loss and gradient manually
+            // L1 loss: mean(|rendered - gt|)
+            // Gradient: sign(rendered - gt) / N
+            auto diff = rendered_4d - gt_4d;
+            auto l1_loss_tensor = diff.abs().mean();  // Keep as tensor (no sync!)
+            auto grad_l1 = diff.sign() / static_cast<float>(diff.numel());
+
+            // Compute SSIM loss and gradient using CUDA kernels
+            auto ssim_outputs = fusedssim(0.01f * 0.01f, 0.03f * 0.03f, rendered_4d, gt_4d, /*train=*/true);
+            auto ssim_map = std::get<0>(ssim_outputs);
+            auto dm_dmu1 = std::get<1>(ssim_outputs);
+            auto dm_dsigma1_sq = std::get<2>(ssim_outputs);
+            auto dm_dsigma12 = std::get<3>(ssim_outputs);
+
+            // Apply valid padding if needed
+            using torch::indexing::Slice;
+            int64_t h = ssim_map.size(2);
+            int64_t w = ssim_map.size(3);
+            if (h > 10 && w > 10) {
+                ssim_map = ssim_map.index({Slice(), Slice(), Slice(5, h - 5), Slice(5, w - 5)});
+            }
+
+            auto ssim_value_tensor = ssim_map.mean();  // Keep as tensor (no sync!)
+            auto ssim_loss_tensor = 1.0f - ssim_value_tensor;  // Tensor operation
+
+            // Compute gradient w.r.t. SSIM
+            // dL/dSSIM = -1 (since loss = 1 - SSIM)
+            // dL/dmap = -1 / numel(ssim_map)
+            auto dL_dmap = torch::full_like(ssim_map, -1.0f / static_cast<float>(ssim_map.numel()));
+
+            // Pad gradient back to full size
+            if (h > 10 && w > 10) {
+                auto full_grad = torch::zeros_like(rendered_4d);
+                full_grad.index_put_({Slice(), Slice(), Slice(5, h - 5), Slice(5, w - 5)}, dL_dmap);
+                dL_dmap = full_grad;
+            }
+
+            // Call SSIM backward kernel
+            auto grad_ssim = fusedssim_backward(
+                0.01f * 0.01f, 0.03f * 0.03f,
+                rendered_4d, gt_4d, dL_dmap,
+                dm_dmu1, dm_dsigma1_sq, dm_dsigma12);
+
+            // Combine gradients: grad = (1 - lambda) * grad_l1 + lambda * grad_ssim
+            auto grad_combined = (1.0f - opt_params.lambda_dssim) * grad_l1 +
+                                opt_params.lambda_dssim * grad_ssim;
+
+            // Remove batch dimension if input was 3D
+            if (rendered.dim() == 3) {
+                grad_combined = grad_combined.squeeze(0);
+            }
+
+            // Compute total loss value as tensor, then extract scalar ONCE at the end
+            auto total_loss_tensor = (1.0f - opt_params.lambda_dssim) * l1_loss_tensor +
+                                     opt_params.lambda_dssim * ssim_loss_tensor;
+            float total_loss = total_loss_tensor.item<float>();  // Single sync point!
+
+            return std::make_pair(total_loss, grad_combined);
+        } catch (const std::exception& e) {
+            return std::unexpected(std::format("Error computing photometric loss with gradient: {}", e.what()));
+        }
+    }
+
     std::expected<float, std::string> Trainer::compute_scale_reg_loss(
         SplatData& splatData,
         const param::OptimizationParameters& opt_params) {
@@ -671,9 +747,13 @@ namespace gs::training {
             torch::Tensor& bg = background_for_step(iter);
 
             RenderOutput r_output;
+            std::optional<FastRasterizeContext> fast_raster_ctx;
+
             // Use the render mode from parameters
             if (!params_.optimization.gut) {
-                r_output = fast_rasterize(adjusted_cam, strategy_->get_model(), bg);
+                auto [output, ctx] = fast_rasterize_forward(adjusted_cam, strategy_->get_model(), bg);
+                r_output = output;
+                fast_raster_ctx = ctx;
             } else {
                 r_output = rasterize(adjusted_cam, strategy_->get_model(), bg, 1.0f, false, false, render_mode,
                                      nullptr);
@@ -684,18 +764,36 @@ namespace gs::training {
                 r_output.image = bilateral_grid_->apply(r_output.image, cam->uid());
             }
 
-            // Compute losses
-            auto loss_result = compute_photometric_loss(r_output,
-                                                        gt_image,
-                                                        strategy_->get_model(),
-                                                        params_.optimization);
-            if (!loss_result) {
-                return std::unexpected(loss_result.error());
-            }
+            // Compute photometric loss
+            float loss_value;
+            torch::Tensor grad_image;
 
-            torch::Tensor loss = *loss_result;
-            loss.backward();
-            float loss_value = loss.item<float>();
+            if (fast_raster_ctx.has_value()) {
+                // For explicit backward, compute loss and gradient manually (no autograd)
+                auto loss_grad_result = compute_photometric_loss_with_gradient(
+                    r_output.image,
+                    gt_image,
+                    params_.optimization);
+                if (!loss_grad_result) {
+                    return std::unexpected(loss_grad_result.error());
+                }
+                auto [loss_val, grad] = *loss_grad_result;
+                loss_value = loss_val;
+                grad_image = grad;
+            } else {
+                // For autograd mode (gut rasterizer), use traditional backward
+                auto loss_result = compute_photometric_loss(r_output,
+                                                            gt_image,
+                                                            strategy_->get_model(),
+                                                            params_.optimization);
+                if (!loss_result) {
+                    return std::unexpected(loss_result.error());
+                }
+                auto loss = *loss_result;
+                loss.backward();
+                loss_value = loss.item<float>();
+                grad_image = torch::Tensor(); // Not needed for autograd path
+            }
 
             // Scale regularization loss
             auto scale_loss_result = compute_scale_reg_loss(strategy_->get_model(), params_.optimization);
@@ -716,18 +814,23 @@ namespace gs::training {
             if (!tv_loss_result) {
                 return std::unexpected(tv_loss_result.error());
             }
-            loss = *tv_loss_result;
-            loss.backward();
-            loss_value += loss.item<float>();
+            auto tv_loss = *tv_loss_result;
+            tv_loss.backward();
+            loss_value += tv_loss.item<float>();
 
             // Add sparsity loss
             auto sparsity_loss_result = compute_sparsity_loss(iter, strategy_->get_model());
             if (!sparsity_loss_result) {
                 return std::unexpected(sparsity_loss_result.error());
             }
-            loss = *sparsity_loss_result;
-            loss.backward();
-            loss_value += loss.item<float>();
+            auto sparsity_loss = *sparsity_loss_result;
+            sparsity_loss.backward();
+            loss_value += sparsity_loss.item<float>();
+
+            // Call explicit backward for fast rasterizer (if used)
+            if (fast_raster_ctx.has_value()) {
+                fast_rasterize_backward(*fast_raster_ctx, grad_image, strategy_->get_model());
+            }
 
             // Store the loss value immediately
             current_loss_ = loss_value;

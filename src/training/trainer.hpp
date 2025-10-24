@@ -129,6 +129,12 @@ namespace gs::training {
             const SplatData& splatData,
             const param::OptimizationParameters& opt_params);
 
+        // Compute photometric loss AND gradient manually (no autograd)
+        std::expected<std::pair<float, torch::Tensor>, std::string> compute_photometric_loss_with_gradient(
+            const torch::Tensor& rendered,
+            const torch::Tensor& gt_image,
+            const param::OptimizationParameters& opt_params);
+
         std::expected<float, std::string> compute_scale_reg_loss(
             SplatData& splatData,
             const param::OptimizationParameters& opt_params);
