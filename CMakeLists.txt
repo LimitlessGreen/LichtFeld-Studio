@@ -117,7 +117,18 @@ if(total_cores GREATER 1)
 endif()
 
 # CUDA setup
-find_program(NVIDIA_SMI nvidia-smi)
+# On Windows, nvidia-smi.exe is in System32, but CMake might be running as 32-bit
+# which causes WOW64 redirection. Explicitly search in Sysnative to avoid this.
+if(WIN32)
+    find_program(NVIDIA_SMI nvidia-smi
+        PATHS "C:/Windows/Sysnative" "C:/Windows/System32"
+        NO_DEFAULT_PATH)
+    if(NOT NVIDIA_SMI)
+        find_program(NVIDIA_SMI nvidia-smi)
+    endif()
+else()
+    find_program(NVIDIA_SMI nvidia-smi)
+endif()
 if(NVIDIA_SMI)
     execute_process(
             COMMAND ${NVIDIA_SMI} --query-gpu=compute_cap --format=csv,noheader
