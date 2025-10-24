@@ -2,11 +2,11 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "rasterizer.hpp"
+#include "validation.hpp"
 #include "Ops.h"
 #include <torch/torch.h>
 
-namespace gs::training {
+namespace gs::training::validation {
     using torch::indexing::None;
     using torch::indexing::Slice;
 
@@ -216,8 +216,8 @@ namespace gs::training {
         }
     };
 
-    // Main render function
-    RenderOutput rasterize(
+    // Main render function (VALIDATION VERSION - WITH AUTOGRAD)
+    RenderOutput rasterize_validation(
         Camera& viewpoint_camera,
         const SplatData& gaussian_model,
         torch::Tensor& bg_color,
@@ -433,4 +433,4 @@ namespace gs::training {
 
         return result;
     }
-} // namespace gs::training
+} // namespace gs::training::validation

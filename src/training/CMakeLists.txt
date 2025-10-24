@@ -10,7 +10,7 @@ set(TRAINING_HOST_SOURCES
         # Rasterization
         rasterization/rasterizer.cpp
         rasterization/fast_rasterizer.cpp
-        rasterization/rasterizer_autograd.cpp
+        rasterization/validation.cpp
 
         # Strategies
         strategies/strategy_utils.cpp

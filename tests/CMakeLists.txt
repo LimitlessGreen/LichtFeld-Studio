@@ -19,6 +19,10 @@ set(TEST_SOURCES
 set(OPTIONAL_TEST_FILES
     test_loss_gradients.cpp
     test_render_modes.cpp
+    test_gut_rasterizer_gradients.cpp
+    test_gut_manual_vs_autograd.cpp
+    test_gut_autograd_vs_manual.cpp
+    test_activation_gradients.cpp
     test_tensor_basic.cpp
     test_tensor_ops.cpp
     test_tensor_memory.cpp
