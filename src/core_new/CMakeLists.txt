@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
-#
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# Build the tensor library first
+# ============================================================================
+# core_new module - New LibTorch-free core module with lfs::core namespace
+# ============================================================================
+
+# Add tensor library
 add_subdirectory(tensor)
 
 # Core CUDA kernels library (kmeans, morton encoding)
@@ -31,6 +34,21 @@ set_target_properties(lfs_core_kernels PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
+
+# CUDA compiler options for lfs_core_kernels
+target_compile_options(lfs_core_kernels PRIVATE
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Debug>>:-O0 -g -G -lineinfo -Xcompiler=/Od -Xcompiler=/Z7 -Xcompiler=/utf-8 -Xcompiler=/D_CRT_SECURE_NO_WARNINGS --diag-suppress=27>
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:-O3 -use_fast_math --ptxas-options=-v -Xcompiler=/O2 -Xcompiler=/DNDEBUG -Xcompiler=/utf-8 -Xcompiler=/D_CRT_SECURE_NO_WARNINGS --diag-suppress=27>
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:GNU>>:-O3 -use_fast_math --ptxas-options=-v>
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>,$<CXX_COMPILER_ID:GNU>>:-O0 -g -G -lineinfo>
+)
+
+# Windows: Add compile definition to tell fmt that UTF-8 is enabled for CUDA files
+if(MSVC)
+    target_compile_definitions(lfs_core_kernels PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:FMT_UNICODE=0>
+    )
+endif()
 
 # Core module - fundamental data structures and utilities
 # Note: lfs_tensor library is now in src/core_new/tensor
@@ -148,7 +166,7 @@ set_target_properties(lfs_core PROPERTIES
 # Configure build type
 function(configure_build_type target)
     get_target_property(target_type ${target} TYPE)
-    
+
     if(target_type STREQUAL "INTERFACE_LIBRARY")
         if(CMAKE_BUILD_TYPE STREQUAL "Debug")
             target_compile_definitions(${target} INTERFACE DEBUG_BUILD)
@@ -167,10 +185,7 @@ endfunction()
 configure_build_type(lfs_core)
 
 message(STATUS "╔════════════════════════════════════════════════════════════════╗")
-message(STATUS "║  lfs_core - Core Application Library                          ║")
+message(STATUS "║  core_new - LibTorch-free Core Module                         ║")
 message(STATUS "╚════════════════════════════════════════════════════════════════╝")
-message(STATUS "  • Core library: C++23 (lfs_core)")
-message(STATUS "  • Tensor library: lfs_tensor (from src/core_new/tensor)")
-message(STATUS "  • Build type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "  • WebP library: ${WEBP_LIB}")
-message(STATUS "  • Archive library: ${ARCHIVE_LIB}")
+message(STATUS "  • Namespace: lfs::core")
+message(STATUS "  • Tensor library: lfs_tensor")

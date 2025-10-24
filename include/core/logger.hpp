@@ -9,6 +9,9 @@
 #include <format>
 #include <iostream>
 #include <mutex>
+#ifdef WIN32
+#define FMT_UNICODE 0
+#endif
 #include <source_location>
 #include <spdlog/sinks/base_sink.h>
 #include <spdlog/sinks/basic_file_sink.h>
