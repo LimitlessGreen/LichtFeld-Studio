@@ -122,13 +122,6 @@ namespace gs::training {
             RenderMode render_mode,
             std::stop_token stop_token = {});
 
-        // Protected methods for computing loss
-        std::expected<torch::Tensor, std::string> compute_photometric_loss(
-            const RenderOutput& render_output,
-            const torch::Tensor& gt_image,
-            const SplatData& splatData,
-            const param::OptimizationParameters& opt_params);
-
         // Compute photometric loss AND gradient manually (no autograd)
         std::expected<std::pair<float, torch::Tensor>, std::string> compute_photometric_loss_with_gradient(
             const torch::Tensor& rendered,

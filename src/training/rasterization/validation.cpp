@@ -5,6 +5,7 @@
 #include "validation.hpp"
 #include "Ops.h"
 #include <torch/torch.h>
+#include "core/logger.hpp"
 
 namespace gs::training::validation {
     using torch::indexing::None;
@@ -149,6 +150,10 @@ namespace gs::training::validation {
             int render_mode = ctx->saved_data["render_mode"].toInt();
 
             // Step 1: Call gsplat backward to get gradients on activated parameters
+            LOG_INFO("validation backward: grad_outputs[0] shape = [{}, {}, {}, {}], norm = {:.6f}",
+                     grad_outputs[0].size(0), grad_outputs[0].size(1), grad_outputs[0].size(2), grad_outputs[0].size(3),
+                     grad_outputs[0].norm().item<float>());
+
             auto grads = gsplat::rasterize_from_world_with_sh_bwd(
                 means, rotations, scales, opacities, sh_coeffs,
                 static_cast<uint32_t>(sh_degree),
@@ -177,6 +182,8 @@ namespace gs::training::validation {
             auto v_means = std::get<0>(grads);
             auto v_quats = std::get<1>(grads);
             auto v_scales = std::get<2>(grads);
+
+            LOG_INFO("validation gsplat backward outputs: v_means norm = {:.6f}", v_means.norm().item<float>());
             auto v_opacities = std::get<3>(grads);
             auto v_sh_coeffs = std::get<4>(grads);
 
@@ -396,7 +403,23 @@ namespace gs::training::validation {
 
         // Handle image output
         if (final_image.defined() && final_image.numel() > 0) {
+            // Register hook to log the gradient PyTorch computes for the output
+            final_image.register_hook([](const torch::Tensor& grad) -> torch::Tensor {
+                float grad_norm = grad.norm().item<float>();
+                LOG_INFO("PyTorch hook on final_image BEFORE clamp/permute: grad shape = [{}, {}, {}, {}], norm = {:.6f}",
+                         grad.size(0), grad.size(1), grad.size(2), grad.size(3), grad_norm);
+                return grad;
+            });
+
             result.image = torch::clamp(final_image.squeeze(0).permute({2, 0, 1}), 0.0f, 1.0f);
+
+            // Also register hook on the final result to see what gradient the loss gives
+            result.image.register_hook([](const torch::Tensor& grad) -> torch::Tensor {
+                float grad_norm = grad.norm().item<float>();
+                LOG_INFO("PyTorch hook on result.image AFTER clamp/permute: grad shape = [{}, {}, {}], norm = {:.6f}",
+                         grad.size(0), grad.size(1), grad.size(2), grad_norm);
+                return grad;
+            });
         } else {
             result.image = torch::Tensor();
         }

@@ -22,6 +22,7 @@ set(OPTIONAL_TEST_FILES
     test_gut_rasterizer_gradients.cpp
     test_gut_manual_vs_autograd.cpp
     test_gut_autograd_vs_manual.cpp
+    test_gut_gradient_comparison.cpp
     test_activation_gradients.cpp
     test_tensor_basic.cpp
     test_tensor_ops.cpp
