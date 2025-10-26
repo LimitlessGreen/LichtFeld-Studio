@@ -10,6 +10,7 @@
 #include "core/events.hpp"
 #include "core/parameters.hpp"
 #include "dataset.hpp"
+#include "kernels/bilateral_grid.cuh"
 #include "metrics/metrics.hpp"
 #include "optimizers/scheduler.hpp"
 #include "progress.hpp"
@@ -136,7 +137,7 @@ namespace gs::training {
             SplatData& splatData,
             const param::OptimizationParameters& opt_params);
 
-        std::expected<torch::Tensor, std::string> compute_bilateral_grid_tv_loss(
+        std::expected<std::pair<float, bilateral_grid::BilateralGridTVContext>, std::string> compute_bilateral_grid_tv_loss(
             const std::unique_ptr<BilateralGrid>& bilateral_grid,
             const param::OptimizationParameters& opt_params);
 

@@ -197,14 +197,21 @@ namespace gs::training {
         }
     }
 
-    std::expected<torch::Tensor, std::string> Trainer::compute_bilateral_grid_tv_loss(
+    std::expected<std::pair<float, bilateral_grid::BilateralGridTVContext>, std::string> Trainer::compute_bilateral_grid_tv_loss(
         const std::unique_ptr<BilateralGrid>& bilateral_grid,
         const param::OptimizationParameters& opt_params) {
         try {
             if (opt_params.use_bilateral_grid) {
-                return opt_params.tv_loss_weight * bilateral_grid->tv_loss();
+                // Manual forward (no autograd)
+                auto [tv_loss_value, ctx] = bilateral_grid->tv_loss_forward();
+                float weighted_loss = opt_params.tv_loss_weight * tv_loss_value;
+
+                // Return weighted loss value and context
+                return std::make_pair(weighted_loss, ctx);
             }
-            return torch::zeros({1}, torch::kFloat32).requires_grad_();
+            // Return zero loss with empty context
+            bilateral_grid::BilateralGridTVContext empty_ctx;
+            return std::make_pair(0.0f, empty_ctx);
         } catch (const std::exception& e) {
             return std::unexpected(std::format("Error computing bilateral grid TV loss: {}", e.what()));
         }
@@ -712,9 +719,12 @@ namespace gs::training {
                 gut_raster_ctx = std::move(ctx);
             }
 
-            // Apply bilateral grid if enabled
+            // Apply bilateral grid if enabled (manual forward - no autograd)
+            std::optional<bilateral_grid::BilateralGridSliceContext> bilateral_ctx;
             if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
-                r_output.image = bilateral_grid_->apply(r_output.image, cam->uid());
+                auto [output_image, ctx] = bilateral_grid_->apply_forward(r_output.image, cam->uid());
+                r_output.image = output_image;
+                bilateral_ctx = ctx;
             }
 
             // Compute photometric loss and gradients manually (no autograd)
@@ -732,6 +742,11 @@ namespace gs::training {
             loss_value = loss_val;
             grad_image = grad;
 
+            // Bilateral grid backward if enabled
+            if (bilateral_grid_ && params_.optimization.use_bilateral_grid && bilateral_ctx.has_value()) {
+                grad_image = bilateral_grid_->apply_backward(*bilateral_ctx, grad_image, cam->uid());
+            }
+
             // Scale regularization loss
             auto scale_loss_result = compute_scale_reg_loss(strategy_->get_model(), params_.optimization);
             if (!scale_loss_result) {
@@ -746,14 +761,20 @@ namespace gs::training {
             }
             loss_value += *opacity_loss_result;
 
-            // Bilateral grid TV loss
+            // Bilateral grid TV loss (manual forward/backward - no autograd)
             auto tv_loss_result = compute_bilateral_grid_tv_loss(bilateral_grid_, params_.optimization);
             if (!tv_loss_result) {
                 return std::unexpected(tv_loss_result.error());
             }
-            auto tv_loss = *tv_loss_result;
-            tv_loss.backward();
-            loss_value += tv_loss.item<float>();
+            auto [tv_loss_value, tv_ctx] = *tv_loss_result;
+
+            // Accumulate TV loss
+            loss_value += tv_loss_value;
+
+            // Backward for TV loss (gradient w.r.t. TV loss is 1.0 since we're just adding it)
+            if (bilateral_grid_ && params_.optimization.use_bilateral_grid && tv_loss_value > 0.0f) {
+                bilateral_grid_->tv_loss_backward(tv_ctx, params_.optimization.tv_loss_weight);
+            }
 
             // Add sparsity loss
             auto sparsity_loss_result = compute_sparsity_loss(iter, strategy_->get_model());

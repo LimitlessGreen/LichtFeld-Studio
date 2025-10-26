@@ -186,5 +186,42 @@ namespace gs {
 
             return grad_grids;
         }
+
+        // ============= MANUAL FORWARD/BACKWARD INTERFACE (no autograd) =============
+
+        // Manual TV loss forward (no autograd)
+        std::pair<float, BilateralGridTVContext> bilateral_grid_tv_forward(
+            const torch::Tensor& grids) {
+
+            TORCH_CHECK(grids.dim() == 5 && grids.size(1) == 12,
+                        "Grids must be [N, 12, L, H, W]");
+
+            // Call CUDA kernel
+            auto tv_loss_tensor = tv_loss_forward_cuda(grids.contiguous());
+
+            // Extract scalar value (no CPU sync needed if we extract immediately)
+            float tv_loss_value = tv_loss_tensor.item<float>();
+
+            // Save context for backward
+            BilateralGridTVContext ctx;
+            ctx.grids = grids;
+
+            return {tv_loss_value, ctx};
+        }
+
+        // Manual TV loss backward (no autograd)
+        torch::Tensor bilateral_grid_tv_backward(
+            const BilateralGridTVContext& ctx,
+            float grad_loss) {
+
+            // Create gradient tensor for the scalar loss
+            auto grad_output = torch::tensor(grad_loss, ctx.grids.options());
+
+            // Call CUDA backward kernel
+            auto grad_grids = tv_loss_backward_cuda(ctx.grids, grad_output);
+
+            return grad_grids;
+        }
+
     } // namespace bilateral_grid
 } // namespace gs
