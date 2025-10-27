@@ -28,6 +28,12 @@ set(TRAINING_HOST_SOURCES
         components/bilateral_grid.cpp
         components/poseopt.cpp
         components/sparsity_optimizer.cpp
+
+        # Losses
+        losses/photometric_loss.cpp
+        losses/scale_regularization.cpp
+        losses/opacity_regularization.cpp
+        losses/sparsity_loss.cpp
 )
 
 # CUDA kernel sources

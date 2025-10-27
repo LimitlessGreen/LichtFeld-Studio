@@ -240,10 +240,6 @@ namespace gs::training {
         // grad_image is [3, H, W] (or [1, H, W] for depth-only modes)
         // Need to convert back to [1, H, W, C] format for gsplat
 
-        LOG_INFO("rasterize_backward INPUT: grad_image shape = [{}, {}, {}], norm = {:.6f}",
-                 grad_image.size(0), grad_image.size(1), grad_image.size(2),
-                 grad_image.norm().item<float>());
-
         torch::Tensor grad_rendered_image;
         if (grad_image.defined() && grad_image.numel() > 0) {
             // Reverse the post-processing operations in backward order:
@@ -258,14 +254,7 @@ namespace gs::training {
             auto unclamped = ctx.rendered_image.squeeze(0).permute({2, 0, 1});  // [3, H, W]
             auto clamp_mask = (unclamped >= 0.0f) & (unclamped <= 1.0f);  // [3, H, W]
 
-            // Debug: check mask statistics
-            float mask_mean = clamp_mask.to(torch::kFloat32).mean().item<float>();
-            LOG_INFO("Clamp mask mean (fraction in [0,1]): {:.6f}", mask_mean);
-
             auto grad_after_clamp = grad_image * clamp_mask.to(grad_image.dtype());
-
-            float grad_norm_after_clamp = grad_after_clamp.norm().item<float>();
-            LOG_INFO("After clamp backward: norm = {:.6f}", grad_norm_after_clamp);
 
             // Step 2: Reverse permute and unsqueeze
             auto grad_permuted = grad_after_clamp.permute({1, 2, 0}).unsqueeze(0);  // [1, H, W, 3]
@@ -277,10 +266,6 @@ namespace gs::training {
         auto grad_rendered_alpha = torch::zeros_like(ctx.rendered_alpha);
 
         // Step 2: Call gsplat backward to get gradients on activated parameters
-        LOG_INFO("rasterize_backward: grad_rendered_image shape = [{}, {}, {}, {}], norm = {:.6f}",
-                 grad_rendered_image.size(0), grad_rendered_image.size(1), grad_rendered_image.size(2), grad_rendered_image.size(3),
-                 grad_rendered_image.norm().item<float>());
-
         auto grads = gsplat::rasterize_from_world_with_sh_bwd(
             ctx.means, ctx.rotations, ctx.scales, ctx.opacities, ctx.sh_coeffs,
             static_cast<uint32_t>(ctx.sh_degree),
@@ -311,15 +296,6 @@ namespace gs::training {
         auto v_scales = std::get<2>(grads);
         auto v_opacities = std::get<3>(grads);
         auto v_sh_coeffs = std::get<4>(grads);
-
-        float v_means_norm = v_means.norm().item<float>();
-        float v_scales_norm = v_scales.norm().item<float>();
-        float v_opacities_norm = v_opacities.norm().item<float>();
-        LOG_INFO("gsplat backward outputs (activated params): v_means={:.6f}, v_scales={:.6f}, v_opacities={:.6f}",
-                 v_means_norm, v_scales_norm, v_opacities_norm);
-
-        LOG_INFO("gsplat backward outputs: v_means norm = {:.6f}, v_opacities norm = {:.6f}",
-                 v_means.norm().item<float>(), v_opacities.norm().item<float>());
 
         // Step 3: Manually apply chain rule to get gradients on RAW parameters
 
@@ -355,12 +331,6 @@ namespace gs::training {
         } else {
             grad_shN = torch::zeros({ctx.means_raw.size(0), 0, 3}, ctx.means_raw.options());
         }
-
-        float grad_means_raw_norm = grad_means_raw.norm().item<float>();
-        float grad_opacities_raw_norm = grad_opacities_raw.norm().item<float>();
-        float grad_scales_raw_norm = grad_scales_raw.norm().item<float>();
-        LOG_INFO("After chain rule: grad_means_raw={:.6f}, grad_opacities_raw={:.6f}, grad_scales_raw={:.6f}",
-                 grad_means_raw_norm, grad_opacities_raw_norm, grad_scales_raw_norm);
 
         // Step 4: Accumulate gradients into parameters
         // Get REFERENCES (not copies!) to parameter tensors

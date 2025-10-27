@@ -15,6 +15,7 @@
 #include "rasterization/fast_rasterizer.hpp"
 #include "rasterization/rasterizer.hpp"
 #include "rasterization/validation.hpp"
+#include "losses/losses.hpp"
 
 #include <ATen/cuda/CUDAEvent.h>
 #include <atomic>
@@ -105,96 +106,32 @@ namespace gs::training {
         }
     }
 
-    // Compute photometric loss AND gradient manually
+    // Compute photometric loss AND gradient manually (using loss struct)
     std::expected<std::pair<float, torch::Tensor>, std::string> Trainer::compute_photometric_loss_with_gradient(
         const torch::Tensor& rendered,
         const torch::Tensor& gt_image,
         const param::OptimizationParameters& opt_params) {
-        try {
-            torch::Tensor rendered_4d = rendered.dim() == 3 ? rendered.unsqueeze(0) : rendered;
-            torch::Tensor gt_4d = gt_image.dim() == 3 ? gt_image.unsqueeze(0) : gt_image;
-
-            TORCH_CHECK(rendered_4d.sizes() == gt_4d.sizes(),
-                        "ERROR: size mismatch – rendered ", rendered_4d.sizes(),
-                        " vs. ground truth ", gt_4d.sizes());
-
-            // Compute L1 loss and gradient manually
-            // L1 loss: mean(|rendered - gt|)
-            // Gradient: sign(rendered - gt) / N
-            auto diff = rendered_4d - gt_4d;
-            auto l1_loss_tensor = diff.abs().mean();  // Keep as tensor (no sync!)
-            auto grad_l1 = diff.sign() / static_cast<float>(diff.numel());
-
-            // Compute SSIM loss and gradient manually (no autograd)
-            auto [ssim_value, ssim_ctx] = ssim_forward(rendered_4d, gt_4d, /*apply_valid_padding=*/true);
-            float ssim_loss = 1.0f - ssim_value;
-
-            // Backward: d(loss)/d(ssim) = -1 (since loss = 1 - ssim)
-            auto grad_ssim = ssim_backward(ssim_ctx, -1.0f);
-
-            // Handle dimension: if input was 3D, squeeze the output
-            if (rendered.dim() == 3 && grad_ssim.dim() == 4) {
-                grad_ssim = grad_ssim.squeeze(0);
-            }
-
-            // Combine gradients: grad = (1 - lambda) * grad_l1 + lambda * grad_ssim
-            auto grad_combined = (1.0f - opt_params.lambda_dssim) * grad_l1 +
-                                opt_params.lambda_dssim * grad_ssim;
-
-            // Remove batch dimension if input was 3D
-            if (rendered.dim() == 3) {
-                grad_combined = grad_combined.squeeze(0);
-            }
-
-            // Compute total loss value (both are already floats, no CPU sync needed!)
-            float l1_loss = l1_loss_tensor.item<float>();  // Extract scalar
-            float total_loss = (1.0f - opt_params.lambda_dssim) * l1_loss +
-                              opt_params.lambda_dssim * ssim_loss;
-
-            return std::make_pair(total_loss, grad_combined);
-        } catch (const std::exception& e) {
-            return std::unexpected(std::format("Error computing photometric loss with gradient: {}", e.what()));
+        lfs::training::losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
+        auto result = lfs::training::losses::PhotometricLoss::forward(rendered, gt_image, params);
+        if (!result) {
+            return std::unexpected(result.error());
         }
+        auto [loss, ctx] = *result;
+        return std::make_pair(loss, ctx.grad_image);
     }
 
     std::expected<float, std::string> Trainer::compute_scale_reg_loss(
         SplatData& splatData,
         const param::OptimizationParameters& opt_params) {
-        try {
-            if (opt_params.scale_reg > 0.0f) {
-                // Efficient fused CUDA kernel for exp regularization with chain rule
-                // Forward:  scaling = exp(_scaling)
-                // Loss:     L = weight * mean(scaling)
-                // Gradient: ∂L/∂_scaling = (weight / N) * exp(_scaling)
-                float loss = regularization::compute_exp_l1_regularization_with_grad_cuda(
-                    splatData.scaling_raw(),
-                    opt_params.scale_reg);
-                return loss;
-            }
-            return 0.0f;
-        } catch (const std::exception& e) {
-            return std::unexpected(std::format("Error computing scale regularization loss: {}", e.what()));
-        }
+        lfs::training::losses::ScaleRegularization::Params params{.weight = opt_params.scale_reg};
+        return lfs::training::losses::ScaleRegularization::forward(splatData.scaling_raw(), params);
     }
 
     std::expected<float, std::string> Trainer::compute_opacity_reg_loss(
         SplatData& splatData,
         const param::OptimizationParameters& opt_params) {
-        try {
-            if (opt_params.opacity_reg > 0.0f) {
-                // Use efficient fused CUDA kernel that computes:
-                // 1. sigmoid(opacity_raw)
-                // 2. Accumulates gradient with chain rule: ∂L/∂opacity_raw = (weight/N) * σ(x) * (1 - σ(x))
-                // 3. Returns loss: weight * mean(sigmoid(opacity_raw))
-                float loss_value = regularization::compute_sigmoid_l1_regularization_with_grad_cuda(
-                    splatData.opacity_raw(),
-                    opt_params.opacity_reg);
-                return loss_value;
-            }
-            return 0.0f;
-        } catch (const std::exception& e) {
-            return std::unexpected(std::format("Error computing opacity regularization loss: {}", e.what()));
-        }
+        lfs::training::losses::OpacityRegularization::Params params{.weight = opt_params.opacity_reg};
+        return lfs::training::losses::OpacityRegularization::forward(splatData.opacity_raw(), params);
     }
 
     std::expected<std::pair<float, bilateral_grid::BilateralGridTVContext>, std::string> Trainer::compute_bilateral_grid_tv_loss(
@@ -246,29 +183,23 @@ namespace gs::training {
     std::expected<std::pair<float, SparsityLossContext>, std::string> Trainer::compute_sparsity_loss_forward(
         int iter,
         const SplatData& splatData) {
-        try {
-            if (sparsity_optimizer_ && sparsity_optimizer_->should_apply_loss(iter)) {
-                // Initialize on first use (lazy initialization)
-                if (!sparsity_optimizer_->is_initialized()) {
-                    auto init_result = sparsity_optimizer_->initialize(splatData.opacity_raw());
-                    if (!init_result) {
-                        return std::unexpected(init_result.error());
-                    }
-                    LOG_INFO("Sparsity optimizer initialized at iteration {}", iter);
+        // Handle initialization before delegating to loss struct
+        if (sparsity_optimizer_ && sparsity_optimizer_->should_apply_loss(iter)) {
+            if (!sparsity_optimizer_->is_initialized()) {
+                auto init_result = sparsity_optimizer_->initialize(splatData.opacity_raw());
+                if (!init_result) {
+                    return std::unexpected(init_result.error());
                 }
-
-                auto loss_result = sparsity_optimizer_->compute_loss_forward(splatData.opacity_raw());
-                if (!loss_result) {
-                    return std::unexpected(loss_result.error());
-                }
-                return *loss_result;
+                LOG_INFO("Sparsity optimizer initialized at iteration {}", iter);
             }
-            // Return zero loss with empty context
-            SparsityLossContext empty_ctx;
-            return std::make_pair(0.0f, empty_ctx);
-        } catch (const std::exception& e) {
-            return std::unexpected(std::format("Error computing sparsity loss: {}", e.what()));
         }
+
+        // Delegate to loss struct
+        lfs::training::losses::SparsityLoss::Params params{
+            .current_iteration = iter,
+            .optimizer_ptr = sparsity_optimizer_.get()
+        };
+        return lfs::training::losses::SparsityLoss::forward(splatData, params);
     }
 
     std::expected<void, std::string> Trainer::handle_sparsity_update(
