@@ -34,17 +34,29 @@ namespace gs::training {
         auto w2c = viewpoint_camera.world_view_transform();
         auto cam_position = viewpoint_camera.cam_position();
 
-        // Call forward wrapper directly (no autograd)
-        auto outputs = fast_gs::rasterization::forward_wrapper(
-            means,
-            raw_scales,
-            raw_rotations,
-            raw_opacities,
-            sh0,
-            shN,
-            w2c,
-            cam_position,
+        const int n_primitives = means.size(0);
+        const int total_bases_sh_rest = shN.size(1);
+
+        // Allocate output tensors
+        const torch::TensorOptions float_options = torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA);
+        torch::Tensor image = torch::empty({3, height, width}, float_options);
+        torch::Tensor alpha = torch::empty({1, height, width}, float_options);
+
+        // Call forward_raw with raw pointers (no PyTorch wrappers)
+        auto forward_ctx = fast_gs::rasterization::forward_raw(
+            reinterpret_cast<const float*>(means.data_ptr<float>()),
+            reinterpret_cast<const float*>(raw_scales.data_ptr<float>()),
+            reinterpret_cast<const float*>(raw_rotations.data_ptr<float>()),
+            raw_opacities.data_ptr<float>(),
+            reinterpret_cast<const float*>(sh0.data_ptr<float>()),
+            reinterpret_cast<const float*>(shN.data_ptr<float>()),
+            w2c.contiguous().data_ptr<float>(),
+            cam_position.contiguous().data_ptr<float>(),
+            image.data_ptr<float>(),
+            alpha.data_ptr<float>(),
+            n_primitives,
             active_sh_bases,
+            total_bases_sh_rest,
             width,
             height,
             fx,
@@ -53,18 +65,6 @@ namespace gs::training {
             cy,
             near_plane,
             far_plane);
-
-        auto image = std::get<0>(outputs);
-        auto alpha = std::get<1>(outputs);
-        auto per_primitive_buffers = std::get<2>(outputs);
-        auto per_tile_buffers = std::get<3>(outputs);
-        auto per_instance_buffers = std::get<4>(outputs);
-        auto per_bucket_buffers = std::get<5>(outputs);
-        int n_visible_primitives = std::get<6>(outputs);
-        int n_instances = std::get<7>(outputs);
-        int n_buckets = std::get<8>(outputs);
-        int primitive_primitive_indices_selector = std::get<9>(outputs);
-        int instance_primitive_indices_selector = std::get<10>(outputs);
 
         // Prepare render output
         RenderOutput render_output;
@@ -82,19 +82,14 @@ namespace gs::training {
         ctx.raw_scales = raw_scales;
         ctx.raw_rotations = raw_rotations;
         ctx.shN = shN;
-
-        ctx.per_primitive_buffers = per_primitive_buffers;
-        ctx.per_tile_buffers = per_tile_buffers;
-        ctx.per_instance_buffers = per_instance_buffers;
-        ctx.per_bucket_buffers = per_bucket_buffers;
         ctx.w2c = w2c;
         ctx.cam_position = cam_position;
-        ctx.n_visible_primitives = n_visible_primitives;
-        ctx.n_instances = n_instances;
-        ctx.n_buckets = n_buckets;
-        ctx.primitive_primitive_indices_selector = primitive_primitive_indices_selector;
-        ctx.instance_primitive_indices_selector = instance_primitive_indices_selector;
+
+        // Store forward context (contains buffer pointers, frame_id, etc.)
+        ctx.forward_ctx = forward_ctx;
+
         ctx.active_sh_bases = active_sh_bases;
+        ctx.total_bases_sh_rest = total_bases_sh_rest;
         ctx.width = width;
         ctx.height = height;
         ctx.focal_x = fx;
@@ -141,45 +136,53 @@ namespace gs::training {
             throw std::runtime_error("Unexpected grad_image shape in fast_rasterize_backward");
         }
 
-        // Call backward wrapper directly (parameters already saved in context)
-        auto grad_outputs = fast_gs::rasterization::backward_wrapper(
-            gaussian_model._densification_info,
-            grad_image,
-            grad_alpha,
-            ctx.image,
-            ctx.alpha,
-            ctx.means,
-            ctx.raw_scales,
-            ctx.raw_rotations,
-            ctx.shN,
-            ctx.per_primitive_buffers,
-            ctx.per_tile_buffers,
-            ctx.per_instance_buffers,
-            ctx.per_bucket_buffers,
-            ctx.w2c,
-            ctx.cam_position,
+        const int n_primitives = ctx.means.size(0);
+
+        // Allocate gradient tensors
+        const torch::TensorOptions float_options = torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA);
+        torch::Tensor grad_means = torch::zeros({n_primitives, 3}, float_options);
+        torch::Tensor grad_scales_raw = torch::zeros({n_primitives, 3}, float_options);
+        torch::Tensor grad_rotations_raw = torch::zeros({n_primitives, 4}, float_options);
+        torch::Tensor grad_opacities_raw = torch::zeros({n_primitives, 1}, float_options);
+        torch::Tensor grad_sh_coefficients_0 = torch::zeros({n_primitives, 1, 3}, float_options);
+        torch::Tensor grad_sh_coefficients_rest = torch::zeros({n_primitives, ctx.total_bases_sh_rest, 3}, float_options);
+        torch::Tensor grad_w2c = torch::zeros_like(ctx.w2c, float_options);
+
+        // Call backward_raw with raw pointers
+        const bool update_densification_info = gaussian_model._densification_info.size(0) > 0;
+        auto backward_result = fast_gs::rasterization::backward_raw(
+            update_densification_info ? gaussian_model._densification_info.data_ptr<float>() : nullptr,
+            grad_image.data_ptr<float>(),
+            grad_alpha.data_ptr<float>(),
+            ctx.image.data_ptr<float>(),
+            ctx.alpha.data_ptr<float>(),
+            reinterpret_cast<const float*>(ctx.means.data_ptr<float>()),
+            reinterpret_cast<const float*>(ctx.raw_scales.data_ptr<float>()),
+            reinterpret_cast<const float*>(ctx.raw_rotations.data_ptr<float>()),
+            reinterpret_cast<const float*>(ctx.shN.data_ptr<float>()),
+            ctx.w2c.contiguous().data_ptr<float>(),
+            ctx.cam_position.contiguous().data_ptr<float>(),
+            ctx.forward_ctx,
+            reinterpret_cast<float*>(grad_means.data_ptr<float>()),
+            reinterpret_cast<float*>(grad_scales_raw.data_ptr<float>()),
+            reinterpret_cast<float*>(grad_rotations_raw.data_ptr<float>()),
+            grad_opacities_raw.data_ptr<float>(),
+            reinterpret_cast<float*>(grad_sh_coefficients_0.data_ptr<float>()),
+            reinterpret_cast<float*>(grad_sh_coefficients_rest.data_ptr<float>()),
+            ctx.w2c.requires_grad() ? reinterpret_cast<float*>(grad_w2c.data_ptr<float>()) : nullptr,
+            n_primitives,
             ctx.active_sh_bases,
+            ctx.total_bases_sh_rest,
             ctx.width,
             ctx.height,
             ctx.focal_x,
             ctx.focal_y,
             ctx.center_x,
-            ctx.center_y,
-            ctx.near_plane,
-            ctx.far_plane,
-            ctx.n_visible_primitives,
-            ctx.n_instances,
-            ctx.n_buckets,
-            ctx.primitive_primitive_indices_selector,
-            ctx.instance_primitive_indices_selector);
+            ctx.center_y);
 
-        auto grad_means = std::get<0>(grad_outputs);
-        auto grad_scales_raw = std::get<1>(grad_outputs);
-        auto grad_rotations_raw = std::get<2>(grad_outputs);
-        auto grad_opacities_raw = std::get<3>(grad_outputs);
-        auto grad_sh_coefficients_0 = std::get<4>(grad_outputs);
-        auto grad_sh_coefficients_rest = std::get<5>(grad_outputs);
-        // std::get<6>(grad_outputs) is grad_w2c - ignore for now
+        if (!backward_result.success) {
+            throw std::runtime_error(std::string("Backward failed: ") + backward_result.error_message);
+        }
 
         // Manually accumulate gradients into the parameter tensors
         // NOTE: Gradients should already be defined and zeroed by optimizer.zero_grad()

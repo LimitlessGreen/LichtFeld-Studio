@@ -21,19 +21,14 @@ namespace gs::training {
         torch::Tensor raw_scales;
         torch::Tensor raw_rotations;
         torch::Tensor shN;
-
-        torch::Tensor per_primitive_buffers;
-        torch::Tensor per_tile_buffers;
-        torch::Tensor per_instance_buffers;
-        torch::Tensor per_bucket_buffers;
         torch::Tensor w2c;
         torch::Tensor cam_position;
-        int n_visible_primitives;
-        int n_instances;
-        int n_buckets;
-        int primitive_primitive_indices_selector;
-        int instance_primitive_indices_selector;
+
+        // Forward context (contains buffer pointers, frame_id, etc.)
+        fast_gs::rasterization::ForwardContext forward_ctx;
+
         int active_sh_bases;
+        int total_bases_sh_rest;
         int width;
         int height;
         float focal_x;
