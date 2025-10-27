@@ -240,6 +240,7 @@ namespace lfs::core {
         uint64_t get_seed() const { return seed_; }
         void* get_generator(Device device);
         uint64_t get_next_cuda_seed();
+        uint64_t get_next_cuda_offset();  // Get next offset for cuRAND generator
         void* get_impl() { return impl_; }
         const void* get_impl() const { return impl_; }
 

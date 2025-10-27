@@ -935,4 +935,52 @@ namespace lfs::core {
     //         }
     //     }
 
+    // ========== GRADIENT MANAGEMENT ==========
+
+    void SplatData::allocate_gradients() {
+        if (_means.is_valid()) {
+            _means_grad = Tensor::zeros(_means.shape(), _means.device());
+        }
+        if (_sh0.is_valid()) {
+            _sh0_grad = Tensor::zeros(_sh0.shape(), _sh0.device());
+        }
+        if (_shN.is_valid()) {
+            _shN_grad = Tensor::zeros(_shN.shape(), _shN.device());
+        }
+        if (_scaling.is_valid()) {
+            _scaling_grad = Tensor::zeros(_scaling.shape(), _scaling.device());
+        }
+        if (_rotation.is_valid()) {
+            _rotation_grad = Tensor::zeros(_rotation.shape(), _rotation.device());
+        }
+        if (_opacity.is_valid()) {
+            _opacity_grad = Tensor::zeros(_opacity.shape(), _opacity.device());
+        }
+    }
+
+    void SplatData::zero_gradients() {
+        if (_means_grad.is_valid()) {
+            _means_grad.zero_();
+        }
+        if (_sh0_grad.is_valid()) {
+            _sh0_grad.zero_();
+        }
+        if (_shN_grad.is_valid()) {
+            _shN_grad.zero_();
+        }
+        if (_scaling_grad.is_valid()) {
+            _scaling_grad.zero_();
+        }
+        if (_rotation_grad.is_valid()) {
+            _rotation_grad.zero_();
+        }
+        if (_opacity_grad.is_valid()) {
+            _opacity_grad.zero_();
+        }
+    }
+
+    bool SplatData::has_gradients() const {
+        return _means_grad.is_valid();
+    }
+
 } // namespace lfs::core

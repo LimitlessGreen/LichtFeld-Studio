@@ -69,6 +69,7 @@ set(OPTIONAL_TEST_FILES
     benchmark_strided_tensors.cpp
     test_scalar_reduction_benchmark.cpp
     test_permute_upload_benchmark.cpp
+    test_lfs_adam_optimizer.cpp
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})
@@ -166,6 +167,65 @@ add_custom_target(run_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running all tests with verbose output"
 )
+
+# Profiling executable for Nsight Systems
+add_executable(profile_adam_optimizer profile_adam_optimizer.cpp)
+
+set_target_properties(profile_adam_optimizer PROPERTIES
+    CUDA_ARCHITECTURES "${LichtFeld-Studio_CUDA_ARCH}"
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+
+target_include_directories(profile_adam_optimizer PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_BINARY_DIR}/include
+    ${CMAKE_SOURCE_DIR}/tests
+    ${CUDAToolkit_INCLUDE_DIRS}
+)
+
+target_link_libraries(profile_adam_optimizer PRIVATE
+    # Core libraries (in dependency order - same as lichtfeld_tests)
+    gs_visualizer
+    gs_rendering
+    gs_training
+    gs_training_kernels
+    gs_project
+    gs_geometry
+    gs_core
+    gs_loader
+    gs_kernels
+    lfs_training
+    lfs_core
+    lfs_loader
+    lfs_tensor
+    gs_geometry  # Listed again after lfs_core to resolve circular dependency
+    gsplat_backend
+    fastgs_backend
+
+    # External libraries
+    ${TORCH_LIBRARIES}
+    ${OPENGL_LIBRARIES}
+    OpenImageIO::OpenImageIO
+    CUDA::cudart
+    CUDA::cublas
+    CUDA::curand
+    CUDA::cupti      # Required by PyTorch profiling
+    CUDA::nvToolsExt  # For NVTX
+    spdlog::spdlog
+)
+
+target_compile_options(profile_adam_optimizer PRIVATE
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G -lineinfo>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:-O0 -g>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3>
+)
+
+message(STATUS "Profiling tool: profile_adam_optimizer")
+message(STATUS "  Build with: ninja profile_adam_optimizer")
+message(STATUS "  Run with: nsys profile --trace=cuda,nvtx --output=adam_profile ./build/tests/profile_adam_optimizer")
 
 # Platform-specific settings
 if(WIN32)
