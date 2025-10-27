@@ -25,7 +25,6 @@
 
 #include "tensor_functors.hpp"
 #include "tensor_ops.hpp"
-#include "stream_pool.hpp"
 
 namespace lfs::core {
 

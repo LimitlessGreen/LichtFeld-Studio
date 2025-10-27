@@ -2,6 +2,32 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# LibTorch-free CUDA kernels
+set(LFS_TRAINING_KERNEL_SOURCES
+    kernels/ssim.cu
+)
+
+# Create CUDA kernels library
+add_library(lfs_training_kernels STATIC ${LFS_TRAINING_KERNEL_SOURCES})
+
+target_include_directories(lfs_training_kernels
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(lfs_training_kernels
+    PUBLIC
+        lfs_tensor       # For lfs::core::Tensor
+        CUDA::cudart
+)
+
+set_target_properties(lfs_training_kernels PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    POSITION_INDEPENDENT_CODE ON
+)
+
 # Optimizer sources
 set(TRAINING_NEW_SOURCES
     optimizer/adam_optimizer.cpp
@@ -25,10 +51,10 @@ target_include_directories(lfs_training
 # Link dependencies
 target_link_libraries(lfs_training
     PUBLIC
-        lfs_core              # Depends on new core module (SplatData, Tensor)
-        fastgs_backend        # For adam_step_raw CUDA kernel
-        gs_training_kernels   # For SSIM and regularization CUDA kernels
-        ${TORCH_LIBRARIES}    # Needed for torch::Tensor wrappers in loss implementations
+        lfs_core                # Depends on new core module (SplatData, Tensor)
+        lfs_training_kernels    # LibTorch-free SSIM kernels
+        fastgs_backend          # For adam_step_raw CUDA kernel
+        gs_training_kernels     # For old regularization CUDA kernels (TODO: port)
 )
 
 # Set C++ standard

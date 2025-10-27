@@ -70,7 +70,6 @@ namespace lfs::core {
             result.is_contiguous_ = true;
             result.device_ = args.device;
             result.dtype_ = args.dtype;
-            result.stream_ = (args.device == Device::CUDA) ? StreamPool::instance().get_stream() : nullptr;
             result.id_ = next_id_++;
 
             size_t bytes = result.shape_.elements() * dtype_size(result.dtype_);
@@ -487,7 +486,7 @@ namespace lfs::core {
             size_t min_dim = std::min(m, n);
 
             if (result.device_ == Device::CUDA) {
-                tensor_ops::launch_eye(result.ptr<float>(), m, n, result.stream_);
+                tensor_ops::launch_eye(result.ptr<float>(), m, n, nullptr);
                 // No sync - tensor operation
             } else {
                 float* data = result.ptr<float>();
@@ -685,7 +684,7 @@ namespace lfs::core {
                 shape_.dims().data(), shape_.rank(),
                 axes.data(), axes.size(),
                 args.keepdim, op,
-                dtype_, result.stream_);
+                dtype_, nullptr);
             // No sync - tensor operation
         } else {
             // CPU implementation
@@ -1393,14 +1392,14 @@ namespace lfs::core {
                 float* dst = result.ptr<float>();
 
                 // Use our optimized kernel
-                tensor_ops::launch_clamp_fused(src, dst, min_val, max_val, numel(), result.stream_);
+                tensor_ops::launch_clamp_fused(src, dst, min_val, max_val, numel(), nullptr);
             } else if (dtype_ == DataType::Int32) {
                 // Fallback: copy then clamp for int
                 cudaMemcpy(result.data_, data_, bytes(), cudaMemcpyDeviceToDevice);
                 tensor_ops::launch_clamp_scalar_int(result.ptr<int>(),
                                                     static_cast<int>(min_val),
                                                     static_cast<int>(max_val),
-                                                    numel(), result.stream_);
+                                                    numel(), nullptr);
             }
         } else {
             // CPU: simple loop

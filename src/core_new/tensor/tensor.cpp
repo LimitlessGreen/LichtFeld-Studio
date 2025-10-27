@@ -67,7 +67,7 @@ namespace lfs::core {
           device_(device),
           dtype_(dtype),
           is_view_(true), // This is a view
-          stream_(device == Device::CUDA ? StreamPool::instance().get_stream() : nullptr),
+          stream_(nullptr), // Use default stream (stream 0) for all operations
           id_(next_id_++) {
 
         compute_alignment(); // Compute alignment flags
@@ -552,8 +552,8 @@ namespace lfs::core {
             CHECK_CUDA(cudaMemcpyAsync(t.data_, src, bytes(), cudaMemcpyHostToDevice, 0));
             CHECK_CUDA(cudaDeviceSynchronize()); // Ensure transfer completes before returning
         } else if (device_ == Device::CUDA && device == Device::CPU) {
-            // API BOUNDARY: Sync all streams before GPU→CPU transfer
-            StreamPool::instance().sync_all();
+            // API BOUNDARY: Sync before GPU→CPU transfer
+            cudaDeviceSynchronize();
             // Async transfer for GPU→CPU as well (destination is pinned)
             CHECK_CUDA(cudaMemcpyAsync(t.data_, src, bytes(), cudaMemcpyDeviceToHost, 0));
             CHECK_CUDA(cudaDeviceSynchronize()); // Ensure transfer completes before returning
@@ -1131,8 +1131,8 @@ namespace lfs::core {
         const char* data_ptr = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
 
         if (device_ == Device::CUDA) {
-            // API BOUNDARY: Sync all streams before reading value from GPU
-            StreamPool::instance().sync_all();
+            // API BOUNDARY: Sync before reading value from GPU
+            cudaDeviceSynchronize();
             CHECK_CUDA(cudaMemcpy(&value, data_ptr, sizeof(float), cudaMemcpyDeviceToHost));
         } else {
             value = *static_cast<const float*>(static_cast<const void*>(data_ptr));
@@ -1152,8 +1152,8 @@ namespace lfs::core {
         values.resize(n);
 
         if (device_ == Device::CUDA) {
-            // API BOUNDARY: Sync all streams before reading from GPU
-            StreamPool::instance().sync_all();
+            // API BOUNDARY: Sync before reading from GPU
+            cudaDeviceSynchronize();
             CHECK_CUDA(cudaMemcpy(values.data(), data_, n * sizeof(float),
                                   cudaMemcpyDeviceToHost));
         } else {
@@ -1217,8 +1217,8 @@ namespace lfs::core {
         const char* src = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
 
         if (device_ == Device::CUDA) {
-            // API BOUNDARY: Sync all streams before reading from GPU
-            StreamPool::instance().sync_all();
+            // API BOUNDARY: Sync before reading from GPU
+            cudaDeviceSynchronize();
             CHECK_CUDA(cudaMemcpy(result.data(), src, bytes(), cudaMemcpyDeviceToHost));
         } else {
             std::memcpy(result.data(), src, bytes());

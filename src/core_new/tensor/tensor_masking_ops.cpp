@@ -800,7 +800,7 @@ namespace lfs::core {
             }
 
             // API BOUNDARY: Sync before reading result from GPU
-            StreamPool::instance().sync_all();
+            cudaDeviceSynchronize();
             CHECK_CUDA(cudaMemcpy(&count, d_count, sizeof(size_t), cudaMemcpyDeviceToHost));
             CHECK_CUDA(cudaFree(d_count));
 

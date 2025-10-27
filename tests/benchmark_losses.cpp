@@ -6,6 +6,7 @@
 #include "losses/regularization.hpp"      // New libtorch-free losses
 #include "losses/photometric_loss.hpp"    // New libtorch-free losses
 #include "kernels/regularization.cuh"     // Old CUDA kernels for comparison
+#include "lfs/kernels/ssim.cuh"           // Old SSIM kernels for comparison
 #include "core_new/tensor.hpp"
 #include <gtest/gtest.h>
 #include <chrono>
@@ -424,6 +425,233 @@ TEST(LossesBenchmark, MemoryOverhead) {
 
     std::cout << "Memory change after 10 iterations: " << (memory_delta / 1024.0 / 1024.0) << " MB\n";
     std::cout << "(Should be minimal - zero-copy wrappers don't allocate)\n";
+}
+
+// ===================================================================================
+// Comparison Benchmarks vs Reference Implementations
+// ===================================================================================
+
+// Reference L1 loss using PyTorch
+float reference_l1_loss_torch(const torch::Tensor& img1, const torch::Tensor& img2) {
+    return torch::l1_loss(img1, img2, torch::Reduction::Mean).item<float>();
+}
+
+// Reference SSIM using old kernels (include/lfs/kernels/ssim.cuh)
+float reference_ssim_old_kernels(const lfs::core::Tensor& img1, const lfs::core::Tensor& img2) {
+    auto [ssim_value, ctx] = lfs::training::kernels::ssim_forward(img1, img2);
+    return 1.0f - ssim_value;  // Convert to D-SSIM loss (1 - SSIM)
+}
+
+// Reference photometric loss built from torch L1 + old SSIM kernels
+float reference_photometric_combined(const lfs::core::Tensor& rendered, const lfs::core::Tensor& gt_image, float lambda_dssim) {
+    // L1 component
+    auto torch_rendered = to_torch(rendered);
+    auto torch_gt = to_torch(gt_image);
+    float l1_loss = reference_l1_loss_torch(torch_rendered, torch_gt);
+
+    // SSIM component
+    float ssim_loss = reference_ssim_old_kernels(rendered, gt_image);
+
+    // Combined
+    return (1.0f - lambda_dssim) * l1_loss + lambda_dssim * ssim_loss;
+}
+
+TEST(LossesBenchmark, L1_vs_Reference) {
+    print_benchmark_header("L1 Loss - New Implementation vs PyTorch Reference");
+    std::cout << std::left << std::setw(45) << "Image Size" << " | ";
+    std::cout << std::right << std::setw(12) << "PyTorch (μs)" << " | ";
+    std::cout << std::right << std::setw(12) << "LFS (μs)" << " | ";
+    std::cout << std::right << std::setw(8) << "Speedup\n";
+    std::cout << std::string(90, '-') << "\n";
+
+    const int n_trials = 1000;
+    std::vector<std::pair<int, int>> sizes = {{256, 256}, {512, 512}, {800, 800}};
+
+    for (auto [H, W] : sizes) {
+        auto img1_lfs = Tensor::rand({H, W, 3}, Device::CUDA);
+        auto img2_lfs = Tensor::rand({H, W, 3}, Device::CUDA);
+        auto img1_torch = to_torch(img1_lfs);
+        auto img2_torch = to_torch(img2_lfs);
+
+        // Warmup
+        reference_l1_loss_torch(img1_torch, img2_torch);
+        auto l1_result = PhotometricLoss::forward(img1_lfs, img2_lfs, PhotometricLoss::Params{.lambda_dssim = 0.0f});
+
+        // Benchmark PyTorch reference
+        Timer timer;
+        timer.start();
+        for (int i = 0; i < n_trials; i++) {
+            float loss = reference_l1_loss_torch(img1_torch, img2_torch);
+        }
+        cudaDeviceSynchronize();
+        double torch_time = timer.stop_us() / n_trials;
+
+        // Benchmark LFS implementation (pure L1, lambda=0)
+        timer.start();
+        for (int i = 0; i < n_trials; i++) {
+            auto result = PhotometricLoss::forward(img1_lfs, img2_lfs, PhotometricLoss::Params{.lambda_dssim = 0.0f});
+        }
+        cudaDeviceSynchronize();
+        double lfs_time = timer.stop_us() / n_trials;
+
+        print_result(std::to_string(H) + "x" + std::to_string(W), torch_time, lfs_time, "μs");
+    }
+}
+
+TEST(LossesBenchmark, SSIM_vs_Reference) {
+    print_benchmark_header("SSIM Loss - New Implementation vs Old Kernels");
+    std::cout << std::left << std::setw(45) << "Image Size" << " | ";
+    std::cout << std::right << std::setw(12) << "Old (μs)" << " | ";
+    std::cout << std::right << std::setw(12) << "New (μs)" << " | ";
+    std::cout << std::right << std::setw(8) << "Speedup\n";
+    std::cout << std::string(90, '-') << "\n";
+
+    const int n_trials = 1000;
+    std::vector<std::pair<int, int>> sizes = {{256, 256}, {512, 512}, {800, 800}};
+
+    for (auto [H, W] : sizes) {
+        auto img1 = Tensor::rand({H, W, 3}, Device::CUDA);
+        auto img2 = Tensor::rand({H, W, 3}, Device::CUDA);
+
+        // Warmup
+        reference_ssim_old_kernels(img1, img2);
+        auto ssim_result = PhotometricLoss::forward(img1, img2, PhotometricLoss::Params{.lambda_dssim = 1.0f});
+
+        // Benchmark old kernels
+        Timer timer;
+        timer.start();
+        for (int i = 0; i < n_trials; i++) {
+            float loss = reference_ssim_old_kernels(img1, img2);
+        }
+        cudaDeviceSynchronize();
+        double old_time = timer.stop_us() / n_trials;
+
+        // Benchmark new implementation (pure SSIM, lambda=1)
+        timer.start();
+        for (int i = 0; i < n_trials; i++) {
+            auto result = PhotometricLoss::forward(img1, img2, PhotometricLoss::Params{.lambda_dssim = 1.0f});
+        }
+        cudaDeviceSynchronize();
+        double new_time = timer.stop_us() / n_trials;
+
+        print_result(std::to_string(H) + "x" + std::to_string(W), old_time, new_time, "μs");
+    }
+}
+
+TEST(LossesBenchmark, PhotometricCombined_vs_Reference) {
+    print_benchmark_header("Photometric Loss (Combined) - New vs Reference");
+    std::cout << std::left << std::setw(45) << "Image Size" << " | ";
+    std::cout << std::right << std::setw(12) << "Reference (μs)" << " | ";
+    std::cout << std::right << std::setw(12) << "LFS (μs)" << " | ";
+    std::cout << std::right << std::setw(8) << "Speedup\n";
+    std::cout << std::string(90, '-') << "\n";
+
+    const int n_trials = 1000;
+    const float lambda_dssim = 0.2f;  // Typical training value
+    std::vector<std::pair<int, int>> sizes = {{256, 256}, {512, 512}, {800, 800}};
+
+    for (auto [H, W] : sizes) {
+        auto rendered = Tensor::rand({H, W, 3}, Device::CUDA);
+        auto gt_image = Tensor::rand({H, W, 3}, Device::CUDA);
+
+        // Warmup
+        reference_photometric_combined(rendered, gt_image, lambda_dssim);
+        auto lfs_result = PhotometricLoss::forward(rendered, gt_image, PhotometricLoss::Params{.lambda_dssim = lambda_dssim});
+
+        // Benchmark reference (torch L1 + old SSIM)
+        Timer timer;
+        timer.start();
+        for (int i = 0; i < n_trials; i++) {
+            float loss = reference_photometric_combined(rendered, gt_image, lambda_dssim);
+        }
+        cudaDeviceSynchronize();
+        double ref_time = timer.stop_us() / n_trials;
+
+        // Benchmark LFS implementation
+        timer.start();
+        for (int i = 0; i < n_trials; i++) {
+            auto result = PhotometricLoss::forward(rendered, gt_image, PhotometricLoss::Params{.lambda_dssim = lambda_dssim});
+        }
+        cudaDeviceSynchronize();
+        double lfs_time = timer.stop_us() / n_trials;
+
+        print_result(std::to_string(H) + "x" + std::to_string(W), ref_time, lfs_time, "μs");
+    }
+}
+
+TEST(LossesBenchmark, NumericalAccuracy_L1) {
+    print_benchmark_header("Numerical Accuracy - L1 Loss");
+    std::cout << "Comparing LFS L1 implementation vs PyTorch reference\n\n";
+
+    const int H = 512, W = 512;
+    auto img1_lfs = Tensor::rand({H, W, 3}, Device::CUDA);
+    auto img2_lfs = Tensor::rand({H, W, 3}, Device::CUDA);
+    auto img1_torch = to_torch(img1_lfs);
+    auto img2_torch = to_torch(img2_lfs);
+
+    // Compute losses
+    float torch_loss = reference_l1_loss_torch(img1_torch, img2_torch);
+    auto lfs_result = PhotometricLoss::forward(img1_lfs, img2_lfs, PhotometricLoss::Params{.lambda_dssim = 0.0f});
+    float lfs_loss = lfs_result.value().first;  // std::pair<float, Context>
+
+    float abs_error = std::abs(torch_loss - lfs_loss);
+    float rel_error = abs_error / std::max(torch_loss, 1e-8f);
+
+    std::cout << std::left << std::setw(30) << "PyTorch L1 loss:" << std::right << std::setw(15) << std::fixed << std::setprecision(8) << torch_loss << "\n";
+    std::cout << std::left << std::setw(30) << "LFS L1 loss:" << std::right << std::setw(15) << std::fixed << std::setprecision(8) << lfs_loss << "\n";
+    std::cout << std::left << std::setw(30) << "Absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << abs_error << "\n";
+    std::cout << std::left << std::setw(30) << "Relative error:" << std::right << std::setw(15) << std::fixed << std::setprecision(6) << (rel_error * 100.0f) << "%\n";
+
+    EXPECT_LT(rel_error, 1e-5);  // Should match within 0.001%
+}
+
+TEST(LossesBenchmark, NumericalAccuracy_SSIM) {
+    print_benchmark_header("Numerical Accuracy - SSIM Loss");
+    std::cout << "Comparing LFS SSIM implementation vs old kernels\n\n";
+
+    const int H = 512, W = 512;
+    auto img1 = Tensor::rand({H, W, 3}, Device::CUDA);
+    auto img2 = Tensor::rand({H, W, 3}, Device::CUDA);
+
+    // Compute losses
+    float old_loss = reference_ssim_old_kernels(img1, img2);
+    auto lfs_result = PhotometricLoss::forward(img1, img2, PhotometricLoss::Params{.lambda_dssim = 1.0f});
+    float lfs_loss = lfs_result.value().first;  // std::pair<float, Context>
+
+    float abs_error = std::abs(old_loss - lfs_loss);
+    float rel_error = abs_error / std::max(old_loss, 1e-8f);
+
+    std::cout << std::left << std::setw(30) << "Old SSIM loss:" << std::right << std::setw(15) << std::fixed << std::setprecision(8) << old_loss << "\n";
+    std::cout << std::left << std::setw(30) << "LFS SSIM loss:" << std::right << std::setw(15) << std::fixed << std::setprecision(8) << lfs_loss << "\n";
+    std::cout << std::left << std::setw(30) << "Absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << abs_error << "\n";
+    std::cout << std::left << std::setw(30) << "Relative error:" << std::right << std::setw(15) << std::fixed << std::setprecision(6) << (rel_error * 100.0f) << "%\n";
+
+    EXPECT_LT(rel_error, 1e-5);  // Should match within 0.001%
+}
+
+TEST(LossesBenchmark, NumericalAccuracy_PhotometricCombined) {
+    print_benchmark_header("Numerical Accuracy - Photometric Loss (Combined)");
+    std::cout << "Comparing LFS implementation vs reference (torch L1 + old SSIM)\n\n";
+
+    const int H = 512, W = 512;
+    const float lambda_dssim = 0.2f;
+    auto rendered = Tensor::rand({H, W, 3}, Device::CUDA);
+    auto gt_image = Tensor::rand({H, W, 3}, Device::CUDA);
+
+    // Compute losses
+    float ref_loss = reference_photometric_combined(rendered, gt_image, lambda_dssim);
+    auto lfs_result = PhotometricLoss::forward(rendered, gt_image, PhotometricLoss::Params{.lambda_dssim = lambda_dssim});
+    float lfs_loss = lfs_result.value().first;  // std::pair<float, Context>
+
+    float abs_error = std::abs(ref_loss - lfs_loss);
+    float rel_error = abs_error / std::max(ref_loss, 1e-8f);
+
+    std::cout << std::left << std::setw(30) << "Reference loss:" << std::right << std::setw(15) << std::fixed << std::setprecision(8) << ref_loss << "\n";
+    std::cout << std::left << std::setw(30) << "LFS loss:" << std::right << std::setw(15) << std::fixed << std::setprecision(8) << lfs_loss << "\n";
+    std::cout << std::left << std::setw(30) << "Absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << abs_error << "\n";
+    std::cout << std::left << std::setw(30) << "Relative error:" << std::right << std::setw(15) << std::fixed << std::setprecision(6) << (rel_error * 100.0f) << "%\n";
+
+    EXPECT_LT(rel_error, 1e-5);  // Should match within 0.001%
 }
 
 } // anonymous namespace
