@@ -5,6 +5,9 @@
 # Optimizer sources
 set(TRAINING_NEW_SOURCES
     optimizer/adam_optimizer.cpp
+    optimizer/scheduler.cpp
+    losses/regularization.cpp
+    losses/photometric_loss.cpp
 )
 
 # lfs_training - Training module with optimizer
@@ -22,8 +25,10 @@ target_include_directories(lfs_training
 # Link dependencies
 target_link_libraries(lfs_training
     PUBLIC
-        lfs_core         # Depends on new core module (SplatData, Tensor)
-        fastgs_backend   # For adam_step_raw CUDA kernel
+        lfs_core              # Depends on new core module (SplatData, Tensor)
+        fastgs_backend        # For adam_step_raw CUDA kernel
+        gs_training_kernels   # For SSIM and regularization CUDA kernels
+        ${TORCH_LIBRARIES}    # Needed for torch::Tensor wrappers in loss implementations
 )
 
 # Set C++ standard
@@ -34,8 +39,8 @@ set_target_properties(lfs_training PROPERTIES
 )
 
 message(STATUS "╔════════════════════════════════════════════════════════════════╗")
-message(STATUS "║  lfs_training - Training Module with Optimizer                ║")
+message(STATUS "║  lfs_training - Training Module with Optimizer & Losses       ║")
 message(STATUS "╚════════════════════════════════════════════════════════════════╝")
-message(STATUS "  • Contains: AdamOptimizer (LibTorch-free)")
+message(STATUS "  • Contains: AdamOptimizer, LR Schedulers, Losses (LibTorch-free API)")
 message(STATUS "  • Namespace: lfs::training")
-message(STATUS "  • Uses: fastgs_backend for fused CUDA kernels")
+message(STATUS "  • Uses: CUDA kernels from gs_training_kernels, fastgs_backend")

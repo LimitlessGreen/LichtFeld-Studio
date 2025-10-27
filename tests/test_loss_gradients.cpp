@@ -9,7 +9,7 @@
 #include <iomanip>
 #include "kernels/regularization.cuh"
 #include "core_new/tensor.hpp"
-#include "losses/losses.hpp"
+#include "training/losses/losses.hpp"  // OLD torch-based losses from src/training
 
 /**
  * Loss Gradient CUDA Kernel Tests

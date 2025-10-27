@@ -70,6 +70,10 @@ set(OPTIONAL_TEST_FILES
     test_scalar_reduction_benchmark.cpp
     test_permute_upload_benchmark.cpp
     test_lfs_adam_optimizer.cpp
+    test_lfs_scheduler.cpp
+    benchmark_scheduler.cpp
+    test_lfs_losses.cpp
+    benchmark_losses.cpp
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})
@@ -94,10 +98,13 @@ set_target_properties(lichtfeld_tests PROPERTIES
 )
 
 # Include directories
+# NOTE: Order matters! We want tests to explicitly choose old vs new headers
 target_include_directories(lichtfeld_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_BINARY_DIR}/include
     ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/src/training_new  # New libtorch-free (for test_lfs_*.cpp)
+    ${CMAKE_SOURCE_DIR}/src               # Old torch-based (for existing tests)
     ${CUDAToolkit_INCLUDE_DIRS}
     ${OPENGL_INCLUDE_DIRS}
 )
