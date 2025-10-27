@@ -66,6 +66,75 @@ namespace gs::training {
         }
     }
 
+    // ============= MANUAL FORWARD/BACKWARD IMPLEMENTATIONS (no autograd) =============
+
+    std::expected<std::pair<float, SparsityLossContext>, std::string> ADMMSparsityOptimizer::compute_loss_forward(const torch::Tensor& opacities) const {
+        try {
+            if (!initialized_) {
+                LOG_WARN("ADMM optimizer compute_loss_forward called before initialization");
+                SparsityLossContext empty_ctx;
+                return std::make_pair(0.0f, empty_ctx);
+            }
+
+            if (!opacities.defined() || opacities.numel() == 0) {
+                return std::unexpected("Invalid opacity tensor for loss computation");
+            }
+
+            // Compute ADMM sparsity loss (manual - no autograd)
+            torch::NoGradGuard no_grad;
+
+            auto opa = torch::sigmoid(opacities);
+            auto diff = opa - z_.detach() + u_.detach();
+            auto diff_norm = torch::norm(diff, 2);
+            float loss_value = 0.5f * config_.init_rho * diff_norm.item<float>() * diff_norm.item<float>();
+
+            // Save context for backward
+            SparsityLossContext ctx;
+            ctx.opacities = opacities;
+            ctx.opa_sigmoid = opa;
+            ctx.z = z_;
+            ctx.u = u_;
+            ctx.rho = config_.init_rho;
+
+            LOG_TRACE("ADMM sparsity loss (manual): {}", loss_value);
+            return std::make_pair(loss_value, ctx);
+        } catch (const std::exception& e) {
+            LOG_ERROR("Failed to compute ADMM sparsity loss (manual forward): {}", e.what());
+            return std::unexpected(std::format("Failed to compute sparsity loss: {}", e.what()));
+        }
+    }
+
+    std::expected<torch::Tensor, std::string> ADMMSparsityOptimizer::compute_loss_backward(const SparsityLossContext& ctx, float grad_loss) const {
+        try {
+            // Compute gradients manually
+            // Loss: L = 0.5 * rho * ||opa - z + u||^2
+            // where opa = sigmoid(opacities)
+            //
+            // dL/d(opa) = rho * (opa - z + u)
+            // dL/d(opacities) = dL/d(opa) * d(opa)/d(opacities)
+            //                 = rho * (opa - z + u) * opa * (1 - opa)
+
+            torch::NoGradGuard no_grad;
+
+            auto diff = ctx.opa_sigmoid - ctx.z.detach() + ctx.u.detach();
+            auto grad_opa = ctx.rho * diff;
+
+            // Chain rule: gradient through sigmoid
+            // d(sigmoid(x))/dx = sigmoid(x) * (1 - sigmoid(x))
+            auto sigmoid_grad = ctx.opa_sigmoid * (1.0f - ctx.opa_sigmoid);
+            auto grad_opacities = grad_opa * sigmoid_grad;
+
+            // Scale by upstream gradient
+            grad_opacities = grad_opacities * grad_loss;
+
+            LOG_TRACE("ADMM sparsity gradient norm: {}", torch::norm(grad_opacities).item<float>());
+            return grad_opacities;
+        } catch (const std::exception& e) {
+            LOG_ERROR("Failed to compute ADMM sparsity loss backward: {}", e.what());
+            return std::unexpected(std::format("Failed to compute sparsity loss backward: {}", e.what()));
+        }
+    }
+
     std::expected<void, std::string> ADMMSparsityOptimizer::update_state(const torch::Tensor& opacities) {
         try {
             torch::NoGradGuard no_grad;

@@ -13,6 +13,17 @@
 namespace gs::training {
 
     /**
+     * @brief Context for manual sparsity loss forward/backward
+     */
+    struct SparsityLossContext {
+        torch::Tensor opacities;     // Opacity values (raw, before sigmoid)
+        torch::Tensor opa_sigmoid;   // Sigmoid(opacities)
+        torch::Tensor z;             // ADMM auxiliary variable
+        torch::Tensor u;             // ADMM dual variable
+        float rho;                   // ADMM penalty parameter
+    };
+
+    /**
      * @brief Interface for sparsity optimization methods
      *
      * Provides a clean abstraction for different sparsity-inducing techniques
@@ -30,11 +41,26 @@ namespace gs::training {
         virtual std::expected<void, std::string> initialize(const torch::Tensor& opacities) = 0;
 
         /**
-         * @brief Compute the sparsity regularization loss
+         * @brief Compute the sparsity regularization loss (OLD - uses autograd)
          * @param opacities Current opacity values from the model
          * @return Loss tensor or error string
          */
         virtual std::expected<torch::Tensor, std::string> compute_loss(const torch::Tensor& opacities) const = 0;
+
+        /**
+         * @brief MANUAL FORWARD: Compute sparsity loss without autograd
+         * @param opacities Current opacity values from the model
+         * @return (loss_value, context) or error string
+         */
+        virtual std::expected<std::pair<float, SparsityLossContext>, std::string> compute_loss_forward(const torch::Tensor& opacities) const = 0;
+
+        /**
+         * @brief MANUAL BACKWARD: Compute gradients manually
+         * @param ctx Context from forward pass
+         * @param grad_loss Gradient of total loss w.r.t. sparsity loss (usually 1.0)
+         * @return Gradient w.r.t. opacities or error string
+         */
+        virtual std::expected<torch::Tensor, std::string> compute_loss_backward(const SparsityLossContext& ctx, float grad_loss) const = 0;
 
         /**
          * @brief Update internal state (called periodically during training)
@@ -96,6 +122,8 @@ namespace gs::training {
 
         std::expected<void, std::string> initialize(const torch::Tensor& opacities) override;
         std::expected<torch::Tensor, std::string> compute_loss(const torch::Tensor& opacities) const override;
+        std::expected<std::pair<float, SparsityLossContext>, std::string> compute_loss_forward(const torch::Tensor& opacities) const override;
+        std::expected<torch::Tensor, std::string> compute_loss_backward(const SparsityLossContext& ctx, float grad_loss) const override;
         std::expected<void, std::string> update_state(const torch::Tensor& opacities) override;
         std::expected<torch::Tensor, std::string> get_prune_mask(const torch::Tensor& opacities) const override;
 

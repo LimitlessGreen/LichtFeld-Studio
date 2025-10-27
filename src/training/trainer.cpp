@@ -243,6 +243,34 @@ namespace gs::training {
         }
     }
 
+    std::expected<std::pair<float, SparsityLossContext>, std::string> Trainer::compute_sparsity_loss_forward(
+        int iter,
+        const SplatData& splatData) {
+        try {
+            if (sparsity_optimizer_ && sparsity_optimizer_->should_apply_loss(iter)) {
+                // Initialize on first use (lazy initialization)
+                if (!sparsity_optimizer_->is_initialized()) {
+                    auto init_result = sparsity_optimizer_->initialize(splatData.opacity_raw());
+                    if (!init_result) {
+                        return std::unexpected(init_result.error());
+                    }
+                    LOG_INFO("Sparsity optimizer initialized at iteration {}", iter);
+                }
+
+                auto loss_result = sparsity_optimizer_->compute_loss_forward(splatData.opacity_raw());
+                if (!loss_result) {
+                    return std::unexpected(loss_result.error());
+                }
+                return *loss_result;
+            }
+            // Return zero loss with empty context
+            SparsityLossContext empty_ctx;
+            return std::make_pair(0.0f, empty_ctx);
+        } catch (const std::exception& e) {
+            return std::unexpected(std::format("Error computing sparsity loss: {}", e.what()));
+        }
+    }
+
     std::expected<void, std::string> Trainer::handle_sparsity_update(
         int iter,
         SplatData& splatData) {
@@ -776,14 +804,30 @@ namespace gs::training {
                 bilateral_grid_->tv_loss_backward(tv_ctx, params_.optimization.tv_loss_weight);
             }
 
-            // Add sparsity loss
-            auto sparsity_loss_result = compute_sparsity_loss(iter, strategy_->get_model());
+            // Add sparsity loss (manual forward/backward - no autograd)
+            auto sparsity_loss_result = compute_sparsity_loss_forward(iter, strategy_->get_model());
             if (!sparsity_loss_result) {
                 return std::unexpected(sparsity_loss_result.error());
             }
-            auto sparsity_loss = *sparsity_loss_result;
-            sparsity_loss.backward();
-            loss_value += sparsity_loss.item<float>();
+            auto [sparsity_loss_value, sparsity_ctx] = *sparsity_loss_result;
+
+            // Accumulate sparsity loss
+            loss_value += sparsity_loss_value;
+
+            // Backward for sparsity loss (gradient w.r.t. sparsity loss is 1.0)
+            if (sparsity_optimizer_ && sparsity_optimizer_->should_apply_loss(iter) && sparsity_loss_value > 0.0f) {
+                auto grad_result = sparsity_optimizer_->compute_loss_backward(sparsity_ctx, 1.0f);
+                if (!grad_result) {
+                    return std::unexpected(grad_result.error());
+                }
+                auto grad_opacities = *grad_result;
+
+                // Accumulate gradient into opacity_raw
+                if (!strategy_->get_model().opacity_raw().grad().defined()) {
+                    strategy_->get_model().opacity_raw().mutable_grad() = torch::zeros_like(strategy_->get_model().opacity_raw());
+                }
+                strategy_->get_model().opacity_raw().mutable_grad().add_(grad_opacities);
+            }
 
             // Call explicit backward for rasterizers
             if (fast_raster_ctx.has_value()) {

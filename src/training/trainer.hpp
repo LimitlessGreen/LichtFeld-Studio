@@ -146,6 +146,10 @@ namespace gs::training {
             int iter,
             const SplatData& splatData);
 
+        std::expected<std::pair<float, SparsityLossContext>, std::string> compute_sparsity_loss_forward(
+            int iter,
+            const SplatData& splatData);
+
         std::expected<void, std::string> handle_sparsity_update(
             int iter,
             SplatData& splatData);
