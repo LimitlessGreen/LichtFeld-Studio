@@ -3,9 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "regularization.hpp"
-#include "kernels/regularization.cuh"  // CUDA kernels that use torch::Tensor
+#include "lfs/kernels/regularization.cuh"  // LibTorch-free CUDA kernels
 #include <format>
-#include <torch/torch.h>
 
 namespace lfs::training::losses {
 
@@ -29,36 +28,28 @@ std::expected<float, std::string> ScaleRegularization::forward(
             return std::unexpected("scaling_raw and scaling_raw_grad must have same shape");
         }
 
-        // Create torch::Tensor views (zero-copy) that wrap our lfs::core::Tensor data
-        // The CUDA kernel expects torch tensors, so we wrap the raw pointers
-        std::vector<int64_t> torch_shape;
-        for (size_t i = 0; i < scaling_raw.ndim(); i++) {
-            torch_shape.push_back(static_cast<int64_t>(scaling_raw.shape()[i]));
+        size_t n = scaling_raw.numel();
+        if (n == 0) {
+            return 0.0f;
         }
 
-        // Wrap the raw data pointers as torch tensors (no copy!)
-        // We need a mutable wrapper for the CUDA kernel to write gradients
-        auto torch_scaling_raw = torch::from_blob(
-            const_cast<float*>(scaling_raw.ptr<float>()),
-            torch_shape,
-            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        // Allocate temporary buffers
+        size_t num_blocks = std::min((n + 255) / 256, size_t(1024));
+        auto temp_buffer = lfs::core::Tensor::empty({num_blocks}, lfs::core::Device::CUDA);
+        auto loss_tensor = lfs::core::Tensor::empty({1}, lfs::core::Device::CUDA);
 
-        // Create a torch tensor that has a grad buffer pointing to our grad tensor
-        torch_scaling_raw.set_requires_grad(true);
-
-        // Manually set the grad tensor to point to our existing gradient buffer
-        auto torch_grad = torch::from_blob(
+        // Launch LibTorch-free fused kernel with warp reductions
+        lfs::training::kernels::launch_fused_scale_regularization(
+            scaling_raw.ptr<float>(),
             scaling_raw_grad.ptr<float>(),
-            torch_shape,
-            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            loss_tensor.ptr<float>(),
+            temp_buffer.ptr<float>(),
+            n,
+            params.weight,
+            nullptr);
 
-        torch_scaling_raw.mutable_grad() = torch_grad;
-
-        // Call the existing CUDA kernel (it accumulates to .grad())
-        float loss = gs::regularization::compute_exp_l1_regularization_with_grad_cuda(
-            torch_scaling_raw,
-            params.weight);
-
+        // Copy result to host
+        float loss = loss_tensor.item<float>();
         return loss;
 
     } catch (const std::exception& e) {
@@ -86,31 +77,28 @@ std::expected<float, std::string> OpacityRegularization::forward(
             return std::unexpected("opacity_raw and opacity_raw_grad must have same shape");
         }
 
-        // Create torch::Tensor views (zero-copy)
-        std::vector<int64_t> torch_shape;
-        for (size_t i = 0; i < opacity_raw.ndim(); i++) {
-            torch_shape.push_back(static_cast<int64_t>(opacity_raw.shape()[i]));
+        size_t n = opacity_raw.numel();
+        if (n == 0) {
+            return 0.0f;
         }
 
-        auto torch_opacity_raw = torch::from_blob(
-            const_cast<float*>(opacity_raw.ptr<float>()),
-            torch_shape,
-            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        // Allocate temporary buffers
+        size_t num_blocks = std::min((n + 255) / 256, size_t(1024));
+        auto temp_buffer = lfs::core::Tensor::empty({num_blocks}, lfs::core::Device::CUDA);
+        auto loss_tensor = lfs::core::Tensor::empty({1}, lfs::core::Device::CUDA);
 
-        torch_opacity_raw.set_requires_grad(true);
-
-        auto torch_grad = torch::from_blob(
+        // Launch LibTorch-free fused kernel with warp reductions
+        lfs::training::kernels::launch_fused_opacity_regularization(
+            opacity_raw.ptr<float>(),
             opacity_raw_grad.ptr<float>(),
-            torch_shape,
-            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            loss_tensor.ptr<float>(),
+            temp_buffer.ptr<float>(),
+            n,
+            params.weight,
+            nullptr);
 
-        torch_opacity_raw.mutable_grad() = torch_grad;
-
-        // Call the existing CUDA kernel
-        float loss = gs::regularization::compute_sigmoid_l1_regularization_with_grad_cuda(
-            torch_opacity_raw,
-            params.weight);
-
+        // Copy result to host
+        float loss = loss_tensor.item<float>();
         return loss;
 
     } catch (const std::exception& e) {

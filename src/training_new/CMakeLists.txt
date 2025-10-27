@@ -5,6 +5,12 @@
 # LibTorch-free CUDA kernels
 set(LFS_TRAINING_KERNEL_SOURCES
     kernels/ssim.cu
+    kernels/l1_loss.cu
+    kernels/ssim_reduction.cu
+    kernels/regularization.cu
+    kernels/bilateral_grid_forward.cu
+    kernels/bilateral_grid_backward.cu
+    kernels/bilateral_grid_tv.cu
 )
 
 # Create CUDA kernels library

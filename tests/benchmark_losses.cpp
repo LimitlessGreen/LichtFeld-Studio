@@ -7,6 +7,8 @@
 #include "losses/photometric_loss.hpp"    // New libtorch-free losses
 #include "kernels/regularization.cuh"     // Old CUDA kernels for comparison
 #include "lfs/kernels/ssim.cuh"           // Old SSIM kernels for comparison
+#include "lfs/kernels/bilateral_grid.cuh" // New bilateral grid kernels
+#include "kernels/bilateral_grid.cuh"     // Old bilateral grid kernels for comparison
 #include "core_new/tensor.hpp"
 #include <gtest/gtest.h>
 #include <chrono>
@@ -42,6 +44,21 @@ void print_benchmark_header(const std::string& title) {
     std::cout << "\n╔═══════════════════════════════════════════════════════════════╗\n";
     std::cout << "║ " << std::left << std::setw(61) << title << "║\n";
     std::cout << "╚═══════════════════════════════════════════════════════════════╝\n";
+}
+
+// Helper to convert torch::Tensor to lfs::core::Tensor
+Tensor from_torch(const torch::Tensor& torch_tensor) {
+    auto cpu_t = torch_tensor.cpu().contiguous();
+    std::vector<float> vec(cpu_t.data_ptr<float>(),
+                           cpu_t.data_ptr<float>() + cpu_t.numel());
+
+    std::vector<size_t> shape;
+    for (int i = 0; i < cpu_t.dim(); i++) {
+        shape.push_back(cpu_t.size(i));
+    }
+
+    auto device = torch_tensor.is_cuda() ? Device::CUDA : Device::CPU;
+    return Tensor::from_vector(vec, TensorShape(shape), device);
 }
 
 void print_result(const std::string& test_name, double old_time, double new_time, const std::string& unit = "μs") {
@@ -431,14 +448,25 @@ TEST(LossesBenchmark, MemoryOverhead) {
 // Comparison Benchmarks vs Reference Implementations
 // ===================================================================================
 
-// Reference L1 loss using PyTorch
-float reference_l1_loss_torch(const torch::Tensor& img1, const torch::Tensor& img2) {
+// Reference L1 loss using PyTorch (forward only)
+float reference_l1_loss_torch_fwd(const torch::Tensor& img1, const torch::Tensor& img2) {
     return torch::l1_loss(img1, img2, torch::Reduction::Mean).item<float>();
 }
 
+// Reference L1 loss with backward (fair comparison)
+std::pair<float, torch::Tensor> reference_l1_loss_torch_fwd_bwd(const torch::Tensor& img1, const torch::Tensor& img2) {
+    auto img1_copy = img1.clone().set_requires_grad(true);
+    auto loss = torch::l1_loss(img1_copy, img2, torch::Reduction::Mean);
+    loss.backward();
+    return {loss.item<float>(), img1_copy.grad()};
+}
+
 // Reference SSIM using old kernels (include/lfs/kernels/ssim.cuh)
+// FAIR COMPARISON: Also compute backward (same as PhotometricLoss)
 float reference_ssim_old_kernels(const lfs::core::Tensor& img1, const lfs::core::Tensor& img2) {
     auto [ssim_value, ctx] = lfs::training::kernels::ssim_forward(img1, img2);
+    // Compute backward to match what PhotometricLoss does
+    auto grad = lfs::training::kernels::ssim_backward(ctx, -1.0f);
     return 1.0f - ssim_value;  // Convert to D-SSIM loss (1 - SSIM)
 }
 
@@ -447,7 +475,7 @@ float reference_photometric_combined(const lfs::core::Tensor& rendered, const lf
     // L1 component
     auto torch_rendered = to_torch(rendered);
     auto torch_gt = to_torch(gt_image);
-    float l1_loss = reference_l1_loss_torch(torch_rendered, torch_gt);
+    float l1_loss = reference_l1_loss_torch_fwd(torch_rendered, torch_gt);
 
     // SSIM component
     float ssim_loss = reference_ssim_old_kernels(rendered, gt_image);
@@ -474,14 +502,14 @@ TEST(LossesBenchmark, L1_vs_Reference) {
         auto img2_torch = to_torch(img2_lfs);
 
         // Warmup
-        reference_l1_loss_torch(img1_torch, img2_torch);
+        reference_l1_loss_torch_fwd_bwd(img1_torch, img2_torch);
         auto l1_result = PhotometricLoss::forward(img1_lfs, img2_lfs, PhotometricLoss::Params{.lambda_dssim = 0.0f});
 
-        // Benchmark PyTorch reference
+        // Benchmark PyTorch reference (forward + backward)
         Timer timer;
         timer.start();
         for (int i = 0; i < n_trials; i++) {
-            float loss = reference_l1_loss_torch(img1_torch, img2_torch);
+            auto [loss, grad] = reference_l1_loss_torch_fwd_bwd(img1_torch, img2_torch);
         }
         cudaDeviceSynchronize();
         double torch_time = timer.stop_us() / n_trials;
@@ -590,7 +618,7 @@ TEST(LossesBenchmark, NumericalAccuracy_L1) {
     auto img2_torch = to_torch(img2_lfs);
 
     // Compute losses
-    float torch_loss = reference_l1_loss_torch(img1_torch, img2_torch);
+    float torch_loss = reference_l1_loss_torch_fwd(img1_torch, img2_torch);
     auto lfs_result = PhotometricLoss::forward(img1_lfs, img2_lfs, PhotometricLoss::Params{.lambda_dssim = 0.0f});
     float lfs_loss = lfs_result.value().first;  // std::pair<float, Context>
 
@@ -652,6 +680,617 @@ TEST(LossesBenchmark, NumericalAccuracy_PhotometricCombined) {
     std::cout << std::left << std::setw(30) << "Relative error:" << std::right << std::setw(15) << std::fixed << std::setprecision(6) << (rel_error * 100.0f) << "%\n";
 
     EXPECT_LT(rel_error, 1e-5);  // Should match within 0.001%
+}
+
+TEST(LossesBenchmark, GradientCorrectness_L1) {
+    print_benchmark_header("Gradient Correctness - L1 Loss");
+    std::cout << "Comparing analytical gradients vs numerical gradients (finite differences)\n\n";
+
+    const int H = 64, W = 64;  // Smaller for faster gradient checking
+    auto img1 = Tensor::rand({H, W, 3}, Device::CUDA);
+    auto img2 = Tensor::rand({H, W, 3}, Device::CUDA);
+
+    // Compute analytical gradients (forward already computes them)
+    auto result = PhotometricLoss::forward(img1, img2, PhotometricLoss::Params{.lambda_dssim = 0.0f});
+    auto [loss, ctx] = result.value();
+    auto grad_analytical = ctx.grad_image;
+
+    // Convert to PyTorch for easier numerical gradient checking
+    auto img1_torch = to_torch(img1).set_requires_grad(true);
+    auto img2_torch = to_torch(img2);
+    auto loss_torch = torch::l1_loss(img1_torch, img2_torch, torch::Reduction::Mean);
+    loss_torch.backward();
+    auto grad_numerical = img1_torch.grad();
+
+    // Compare gradients
+    auto grad_analytical_torch = to_torch(grad_analytical);
+    auto diff = (grad_analytical_torch - grad_numerical).abs();
+    float max_error = diff.max().item<float>();
+    float mean_error = diff.mean().item<float>();
+
+    std::cout << std::left << std::setw(30) << "Max absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << max_error << "\n";
+    std::cout << std::left << std::setw(30) << "Mean absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << mean_error << "\n";
+
+    EXPECT_LT(max_error, 1e-4);  // Gradients should match within 1e-4
+}
+
+TEST(LossesBenchmark, GradientCorrectness_SSIM) {
+    print_benchmark_header("Gradient Correctness - SSIM Loss");
+    std::cout << "Comparing analytical gradients vs numerical gradients (finite differences)\n\n";
+
+    const int H = 64, W = 64;  // Smaller for faster gradient checking
+    auto img1 = Tensor::rand({H, W, 3}, Device::CUDA);
+    auto img2 = Tensor::rand({H, W, 3}, Device::CUDA);
+
+    // Compute analytical gradients (LFS - forward already computes them)
+    auto result = PhotometricLoss::forward(img1, img2, PhotometricLoss::Params{.lambda_dssim = 1.0f});
+    auto [loss, ctx] = result.value();
+    auto grad_analytical = ctx.grad_image;
+
+    // Compute numerical gradients using finite differences
+    const float epsilon = 1e-4f;
+    auto img1_cpu = img1.to(Device::CPU);
+    auto img2_cpu = img2.to(Device::CPU);
+    auto grad_analytical_cpu = grad_analytical.to(Device::CPU);
+
+    // Check a subset of pixels (every 8th pixel to save time)
+    int n_checks = 0;
+    float max_error = 0.0f;
+    float sum_error = 0.0f;
+
+    for (int h = 0; h < H; h += 8) {
+        for (int w = 0; w < W; w += 8) {
+            for (int c = 0; c < 3; c++) {
+                size_t idx = h * W * 3 + w * 3 + c;
+
+                // Perturb +epsilon
+                auto img1_plus_cpu = img1_cpu.clone();
+                img1_plus_cpu.template ptr<float>()[idx] += epsilon;
+                auto img1_plus = img1_plus_cpu.to(Device::CUDA);
+                float loss_plus = PhotometricLoss::forward(img1_plus, img2, PhotometricLoss::Params{.lambda_dssim = 1.0f}).value().first;
+
+                // Perturb -epsilon
+                auto img1_minus_cpu = img1_cpu.clone();
+                img1_minus_cpu.template ptr<float>()[idx] -= epsilon;
+                auto img1_minus = img1_minus_cpu.to(Device::CUDA);
+                float loss_minus = PhotometricLoss::forward(img1_minus, img2, PhotometricLoss::Params{.lambda_dssim = 1.0f}).value().first;
+
+                // Numerical gradient
+                float grad_num = (loss_plus - loss_minus) / (2.0f * epsilon);
+                float grad_ana = grad_analytical_cpu.template ptr<float>()[idx];
+
+                float error = std::abs(grad_ana - grad_num);
+                max_error = std::max(max_error, error);
+                sum_error += error;
+                n_checks++;
+            }
+        }
+    }
+
+    float mean_error = sum_error / n_checks;
+
+    std::cout << std::left << std::setw(30) << "Pixels checked:" << std::right << std::setw(15) << n_checks << "\n";
+    std::cout << std::left << std::setw(30) << "Max absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << max_error << "\n";
+    std::cout << std::left << std::setw(30) << "Mean absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << mean_error << "\n";
+
+    EXPECT_LT(max_error, 1e-3);  // SSIM gradients are complex, allow slightly larger tolerance
+}
+
+TEST(LossesBenchmark, GradientCorrectness_Combined) {
+    print_benchmark_header("Gradient Correctness - Combined Photometric Loss");
+    std::cout << "Comparing analytical gradients vs numerical gradients (finite differences)\n\n";
+
+    const int H = 64, W = 64;
+    const float lambda_dssim = 0.2f;
+    auto img1 = Tensor::rand({H, W, 3}, Device::CUDA);
+    auto img2 = Tensor::rand({H, W, 3}, Device::CUDA);
+
+    // Compute analytical gradients (forward already computes them)
+    auto result = PhotometricLoss::forward(img1, img2, PhotometricLoss::Params{.lambda_dssim = lambda_dssim});
+    auto [loss, ctx] = result.value();
+    auto grad_analytical = ctx.grad_image;
+
+    // Compute numerical gradients (subset)
+    const float epsilon = 1e-4f;
+    auto img1_cpu = img1.to(Device::CPU);
+    auto img2_cpu = img2.to(Device::CPU);
+    auto grad_analytical_cpu = grad_analytical.to(Device::CPU);
+
+    int n_checks = 0;
+    float max_error = 0.0f;
+    float sum_error = 0.0f;
+
+    for (int h = 0; h < H; h += 8) {
+        for (int w = 0; w < W; w += 8) {
+            for (int c = 0; c < 3; c++) {
+                size_t idx = h * W * 3 + w * 3 + c;
+
+                auto img1_plus_cpu = img1_cpu.clone();
+                img1_plus_cpu.template ptr<float>()[idx] += epsilon;
+                auto img1_plus = img1_plus_cpu.to(Device::CUDA);
+                float loss_plus = PhotometricLoss::forward(img1_plus, img2, PhotometricLoss::Params{.lambda_dssim = lambda_dssim}).value().first;
+
+                auto img1_minus_cpu = img1_cpu.clone();
+                img1_minus_cpu.template ptr<float>()[idx] -= epsilon;
+                auto img1_minus = img1_minus_cpu.to(Device::CUDA);
+                float loss_minus = PhotometricLoss::forward(img1_minus, img2, PhotometricLoss::Params{.lambda_dssim = lambda_dssim}).value().first;
+
+                float grad_num = (loss_plus - loss_minus) / (2.0f * epsilon);
+                float grad_ana = grad_analytical_cpu.template ptr<float>()[idx];
+
+                float error = std::abs(grad_ana - grad_num);
+                max_error = std::max(max_error, error);
+                sum_error += error;
+                n_checks++;
+            }
+        }
+    }
+
+    float mean_error = sum_error / n_checks;
+
+    std::cout << std::left << std::setw(30) << "Pixels checked:" << std::right << std::setw(15) << n_checks << "\n";
+    std::cout << std::left << std::setw(30) << "Max absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << max_error << "\n";
+    std::cout << std::left << std::setw(30) << "Mean absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << mean_error << "\n";
+
+    EXPECT_LT(max_error, 1e-3);  // Allow slightly larger tolerance for combined loss
+}
+
+TEST(LossesBenchmark, GradientCorrectness_ScaleRegularization) {
+    print_benchmark_header("Gradient Correctness - Scale Regularization");
+    std::cout << "Comparing analytical gradients vs numerical gradients (finite differences)\n\n";
+
+    const size_t N = 1000;  // 1000 Gaussians
+    const float weight = 0.01f;
+    auto scaling_raw = Tensor::randn({N, 3}, Device::CUDA);
+
+    // Compute analytical gradients (new implementation)
+    auto scaling_raw_grad = Tensor::zeros({N, 3}, Device::CUDA);
+    float loss = ScaleRegularization::forward(scaling_raw, scaling_raw_grad, ScaleRegularization::Params{.weight = weight}).value();
+
+    // Compute numerical gradients using finite differences (subset)
+    const float epsilon = 1e-4f;
+    auto scaling_raw_cpu = scaling_raw.to(Device::CPU);
+    auto scaling_raw_grad_cpu = scaling_raw_grad.to(Device::CPU);
+
+    int n_checks = 0;
+    float max_error = 0.0f;
+    float sum_error = 0.0f;
+
+    // Check every 10th element to save time
+    for (size_t i = 0; i < N * 3; i += 10) {
+        // Perturb +epsilon
+        auto scaling_plus_cpu = scaling_raw_cpu.clone();
+        scaling_plus_cpu.template ptr<float>()[i] += epsilon;
+        auto scaling_plus = scaling_plus_cpu.to(Device::CUDA);
+        auto grad_plus = Tensor::zeros({N, 3}, Device::CUDA);
+        float loss_plus = ScaleRegularization::forward(scaling_plus, grad_plus, ScaleRegularization::Params{.weight = weight}).value();
+
+        // Perturb -epsilon
+        auto scaling_minus_cpu = scaling_raw_cpu.clone();
+        scaling_minus_cpu.template ptr<float>()[i] -= epsilon;
+        auto scaling_minus = scaling_minus_cpu.to(Device::CUDA);
+        auto grad_minus = Tensor::zeros({N, 3}, Device::CUDA);
+        float loss_minus = ScaleRegularization::forward(scaling_minus, grad_minus, ScaleRegularization::Params{.weight = weight}).value();
+
+        // Numerical gradient
+        float grad_num = (loss_plus - loss_minus) / (2.0f * epsilon);
+        float grad_ana = scaling_raw_grad_cpu.template ptr<float>()[i];
+
+        float error = std::abs(grad_ana - grad_num);
+        max_error = std::max(max_error, error);
+        sum_error += error;
+        n_checks++;
+    }
+
+    float mean_error = sum_error / n_checks;
+
+    std::cout << std::left << std::setw(30) << "Elements checked:" << std::right << std::setw(15) << n_checks << "\n";
+    std::cout << std::left << std::setw(30) << "Max absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << max_error << "\n";
+    std::cout << std::left << std::setw(30) << "Mean absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << mean_error << "\n";
+
+    EXPECT_LT(max_error, 1e-3);  // Gradient should be accurate
+}
+
+TEST(LossesBenchmark, GradientCorrectness_OpacityRegularization) {
+    print_benchmark_header("Gradient Correctness - Opacity Regularization");
+    std::cout << "Comparing analytical gradients vs numerical gradients (finite differences)\n\n";
+
+    const size_t N = 1000;  // 1000 Gaussians
+    const float weight = 0.01f;
+    auto opacity_raw = Tensor::randn({N, 1}, Device::CUDA);
+
+    // Compute analytical gradients (new implementation)
+    auto opacity_raw_grad = Tensor::zeros({N, 1}, Device::CUDA);
+    float loss = OpacityRegularization::forward(opacity_raw, opacity_raw_grad, OpacityRegularization::Params{.weight = weight}).value();
+
+    // Compute numerical gradients using finite differences (subset)
+    const float epsilon = 1e-4f;
+    auto opacity_raw_cpu = opacity_raw.to(Device::CPU);
+    auto opacity_raw_grad_cpu = opacity_raw_grad.to(Device::CPU);
+
+    int n_checks = 0;
+    float max_error = 0.0f;
+    float sum_error = 0.0f;
+
+    // Check every 10th element to save time
+    for (size_t i = 0; i < N; i += 10) {
+        // Perturb +epsilon
+        auto opacity_plus_cpu = opacity_raw_cpu.clone();
+        opacity_plus_cpu.template ptr<float>()[i] += epsilon;
+        auto opacity_plus = opacity_plus_cpu.to(Device::CUDA);
+        auto grad_plus = Tensor::zeros({N, 1}, Device::CUDA);
+        float loss_plus = OpacityRegularization::forward(opacity_plus, grad_plus, OpacityRegularization::Params{.weight = weight}).value();
+
+        // Perturb -epsilon
+        auto opacity_minus_cpu = opacity_raw_cpu.clone();
+        opacity_minus_cpu.template ptr<float>()[i] -= epsilon;
+        auto opacity_minus = opacity_minus_cpu.to(Device::CUDA);
+        auto grad_minus = Tensor::zeros({N, 1}, Device::CUDA);
+        float loss_minus = OpacityRegularization::forward(opacity_minus, grad_minus, OpacityRegularization::Params{.weight = weight}).value();
+
+        // Numerical gradient
+        float grad_num = (loss_plus - loss_minus) / (2.0f * epsilon);
+        float grad_ana = opacity_raw_grad_cpu.template ptr<float>()[i];
+
+        float error = std::abs(grad_ana - grad_num);
+        max_error = std::max(max_error, error);
+        sum_error += error;
+        n_checks++;
+    }
+
+    float mean_error = sum_error / n_checks;
+
+    std::cout << std::left << std::setw(30) << "Elements checked:" << std::right << std::setw(15) << n_checks << "\n";
+    std::cout << std::left << std::setw(30) << "Max absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << max_error << "\n";
+    std::cout << std::left << std::setw(30) << "Mean absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << mean_error << "\n";
+
+    EXPECT_LT(max_error, 1e-3);  // Gradient should be accurate
+}
+
+// =============================================================================
+// BILATERAL GRID BENCHMARKS
+// =============================================================================
+
+TEST(LossesBenchmark, BilateralGridSlice_vs_Reference) {
+    print_benchmark_header("Bilateral Grid Slice - Forward+Backward (LFS vs Reference)");
+    std::cout << "Testing bilateral grid slice operation (forward + backward pass)\n\n";
+
+    // Grid dimensions
+    const int L = 8, H = 16, W = 16;  // Standard bilateral grid dimensions
+
+    // Test different image sizes
+    std::vector<std::pair<int, int>> sizes = {{128, 128}, {256, 256}, {512, 512}};
+
+    std::cout << std::left << std::setw(45) << "Image Size" << " | ";
+    std::cout << std::right << std::setw(10) << "Reference" << " | ";
+    std::cout << std::right << std::setw(10) << "LFS" << " | ";
+    std::cout << std::right << std::setw(10) << "Speedup" << "\n";
+    std::cout << std::string(90, '-') << "\n";
+
+    for (const auto& [h, w] : sizes) {
+        // Create test data
+        auto grid_torch = torch::randn({12, L, H, W}, torch::kCUDA).contiguous();
+        auto rgb_torch = torch::rand({h, w, 3}, torch::kCUDA).contiguous();
+        auto grad_output_torch = torch::randn({h, w, 3}, torch::kCUDA).contiguous();
+
+        // Convert to LFS tensors
+        auto grid_lfs = from_torch(grid_torch);
+        auto rgb_lfs = from_torch(rgb_torch);
+        auto grad_output_lfs = from_torch(grad_output_torch);
+
+        Timer timer;
+        const int warmup = 5;
+        const int iterations = 20;
+
+        // ===== REFERENCE (torch-based) =====
+        for (int i = 0; i < warmup; i++) {
+            auto [output, ctx] = gs::bilateral_grid::bilateral_grid_slice_forward(grid_torch, rgb_torch);
+            auto [grad_grid, grad_rgb] = gs::bilateral_grid::bilateral_grid_slice_backward(ctx, grad_output_torch);
+        }
+        cudaDeviceSynchronize();
+
+        timer.start();
+        for (int i = 0; i < iterations; i++) {
+            auto [output, ctx] = gs::bilateral_grid::bilateral_grid_slice_forward(grid_torch, rgb_torch);
+            auto [grad_grid, grad_rgb] = gs::bilateral_grid::bilateral_grid_slice_backward(ctx, grad_output_torch);
+        }
+        cudaDeviceSynchronize();
+        double ref_time = timer.stop_us() / iterations;
+
+        // ===== LFS (LibTorch-free) =====
+        auto grad_grid_lfs = Tensor::zeros({12, L, H, W}, Device::CUDA);
+        auto grad_rgb_lfs = Tensor::zeros({(size_t)h, (size_t)w, 3}, Device::CUDA);
+        auto output_lfs = Tensor::zeros({(size_t)h, (size_t)w, 3}, Device::CUDA);
+
+        float* grid_ptr = grid_lfs.template ptr<float>();
+        float* rgb_ptr = rgb_lfs.template ptr<float>();
+        float* output_ptr = output_lfs.template ptr<float>();
+        float* grad_output_ptr = grad_output_lfs.template ptr<float>();
+        float* grad_grid_ptr = grad_grid_lfs.template ptr<float>();
+        float* grad_rgb_ptr = grad_rgb_lfs.template ptr<float>();
+
+        for (int i = 0; i < warmup; i++) {
+            lfs::training::kernels::launch_bilateral_grid_slice_forward(
+                grid_ptr, rgb_ptr, output_ptr,
+                L, H, W, h, w, nullptr);
+            lfs::training::kernels::launch_bilateral_grid_slice_backward(
+                grid_ptr, rgb_ptr, grad_output_ptr,
+                grad_grid_ptr, grad_rgb_ptr,
+                L, H, W, h, w, nullptr);
+        }
+        cudaDeviceSynchronize();
+
+        timer.start();
+        for (int i = 0; i < iterations; i++) {
+            lfs::training::kernels::launch_bilateral_grid_slice_forward(
+                grid_ptr, rgb_ptr, output_ptr,
+                L, H, W, h, w, nullptr);
+            lfs::training::kernels::launch_bilateral_grid_slice_backward(
+                grid_ptr, rgb_ptr, grad_output_ptr,
+                grad_grid_ptr, grad_rgb_ptr,
+                L, H, W, h, w, nullptr);
+        }
+        cudaDeviceSynchronize();
+        double lfs_time = timer.stop_us() / iterations;
+
+        print_result(std::to_string(h) + "x" + std::to_string(w), ref_time, lfs_time);
+    }
+}
+
+TEST(LossesBenchmark, BilateralGridTV_vs_Reference) {
+    print_benchmark_header("Bilateral Grid TV Loss - Forward+Backward (LFS vs Reference)");
+    std::cout << "Testing bilateral grid total variation loss (forward + backward pass)\n\n";
+
+    // Grid dimensions
+    const int N = 10;  // 10 images
+    const int L = 8, H = 16, W = 16;  // Standard bilateral grid dimensions
+
+    // Create test data
+    auto grids_torch = torch::randn({N, 12, L, H, W}, torch::kCUDA).contiguous();
+    auto grids_lfs = from_torch(grids_torch);
+
+    Timer timer;
+    const int warmup = 10;
+    const int iterations = 50;
+
+    // ===== REFERENCE (torch-based) =====
+    for (int i = 0; i < warmup; i++) {
+        auto [loss, ctx] = gs::bilateral_grid::bilateral_grid_tv_forward(grids_torch);
+        auto grad = gs::bilateral_grid::bilateral_grid_tv_backward(ctx, 1.0f);
+    }
+    cudaDeviceSynchronize();
+
+    timer.start();
+    for (int i = 0; i < iterations; i++) {
+        auto [loss, ctx] = gs::bilateral_grid::bilateral_grid_tv_forward(grids_torch);
+        auto grad = gs::bilateral_grid::bilateral_grid_tv_backward(ctx, 1.0f);
+    }
+    cudaDeviceSynchronize();
+    double ref_time = timer.stop_us() / iterations;
+
+    // ===== LFS (LibTorch-free) =====
+    auto loss_lfs = Tensor::zeros({1}, Device::CUDA);
+    auto grad_lfs = Tensor::zeros({N, 12, L, H, W}, Device::CUDA);
+
+    // Allocate temp buffer
+    const int total = N * L * H * W;
+    const int num_blocks = std::min((total + 255) / 256, 2048);
+    auto temp_buffer = Tensor::zeros({num_blocks}, Device::CUDA);
+
+    float* grids_ptr = grids_lfs.template ptr<float>();
+    float* loss_ptr = loss_lfs.template ptr<float>();
+    float* temp_ptr = temp_buffer.template ptr<float>();
+    float* grad_ptr = grad_lfs.template ptr<float>();
+
+    for (int i = 0; i < warmup; i++) {
+        lfs::training::kernels::launch_bilateral_grid_tv_forward(
+            grids_ptr, loss_ptr, temp_ptr,
+            N, L, H, W, nullptr);
+        lfs::training::kernels::launch_bilateral_grid_tv_backward(
+            grids_ptr, 1.0f, grad_ptr,
+            N, L, H, W, nullptr);
+    }
+    cudaDeviceSynchronize();
+
+    timer.start();
+    for (int i = 0; i < iterations; i++) {
+        lfs::training::kernels::launch_bilateral_grid_tv_forward(
+            grids_ptr, loss_ptr, temp_ptr,
+            N, L, H, W, nullptr);
+        lfs::training::kernels::launch_bilateral_grid_tv_backward(
+            grids_ptr, 1.0f, grad_ptr,
+            N, L, H, W, nullptr);
+    }
+    cudaDeviceSynchronize();
+    double lfs_time = timer.stop_us() / iterations;
+
+    std::cout << std::left << std::setw(45) << "TV Loss (N=10, L=8, H=16, W=16)" << " | ";
+    std::cout << std::right << std::setw(10) << std::fixed << std::setprecision(2) << ref_time << " μs | ";
+    std::cout << std::right << std::setw(10) << std::fixed << std::setprecision(2) << lfs_time << " μs | ";
+    double speedup = ref_time / lfs_time;
+    std::cout << std::right << std::setw(10) << std::fixed << std::setprecision(2) << speedup << "x";
+    std::cout << (speedup >= 1.0 ? " ✓" : " ✗") << "\n";
+}
+
+TEST(LossesBenchmark, GradientCorrectness_BilateralGridSlice) {
+    print_benchmark_header("Gradient Correctness - Bilateral Grid Slice");
+    std::cout << "Comparing analytical gradients vs numerical gradients (finite differences)\n\n";
+
+    // Small test case for gradient checking
+    const int L = 4, H = 8, W = 8;
+    const int h = 32, w = 32;
+
+    // Create test data
+    auto grid = Tensor::randn({12, L, H, W}, Device::CUDA);
+    auto rgb = Tensor::rand({h, w, 3}, Device::CUDA);
+    auto grad_output = Tensor::ones({h, w, 3}, Device::CUDA);  // Upstream gradient = 1
+
+    // Compute analytical gradients
+    auto output = Tensor::zeros({h, w, 3}, Device::CUDA);
+    auto grad_grid = Tensor::zeros({12, L, H, W}, Device::CUDA);
+    auto grad_rgb = Tensor::zeros({h, w, 3}, Device::CUDA);
+
+    float* grid_ptr = grid.template ptr<float>();
+    float* rgb_ptr = rgb.template ptr<float>();
+    float* output_ptr = output.template ptr<float>();
+    float* grad_output_ptr = grad_output.template ptr<float>();
+    float* grad_grid_ptr = grad_grid.template ptr<float>();
+    float* grad_rgb_ptr = grad_rgb.template ptr<float>();
+
+    lfs::training::kernels::launch_bilateral_grid_slice_forward(
+        grid_ptr, rgb_ptr, output_ptr,
+        L, H, W, h, w, nullptr);
+    lfs::training::kernels::launch_bilateral_grid_slice_backward(
+        grid_ptr, rgb_ptr, grad_output_ptr,
+        grad_grid_ptr, grad_rgb_ptr,
+        L, H, W, h, w, nullptr);
+    cudaDeviceSynchronize();
+
+    // Numerical gradient checking (sample a few elements)
+    const float epsilon = 1e-4f;
+    auto grid_cpu = grid.to(Device::CPU);
+    auto grad_grid_cpu = grad_grid.to(Device::CPU);
+
+    int n_checks = 0;
+    float max_error = 0.0f;
+    float sum_error = 0.0f;
+
+    // Check every 50th grid element
+    for (size_t i = 0; i < 12 * L * H * W; i += 50) {
+        // Perturb +epsilon
+        auto grid_plus_cpu = grid_cpu.clone();
+        grid_plus_cpu.template ptr<float>()[i] += epsilon;
+        auto grid_plus = grid_plus_cpu.to(Device::CUDA);
+        auto output_plus = Tensor::zeros({h, w, 3}, Device::CUDA);
+        float* grid_plus_ptr = grid_plus.template ptr<float>();
+        float* output_plus_ptr = output_plus.template ptr<float>();
+        lfs::training::kernels::launch_bilateral_grid_slice_forward(
+            grid_plus_ptr, rgb_ptr, output_plus_ptr,
+            L, H, W, h, w, nullptr);
+        cudaDeviceSynchronize();
+        auto output_plus_cpu = output_plus.to(Device::CPU);
+
+        // Perturb -epsilon
+        auto grid_minus_cpu = grid_cpu.clone();
+        grid_minus_cpu.template ptr<float>()[i] -= epsilon;
+        auto grid_minus = grid_minus_cpu.to(Device::CUDA);
+        auto output_minus = Tensor::zeros({h, w, 3}, Device::CUDA);
+        float* grid_minus_ptr = grid_minus.template ptr<float>();
+        float* output_minus_ptr = output_minus.template ptr<float>();
+        lfs::training::kernels::launch_bilateral_grid_slice_forward(
+            grid_minus_ptr, rgb_ptr, output_minus_ptr,
+            L, H, W, h, w, nullptr);
+        cudaDeviceSynchronize();
+        auto output_minus_cpu = output_minus.to(Device::CPU);
+
+        // Compute numerical gradient: sum of (output_diff * grad_output)
+        float grad_num = 0.0f;
+        for (size_t j = 0; j < h * w * 3; j++) {
+            float diff = (output_plus_cpu.template ptr<float>()[j] - output_minus_cpu.template ptr<float>()[j]) / (2.0f * epsilon);
+            grad_num += diff * 1.0f;  // grad_output = 1
+        }
+
+        float grad_ana = grad_grid_cpu.template ptr<float>()[i];
+        float error = std::abs(grad_ana - grad_num);
+        max_error = std::max(max_error, error);
+        sum_error += error;
+        n_checks++;
+    }
+
+    float mean_error = sum_error / n_checks;
+
+    std::cout << std::left << std::setw(30) << "Elements checked:" << std::right << std::setw(15) << n_checks << "\n";
+    std::cout << std::left << std::setw(30) << "Max absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << max_error << "\n";
+    std::cout << std::left << std::setw(30) << "Mean absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << mean_error << "\n";
+
+    EXPECT_LT(max_error, 1e-2);  // Bilateral grid gradients are more complex, allow higher tolerance
+}
+
+TEST(LossesBenchmark, GradientCorrectness_BilateralGridTV) {
+    print_benchmark_header("Gradient Correctness - Bilateral Grid TV Loss");
+    std::cout << "Comparing analytical gradients vs numerical gradients (finite differences)\n\n";
+
+    // Small test case
+    const int N = 2;
+    const int L = 4, H = 8, W = 8;
+
+    auto grids = Tensor::randn({N, 12, L, H, W}, Device::CUDA);
+    auto loss = Tensor::zeros({1}, Device::CUDA);
+    auto grad_grids = Tensor::zeros({N, 12, L, H, W}, Device::CUDA);
+
+    // Allocate temp buffer
+    const int total = N * L * H * W;
+    const int num_blocks = std::min((total + 255) / 256, 2048);
+    auto temp_buffer = Tensor::zeros({num_blocks}, Device::CUDA);
+
+    float* grids_ptr = grids.template ptr<float>();
+    float* loss_ptr = loss.template ptr<float>();
+    float* temp_ptr = temp_buffer.template ptr<float>();
+    float* grad_grids_ptr = grad_grids.template ptr<float>();
+
+    // Compute analytical gradients
+    lfs::training::kernels::launch_bilateral_grid_tv_forward(
+        grids_ptr, loss_ptr, temp_ptr,
+        N, L, H, W, nullptr);
+    lfs::training::kernels::launch_bilateral_grid_tv_backward(
+        grids_ptr, 1.0f, grad_grids_ptr,
+        N, L, H, W, nullptr);
+    cudaDeviceSynchronize();
+
+    // Numerical gradient checking
+    const float epsilon = 1e-4f;
+    auto grids_cpu = grids.to(Device::CPU);
+    auto grad_grids_cpu = grad_grids.to(Device::CPU);
+
+    int n_checks = 0;
+    float max_error = 0.0f;
+    float sum_error = 0.0f;
+
+    // Check every 100th element
+    for (size_t i = 0; i < N * 12 * L * H * W; i += 100) {
+        // Perturb +epsilon
+        auto grids_plus_cpu = grids_cpu.clone();
+        grids_plus_cpu.template ptr<float>()[i] += epsilon;
+        auto grids_plus = grids_plus_cpu.to(Device::CUDA);
+        auto loss_plus = Tensor::zeros({1}, Device::CUDA);
+        float* grids_plus_ptr = grids_plus.template ptr<float>();
+        float* loss_plus_ptr = loss_plus.template ptr<float>();
+        lfs::training::kernels::launch_bilateral_grid_tv_forward(
+            grids_plus_ptr, loss_plus_ptr, temp_ptr,
+            N, L, H, W, nullptr);
+        cudaDeviceSynchronize();
+        float loss_plus_val = loss_plus.item<float>();
+
+        // Perturb -epsilon
+        auto grids_minus_cpu = grids_cpu.clone();
+        grids_minus_cpu.template ptr<float>()[i] -= epsilon;
+        auto grids_minus = grids_minus_cpu.to(Device::CUDA);
+        auto loss_minus = Tensor::zeros({1}, Device::CUDA);
+        float* grids_minus_ptr = grids_minus.template ptr<float>();
+        float* loss_minus_ptr = loss_minus.template ptr<float>();
+        lfs::training::kernels::launch_bilateral_grid_tv_forward(
+            grids_minus_ptr, loss_minus_ptr, temp_ptr,
+            N, L, H, W, nullptr);
+        cudaDeviceSynchronize();
+        float loss_minus_val = loss_minus.item<float>();
+
+        // Numerical gradient
+        float grad_num = (loss_plus_val - loss_minus_val) / (2.0f * epsilon);
+        float grad_ana = grad_grids_cpu.template ptr<float>()[i];
+
+        float error = std::abs(grad_ana - grad_num);
+        max_error = std::max(max_error, error);
+        sum_error += error;
+        n_checks++;
+    }
+
+    float mean_error = sum_error / n_checks;
+
+    std::cout << std::left << std::setw(30) << "Elements checked:" << std::right << std::setw(15) << n_checks << "\n";
+    std::cout << std::left << std::setw(30) << "Max absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << max_error << "\n";
+    std::cout << std::left << std::setw(30) << "Mean absolute error:" << std::right << std::setw(15) << std::scientific << std::setprecision(2) << mean_error << "\n";
+
+    EXPECT_LT(max_error, 5e-3);  // TV loss gradients - allow slightly higher tolerance due to complex accumulations
 }
 
 } // anonymous namespace

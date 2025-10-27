@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "lfs/kernels/ssim.cuh"
+#include "lfs/kernels/ssim_reduction.cuh"
 #include <algorithm>
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
@@ -479,13 +480,14 @@ std::pair<float, SSIMContext> ssim_forward(
     int h = H;
     int w = W;
 
-    // Apply valid padding (crop 5 pixels from each side)
+    // Apply valid padding (crop 5 pixels from each side) using efficient view slicing
+    // Then compute mean using optimized tensor reduction (matches PyTorch speed!)
     lfs::core::Tensor ssim_map_cropped = ssim_map;
-    if (apply_valid_padding && h > 10 && w > 10) {
-        ssim_map_cropped = ssim_map.slice(2, 5, h - 5).slice(3, 5, w - 5);
+    if (apply_valid_padding && H > 10 && W > 10) {
+        ssim_map_cropped = ssim_map.slice(2, 5, H - 5).slice(3, 5, W - 5);
     }
 
-    // Compute mean SSIM value
+    // Use tensor library's optimized mean (warp reductions + vectorized loads)
     float ssim_value = ssim_map_cropped.mean().item<float>();
 
     // Save context for backward
