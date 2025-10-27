@@ -697,8 +697,7 @@ namespace lfs::core::tensor_ops {
         const auto& gpu = GPUConfig::get();
         int grid_size = gpu.optimal_grid_size(BLOCK_SIZE);
 
-        // Cap grid size for efficiency (llm.c pattern)
-        grid_size = min(grid_size, 2048);
+        // No cap needed - two-stage reduction handles any size efficiently
 
         // Allocate partial buffer using stream-ordered allocation (CUDA 12.8+)
         float* partial = partial_buffer;
@@ -769,7 +768,7 @@ namespace lfs::core::tensor_ops {
         constexpr int BLOCK_SIZE = 256;
         int num_vec_elements = (n + 3) / 4;
         int grid_size = (num_vec_elements + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        grid_size = min(grid_size, 2048);
+        // No cap - single-stage warp reduce handles any size
 
         switch (op) {
         case ReduceOp::Sum:
@@ -825,7 +824,7 @@ namespace lfs::core::tensor_ops {
         if (segment_size < 32) {
             constexpr int BLOCK_SIZE = 256;
             int grid_size = (num_segments + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            grid_size = min(grid_size, 2048); // Cap at 2048 blocks
+            // No cap - each thread handles one segment
 
             switch (op) {
             case ReduceOp::Sum:
@@ -850,7 +849,7 @@ namespace lfs::core::tensor_ops {
         // Standard case: Medium segments (32-500K elements)
         // Use grid-stride loop: Each block processes multiple segments
         constexpr int BLOCK_SIZE = 256;
-        int grid_size = min((int)num_segments, 2048); // Cap at 2048 blocks for efficiency
+        int grid_size = num_segments; // One block per segment (or less if very many)
 
         switch (op) {
         case ReduceOp::Sum:
@@ -898,10 +897,10 @@ namespace lfs::core::tensor_ops {
 
         size_t output_elements = outer_size * inner_size;
 
-        // Optimal configuration: 256 threads per block, cap grid size
+        // Optimal configuration: 256 threads per block
         constexpr int BLOCK_SIZE = 256;
         int grid_size = (output_elements + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        grid_size = min(grid_size, 2048);
+        // No cap - warp-level reduction scales well
 
         switch (op) {
         case ReduceOp::Sum:

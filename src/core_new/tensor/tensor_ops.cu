@@ -110,7 +110,7 @@ namespace lfs::core::tensor_ops {
         } else {
             // Fallback to scalar kernel for unaligned data
             int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            grid_size = min(grid_size, 2048);
+            // No cap needed - grid-stride loop handles any size
 
             clamp_kernel_optimized<<<grid_size, BLOCK_SIZE, 0, stream>>>(data, min_val, max_val, n);
         }
@@ -173,7 +173,7 @@ namespace lfs::core::tensor_ops {
             clamp_kernel_fused_vectorized<<<grid_size, BLOCK_SIZE, 0, stream>>>(src, dst, min_val, max_val, n);
         } else {
             int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            grid_size = min(grid_size, 2048);
+            // No cap needed - grid-stride loop handles any size
 
             clamp_kernel_fused<<<grid_size, BLOCK_SIZE, 0, stream>>>(src, dst, min_val, max_val, n);
         }

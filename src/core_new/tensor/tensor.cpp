@@ -67,7 +67,10 @@ namespace lfs::core {
           device_(device),
           dtype_(dtype),
           is_view_(true), // This is a view
+          stream_(device == Device::CUDA ? StreamPool::instance().get_stream() : nullptr),
           id_(next_id_++) {
+
+        compute_alignment(); // Compute alignment flags
 
         if (profiling_enabled_) {
             LOG_DEBUG("Created tensor #{} (non-owning view): shape={}, device={}, dtype={}",
@@ -86,6 +89,9 @@ namespace lfs::core {
           device_(other.device_),
           dtype_(other.dtype_),
           is_view_(other.is_view_),
+          is_aligned_16_(other.is_aligned_16_), // Copy alignment flags
+          is_aligned_128_(other.is_aligned_128_),
+          stream_(other.stream_), // Copy stream assignment
           id_(next_id_++) {
 
         if (profiling_enabled_) {
@@ -111,6 +117,9 @@ namespace lfs::core {
         device_ = other.device_;
         dtype_ = other.dtype_;
         is_view_ = other.is_view_;
+        is_aligned_16_ = other.is_aligned_16_; // Copy alignment flags
+        is_aligned_128_ = other.is_aligned_128_;
+        stream_ = other.stream_; // Copy stream assignment
         id_ = next_id_++;
 
         if (profiling_enabled_) {
@@ -133,6 +142,9 @@ namespace lfs::core {
           device_(other.device_),
           dtype_(other.dtype_),
           is_view_(std::exchange(other.is_view_, false)),
+          is_aligned_16_(std::exchange(other.is_aligned_16_, false)),
+          is_aligned_128_(std::exchange(other.is_aligned_128_, false)),
+          stream_(std::exchange(other.stream_, nullptr)),
           id_(other.id_) {
 
         if (profiling_enabled_) {
@@ -152,6 +164,9 @@ namespace lfs::core {
             device_ = other.device_;
             dtype_ = other.dtype_;
             is_view_ = std::exchange(other.is_view_, false);
+            is_aligned_16_ = std::exchange(other.is_aligned_16_, false);
+            is_aligned_128_ = std::exchange(other.is_aligned_128_, false);
+            stream_ = std::exchange(other.stream_, nullptr);
             id_ = other.id_;
 
             if (profiling_enabled_) {
@@ -254,7 +269,7 @@ namespace lfs::core {
                 dtype_,
                 nullptr);
 
-            cudaDeviceSynchronize();
+            // No sync needed - cudaFree is implicitly synchronizing
             cudaFree(d_shape);
             cudaFree(d_strides);
         } else {
@@ -537,6 +552,8 @@ namespace lfs::core {
             CHECK_CUDA(cudaMemcpyAsync(t.data_, src, bytes(), cudaMemcpyHostToDevice, 0));
             CHECK_CUDA(cudaDeviceSynchronize()); // Ensure transfer completes before returning
         } else if (device_ == Device::CUDA && device == Device::CPU) {
+            // API BOUNDARY: Sync all streams before GPU→CPU transfer
+            StreamPool::instance().sync_all();
             // Async transfer for GPU→CPU as well (destination is pinned)
             CHECK_CUDA(cudaMemcpyAsync(t.data_, src, bytes(), cudaMemcpyDeviceToHost, 0));
             CHECK_CUDA(cudaDeviceSynchronize()); // Ensure transfer completes before returning
@@ -570,7 +587,7 @@ namespace lfs::core {
         if (device_ == Device::CUDA) {                                                                                                       \
             tensor_ops::launch_convert_type<FROM_TYPE, TO_TYPE>(                                                                             \
                 ptr<FROM_TYPE>(), result.ptr<TO_TYPE>(), numel(), 0);                                                                        \
-            CHECK_CUDA(cudaDeviceSynchronize());                                                                                             \
+            /* No sync - tensor-to-tensor operation */                                                                                       \
             return result;                                                                                                                   \
         }                                                                                                                                    \
         /* CPU fallback */                                                                                                                   \
@@ -747,8 +764,8 @@ namespace lfs::core {
 
     Tensor Tensor::cat(const Tensor& other, int dim) const {
         std::vector<Tensor> tensors;
-        tensors.push_back(clone());
-        tensors.push_back(other.clone());
+        tensors.push_back(*this);
+        tensors.push_back(other);
         return Tensor::cat(tensors, dim);
     }
 
@@ -838,12 +855,12 @@ namespace lfs::core {
 
         if (device_ == Device::CUDA) {
             if (dtype_ == DataType::Float32) {
-                tensor_ops::launch_clamp_scalar(ptr<float>(), min_val, max_val, numel(), 0);
+                tensor_ops::launch_clamp_scalar(ptr<float>(), min_val, max_val, numel(), stream_);
             } else if (dtype_ == DataType::Int32) {
                 tensor_ops::launch_clamp_scalar_int(ptr<int>(),
                                                     static_cast<int>(min_val),
                                                     static_cast<int>(max_val),
-                                                    numel(), 0);
+                                                    numel(), stream_);
             }
         } else {
             if (dtype_ == DataType::Float32) {
@@ -893,7 +910,7 @@ namespace lfs::core {
         if (device_ == Device::CUDA) {
             tensor_ops::launch_cumsum(result.raw_ptr(), shape_.dims().data(),
                                       shape_.rank(), dim, dtype_, nullptr);
-            cudaDeviceSynchronize();
+            // No sync - returns tensor, not API boundary
         } else {
             if (dtype_ == DataType::Float32) {
                 float* data = result.ptr<float>();
@@ -1114,6 +1131,8 @@ namespace lfs::core {
         const char* data_ptr = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
 
         if (device_ == Device::CUDA) {
+            // API BOUNDARY: Sync all streams before reading value from GPU
+            StreamPool::instance().sync_all();
             CHECK_CUDA(cudaMemcpy(&value, data_ptr, sizeof(float), cudaMemcpyDeviceToHost));
         } else {
             value = *static_cast<const float*>(static_cast<const void*>(data_ptr));
@@ -1133,6 +1152,8 @@ namespace lfs::core {
         values.resize(n);
 
         if (device_ == Device::CUDA) {
+            // API BOUNDARY: Sync all streams before reading from GPU
+            StreamPool::instance().sync_all();
             CHECK_CUDA(cudaMemcpy(values.data(), data_, n * sizeof(float),
                                   cudaMemcpyDeviceToHost));
         } else {
@@ -1196,6 +1217,8 @@ namespace lfs::core {
         const char* src = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
 
         if (device_ == Device::CUDA) {
+            // API BOUNDARY: Sync all streams before reading from GPU
+            StreamPool::instance().sync_all();
             CHECK_CUDA(cudaMemcpy(result.data(), src, bytes(), cudaMemcpyDeviceToHost));
         } else {
             std::memcpy(result.data(), src, bytes());

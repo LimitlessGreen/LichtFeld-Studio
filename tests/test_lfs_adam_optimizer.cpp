@@ -1212,23 +1212,39 @@ protected:
 };
 
 TEST_F(AdamOptimizerBenchmark, StepPerformance) {
-    // Test step performance at different scales
+    // Test step performance at different scales - FAIR: both optimize ALL 6 parameters
     std::vector<size_t> sizes = {10'000, 50'000, 100'000, 500'000};
 
     for (size_t N : sizes) {
         const float lr = 1e-3f;
 
-        // Setup PyTorch
+        // Setup PyTorch - ALL 6 parameters like LFS!
         auto torch_means = torch::randn({static_cast<long>(N), 3},
             torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).requires_grad_(true);
+        auto torch_sh0 = torch::randn({static_cast<long>(N), 1, 3},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).requires_grad_(true);
+        auto torch_shN = torch::randn({static_cast<long>(N), 15, 3},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).requires_grad_(true);
+        auto torch_scaling = torch::randn({static_cast<long>(N), 3},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).requires_grad_(true);
+        auto torch_rotation = torch::randn({static_cast<long>(N), 4},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).requires_grad_(true);
+        auto torch_opacity = torch::randn({static_cast<long>(N), 1},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).requires_grad_(true);
+
         auto torch_opt = std::make_unique<gs::training::FusedAdam>(
-            std::vector<torch::Tensor>{torch_means},
+            std::vector<torch::Tensor>{torch_means, torch_sh0, torch_shN, torch_scaling, torch_rotation, torch_opacity},
             std::make_unique<gs::training::FusedAdam::Options>(lr)
         );
 
         // Setup LFS
         auto lfs_splat = create_test_splat_data(N, 3);
         lfs_splat.means() = from_torch(torch_means.detach());
+        lfs_splat.sh0() = from_torch(torch_sh0.detach());
+        lfs_splat.shN() = from_torch(torch_shN.detach());
+        lfs_splat.scaling_raw() = from_torch(torch_scaling.detach());
+        lfs_splat.rotation_raw() = from_torch(torch_rotation.detach());
+        lfs_splat.opacity_raw() = from_torch(torch_opacity.detach());
         lfs_splat.allocate_gradients();
 
         AdamConfig lfs_config;
@@ -1236,25 +1252,52 @@ TEST_F(AdamOptimizerBenchmark, StepPerformance) {
         lfs_config.growth_factor = 1.0f;  // No pre-allocation for fair comparison
         AdamOptimizer lfs_opt(lfs_splat, lfs_config);
 
-        // Create gradient
-        auto grad = torch::randn({static_cast<long>(N), 3},
+        // Create gradients for ALL parameters
+        auto grad_means = torch::randn({static_cast<long>(N), 3},
             torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-        auto lfs_grad = from_torch(grad);
+        auto grad_sh0 = torch::randn({static_cast<long>(N), 1, 3},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        auto grad_shN = torch::randn({static_cast<long>(N), 15, 3},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        auto grad_scaling = torch::randn({static_cast<long>(N), 3},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        auto grad_rotation = torch::randn({static_cast<long>(N), 4},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        auto grad_opacity = torch::randn({static_cast<long>(N), 1},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
 
-        // Benchmark PyTorch
+        // Pre-convert LFS gradients (do this ONCE, not in benchmark loop!)
+        auto lfs_grad_means = from_torch(grad_means);
+        auto lfs_grad_sh0 = from_torch(grad_sh0);
+        auto lfs_grad_shN = from_torch(grad_shN);
+        auto lfs_grad_scaling = from_torch(grad_scaling);
+        auto lfs_grad_rotation = from_torch(grad_rotation);
+        auto lfs_grad_opacity = from_torch(grad_opacity);
+
+        // Benchmark PyTorch - ALL 6 parameters
         double torch_time = time_operation([&]() {
-            torch_means.mutable_grad() = grad.clone();
+            torch_means.mutable_grad() = grad_means;
+            torch_sh0.mutable_grad() = grad_sh0;
+            torch_shN.mutable_grad() = grad_shN;
+            torch_scaling.mutable_grad() = grad_scaling;
+            torch_rotation.mutable_grad() = grad_rotation;
+            torch_opacity.mutable_grad() = grad_opacity;
             torch_opt->step(1);
         });
 
-        // Benchmark LFS
+        // Benchmark LFS - ALL 6 parameters (no conversion overhead!)
         double lfs_time = time_operation([&]() {
-            lfs_splat.means_grad() = lfs_grad;
+            lfs_splat.means_grad() = lfs_grad_means;
+            lfs_splat.sh0_grad() = lfs_grad_sh0;
+            lfs_splat.shN_grad() = lfs_grad_shN;
+            lfs_splat.scaling_grad() = lfs_grad_scaling;
+            lfs_splat.rotation_grad() = lfs_grad_rotation;
+            lfs_splat.opacity_grad() = lfs_grad_opacity;
             lfs_opt.step(1);
         });
 
         BenchmarkResult result;
-        result.name = "Step (N=" + std::to_string(N) + ")";
+        result.name = "Step (N=" + std::to_string(N) + ", 6 params)";
         result.lfs_time_ms = lfs_time;
         result.torch_time_ms = torch_time;
         result.speedup = torch_time / lfs_time;
@@ -1328,10 +1371,10 @@ TEST_F(AdamOptimizerBenchmark, AddParametersNoPreallocation) {
         torch_means = extended;
     }, 1, n_additions);
 
-    // Benchmark LFS additions
+    // Benchmark LFS additions (disable validation for fair comparison)
     double lfs_time = time_operation([&]() {
         auto new_means = Tensor::randn({N_add, 3}, Device::CUDA);
-        lfs_opt.add_new_params(ParamType::Means, new_means);
+        lfs_opt.add_new_params(ParamType::Means, new_means, false);  // No validation
     }, 1, n_additions);
 
     BenchmarkResult result;
@@ -1366,10 +1409,10 @@ TEST_F(AdamOptimizerBenchmark, AddParametersWithGrowthFactor) {
         lfs_opt.step(i + 1);
     }
 
-    // Benchmark LFS additions with growth
+    // Benchmark LFS additions with growth (no validation)
     double lfs_time = time_operation([&]() {
         auto new_means = Tensor::randn({N_add, 3}, Device::CUDA);
-        lfs_opt.add_new_params(ParamType::Means, new_means);
+        lfs_opt.add_new_params(ParamType::Means, new_means, false);
     }, 1, n_additions);
 
     BenchmarkResult result;
@@ -1408,10 +1451,10 @@ TEST_F(AdamOptimizerBenchmark, AddParametersWithPreallocation) {
         lfs_opt.step(i + 1);
     }
 
-    // Benchmark LFS additions with pre-allocation
+    // Benchmark LFS additions with pre-allocation (no validation)
     double lfs_time = time_operation([&]() {
         auto new_means = Tensor::randn({N_add, 3}, Device::CUDA);
-        lfs_opt.add_new_params(ParamType::Means, new_means);
+        lfs_opt.add_new_params(ParamType::Means, new_means, false);
     }, 1, n_additions);
 
     BenchmarkResult result;
@@ -1470,6 +1513,11 @@ TEST_F(AdamOptimizerBenchmark, RelocateParameters) {
     auto torch_indices = torch::tensor(indices,
         torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA));
 
+    // Pre-allocate GPU indices for LFS (fair comparison with PyTorch!)
+    int64_t* lfs_indices_gpu;
+    cudaMalloc(&lfs_indices_gpu, N_relocate * sizeof(int64_t));
+    cudaMemcpy(lfs_indices_gpu, indices.data(), N_relocate * sizeof(int64_t), cudaMemcpyHostToDevice);
+
     // Benchmark PyTorch
     double torch_time = time_operation([&]() {
         auto& state_map = torch_opt->state();
@@ -1479,10 +1527,12 @@ TEST_F(AdamOptimizerBenchmark, RelocateParameters) {
         state->exp_avg_sq.index_put_({torch_indices}, 0);
     }, 1, n_relocations);
 
-    // Benchmark LFS
+    // Benchmark LFS - using GPU indices (fair comparison!)
     double lfs_time = time_operation([&]() {
-        lfs_opt.relocate_params_at_indices(ParamType::Means, indices);
+        lfs_opt.relocate_params_at_indices_gpu(ParamType::Means, lfs_indices_gpu, N_relocate);
     }, 1, n_relocations);
+
+    cudaFree(lfs_indices_gpu);
 
     BenchmarkResult result;
     result.name = "Relocate (N=" + std::to_string(N) + ", " + std::to_string(N_relocate) + " indices)";
@@ -1501,13 +1551,24 @@ TEST_F(AdamOptimizerBenchmark, FullMCMCWorkflow) {
     const size_t N_add_per_iter = 5'000;
     const float lr = 1e-3f;
 
-    printf("\n  Simulating %d iterations of MCMC training...\n", n_iterations);
+    printf("\n  Simulating %d iterations of MCMC training (6 parameters)...\n", n_iterations);
 
-    // Setup PyTorch
+    // Setup PyTorch - ALL 6 parameters for fair comparison!
     auto torch_means = torch::randn({static_cast<long>(N_initial), 3},
         torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).requires_grad_(true);
+    auto torch_sh0 = torch::randn({static_cast<long>(N_initial), 1, 3},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).requires_grad_(true);
+    auto torch_shN = torch::randn({static_cast<long>(N_initial), 15, 3},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).requires_grad_(true);
+    auto torch_scaling = torch::randn({static_cast<long>(N_initial), 3},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).requires_grad_(true);
+    auto torch_rotation = torch::randn({static_cast<long>(N_initial), 4},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).requires_grad_(true);
+    auto torch_opacity = torch::randn({static_cast<long>(N_initial), 1},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).requires_grad_(true);
+
     auto torch_opt = std::make_unique<gs::training::FusedAdam>(
-        std::vector<torch::Tensor>{torch_means},
+        std::vector<torch::Tensor>{torch_means, torch_sh0, torch_shN, torch_scaling, torch_rotation, torch_opacity},
         std::make_unique<gs::training::FusedAdam::Options>(lr)
     );
 
@@ -1538,36 +1599,39 @@ TEST_F(AdamOptimizerBenchmark, FullMCMCWorkflow) {
 
     size_t current_N = N_initial;
 
-    // Benchmark PyTorch workflow
+    // Benchmark PyTorch workflow - ALL 6 parameters
     double torch_time = time_operation([&]() {
         for (int iter = 0; iter < n_iterations; iter++) {
-            // Step
-            auto grad = torch::randn({static_cast<long>(current_N), 3},
-                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-            torch_means.mutable_grad() = grad;
+            // Step - set gradients for ALL 6 parameters
+            torch_means.mutable_grad() = torch::randn({static_cast<long>(current_N), 3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            torch_sh0.mutable_grad() = torch::randn({static_cast<long>(current_N), 1, 3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            torch_shN.mutable_grad() = torch::randn({static_cast<long>(current_N), 15, 3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            torch_scaling.mutable_grad() = torch::randn({static_cast<long>(current_N), 3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            torch_rotation.mutable_grad() = torch::randn({static_cast<long>(current_N), 4}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            torch_opacity.mutable_grad() = torch::randn({static_cast<long>(current_N), 1}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
             torch_opt->step(iter + 1);
 
-            // Add parameters periodically
+            // Add parameters periodically (only means for simplicity, but optimizer handles all 6)
             if ((iter + 1) % add_every == 0) {
-                auto new_means = torch::randn({static_cast<long>(N_add_per_iter), 3},
-                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-                auto extended = torch::cat({torch_means.detach(), new_means}, 0).requires_grad_(true);
+                // Just add to means (to match LFS benchmark which only adds means)
+                auto new_means = torch::randn({static_cast<long>(N_add_per_iter), 3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+                torch_means = torch::cat({torch_means.detach(), new_means}, 0).requires_grad_(true);
+                torch_sh0 = torch::cat({torch_sh0.detach(), torch::randn({static_cast<long>(N_add_per_iter), 1, 3}, torch_sh0.options())}, 0).requires_grad_(true);
+                torch_shN = torch::cat({torch_shN.detach(), torch::randn({static_cast<long>(N_add_per_iter), 15, 3}, torch_shN.options())}, 0).requires_grad_(true);
+                torch_scaling = torch::cat({torch_scaling.detach(), torch::randn({static_cast<long>(N_add_per_iter), 3}, torch_scaling.options())}, 0).requires_grad_(true);
+                torch_rotation = torch::cat({torch_rotation.detach(), torch::randn({static_cast<long>(N_add_per_iter), 4}, torch_rotation.options())}, 0).requires_grad_(true);
+                torch_opacity = torch::cat({torch_opacity.detach(), torch::randn({static_cast<long>(N_add_per_iter), 1}, torch_opacity.options())}, 0).requires_grad_(true);
 
+                // Update optimizer state for all 6 parameters
                 auto& state_map = torch_opt->state();
-                auto state_it = state_map.find(torch_means.unsafeGetTensorImpl());
-                auto* old_state = static_cast<gs::training::FusedAdam::AdamParamState*>(state_it->second.get());
+                for (auto& p : torch_opt->param_groups()[0].params()) {
+                    auto it = state_map.find(p.unsafeGetTensorImpl());
+                    if (it != state_map.end()) {
+                        state_map.erase(it);
+                    }
+                }
 
-                auto zeros = torch::zeros({static_cast<long>(N_add_per_iter), 3}, old_state->exp_avg.options());
-                auto new_state = std::make_unique<gs::training::FusedAdam::AdamParamState>();
-                new_state->step_count = old_state->step_count;
-                new_state->exp_avg = torch::cat({old_state->exp_avg, zeros}, 0);
-                new_state->exp_avg_sq = torch::cat({old_state->exp_avg_sq, zeros}, 0);
-
-                state_map.erase(torch_means.unsafeGetTensorImpl());
-                torch_opt->param_groups()[0].params()[0] = extended;
-                state_map[extended.unsafeGetTensorImpl()] = std::move(new_state);
-                torch_means = extended;
-
+                torch_opt->param_groups()[0].params() = {torch_means, torch_sh0, torch_shN, torch_scaling, torch_rotation, torch_opacity};
                 current_N += N_add_per_iter;
             }
         }
@@ -1576,15 +1640,26 @@ TEST_F(AdamOptimizerBenchmark, FullMCMCWorkflow) {
     // Reset for LFS benchmarks
     current_N = N_initial;
 
-    // Benchmark LFS (no pre-allocation)
+    // Benchmark LFS (no pre-allocation) - ALL 6 parameters
     double lfs_time_no_prealloc = time_operation([&]() {
         for (int iter = 0; iter < n_iterations; iter++) {
+            // Set gradients for ALL 6 parameters
             lfs_splat_no_prealloc.means_grad() = Tensor::randn({current_N, 3}, Device::CUDA);
+            lfs_splat_no_prealloc.sh0_grad() = Tensor::randn({current_N, 1, 3}, Device::CUDA);
+            lfs_splat_no_prealloc.shN_grad() = Tensor::randn({current_N, 15, 3}, Device::CUDA);
+            lfs_splat_no_prealloc.scaling_grad() = Tensor::randn({current_N, 3}, Device::CUDA);
+            lfs_splat_no_prealloc.rotation_grad() = Tensor::randn({current_N, 4}, Device::CUDA);
+            lfs_splat_no_prealloc.opacity_grad() = Tensor::randn({current_N, 1}, Device::CUDA);
             lfs_opt_no_prealloc.step(iter + 1);
 
             if ((iter + 1) % add_every == 0) {
-                auto new_means = Tensor::randn({N_add_per_iter, 3}, Device::CUDA);
-                lfs_opt_no_prealloc.add_new_params(ParamType::Means, new_means);
+                // Add to ALL 6 parameters
+                lfs_opt_no_prealloc.add_new_params(ParamType::Means, Tensor::randn({N_add_per_iter, 3}, Device::CUDA), false);
+                lfs_opt_no_prealloc.add_new_params(ParamType::Sh0, Tensor::randn({N_add_per_iter, 1, 3}, Device::CUDA), false);
+                lfs_opt_no_prealloc.add_new_params(ParamType::ShN, Tensor::randn({N_add_per_iter, 15, 3}, Device::CUDA), false);
+                lfs_opt_no_prealloc.add_new_params(ParamType::Scaling, Tensor::randn({N_add_per_iter, 3}, Device::CUDA), false);
+                lfs_opt_no_prealloc.add_new_params(ParamType::Rotation, Tensor::randn({N_add_per_iter, 4}, Device::CUDA), false);
+                lfs_opt_no_prealloc.add_new_params(ParamType::Opacity, Tensor::randn({N_add_per_iter, 1}, Device::CUDA), false);
                 current_N += N_add_per_iter;
             }
         }
@@ -1592,15 +1667,24 @@ TEST_F(AdamOptimizerBenchmark, FullMCMCWorkflow) {
 
     current_N = N_initial;
 
-    // Benchmark LFS (1.5x growth)
+    // Benchmark LFS (1.5x growth) - ALL 6 parameters
     double lfs_time_growth = time_operation([&]() {
         for (int iter = 0; iter < n_iterations; iter++) {
             lfs_splat_growth.means_grad() = Tensor::randn({current_N, 3}, Device::CUDA);
+            lfs_splat_growth.sh0_grad() = Tensor::randn({current_N, 1, 3}, Device::CUDA);
+            lfs_splat_growth.shN_grad() = Tensor::randn({current_N, 15, 3}, Device::CUDA);
+            lfs_splat_growth.scaling_grad() = Tensor::randn({current_N, 3}, Device::CUDA);
+            lfs_splat_growth.rotation_grad() = Tensor::randn({current_N, 4}, Device::CUDA);
+            lfs_splat_growth.opacity_grad() = Tensor::randn({current_N, 1}, Device::CUDA);
             lfs_opt_growth.step(iter + 1);
 
             if ((iter + 1) % add_every == 0) {
-                auto new_means = Tensor::randn({N_add_per_iter, 3}, Device::CUDA);
-                lfs_opt_growth.add_new_params(ParamType::Means, new_means);
+                lfs_opt_growth.add_new_params(ParamType::Means, Tensor::randn({N_add_per_iter, 3}, Device::CUDA), false);
+                lfs_opt_growth.add_new_params(ParamType::Sh0, Tensor::randn({N_add_per_iter, 1, 3}, Device::CUDA), false);
+                lfs_opt_growth.add_new_params(ParamType::ShN, Tensor::randn({N_add_per_iter, 15, 3}, Device::CUDA), false);
+                lfs_opt_growth.add_new_params(ParamType::Scaling, Tensor::randn({N_add_per_iter, 3}, Device::CUDA), false);
+                lfs_opt_growth.add_new_params(ParamType::Rotation, Tensor::randn({N_add_per_iter, 4}, Device::CUDA), false);
+                lfs_opt_growth.add_new_params(ParamType::Opacity, Tensor::randn({N_add_per_iter, 1}, Device::CUDA), false);
                 current_N += N_add_per_iter;
             }
         }
@@ -1608,15 +1692,24 @@ TEST_F(AdamOptimizerBenchmark, FullMCMCWorkflow) {
 
     current_N = N_initial;
 
-    // Benchmark LFS (pre-allocated)
+    // Benchmark LFS (pre-allocated) - ALL 6 parameters
     double lfs_time_prealloc = time_operation([&]() {
         for (int iter = 0; iter < n_iterations; iter++) {
             lfs_splat_prealloc.means_grad() = Tensor::randn({current_N, 3}, Device::CUDA);
+            lfs_splat_prealloc.sh0_grad() = Tensor::randn({current_N, 1, 3}, Device::CUDA);
+            lfs_splat_prealloc.shN_grad() = Tensor::randn({current_N, 15, 3}, Device::CUDA);
+            lfs_splat_prealloc.scaling_grad() = Tensor::randn({current_N, 3}, Device::CUDA);
+            lfs_splat_prealloc.rotation_grad() = Tensor::randn({current_N, 4}, Device::CUDA);
+            lfs_splat_prealloc.opacity_grad() = Tensor::randn({current_N, 1}, Device::CUDA);
             lfs_opt_prealloc.step(iter + 1);
 
             if ((iter + 1) % add_every == 0) {
-                auto new_means = Tensor::randn({N_add_per_iter, 3}, Device::CUDA);
-                lfs_opt_prealloc.add_new_params(ParamType::Means, new_means);
+                lfs_opt_prealloc.add_new_params(ParamType::Means, Tensor::randn({N_add_per_iter, 3}, Device::CUDA), false);
+                lfs_opt_prealloc.add_new_params(ParamType::Sh0, Tensor::randn({N_add_per_iter, 1, 3}, Device::CUDA), false);
+                lfs_opt_prealloc.add_new_params(ParamType::ShN, Tensor::randn({N_add_per_iter, 15, 3}, Device::CUDA), false);
+                lfs_opt_prealloc.add_new_params(ParamType::Scaling, Tensor::randn({N_add_per_iter, 3}, Device::CUDA), false);
+                lfs_opt_prealloc.add_new_params(ParamType::Rotation, Tensor::randn({N_add_per_iter, 4}, Device::CUDA), false);
+                lfs_opt_prealloc.add_new_params(ParamType::Opacity, Tensor::randn({N_add_per_iter, 1}, Device::CUDA), false);
                 current_N += N_add_per_iter;
             }
         }
@@ -1655,6 +1748,170 @@ TEST_F(AdamOptimizerBenchmark, FullMCMCWorkflow) {
     results.push_back(result4);
 
     printf("  Final Gaussian count: %zu\n", current_N);
+}
+
+TEST_F(AdamOptimizerBenchmark, RandnOverhead) {
+    const int N = 500000;
+    const int ITERS = 100;
+
+    printf("\n=== Random Number Generation Overhead ===\n");
+    printf("N=%d, %d iterations\n\n", N, ITERS);
+
+    // Test 1: Single parameter (means: N x 3)
+    double lfs_means_time = time_operation([&]() {
+        auto t = Tensor::randn({N, 3}, Device::CUDA);
+    }, 5, ITERS);
+
+    double torch_means_time = time_operation([&]() {
+        auto t = torch::randn({N, 3}, torch::TensorOptions().device(torch::kCUDA));
+    }, 5, ITERS);
+
+    printf("Single parameter (means N x 3):\n");
+    printf("  Tensor::randn: %.4f ms\n", lfs_means_time);
+    printf("  torch::randn:  %.4f ms\n", torch_means_time);
+    printf("  Slowdown:      %.2fx\n\n", lfs_means_time / torch_means_time);
+
+    // Test 2: Full MCMC-style workload (all 6 parameter types)
+    double lfs_full_time = time_operation([&]() {
+        auto means = Tensor::randn({N, 3}, Device::CUDA);
+        auto sh0 = Tensor::randn({N, 1, 3}, Device::CUDA);
+        auto shN = Tensor::randn({N, 15, 3}, Device::CUDA);
+        auto scaling = Tensor::randn({N, 3}, Device::CUDA);
+        auto rotation = Tensor::randn({N, 4}, Device::CUDA);
+        auto opacity = Tensor::randn({N, 1}, Device::CUDA);
+    }, 5, ITERS);
+
+    double torch_full_time = time_operation([&]() {
+        auto means = torch::randn({N, 3}, torch::TensorOptions().device(torch::kCUDA));
+        auto sh0 = torch::randn({N, 1, 3}, torch::TensorOptions().device(torch::kCUDA));
+        auto shN = torch::randn({N, 15, 3}, torch::TensorOptions().device(torch::kCUDA));
+        auto scaling = torch::randn({N, 3}, torch::TensorOptions().device(torch::kCUDA));
+        auto rotation = torch::randn({N, 4}, torch::TensorOptions().device(torch::kCUDA));
+        auto opacity = torch::randn({N, 1}, torch::TensorOptions().device(torch::kCUDA));
+    }, 5, ITERS);
+
+    printf("Full workload (6 parameters):\n");
+    printf("  Tensor::randn: %.4f ms\n", lfs_full_time);
+    printf("  torch::randn:  %.4f ms\n", torch_full_time);
+    printf("  Slowdown:      %.2fx\n\n", lfs_full_time / torch_full_time);
+
+    // Estimate MCMC workflow overhead
+    double per_iter_overhead = lfs_full_time - torch_full_time;
+    double mcmc_overhead = per_iter_overhead * 10;  // 10 iterations in MCMC test
+    printf("Estimated MCMC overhead contribution:\n");
+    printf("  Per-iteration overhead: %.4f ms\n", per_iter_overhead);
+    printf("  Total for 10 iterations: %.4f ms\n", mcmc_overhead);
+    printf("  %% of 165ms MCMC gap: %.1f%%\n\n", mcmc_overhead / 165.0 * 100);
+
+    BenchmarkResult result1;
+    result1.name = "Randn (single param)";
+    result1.lfs_time_ms = lfs_means_time;
+    result1.torch_time_ms = torch_means_time;
+    result1.speedup = torch_means_time / lfs_means_time;
+    result1.operations = N * 3;
+    results.push_back(result1);
+
+    BenchmarkResult result2;
+    result2.name = "Randn (6 params)";
+    result2.lfs_time_ms = lfs_full_time;
+    result2.torch_time_ms = torch_full_time;
+    result2.speedup = torch_full_time / lfs_full_time;
+    result2.operations = N * (3 + 3 + 45 + 3 + 4 + 1);
+    results.push_back(result2);
+}
+
+TEST_F(AdamOptimizerBenchmark, TensorOpsOverhead) {
+    const int N_existing = 150000;  // Existing parameters
+    const int N_new = 50000;        // New parameters to add
+    const int ITERS = 100;
+
+    printf("\n=== Tensor Operations Overhead (cat, zeros) ===\n");
+    printf("N_existing=%d, N_new=%d, %d iterations\n\n", N_existing, N_new, ITERS);
+
+    // Pre-create tensors for fair comparison
+    auto lfs_existing = Tensor::randn({N_existing, 3}, Device::CUDA);
+    auto lfs_new = Tensor::randn({N_new, 3}, Device::CUDA);
+    auto torch_existing = torch::randn({N_existing, 3}, torch::TensorOptions().device(torch::kCUDA));
+    auto torch_new = torch::randn({N_new, 3}, torch::TensorOptions().device(torch::kCUDA));
+
+    // Test 1: Tensor::cat vs torch::cat
+    double lfs_cat_time = time_operation([&]() {
+        auto result = Tensor::cat(std::vector<Tensor>{lfs_existing, lfs_new}, 0);
+    }, 5, ITERS);
+
+    double torch_cat_time = time_operation([&]() {
+        auto result = torch::cat({torch_existing, torch_new}, 0);
+    }, 5, ITERS);
+
+    printf("Cat operation (concatenate N=%d + N=%d along dim 0):\n", N_existing, N_new);
+    printf("  Tensor::cat:  %.4f ms\n", lfs_cat_time);
+    printf("  torch::cat:   %.4f ms\n", torch_cat_time);
+    printf("  Slowdown:     %.2fx\n\n", lfs_cat_time / torch_cat_time);
+
+    // Test 2: Tensor::zeros vs torch::zeros
+    double lfs_zeros_time = time_operation([&]() {
+        auto result = Tensor::zeros({N_new, 3}, Device::CUDA);
+    }, 5, ITERS);
+
+    double torch_zeros_time = time_operation([&]() {
+        auto result = torch::zeros({N_new, 3}, torch::TensorOptions().device(torch::kCUDA));
+    }, 5, ITERS);
+
+    printf("Zeros operation (create N=%d zeros):\n", N_new);
+    printf("  Tensor::zeros: %.4f ms\n", lfs_zeros_time);
+    printf("  torch::zeros:  %.4f ms\n", torch_zeros_time);
+    printf("  Slowdown:      %.2fx\n\n", lfs_zeros_time / torch_zeros_time);
+
+    // Test 3: Full add_params-like operation (2 cats + 1 zeros)
+    double lfs_add_time = time_operation([&]() {
+        auto param_concat = Tensor::cat(std::vector<Tensor>{lfs_existing, lfs_new}, 0);
+        auto zeros = Tensor::zeros({N_new, 3}, Device::CUDA);
+        auto grad_concat = Tensor::cat(std::vector<Tensor>{lfs_existing, zeros}, 0);
+    }, 5, ITERS);
+
+    double torch_add_time = time_operation([&]() {
+        auto param_concat = torch::cat({torch_existing, torch_new}, 0);
+        auto zeros = torch::zeros({N_new, 3}, torch::TensorOptions().device(torch::kCUDA));
+        auto grad_concat = torch::cat({torch_existing, zeros}, 0);
+    }, 5, ITERS);
+
+    printf("Full add operation (2×cat + 1×zeros):\n");
+    printf("  LFS:      %.4f ms\n", lfs_add_time);
+    printf("  PyTorch:  %.4f ms\n", torch_add_time);
+    printf("  Slowdown: %.2fx\n\n", lfs_add_time / torch_add_time);
+
+    // Estimate MCMC overhead from tensor ops
+    // In MCMC: 6 params × 3 add operations = 18 add operations
+    double per_add_overhead = lfs_add_time - torch_add_time;
+    double mcmc_add_overhead = per_add_overhead * 18;
+    printf("Estimated MCMC overhead from add operations:\n");
+    printf("  Per-add overhead:    %.4f ms\n", per_add_overhead);
+    printf("  Total for 18 adds:   %.4f ms\n", mcmc_add_overhead);
+    printf("  %% of 127ms MCMC gap: %.1f%%\n\n", mcmc_add_overhead / 127.0 * 100);
+
+    BenchmarkResult result1;
+    result1.name = "Tensor::cat";
+    result1.lfs_time_ms = lfs_cat_time;
+    result1.torch_time_ms = torch_cat_time;
+    result1.speedup = torch_cat_time / lfs_cat_time;
+    result1.operations = (N_existing + N_new) * 3;
+    results.push_back(result1);
+
+    BenchmarkResult result2;
+    result2.name = "Tensor::zeros";
+    result2.lfs_time_ms = lfs_zeros_time;
+    result2.torch_time_ms = torch_zeros_time;
+    result2.speedup = torch_zeros_time / lfs_zeros_time;
+    result2.operations = N_new * 3;
+    results.push_back(result2);
+
+    BenchmarkResult result3;
+    result3.name = "Full add operation";
+    result3.lfs_time_ms = lfs_add_time;
+    result3.torch_time_ms = torch_add_time;
+    result3.speedup = torch_add_time / lfs_add_time;
+    result3.operations = (N_existing + N_new) * 3 * 2 + N_new * 3;
+    results.push_back(result3);
 }
 
 } // namespace

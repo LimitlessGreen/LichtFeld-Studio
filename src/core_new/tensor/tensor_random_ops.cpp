@@ -42,9 +42,9 @@ namespace lfs::core {
 
         RandomGeneratorImpl() : seed_(42),
                                 cpu_generator_(seed_) {
-            // Initialize CUDA random generator
+            // Initialize CUDA random generator with Philox (same as PyTorch - much faster!)
             curandGenerator_t* gen = new curandGenerator_t;
-            CHECK_CURAND(curandCreateGenerator(gen, CURAND_RNG_PSEUDO_DEFAULT));
+            CHECK_CURAND(curandCreateGenerator(gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
             CHECK_CURAND(curandSetPseudoRandomGeneratorSeed(*gen, seed_));
             cuda_generator_ = gen;
         }
@@ -131,8 +131,8 @@ namespace lfs::core {
         if (device_ == Device::CUDA) {
             // Use kernel-based generation with advancing seed
             uint64_t seed = RandomGenerator::instance().get_next_cuda_seed();
-            tensor_ops::launch_uniform(ptr<float>(), n, low, high, seed, 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
+            tensor_ops::launch_uniform(ptr<float>(), n, low, high, seed, stream_);
+            // No sync - in-place operation returns *this
         } else {
             // CPU uses stateful generator
             auto* impl = static_cast<RandomGeneratorImpl*>(

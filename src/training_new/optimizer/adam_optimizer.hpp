@@ -160,9 +160,19 @@ namespace lfs::training {
          * Also zeros out the corresponding gradients to ensure clean state.
          *
          * @param type Parameter type
-         * @param indices Indices to reset (will be validated)
+         * @param indices Indices to reset (CPU vector - will be copied to GPU)
          */
         void relocate_params_at_indices(ParamType type, const std::vector<int64_t>& indices);
+
+        /**
+         * Reset optimizer state at specific indices (FAST VERSION - indices already on GPU)
+         * Also zeros out the corresponding gradients to ensure clean state.
+         *
+         * @param type Parameter type
+         * @param indices_device GPU pointer to indices (must be valid device pointer!)
+         * @param n_indices Number of indices
+         */
+        void relocate_params_at_indices_gpu(ParamType type, const int64_t* indices_device, size_t n_indices);
 
         // ===== LOW-LEVEL STATE MANIPULATION =====
         // These are kept for backwards compatibility and testing, but prefer the safe methods above

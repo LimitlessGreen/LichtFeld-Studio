@@ -30,6 +30,7 @@ set(LFS_TENSOR_SOURCES
     tensor_masking_ops.cpp     # Masking and indexing operations
     tensor_advanced_ops.cpp    # Advanced operations
     pinned_memory_allocator.cpp # Pinned memory allocator for fast CPU-GPU transfers (used by tensor)
+    offset_allocator.cpp       # OffsetAllocator for O(1) GPU memory sub-allocation
 )
 
 # CUDA sources (limited to C++20)

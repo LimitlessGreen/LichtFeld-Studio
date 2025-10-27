@@ -25,6 +25,7 @@
 
 #include "tensor_functors.hpp"
 #include "tensor_ops.hpp"
+#include "stream_pool.hpp"
 
 namespace lfs::core {
 
@@ -273,9 +274,28 @@ namespace lfs::core {
         DataType dtype_ = DataType::Float32;
         bool is_view_ = false;
 
+        // Cached alignment flags (computed once on allocation)
+        bool is_aligned_16_ = false;   // 16-byte alignment for float4 vectorization
+        bool is_aligned_128_ = false;  // 128-byte alignment for cache line optimization
+
+        // CUDA stream for async execution (assigned round-robin from StreamPool)
+        cudaStream_t stream_ = nullptr;
+
         mutable size_t id_ = 0;
         static std::atomic<size_t> next_id_;
         static inline bool profiling_enabled_ = false;
+
+        // Compute alignment flags for vectorization
+        void compute_alignment() {
+            if (data_ != nullptr) {
+                auto addr = reinterpret_cast<uintptr_t>(data_);
+                is_aligned_16_ = (addr % 16) == 0;
+                is_aligned_128_ = (addr % 128) == 0;
+            } else {
+                is_aligned_16_ = false;
+                is_aligned_128_ = false;
+            }
+        }
 
         // Generic functor-based binary operation (zero enum overhead)
         template <typename SrcT, typename OutT, typename Op>
@@ -313,8 +333,8 @@ namespace lfs::core {
                 if (device_ == Device::CUDA) {
                     tensor_ops::launch_binary_op_generic(
                         ptr<SrcT>(), other.ptr<SrcT>(), result.ptr<OutT>(),
-                        result.numel(), op, nullptr);
-                    cudaDeviceSynchronize();
+                        result.numel(), op, result.stream());
+                    // No sync - tensor operation
                 } else {
                     apply_binary_cpu(ptr<SrcT>(), other.ptr<SrcT>(), result.ptr<OutT>(),
                                      result.numel(), op);
@@ -330,8 +350,8 @@ namespace lfs::core {
                         ptr<SrcT>(), other.ptr<SrcT>(), result.ptr<OutT>(),
                         a_shape.data(), b_shape.data(), c_shape.data(),
                         a_shape.size(), b_shape.size(), c_shape.size(),
-                        result.numel(), op, nullptr);
-                    cudaDeviceSynchronize();
+                        result.numel(), op, result.stream());
+                    // No sync - tensor operation
                 } else {
                     // CPU broadcasting: materialize broadcasts first
                     auto a_broadcast = a_needs_broadcast ? broadcast_to(broadcast_shape) : clone();
@@ -422,7 +442,7 @@ namespace lfs::core {
                 tensor_ops::launch_scalar_op_generic(
                     ptr<float>(), scalar, ptr<float>(),
                     numel(), op, nullptr);
-                cudaDeviceSynchronize();
+                // No sync - tensor operation
             } else {
                 // CPU implementation
                 float* dst = ptr<float>();
@@ -445,7 +465,7 @@ namespace lfs::core {
                 tensor_ops::launch_binary_op_generic(
                     ptr<SrcT>(), other.ptr<SrcT>(), ptr<SrcT>(),
                     numel(), op, nullptr);
-                cudaDeviceSynchronize();
+                // No sync - tensor operation
             } else {
                 // CPU implementation
                 apply_binary_cpu(ptr<SrcT>(), other.ptr<SrcT>(), ptr<SrcT>(),
@@ -904,6 +924,14 @@ namespace lfs::core {
         size_t ndim() const {
             return is_valid() ? shape_.rank() : 0;
         }
+
+        // Alignment accessors (cached flags computed on allocation)
+        bool is_aligned_16() const { return is_aligned_16_; }
+        bool is_aligned_128() const { return is_aligned_128_; }
+
+        // Stream accessor (for async CUDA operations)
+        cudaStream_t stream() const { return stream_; }
+        void set_stream(cudaStream_t stream) { stream_ = stream; }
 
         size_t size(size_t dim) const {
             if (!is_valid())
