@@ -14,7 +14,6 @@
 #include "loader/cache_image_loader.hpp"
 #include "rasterization/fast_rasterizer.hpp"
 #include "rasterization/rasterizer.hpp"
-#include "rasterization/validation.hpp"
 #include "losses/losses.hpp"
 
 #include <ATen/cuda/CUDAEvent.h>
