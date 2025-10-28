@@ -2,6 +2,9 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# Add fastlfs backend
+add_subdirectory(fastgs)
+
 # LibTorch-free CUDA kernels
 set(LFS_TRAINING_KERNEL_SOURCES
     kernels/ssim.cu
@@ -11,6 +14,7 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/bilateral_grid_forward.cu
     kernels/bilateral_grid_backward.cu
     kernels/bilateral_grid_tv.cu
+    kernels/mcmc_kernels.cu
 )
 
 # Create CUDA kernels library
@@ -40,6 +44,10 @@ set(TRAINING_NEW_SOURCES
     optimizer/scheduler.cpp
     losses/regularization.cpp
     losses/photometric_loss.cpp
+    strategies/strategy_utils.cpp
+    strategies/default_strategy.cpp
+    strategies/mcmc.cpp
+    rasterization/fast_rasterizer.cpp
 )
 
 # lfs_training - Training module with optimizer
@@ -51,7 +59,10 @@ target_include_directories(lfs_training
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:include>
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/src/training/fastgs  # For adam_api.h
+        ${CMAKE_SOURCE_DIR}/src/training/fastgs  # For adam_api.h (old)
+        ${CMAKE_CURRENT_SOURCE_DIR}/fastgs/rasterization/include  # For rasterization_api.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/fastgs/optimizer/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/fastgs/utils
 )
 
 # Link dependencies
@@ -59,7 +70,7 @@ target_link_libraries(lfs_training
     PUBLIC
         lfs_core                # Depends on new core module (SplatData, Tensor)
         lfs_training_kernels    # LibTorch-free SSIM kernels
-        fastgs_backend          # For adam_step_raw CUDA kernel
+        fastlfs_backend         # For adam_step_raw CUDA kernel (LibTorch-free)
         gs_training_kernels     # For old regularization CUDA kernels (TODO: port)
 )
 

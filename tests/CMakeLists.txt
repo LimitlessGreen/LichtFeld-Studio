@@ -74,6 +74,10 @@ set(OPTIONAL_TEST_FILES
     benchmark_scheduler.cpp
     test_lfs_losses.cpp
     benchmark_losses.cpp
+    test_mcmc_kernels.cpp
+    test_mcmc_strategy.cpp
+    test_tensor_bool.cpp
+    test_dataloader_lfs.cpp
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})

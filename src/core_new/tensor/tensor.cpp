@@ -673,6 +673,55 @@ namespace lfs::core {
             return clone();
         }
 
+        // Bool <-> Int32: Manual conversion (bool != 0 logic)
+        if (dtype_ == DataType::Int32 && dtype == DataType::Bool) {
+            auto result = empty(shape_, device_, DataType::Bool);
+            if (numel() == 0)
+                return result;
+
+            if (device_ == Device::CUDA) {
+                // Copy to CPU, convert, copy back
+                auto result_cpu = empty(shape_, Device::CPU, DataType::Bool);
+                std::vector<int> temp(numel());
+                CHECK_CUDA(cudaMemcpy(temp.data(), ptr<int>(), bytes(), cudaMemcpyDeviceToHost));
+
+                unsigned char* dst_cpu = result_cpu.ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst_cpu[i] = (temp[i] != 0) ? 1 : 0;
+                }
+
+                CHECK_CUDA(cudaMemcpy(result.ptr<unsigned char>(), result_cpu.ptr<unsigned char>(),
+                                     numel() * sizeof(unsigned char), cudaMemcpyHostToDevice));
+            } else {
+                const int* src = ptr<int>();
+                unsigned char* dst = result.ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = (src[i] != 0) ? 1 : 0;
+                }
+            }
+            return result;
+        }
+
+        if (dtype_ == DataType::Bool && dtype == DataType::Int32) {
+            auto result = empty(shape_, device_, DataType::Int32);
+            if (numel() == 0)
+                return result;
+
+            if (device_ == Device::CUDA) {
+                // Use generic conversion (unsigned char -> int)
+                tensor_ops::launch_convert_type<unsigned char, int>(
+                    ptr<unsigned char>(), result.ptr<int>(), numel(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                const unsigned char* src = ptr<unsigned char>();
+                int* dst = result.ptr<int>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = static_cast<int>(src[i]);
+                }
+            }
+            return result;
+        }
+
         CONVERT_DTYPE_CUDA(int64_t, uint8_t, DataType::Int64, DataType::UInt8)
         CONVERT_DTYPE_CUDA(uint8_t, int64_t, DataType::UInt8, DataType::Int64)
 
@@ -716,6 +765,33 @@ namespace lfs::core {
         // Account for storage offset
         void* dest = static_cast<char*>(data_) + storage_offset_ * dtype_size(dtype_);
 
+        // Handle Bool dtype
+        if (dtype_ == DataType::Bool) {
+            unsigned char bool_val = (value != 0.0f) ? 1 : 0;
+            if (device_ == Device::CUDA) {
+                std::vector<unsigned char> temp(numel(), bool_val);
+                CHECK_CUDA(cudaMemcpy(dest, temp.data(), bytes(), cudaMemcpyHostToDevice));
+            } else {
+                unsigned char* data = static_cast<unsigned char*>(dest);
+                std::fill(data, data + numel(), bool_val);
+            }
+            return *this;
+        }
+
+        // Handle Int32 dtype
+        if (dtype_ == DataType::Int32) {
+            int int_val = static_cast<int>(value);
+            if (device_ == Device::CUDA) {
+                std::vector<int> temp(numel(), int_val);
+                CHECK_CUDA(cudaMemcpy(dest, temp.data(), bytes(), cudaMemcpyHostToDevice));
+            } else {
+                int* data = static_cast<int*>(dest);
+                std::fill(data, data + numel(), int_val);
+            }
+            return *this;
+        }
+
+        // Handle Float32 dtype (original code)
         if (device_ == Device::CUDA) {
             std::vector<float> temp(numel(), value);
             CHECK_CUDA(cudaMemcpy(dest, temp.data(), bytes(), cudaMemcpyHostToDevice));

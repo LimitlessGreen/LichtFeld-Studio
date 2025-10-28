@@ -484,11 +484,10 @@ namespace lfs::core::tensor_ops {
 
     // ============= MAIN REDUCE OPERATION DISPATCH =============
 
-    void launch_reduce_op(const void* input, void* output, const size_t* shape, size_t rank,
-                          const int* axes, size_t num_axes, bool keepdim, ReduceOp op,
-                          DataType dtype, cudaStream_t stream) {
-        if (dtype != DataType::Float32)
-            return;
+    // Internal Float32 implementation (original)
+    static void launch_reduce_op_float32(const void* input, void* output, const size_t* shape, size_t rank,
+                                         const int* axes, size_t num_axes, bool keepdim, ReduceOp op,
+                                         cudaStream_t stream) {
 
         size_t n = 1;
         for (size_t i = 0; i < rank; ++i)
@@ -881,6 +880,84 @@ namespace lfs::core::tensor_ops {
                                   ops::mul_op{});
             });
         }
+    }
+
+    // Internal Int32 implementation (simplified - only handles full reductions)
+    static void launch_reduce_op_int32(const void* input, void* output, const size_t* shape, size_t rank,
+                                       const int* axes, size_t num_axes, bool keepdim, ReduceOp op,
+                                       cudaStream_t stream) {
+        size_t n = 1;
+        for (size_t i = 0; i < rank; ++i)
+            n *= shape[i];
+        if (n == 0)
+            return;
+
+        const int* d_in = static_cast<const int*>(input);
+        int* d_out = static_cast<int*>(output);
+
+        // Only support full reduction for Int32
+        if (num_axes == 0 || num_axes == rank) {
+            void* d_temp_storage = nullptr;
+            size_t temp_storage_bytes = 0;
+
+            switch (op) {
+            case ReduceOp::Sum:
+            case ReduceOp::Mean:
+                cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+                cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaFreeAsync(d_temp_storage, stream);
+                if (op == ReduceOp::Mean) {
+                    // Divide by count for mean - use Thrust directly
+                    auto out_ptr = thrust::device_pointer_cast(d_out);
+                    const int count = static_cast<int>(n);
+                    thrust::transform(thrust::cuda::par.on(stream), out_ptr, out_ptr + 1, out_ptr,
+                                    [count] __device__(int val) { return val / count; });
+                }
+                break;
+            case ReduceOp::Max:
+                cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+                cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaFreeAsync(d_temp_storage, stream);
+                break;
+            case ReduceOp::Min:
+                cub::DeviceReduce::Min(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+                cub::DeviceReduce::Min(d_temp_storage, temp_storage_bytes, d_in, d_out, n, stream);
+                cudaFreeAsync(d_temp_storage, stream);
+                break;
+            case ReduceOp::Prod:
+                {
+                    auto in_ptr = thrust::device_pointer_cast(d_in);
+                    int result = 1;
+                    run_with_thrust_policy(stream, [&](auto policy) {
+                        result = thrust::reduce(policy, in_ptr, in_ptr + n, 1, ops::mul_op{});
+                    });
+                    cudaMemcpyAsync(d_out, &result, sizeof(int), cudaMemcpyHostToDevice, stream);
+                }
+                break;
+            default:
+                {
+                    int zero = 0;
+                    cudaMemcpyAsync(d_out, &zero, sizeof(int), cudaMemcpyHostToDevice, stream);
+                }
+                break;
+            }
+        }
+        // Partial reductions not supported for Int32 yet
+    }
+
+    // Public dispatcher function
+    void launch_reduce_op(const void* input, void* output, const size_t* shape, size_t rank,
+                          const int* axes, size_t num_axes, bool keepdim, ReduceOp op,
+                          DataType dtype, cudaStream_t stream) {
+        if (dtype == DataType::Float32) {
+            launch_reduce_op_float32(input, output, shape, rank, axes, num_axes, keepdim, op, stream);
+        } else if (dtype == DataType::Int32) {
+            launch_reduce_op_int32(input, output, shape, rank, axes, num_axes, keepdim, op, stream);
+        }
+        // Other dtypes not supported
     }
 
     // ============= TERNARY OPERATIONS =============

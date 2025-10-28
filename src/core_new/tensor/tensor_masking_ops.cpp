@@ -149,6 +149,11 @@ namespace lfs::core {
 
         auto indices_same_device = ensure_same_device(indices);
 
+        // Convert Int64 indices to Int32 if needed
+        if (indices_same_device.dtype() == DataType::Int64) {
+            indices_same_device = indices_same_device.to(DataType::Int32);
+        }
+
         if (device_ == Device::CUDA) {
             tensor_ops::launch_index_select(ptr<float>(), indices_same_device.ptr<int>(),
                                             result.ptr<float>(), shape_.dims().data(),

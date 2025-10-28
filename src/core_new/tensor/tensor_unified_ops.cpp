@@ -688,6 +688,52 @@ namespace lfs::core {
             // No sync - tensor operation
         } else {
             // CPU implementation
+
+            // Handle Int32 dtype
+            if (dtype_ == DataType::Int32) {
+                const int* src = static_cast<const int*>(raw_ptr());
+                int* dst = static_cast<int*>(result.raw_ptr());
+
+                // Full reduction to scalar (only mode supported for Int32)
+                if (axes.size() == shape_.rank()) {
+                    if (op == ReduceOp::Sum) {
+                        int sum = 0;
+                        for (size_t i = 0; i < numel(); ++i) {
+                            sum += src[i];
+                        }
+                        dst[0] = sum;
+                    } else if (op == ReduceOp::Mean) {
+                        int sum = 0;
+                        for (size_t i = 0; i < numel(); ++i) {
+                            sum += src[i];
+                        }
+                        dst[0] = sum / static_cast<int>(numel());
+                    } else if (op == ReduceOp::Max) {
+                        int max_val = src[0];
+                        for (size_t i = 1; i < numel(); ++i) {
+                            max_val = std::max(max_val, src[i]);
+                        }
+                        dst[0] = max_val;
+                    } else if (op == ReduceOp::Min) {
+                        int min_val = src[0];
+                        for (size_t i = 1; i < numel(); ++i) {
+                            min_val = std::min(min_val, src[i]);
+                        }
+                        dst[0] = min_val;
+                    } else if (op == ReduceOp::Prod) {
+                        int prod = 1;
+                        for (size_t i = 0; i < numel(); ++i) {
+                            prod *= src[i];
+                        }
+                        dst[0] = prod;
+                    }
+                    return result;
+                }
+                // Partial reductions not supported for Int32
+                return result;
+            }
+
+            // Float32 implementation
             const float* src = static_cast<const float*>(raw_ptr());
             float* dst = static_cast<float*>(result.raw_ptr());
 

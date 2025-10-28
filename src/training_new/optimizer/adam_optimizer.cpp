@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "adam_optimizer.hpp"
-#include "adam_api.h"  // fast_gs::optimizer::adam_step_raw
+#include "adam_api.h"  // fast_lfs::optimizer::adam_step_raw
 #include "core_new/logger.hpp"
 #include <cmath>
 #include <stdexcept>
@@ -142,7 +142,7 @@ namespace lfs::training {
         // The state tensors may be larger than param, but we only use state.size elements
 
         // Call fused CUDA kernel (operates on param.numel() elements)
-        fast_gs::optimizer::adam_step_raw(
+        fast_lfs::optimizer::adam_step_raw(
             param.ptr<float>(),
             state.exp_avg.ptr<float>(),
             state.exp_avg_sq.ptr<float>(),
@@ -185,14 +185,14 @@ namespace lfs::training {
         cudaMemcpy(indices_device_ptr, indices.data(), indices.size() * sizeof(int64_t), cudaMemcpyHostToDevice);
 
         // Use batched CUDA kernel for much better performance (600x faster!)
-        fast_gs::optimizer::zero_rows_at_indices(
+        fast_lfs::optimizer::zero_rows_at_indices(
             state.exp_avg.template ptr<float>(),
             indices_device_ptr,
             indices.size(),
             row_size
         );
 
-        fast_gs::optimizer::zero_rows_at_indices(
+        fast_lfs::optimizer::zero_rows_at_indices(
             state.exp_avg_sq.template ptr<float>(),
             indices_device_ptr,
             indices.size(),
@@ -386,7 +386,7 @@ namespace lfs::training {
         }
 
         // Zero out gradients using batched GPU kernel (FAST!)
-        fast_gs::optimizer::zero_rows_at_indices(
+        fast_lfs::optimizer::zero_rows_at_indices(
             grad.template ptr<float>(),
             indices_device,
             n_indices,
@@ -409,14 +409,14 @@ namespace lfs::training {
         }
 
         // Zero out optimizer state using batched GPU kernel (FAST!)
-        fast_gs::optimizer::zero_rows_at_indices(
+        fast_lfs::optimizer::zero_rows_at_indices(
             state.exp_avg.template ptr<float>(),
             indices_device,
             n_indices,
             state_row_size
         );
 
-        fast_gs::optimizer::zero_rows_at_indices(
+        fast_lfs::optimizer::zero_rows_at_indices(
             state.exp_avg_sq.template ptr<float>(),
             indices_device,
             n_indices,
