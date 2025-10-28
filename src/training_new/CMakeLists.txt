@@ -15,6 +15,7 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/bilateral_grid_backward.cu
     kernels/bilateral_grid_tv.cu
     kernels/mcmc_kernels.cu
+    components/sparsity_optimizer_kernels.cu
 )
 
 # Create CUDA kernels library
@@ -48,6 +49,10 @@ set(TRAINING_NEW_SOURCES
     strategies/default_strategy.cpp
     strategies/mcmc.cpp
     rasterization/fast_rasterizer.cpp
+    components/bilateral_grid.cpp
+    components/sparsity_optimizer.cpp
+    trainer.cpp
+    training_setup.cpp
 )
 
 # lfs_training - Training module with optimizer
@@ -59,6 +64,8 @@ target_include_directories(lfs_training
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:include>
     PRIVATE
+        ${CMAKE_SOURCE_DIR}/src                   # For old training components (TODO: port)
+        ${CMAKE_SOURCE_DIR}/src/training          # For old training components (TODO: port)
         ${CMAKE_SOURCE_DIR}/src/training/fastgs  # For adam_api.h (old)
         ${CMAKE_CURRENT_SOURCE_DIR}/fastgs/rasterization/include  # For rasterization_api.h
         ${CMAKE_CURRENT_SOURCE_DIR}/fastgs/optimizer/include
@@ -72,6 +79,11 @@ target_link_libraries(lfs_training
         lfs_training_kernels    # LibTorch-free SSIM kernels
         fastlfs_backend         # For adam_step_raw CUDA kernel (LibTorch-free)
         gs_training_kernels     # For old regularization CUDA kernels (TODO: port)
+        gs_training             # For old components (bilateral_grid, poseopt, etc. - TODO: port)
+        gs_core                 # For old Camera, events, etc.
+        gs_loader               # For filesystem_utils, cache_image_loader
+        gs_project              # For project management
+        ${TORCH_LIBRARIES}      # Still needed for many components
 )
 
 # Set C++ standard

@@ -4,32 +4,33 @@
 
 #pragma once
 
+// TODO: Port these components to LibTorch-free implementation
 #include "components/bilateral_grid.hpp"
-#include "components/poseopt.hpp"
 #include "components/sparsity_optimizer.hpp"
-#include "core/events.hpp"
-#include "core/parameters.hpp"
+// #include "components/poseopt.hpp"
+#include "core/events.hpp"         // Using old events system for now
+#include "core_new/parameters.hpp"
 #include "dataset.hpp"
-#include "kernels/bilateral_grid.cuh"
-#include "metrics/metrics.hpp"
-#include "optimizers/scheduler.hpp"
-#include "progress.hpp"
-#include "project/project.hpp"
-#include "rasterization/rasterizer.hpp"
+#include "lfs/kernels/bilateral_grid.cuh"  // Kernels are ported
+// TODO: Port metrics to LibTorch-free implementation
+// #include "metrics/metrics.hpp"
+#include "optimizer/scheduler.hpp"
+// TODO: Port progress to LibTorch-free implementation
+// #include "progress.hpp"
+#include "project/project.hpp"  // Using old project system for now
+// TODO: Port 3DGUT rasterizer to LibTorch-free implementation
+// #include "rasterization/rasterizer.hpp"
 #include "strategies/istrategy.hpp"
-#include <ATen/cuda/CUDAEvent.h>
+#include "core_new/camera.hpp"
+#include "core_new/tensor.hpp"
 #include <atomic>
 #include <expected>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <stop_token>
-#include <torch/torch.h>
 
-// Forward declaration
-class Camera;
-
-namespace gs::training {
+namespace lfs::training {
     class Trainer {
     public:
         // Constructor that takes ownership of strategy and shares datasets
@@ -50,7 +51,7 @@ namespace gs::training {
         ~Trainer();
 
         // Initialize trainer - must be called before training
-        std::expected<void, std::string> initialize(const param::TrainingParameters& params);
+        std::expected<void, std::string> initialize(const lfs::core::param::TrainingParameters& params);
 
         // Check if trainer is initialized
         bool isInitialized() const { return initialized_.load(); }
@@ -79,11 +80,11 @@ namespace gs::training {
         // Allow viewer to lock for rendering
         std::shared_mutex& getRenderMutex() const { return render_mutex_; }
 
-        const param::TrainingParameters& getParams() const { return params_; }
+        const lfs::core::param::TrainingParameters& getParams() const { return params_; }
 
-        std::shared_ptr<const Camera> getCamById(int camId) const;
+        std::shared_ptr<const lfs::core::Camera> getCamById(int camId) const;
 
-        std::vector<std::shared_ptr<const Camera>> getCamList() const;
+        std::vector<std::shared_ptr<const lfs::core::Camera>> getCamList() const;
 
         void setProject(std::shared_ptr<gs::management::Project> project) { lf_project_ = project; }
 
@@ -113,50 +114,46 @@ namespace gs::training {
         };
 
         // Returns the background color to use at a given iteration
-        torch::Tensor& background_for_step(int iter);
+        lfs::core::Tensor& background_for_step(int iter);
 
         // Protected method for processing a single training step
         std::expected<StepResult, std::string> train_step(
             int iter,
-            Camera* cam,
-            torch::Tensor gt_image,
+            lfs::core::Camera* cam,
+            lfs::core::Tensor gt_image,
             RenderMode render_mode,
             std::stop_token stop_token = {});
 
         // Compute photometric loss AND gradient manually (no autograd)
-        std::expected<std::pair<float, torch::Tensor>, std::string> compute_photometric_loss_with_gradient(
-            const torch::Tensor& rendered,
-            const torch::Tensor& gt_image,
-            const param::OptimizationParameters& opt_params);
+        std::expected<std::pair<float, lfs::core::Tensor>, std::string> compute_photometric_loss_with_gradient(
+            const lfs::core::Tensor& rendered,
+            const lfs::core::Tensor& gt_image,
+            const lfs::core::param::OptimizationParameters& opt_params);
 
         std::expected<float, std::string> compute_scale_reg_loss(
-            SplatData& splatData,
-            const param::OptimizationParameters& opt_params);
+            lfs::core::SplatData& splatData,
+            const lfs::core::param::OptimizationParameters& opt_params);
 
         std::expected<float, std::string> compute_opacity_reg_loss(
-            SplatData& splatData,
-            const param::OptimizationParameters& opt_params);
+            lfs::core::SplatData& splatData,
+            const lfs::core::param::OptimizationParameters& opt_params);
 
-        std::expected<std::pair<float, bilateral_grid::BilateralGridTVContext>, std::string> compute_bilateral_grid_tv_loss(
+        std::expected<std::pair<float, BilateralGridTVContext>, std::string> compute_bilateral_grid_tv_loss(
             const std::unique_ptr<BilateralGrid>& bilateral_grid,
-            const param::OptimizationParameters& opt_params);
+            const lfs::core::param::OptimizationParameters& opt_params);
 
-        // Sparsity-related methods
-        std::expected<torch::Tensor, std::string> compute_sparsity_loss(
-            int iter,
-            const SplatData& splatData);
-
+        // Sparsity-related methods (LibTorch-free)
         std::expected<std::pair<float, SparsityLossContext>, std::string> compute_sparsity_loss_forward(
             int iter,
-            const SplatData& splatData);
+            const lfs::core::SplatData& splatData);
 
         std::expected<void, std::string> handle_sparsity_update(
             int iter,
-            SplatData& splatData);
+            lfs::core::SplatData& splatData);
 
         std::expected<void, std::string> apply_sparsity_pruning(
             int iter,
-            SplatData& splatData);
+            lfs::core::SplatData& splatData);
 
         // Cleanup method for re-initialization
         void cleanup();
@@ -173,27 +170,30 @@ namespace gs::training {
         std::shared_ptr<CameraDataset> train_dataset_;
         std::shared_ptr<CameraDataset> val_dataset_;
         std::unique_ptr<IStrategy> strategy_;
-        param::TrainingParameters params_;
+        lfs::core::param::TrainingParameters params_;
         std::optional<std::tuple<std::vector<std::string>, std::vector<std::string>>> provided_splits_;
 
-        torch::Tensor background_{};
-        torch::Tensor bg_mix_buffer_;
-        std::unique_ptr<TrainingProgress> progress_;
+        lfs::core::Tensor background_{};
+        lfs::core::Tensor bg_mix_buffer_;
+        // TODO: Port progress to LibTorch-free implementation
+        // std::unique_ptr<TrainingProgress> progress_;
         size_t train_dataset_size_ = 0;
 
         // Bilateral grid components
         std::unique_ptr<BilateralGrid> bilateral_grid_;
-        std::unique_ptr<torch::optim::Adam> bilateral_grid_optimizer_;
+        std::unique_ptr<lfs::training::AdamOptimizer> bilateral_grid_optimizer_;  // Use ported Adam
         std::unique_ptr<WarmupExponentialLR> bilateral_grid_scheduler_;
 
-        std::unique_ptr<PoseOptimizationModule> poseopt_module_; // Pose optimization module
-        std::unique_ptr<torch::optim::Adam> poseopt_optimizer_;  // Optimizer for pose optimization
+        // TODO: Port pose optimization to LibTorch-free implementation
+        // std::unique_ptr<PoseOptimizationModule> poseopt_module_; // Pose optimization module
+        // std::unique_ptr<torch::optim::Adam> poseopt_optimizer_;  // Optimizer for pose optimization
 
-        // Sparsity optimizer
+        // Sparsity optimizer (LibTorch-free)
         std::unique_ptr<ISparsityOptimizer> sparsity_optimizer_;
 
+        // TODO: Port metrics to LibTorch-free implementation
         // Metrics evaluator - handles all evaluation logic
-        std::unique_ptr<MetricsEvaluator> evaluator_;
+        // std::unique_ptr<MetricsEvaluator> evaluator_;
 
         // Single mutex that protects the model during training
         mutable std::shared_mutex render_mutex_;
@@ -215,16 +215,16 @@ namespace gs::training {
         std::atomic<int> current_iteration_{0};
         std::atomic<float> current_loss_{0.0f};
 
-        // Callback system for async operations
+        // Callback system for async operations (LibTorch-free)
         std::function<void()> callback_;
         std::atomic<bool> callback_busy_{false};
-        at::cuda::CUDAStream callback_stream_ = at::cuda::getStreamFromPool(false);
-        at::cuda::CUDAEvent callback_launch_event_;
+        cudaStream_t callback_stream_ = nullptr;
+        cudaEvent_t callback_launch_event_ = nullptr;
 
         // camera id to cam
-        std::map<int, std::shared_ptr<const Camera>> m_cam_id_to_cam;
+        std::map<int, std::shared_ptr<const lfs::core::Camera>> m_cam_id_to_cam;
 
         // LichtFeld project
         std::shared_ptr<gs::management::Project> lf_project_ = nullptr;
     };
-} // namespace gs::training
+} // namespace lfs::training

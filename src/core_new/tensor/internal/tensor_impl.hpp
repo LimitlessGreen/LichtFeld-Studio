@@ -77,6 +77,52 @@ namespace lfs::core {
         return device == Device::CPU ? "cpu" : "cuda";
     }
 
+    // ============================================================================
+    // Type Promotion System
+    // ============================================================================
+    // Determines the result dtype for binary operations between different types.
+    // Follows PyTorch/NumPy conventions:
+    //   - Bool promotes to any numeric type
+    //   - Integer promotes to Float
+    //   - Smaller types promote to larger types
+    //   - Float16 + Float32 → Float32
+    // ============================================================================
+
+    constexpr DataType promote_dtypes(DataType lhs, DataType rhs) {
+        // Same types - no promotion needed
+        if (lhs == rhs) return lhs;
+
+        // Bool promotes to any other type
+        if (lhs == DataType::Bool) return rhs;
+        if (rhs == DataType::Bool) return lhs;
+
+        // Type promotion table for different type combinations
+        // Order of precedence: Float32 > Float16 > Int64 > Int32 > UInt8
+
+        // Float32 is the highest - anything with Float32 becomes Float32
+        if (lhs == DataType::Float32 || rhs == DataType::Float32) {
+            return DataType::Float32;
+        }
+
+        // Float16 with any integer becomes Float16
+        if (lhs == DataType::Float16 || rhs == DataType::Float16) {
+            return DataType::Float16;
+        }
+
+        // Int64 is the largest integer type
+        if (lhs == DataType::Int64 || rhs == DataType::Int64) {
+            return DataType::Int64;
+        }
+
+        // Int32 with UInt8 becomes Int32
+        if (lhs == DataType::Int32 || rhs == DataType::Int32) {
+            return DataType::Int32;
+        }
+
+        // Only UInt8 remains
+        return DataType::UInt8;
+    }
+
     enum class BoundaryMode : uint8_t {
         Assert = 0,
         Clamp = 1,
@@ -506,6 +552,54 @@ namespace lfs::core {
                 }
             }
             return true;
+        }
+
+        // Helper for binary operations with automatic type promotion
+        // Promotes types, converts operands if needed, and creates BinaryExpr
+        template<typename Op>
+        Tensor binary_op_with_promotion(const Tensor& other, Op op) const {
+            if (!validate_binary_op(other, false, true)) {
+                return Tensor();
+            }
+
+            // Determine promoted dtype for the result
+            DataType result_dtype = promote_dtypes(dtype_, other.dtype());
+
+            // Convert operands to result dtype if needed
+            const Tensor& lhs = (dtype_ == result_dtype) ? *this : this->to(result_dtype);
+            const Tensor& rhs = (other.dtype() == result_dtype) ? other : other.to(result_dtype);
+
+            // Compute broadcast shape
+            auto broadcast_shape = lhs.broadcast_shape(rhs.shape());
+
+            // Create and return the binary expression with promoted dtype
+            return BinaryExpr<TensorLeaf, TensorLeaf, Op>(
+                TensorLeaf(lhs), TensorLeaf(rhs), op,
+                broadcast_shape, lhs.device(), result_dtype);
+        }
+
+        // Helper for comparison operations with automatic type promotion
+        // Promotes operand types for comparison, but always returns Bool
+        template<typename Op>
+        Tensor comparison_op_with_promotion(const Tensor& other, Op op) const {
+            if (!validate_binary_op(other, false, true)) {
+                return Tensor();
+            }
+
+            // Promote operand types for comparison
+            DataType compare_dtype = promote_dtypes(dtype_, other.dtype());
+
+            // Convert operands to common dtype for comparison
+            const Tensor& lhs = (dtype_ == compare_dtype) ? *this : this->to(compare_dtype);
+            const Tensor& rhs = (other.dtype() == compare_dtype) ? other : other.to(compare_dtype);
+
+            // Compute broadcast shape
+            auto broadcast_shape = lhs.broadcast_shape(rhs.shape());
+
+            // Return Bool tensor (comparison result)
+            return BinaryExpr<TensorLeaf, TensorLeaf, Op>(
+                TensorLeaf(lhs), TensorLeaf(rhs), op,
+                broadcast_shape, lhs.device(), DataType::Bool);
         }
 
         bool validate_unary_op() const {
@@ -1384,92 +1478,37 @@ namespace lfs::core {
         // Arithmetic operations
 
         // New functor-based overloads for Tensor (zero enum overhead, lazy evaluation)
+        // Now with automatic type promotion for mixed-dtype operations
         Tensor add(const Tensor& other) const {
-            if (!validate_binary_op(other, false, true)) {
-                return Tensor();
-            }
-            auto broadcast_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::add_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::add_op{},
-                broadcast_shape, device_, dtype_);
+            return binary_op_with_promotion(other, ops::add_op{});
         }
 
         Tensor sub(const Tensor& other) const {
-            if (!validate_binary_op(other, false, true)) {
-                return Tensor();
-            }
-            auto broadcast_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::sub_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::sub_op{},
-                broadcast_shape, device_, dtype_);
+            return binary_op_with_promotion(other, ops::sub_op{});
         }
 
         Tensor mul(const Tensor& other) const {
-            if (!validate_binary_op(other, false, true)) {
-                return Tensor();
-            }
-            auto broadcast_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::mul_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::mul_op{},
-                broadcast_shape, device_, dtype_);
+            return binary_op_with_promotion(other, ops::mul_op{});
         }
 
         Tensor div(const Tensor& other) const {
-            if (!validate_binary_op(other, false, true)) {
-                return Tensor();
-            }
-            auto broadcast_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::div_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::div_op{},
-                broadcast_shape, device_, dtype_);
+            return binary_op_with_promotion(other, ops::div_op{});
         }
 
         Tensor pow(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, dtype_);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::pow_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::pow_op{},
-                result_shape, device_, dtype_);
+            return binary_op_with_promotion(other, ops::pow_op{});
         }
 
         Tensor mod(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, dtype_);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::mod_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::mod_op{},
-                result_shape, device_, dtype_);
+            return binary_op_with_promotion(other, ops::mod_op{});
         }
 
         Tensor maximum(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, dtype_);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::maximum_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::maximum_op{},
-                result_shape, device_, dtype_);
+            return binary_op_with_promotion(other, ops::maximum_op{});
         }
 
         Tensor minimum(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, dtype_);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::minimum_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::minimum_op{},
-                result_shape, device_, dtype_);
+            return binary_op_with_promotion(other, ops::minimum_op{});
         }
 
         // Template versions for scalars (lazy evaluation with scalar_right_op)
@@ -1573,75 +1612,27 @@ namespace lfs::core {
 
         // Functor-based overloads for Tensor (zero enum overhead)
         Tensor eq(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, DataType::Bool);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::equal_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::equal_op{},
-                result_shape, device_, DataType::Bool);
+            return comparison_op_with_promotion(other, ops::equal_op{});
         }
 
         Tensor ne(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, DataType::Bool);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::not_equal_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::not_equal_op{},
-                result_shape, device_, DataType::Bool);
+            return comparison_op_with_promotion(other, ops::not_equal_op{});
         }
 
         Tensor lt(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, DataType::Bool);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::less_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::less_op{},
-                result_shape, device_, DataType::Bool);
+            return comparison_op_with_promotion(other, ops::less_op{});
         }
 
         Tensor le(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, DataType::Bool);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::less_equal_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::less_equal_op{},
-                result_shape, device_, DataType::Bool);
+            return comparison_op_with_promotion(other, ops::less_equal_op{});
         }
 
         Tensor gt(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, DataType::Bool);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::greater_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::greater_op{},
-                result_shape, device_, DataType::Bool);
+            return comparison_op_with_promotion(other, ops::greater_op{});
         }
 
         Tensor ge(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, DataType::Bool);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::greater_equal_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::greater_equal_op{},
-                result_shape, device_, DataType::Bool);
+            return comparison_op_with_promotion(other, ops::greater_equal_op{});
         }
 
         // Template versions for scalars (direct functor calls - zero enum overhead!)
@@ -1719,39 +1710,15 @@ namespace lfs::core {
 
         // Logical operations (Tensor only, Bool -> Bool)
         Tensor logical_and(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, DataType::Bool);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::logical_and_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::logical_and_op{},
-                result_shape, device_, DataType::Bool);
+            return comparison_op_with_promotion(other, ops::logical_and_op{});
         }
 
         Tensor logical_or(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, DataType::Bool);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::logical_or_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::logical_or_op{},
-                result_shape, device_, DataType::Bool);
+            return comparison_op_with_promotion(other, ops::logical_or_op{});
         }
 
         Tensor logical_xor(const Tensor& other) const {
-            if (!is_valid() || numel() == 0 || !other.is_valid() || other.numel() == 0) {
-                if (!is_valid())
-                    return Tensor();
-                return Tensor::empty(shape_, device_, DataType::Bool);
-            }
-            auto result_shape = this->broadcast_shape(other.shape());
-            return BinaryExpr<TensorLeaf, TensorLeaf, ops::logical_xor_op>(
-                TensorLeaf(*this), TensorLeaf(other), ops::logical_xor_op{},
-                result_shape, device_, DataType::Bool);
+            return comparison_op_with_promotion(other, ops::logical_xor_op{});
         }
 
         // ============= REDUCE OPERATIONS =============
@@ -1924,9 +1891,39 @@ namespace lfs::core {
 
         template <typename T>
         T item() const {
-            if (!is_valid() || numel() != 1) {
-                LOG_ERROR("item<T>() requires a valid single-element tensor");
-                return T{};
+            if (!is_valid()) {
+                std::string msg = "item<T>() called on invalid tensor";
+                LOG_ERROR("{}", msg);
+                throw std::runtime_error(msg);
+            }
+            if (numel() != 1) {
+                std::string msg = std::format("item<T>() requires single-element tensor, got {} elements", numel());
+                LOG_ERROR("{}", msg);
+                throw std::runtime_error(msg);
+            }
+
+            // Validate that template type T matches tensor's dtype
+            // Note: unsigned char can be used for both Bool and UInt8 (since uint8_t is typedef of unsigned char)
+            bool dtype_matches = false;
+
+            if constexpr (std::is_same_v<T, float>) {
+                dtype_matches = (dtype_ == DataType::Float32);
+            } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, int>) {
+                dtype_matches = (dtype_ == DataType::Int32);
+            } else if constexpr (std::is_same_v<T, int64_t>) {
+                dtype_matches = (dtype_ == DataType::Int64);
+            } else if constexpr (std::is_same_v<T, unsigned char> || std::is_same_v<T, uint8_t> || std::is_same_v<T, bool>) {
+                // unsigned char/uint8_t can be used for both Bool and UInt8
+                dtype_matches = (dtype_ == DataType::Bool || dtype_ == DataType::UInt8);
+            }
+            // Note: __half check omitted as it's only available in CUDA compilation units
+            // Float16 tensors should be accessed through .to(Float32).item<float>()
+
+            if (!dtype_matches) {
+                std::string msg = std::format("item<T>(): dtype mismatch - tensor is {}, but requested incompatible type T",
+                                              dtype_name(dtype_));
+                LOG_ERROR("{}", msg);
+                throw std::runtime_error(msg);
             }
 
             T value{};

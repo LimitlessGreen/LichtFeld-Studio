@@ -684,28 +684,81 @@ namespace lfs::core {
         auto idx_same_device = ensure_same_device(idx);
         auto vals_same_device = ensure_same_device(vals);
 
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_index_put(ptr<float>(), idx_same_device.ptr<int>(),
-                                         vals_same_device.ptr<float>(), numel(), idx.numel(), 0);
-            // No sync - tensor operation
-        } else {
-            float* data = ptr<float>();
-            const int* indices = idx_same_device.ptr<int>();
-            const float* values = vals_same_device.ptr<float>();
-            size_t num_elements = numel();
+        // Helper lambda for index_put_ implementation
+        auto index_put_impl = [&]<typename DataT, typename IndexT>() {
+            if (device_ == Device::CUDA) {
+                // For CUDA, transfer to CPU, operate, transfer back
+                // This is more reliable than the thrust::scatter implementation
+                auto cpu_tensor = to(Device::CPU);
+                auto cpu_idx = idx_same_device.to(Device::CPU);
+                auto cpu_vals = vals_same_device.to(Device::CPU);
 
-            std::for_each(std::execution::par_unseq,
-                          std::views::iota(size_t(0), idx.numel()).begin(),
-                          std::views::iota(size_t(0), idx.numel()).end(),
-                          [data, indices, values, num_elements](size_t i) {
-                              int pos = indices[i];
-                              if (pos < 0)
-                                  pos += num_elements;
-                              if (pos >= 0 && pos < static_cast<int>(num_elements)) {
-                                  data[pos] = values[i];
-                              }
-                          });
+                DataT* data = cpu_tensor.ptr<DataT>();
+                const IndexT* indices = cpu_idx.ptr<IndexT>();
+                const DataT* values = cpu_vals.ptr<DataT>();
+                size_t num_elements = cpu_tensor.numel();
+
+                for (size_t i = 0; i < cpu_idx.numel(); ++i) {
+                    IndexT pos = indices[i];
+                    if (pos < 0)
+                        pos += num_elements;
+                    if (pos >= 0 && pos < static_cast<IndexT>(num_elements)) {
+                        data[pos] = values[i];
+                    }
+                }
+
+                *this = cpu_tensor.to(device_);
+            } else {
+                // CPU implementation with parallel execution
+                DataT* data = ptr<DataT>();
+                const IndexT* indices = idx_same_device.ptr<IndexT>();
+                const DataT* values = vals_same_device.ptr<DataT>();
+                size_t num_elements = numel();
+
+                std::for_each(std::execution::par_unseq,
+                              std::views::iota(size_t(0), idx.numel()).begin(),
+                              std::views::iota(size_t(0), idx.numel()).end(),
+                              [data, indices, values, num_elements](size_t i) {
+                                  IndexT pos = indices[i];
+                                  if (pos < 0)
+                                      pos += num_elements;
+                                  if (pos >= 0 && pos < static_cast<IndexT>(num_elements)) {
+                                      data[pos] = values[i];
+                                  }
+                              });
+            }
+        };
+
+        // Dispatch based on data dtype and index dtype
+        if (idx_same_device.dtype() == DataType::Int32) {
+            if (dtype_ == DataType::Float32) {
+                index_put_impl.template operator()<float, int>();
+            } else if (dtype_ == DataType::Bool) {
+                index_put_impl.template operator()<unsigned char, int>();
+            } else if (dtype_ == DataType::Int32) {
+                index_put_impl.template operator()<int, int>();
+            } else if (dtype_ == DataType::Int64) {
+                index_put_impl.template operator()<int64_t, int>();
+            } else {
+                LOG_ERROR("index_put_: unsupported data dtype {}", static_cast<int>(dtype_));
+            }
+        } else if (idx_same_device.dtype() == DataType::Int64) {
+            if (dtype_ == DataType::Float32) {
+                index_put_impl.template operator()<float, int64_t>();
+            } else if (dtype_ == DataType::Bool) {
+                index_put_impl.template operator()<unsigned char, int64_t>();
+            } else if (dtype_ == DataType::Int32) {
+                index_put_impl.template operator()<int, int64_t>();
+            } else if (dtype_ == DataType::Int64) {
+                index_put_impl.template operator()<int64_t, int64_t>();
+            } else {
+                LOG_ERROR("index_put_: unsupported data dtype {}", static_cast<int>(dtype_));
+            }
+        } else {
+            LOG_ERROR("index_put_: indices must be Int32 or Int64, got dtype {}",
+                      static_cast<int>(idx_same_device.dtype()));
         }
+
         return *this;
     }
 

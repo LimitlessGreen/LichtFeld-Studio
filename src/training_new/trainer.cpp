@@ -4,26 +4,29 @@
 
 #include "trainer.hpp"
 #include "loader/filesystem_utils.hpp"
+// TODO: Port components to LibTorch-free implementation
 #include "components/bilateral_grid.hpp"
-#include "components/poseopt.hpp"
 #include "components/sparsity_optimizer.hpp"
-#include "core/image_io.hpp"
-#include "core/logger.hpp"
-#include "kernels/fused_ssim.cuh"
-#include "kernels/regularization.cuh"
+// #include "components/poseopt.hpp"
+#include "core_new/image_io.hpp"
+#include "core_new/logger.hpp"
+#include "optimizer/adam_optimizer.hpp"
+// TODO: Fused SSIM kernels not needed - using lfs::training::losses::PhotometricLoss
+// #include "kernels/fused_ssim.cuh"
+// #include "kernels/regularization.cuh"
 #include "loader/cache_image_loader.hpp"
 #include "rasterization/fast_rasterizer.hpp"
-#include "rasterization/rasterizer.hpp"
+// TODO: Port 3DGUT rasterizer to LibTorch-free implementation
+// #include "rasterization/rasterizer.hpp"
 #include "losses/losses.hpp"
 
-#include <ATen/cuda/CUDAEvent.h>
 #include <atomic>
 #include <chrono>
 #include <cuda_runtime.h>
 #include <expected>
 #include <memory>
 
-namespace gs::training {
+namespace lfs::training {
 
     void Trainer::cleanup() {
         LOG_DEBUG("Cleaning up trainer for re-initialization");
@@ -33,19 +36,21 @@ namespace gs::training {
 
         // Wait for callback to finish if busy
         if (callback_busy_.load()) {
-            callback_stream_.synchronize();
+            cudaStreamSynchronize(callback_stream_);
             callback_busy_.store(false);
         }
 
         // Reset all components
-        progress_.reset();
+        // TODO: Port progress, poseopt to LibTorch-free implementation
+        // progress_.reset();
         bilateral_grid_.reset();
         bilateral_grid_optimizer_.reset();
         bilateral_grid_scheduler_.reset();
-        poseopt_module_.reset();
-        poseopt_optimizer_.reset();
+        // poseopt_module_.reset();
+        // poseopt_optimizer_.reset();
         sparsity_optimizer_.reset();
-        evaluator_.reset();
+        // TODO: Port metrics to LibTorch-free implementation
+        // evaluator_.reset();
 
         // Clear datasets (will be recreated)
         train_dataset_.reset();
@@ -80,22 +85,23 @@ namespace gs::training {
                 params_.optimization.bilateral_grid_Y,
                 params_.optimization.bilateral_grid_W);
 
-            bilateral_grid_optimizer_ = std::make_unique<torch::optim::Adam>(
-                std::vector<torch::Tensor>{bilateral_grid_->parameters()},
-                torch::optim::AdamOptions(params_.optimization.bilateral_grid_lr)
-                    .eps(1e-15));
+            // TODO: Create AdamOptimizer variant that works with arbitrary tensors (not just SplatData)
+            // bilateral_grid_optimizer_ = std::make_unique<lfs::training::AdamOptimizer>(
+            //     bilateral_grid_->parameters(),
+            //     bilateral_grid_->grad(),
+            //     params_.optimization.bilateral_grid_lr,
+            //     1e-15);
+            //
+            // // Create scheduler with warmup
+            // const double gamma = std::pow(0.01, 1.0 / params_.optimization.iterations);
+            // bilateral_grid_scheduler_ = std::make_unique<WarmupExponentialLR>(
+            //     *bilateral_grid_optimizer_,
+            //     gamma,
+            //     1000, // warmup steps
+            //     0.01  // start at 1% of initial LR
+            // );
 
-            // Create scheduler with warmup
-            const double gamma = std::pow(0.01, 1.0 / params_.optimization.iterations);
-            bilateral_grid_scheduler_ = std::make_unique<WarmupExponentialLR>(
-                *bilateral_grid_optimizer_,
-                gamma,
-                1000, // warmup steps
-                0.01, // start at 1% of initial LR
-                -1    // all param groups
-            );
-
-            LOG_DEBUG("Bilateral grid initialized with size {}x{}x{} and warmup scheduler",
+            LOG_DEBUG("Bilateral grid initialized with size {}x{}x{} (optimizer TODO)",
                       params_.optimization.bilateral_grid_X,
                       params_.optimization.bilateral_grid_Y,
                       params_.optimization.bilateral_grid_W);
@@ -106,10 +112,10 @@ namespace gs::training {
     }
 
     // Compute photometric loss AND gradient manually (using loss struct)
-    std::expected<std::pair<float, torch::Tensor>, std::string> Trainer::compute_photometric_loss_with_gradient(
-        const torch::Tensor& rendered,
-        const torch::Tensor& gt_image,
-        const param::OptimizationParameters& opt_params) {
+    std::expected<std::pair<float, lfs::core::Tensor>, std::string> Trainer::compute_photometric_loss_with_gradient(
+        const lfs::core::Tensor& rendered,
+        const lfs::core::Tensor& gt_image,
+        const lfs::core::param::OptimizationParameters& opt_params) {
         lfs::training::losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
         auto result = lfs::training::losses::PhotometricLoss::forward(rendered, gt_image, params);
         if (!result) {
@@ -120,22 +126,22 @@ namespace gs::training {
     }
 
     std::expected<float, std::string> Trainer::compute_scale_reg_loss(
-        SplatData& splatData,
-        const param::OptimizationParameters& opt_params) {
+        lfs::core::SplatData& splatData,
+        const lfs::core::param::OptimizationParameters& opt_params) {
         lfs::training::losses::ScaleRegularization::Params params{.weight = opt_params.scale_reg};
-        return lfs::training::losses::ScaleRegularization::forward(splatData.scaling_raw(), params);
+        return lfs::training::losses::ScaleRegularization::forward(splatData.scaling_raw(), splatData.scaling_grad(), params);
     }
 
     std::expected<float, std::string> Trainer::compute_opacity_reg_loss(
-        SplatData& splatData,
-        const param::OptimizationParameters& opt_params) {
+        lfs::core::SplatData& splatData,
+        const lfs::core::param::OptimizationParameters& opt_params) {
         lfs::training::losses::OpacityRegularization::Params params{.weight = opt_params.opacity_reg};
-        return lfs::training::losses::OpacityRegularization::forward(splatData.opacity_raw(), params);
+        return lfs::training::losses::OpacityRegularization::forward(splatData.opacity_raw(), splatData.opacity_grad(), params);
     }
 
-    std::expected<std::pair<float, bilateral_grid::BilateralGridTVContext>, std::string> Trainer::compute_bilateral_grid_tv_loss(
+    std::expected<std::pair<float, BilateralGridTVContext>, std::string> Trainer::compute_bilateral_grid_tv_loss(
         const std::unique_ptr<BilateralGrid>& bilateral_grid,
-        const param::OptimizationParameters& opt_params) {
+        const lfs::core::param::OptimizationParameters& opt_params) {
         try {
             if (opt_params.use_bilateral_grid) {
                 // Manual forward (no autograd)
@@ -146,43 +152,16 @@ namespace gs::training {
                 return std::make_pair(weighted_loss, ctx);
             }
             // Return zero loss with empty context
-            bilateral_grid::BilateralGridTVContext empty_ctx;
+            BilateralGridTVContext empty_ctx;
             return std::make_pair(0.0f, empty_ctx);
         } catch (const std::exception& e) {
             return std::unexpected(std::format("Error computing bilateral grid TV loss: {}", e.what()));
         }
     }
 
-    std::expected<torch::Tensor, std::string> Trainer::compute_sparsity_loss(
-        int iter,
-        const SplatData& splatData) {
-        try {
-            if (sparsity_optimizer_ && sparsity_optimizer_->should_apply_loss(iter)) {
-                // Initialize on first use (lazy initialization)
-                if (!sparsity_optimizer_->is_initialized()) {
-                    auto init_result = sparsity_optimizer_->initialize(splatData.opacity_raw());
-                    if (!init_result) {
-                        return std::unexpected(init_result.error());
-                    }
-                    LOG_INFO("Sparsity optimizer initialized at iteration {}", iter);
-                }
-
-                auto loss_result = sparsity_optimizer_->compute_loss(splatData.opacity_raw());
-                if (!loss_result) {
-                    return std::unexpected(loss_result.error());
-                }
-                return *loss_result;
-            }
-            return torch::zeros({1}, torch::kFloat32).to(torch::kCUDA).requires_grad_();
-        } catch (const std::exception& e) {
-            return std::unexpected(std::format("Error computing sparsity loss: {}", e.what()));
-        }
-    }
-
-    std::expected<std::pair<float, SparsityLossContext>, std::string> Trainer::compute_sparsity_loss_forward(
-        int iter,
-        const SplatData& splatData) {
-        // Handle initialization before delegating to loss struct
+    std::expected<std::pair<float, SparsityLossContext>, std::string>
+    Trainer::compute_sparsity_loss_forward(int iter, const lfs::core::SplatData& splatData) {
+        // Handle initialization before computing loss
         if (sparsity_optimizer_ && sparsity_optimizer_->should_apply_loss(iter)) {
             if (!sparsity_optimizer_->is_initialized()) {
                 auto init_result = sparsity_optimizer_->initialize(splatData.opacity_raw());
@@ -191,19 +170,19 @@ namespace gs::training {
                 }
                 LOG_INFO("Sparsity optimizer initialized at iteration {}", iter);
             }
+
+            // Compute loss forward (manual - no autograd)
+            return sparsity_optimizer_->compute_loss_forward(splatData.opacity_raw());
         }
 
-        // Delegate to loss struct
-        lfs::training::losses::SparsityLoss::Params params{
-            .current_iteration = iter,
-            .optimizer_ptr = sparsity_optimizer_.get()
-        };
-        return lfs::training::losses::SparsityLoss::forward(splatData, params);
+        // Return zero loss with empty context if not active
+        SparsityLossContext empty_ctx{};
+        return std::make_pair(0.0f, empty_ctx);
     }
 
     std::expected<void, std::string> Trainer::handle_sparsity_update(
         int iter,
-        SplatData& splatData) {
+        lfs::core::SplatData& splatData) {
         try {
             if (sparsity_optimizer_ && sparsity_optimizer_->should_update(iter)) {
                 LOG_TRACE("Updating sparsity state at iteration {}", iter);
@@ -220,7 +199,7 @@ namespace gs::training {
 
     std::expected<void, std::string> Trainer::apply_sparsity_pruning(
         int iter,
-        SplatData& splatData) {
+        lfs::core::SplatData& splatData) {
         try {
             if (sparsity_optimizer_ && sparsity_optimizer_->should_prune(iter)) {
                 LOG_INFO("Applying sparsity-based pruning at iteration {}", iter);
@@ -229,17 +208,19 @@ namespace gs::training {
                 if (!mask_result) {
                     return std::unexpected(mask_result.error());
                 }
-
                 auto prune_mask = *mask_result;
-                int n_prune = prune_mask.sum().item<int>();
-                int n_before = splatData.size();
+
+                int n_before = static_cast<int>(splatData.size());
 
                 // Use strategy's remove functionality
                 strategy_->remove_gaussians(prune_mask);
 
-                int n_after = splatData.size();
-                std::println("Sparsity pruning complete: {} -> {} Gaussians (removed {})",
-                             n_before, n_after, n_prune);
+                int n_after = static_cast<int>(splatData.size());
+                int n_prune = n_before - n_after;
+
+                LOG_INFO("Pruned {} Gaussians: {} -> {} ({}% reduction)",
+                         n_prune, n_before, n_after,
+                         static_cast<int>(100.0f * n_prune / n_before));
 
                 // Clear sparsity optimizer after pruning
                 sparsity_optimizer_.reset();
@@ -257,9 +238,17 @@ namespace gs::training {
         : base_dataset_(std::move(dataset)),
           strategy_(std::move(strategy)),
           provided_splits_(std::move(provided_splits)) {
-        if (!torch::cuda::is_available()) {
+        // Check CUDA availability
+        int device_count = 0;
+        cudaError_t error = cudaGetDeviceCount(&device_count);
+        if (error != cudaSuccess || device_count == 0) {
             throw std::runtime_error("CUDA is not available – aborting.");
         }
+
+        // Initialize callback stream and event (LibTorch-free)
+        cudaStreamCreateWithFlags(&callback_stream_, cudaStreamNonBlocking);
+        cudaEventCreate(&callback_launch_event_);
+
         LOG_DEBUG("Trainer constructed with {} cameras", base_dataset_->get_cameras().size());
     }
 
@@ -271,7 +260,7 @@ namespace gs::training {
         }
     }
 
-    std::expected<void, std::string> Trainer::initialize(const param::TrainingParameters& params) {
+    std::expected<void, std::string> Trainer::initialize(const lfs::core::param::TrainingParameters& params) {
         // Thread-safe initialization using mutex
         std::lock_guard<std::mutex> lock(init_mutex_);
 
@@ -287,26 +276,32 @@ namespace gs::training {
         try {
             params_ = params;
 
+            // Create DatasetConfig for lfs::training::CameraDataset
+            lfs::training::DatasetConfig dataset_config;
+            dataset_config.resize_factor = params.dataset.resize_factor;
+            dataset_config.max_width = params.dataset.max_width;
+            dataset_config.test_every = params.dataset.test_every;
+
             // Handle dataset split based on evaluation flag
             if (params.optimization.enable_eval) {
                 // Create train/val split
                 train_dataset_ = std::make_shared<CameraDataset>(
-                    base_dataset_->get_cameras(), params.dataset, CameraDataset::Split::TRAIN,
+                    base_dataset_->get_cameras(), dataset_config, CameraDataset::Split::TRAIN,
                     provided_splits_ ? std::make_optional(std::get<0>(*provided_splits_)) : std::nullopt);
                 val_dataset_ = std::make_shared<CameraDataset>(
-                    base_dataset_->get_cameras(), params.dataset, CameraDataset::Split::VAL,
+                    base_dataset_->get_cameras(), dataset_config, CameraDataset::Split::VAL,
                     provided_splits_ ? std::make_optional(std::get<1>(*provided_splits_)) : std::nullopt);
 
                 LOG_INFO("Created train/val split: {} train, {} val images",
-                         train_dataset_->size().value(),
-                         val_dataset_->size().value());
+                         train_dataset_->size(),
+                         val_dataset_->size());
             } else {
                 // Use all images for training
                 train_dataset_ = base_dataset_;
                 val_dataset_ = nullptr;
 
                 LOG_INFO("Using all {} images for training (no evaluation)",
-                         train_dataset_->size().value());
+                         train_dataset_->size());
             }
 
             // change resize factor (change may comes from gui)
@@ -319,7 +314,7 @@ namespace gs::training {
                 val_dataset_->set_max_width(params.dataset.max_width);
             }
 
-            train_dataset_size_ = train_dataset_->size().value();
+            train_dataset_size_ = train_dataset_->size();
 
             m_cam_id_to_cam.clear();
             // Setup camera cache
@@ -369,45 +364,44 @@ namespace gs::training {
                 }
             }
 
-            background_ = torch::tensor({0.f, 0.f, 0.f},
-                                        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            // Initialize background color tensor [3] = [0, 0, 0]
+            background_ = lfs::core::Tensor::zeros({3}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
 
-            if (params.optimization.pose_optimization != "none") {
-                if (params.optimization.enable_eval) {
-                    return std::unexpected("Evaluating with pose optimization is not supported yet. "
-                                           "Please disable pose optimization or evaluation.");
-                }
-                if (params.optimization.gut) {
-                    return std::unexpected("The 3DGUT rasterizer doesn't have camera gradients yet. "
-                                           "Please disable pose optimization or disable gut.");
-                }
-                if (params.optimization.pose_optimization == "direct") {
-                    poseopt_module_ = std::make_unique<DirectPoseOptimizationModule>(train_dataset_->get_cameras().size());
-                    LOG_DEBUG("Direct pose optimization module created");
-                } else if (params.optimization.pose_optimization == "mlp") {
-                    poseopt_module_ = std::make_unique<MLPPoseOptimizationModule>(train_dataset_->get_cameras().size());
-                    LOG_DEBUG("MLP pose optimization module created");
-                } else {
-                    return std::unexpected("Invalid pose optimization type: " + params.optimization.pose_optimization);
-                }
-                poseopt_optimizer_ = std::make_unique<torch::optim::Adam>(
-                    std::vector<torch::Tensor>{poseopt_module_->parameters()},
-                    torch::optim::AdamOptions(1e-5));
-            } else {
-                poseopt_module_ = std::make_unique<PoseOptimizationModule>();
-            }
+            // TODO: Port pose optimization to LibTorch-free implementation
+            // if (params.optimization.pose_optimization != "none") {
+            //     if (params.optimization.enable_eval) {
+            //         return std::unexpected("Evaluating with pose optimization is not supported yet. "
+            //                                "Please disable pose optimization or evaluation.");
+            //     }
+            //     if (params.optimization.pose_optimization == "direct") {
+            //         poseopt_module_ = std::make_unique<DirectPoseOptimizationModule>(train_dataset_->get_cameras().size());
+            //         LOG_DEBUG("Direct pose optimization module created");
+            //     } else if (params.optimization.pose_optimization == "mlp") {
+            //         poseopt_module_ = std::make_unique<MLPPoseOptimizationModule>(train_dataset_->get_cameras().size());
+            //         LOG_DEBUG("MLP pose optimization module created");
+            //     } else {
+            //         return std::unexpected("Invalid pose optimization type: " + params.optimization.pose_optimization);
+            //     }
+            //     poseopt_optimizer_ = std::make_unique<torch::optim::Adam>(
+            //         std::vector<lfs::core::Tensor>{poseopt_module_->parameters()},
+            //         torch::optim::AdamOptions(1e-5));
+            // } else {
+            //     poseopt_module_ = std::make_unique<PoseOptimizationModule>();
+            // }
 
+            // TODO: Port progress to LibTorch-free implementation
             // Create progress bar based on headless flag
-            if (params.optimization.headless) {
-                progress_ = std::make_unique<TrainingProgress>(
-                    params_.optimization.iterations, // This now includes sparsity steps if enabled
-                    /*update_frequency=*/100);
-                LOG_DEBUG("Progress bar initialized for {} total iterations", params_.optimization.iterations);
-            }
+            // if (params.optimization.headless) {
+            //     progress_ = std::make_unique<TrainingProgress>(
+            //         params_.optimization.iterations, // This now includes sparsity steps if enabled
+            //         /*update_frequency=*/100);
+            //     LOG_DEBUG("Progress bar initialized for {} total iterations", params_.optimization.iterations);
+            // }
 
+            // TODO: Port metrics to LibTorch-free implementation
             // Initialize the evaluator - it handles all metrics internally
-            evaluator_ = std::make_unique<MetricsEvaluator>(params_);
-            LOG_DEBUG("Metrics evaluator initialized");
+            // evaluator_ = std::make_unique<MetricsEvaluator>(params_);
+            // LOG_DEBUG("Metrics evaluator initialized");
 
             // Print configuration
             LOG_INFO("Render mode: {}", params.optimization.render_mode);
@@ -428,8 +422,20 @@ namespace gs::training {
 
         // Wait for callback to finish if busy
         if (callback_busy_.load()) {
-            callback_stream_.synchronize();
+            cudaStreamSynchronize(callback_stream_);
+            callback_busy_.store(false);
         }
+
+        // Cleanup CUDA resources
+        if (callback_stream_) {
+            cudaStreamDestroy(callback_stream_);
+            callback_stream_ = nullptr;
+        }
+        if (callback_launch_event_) {
+            cudaEventDestroy(callback_launch_event_);
+            callback_launch_event_ = nullptr;
+        }
+
         LOG_DEBUG("Trainer destroyed");
     }
 
@@ -443,16 +449,18 @@ namespace gs::training {
         // Handle pause/resume
         if (pause_requested_.load() && !is_paused_.load()) {
             is_paused_ = true;
-            if (progress_) {
-                progress_->pause();
-            }
+            // TODO: Port progress to LibTorch-free implementation
+            // if (progress_) {
+            //     progress_->pause();
+            // }
             LOG_INFO("Training paused at iteration {}", iter);
             LOG_DEBUG("Click 'Resume Training' to continue.");
         } else if (!pause_requested_.load() && is_paused_.load()) {
             is_paused_ = false;
-            if (progress_) {
-                progress_->resume(iter, current_loss_.load(), static_cast<int>(strategy_->get_model().size()));
-            }
+            // TODO: Port progress to LibTorch-free implementation
+            // if (progress_) {
+            //     progress_->resume(iter, current_loss_.load(), static_cast<int>(strategy_->get_model().size()));
+            // }
             LOG_INFO("Training resumed at iteration {}", iter);
         }
 
@@ -464,11 +472,12 @@ namespace gs::training {
 
             LOG_INFO("Checkpoint saved to {}", checkpoint_path.string());
 
+            // TODO: Port events system to use lfs::core events
             // Emit checkpoint saved event
-            events::state::CheckpointSaved{
-                .iteration = iter,
-                .path = checkpoint_path}
-                .emit();
+            // events::state::CheckpointSaved{
+            //     .iteration = iter,
+            //     .path = checkpoint_path}
+            //     .emit();
         }
 
         // Handle stop request - this permanently stops training
@@ -503,100 +512,104 @@ namespace gs::training {
         }
     }
 
-    torch::Tensor sine_background_for_step(
-        int step, int periodR = 37, int periodG = 41, int periodB = 43, bool grayscale_only = false, float jitter_amp = 0.03f) {
-        const float eps = 1e-4f;
-        auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-        const float two_pi = M_PI * 2.0f;
+    // TODO: Port to LibTorch-free implementation
+    // torch::Tensor sine_background_for_step(
+    //     int step, int periodR = 37, int periodG = 41, int periodB = 43, bool grayscale_only = false, float jitter_amp = 0.03f) {
+    //     const float eps = 1e-4f;
+    //     auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    //     const float two_pi = M_PI * 2.0f;
+    //
+    //     // Phase 0..2PI
+    //     const float tR = (periodR > 0) ? float(step % periodR) / float(periodR) : 0.0f;
+    //     const float phaseR = two_pi * tR;
+    //
+    //     const float tG = (periodG > 0) ? float(step % periodG) / float(periodG) : 0.0f;
+    //     const float phaseG = two_pi * tG;
+    //
+    //     const float tB = (periodB > 0) ? float(step % periodB) / float(periodB) : 0.0f;
+    //     const float phaseB = two_pi * tB;
+    //
+    //     torch::Tensor bg;
+    //     if (grayscale_only) {
+    //         // Grayscale: g in [0,1]
+    //         float g = 0.5f * (1.0f + std::sin(phaseG));
+    //         bg = torch::tensor({g, g, g}, opts);
+    //     } else {
+    //         // Phase-shifted RGB: covers the color wheel over the cycle
+    //         float r = 0.5f * (1.0f + std::sin(phaseR + 0.0f * two_pi / 3.0f));
+    //         float g = 0.5f * (1.0f + std::sin(phaseG + 1.0f * two_pi / 3.0f));
+    //         float b = 0.5f * (1.0f + std::sin(phaseB + 2.0f * two_pi / 3.0f));
+    //         bg = torch::tensor({r, g, b}, opts);
+    //     }
+    //
+    //     // Small jitter to prevent exact periodic lock-in
+    //     if (jitter_amp > 0.0f) {
+    //         auto jitter = (torch::rand({3}, opts) - 0.5f) * (2.0f * jitter_amp);
+    //         bg = (bg + jitter).clamp(eps, 1.0f - eps);
+    //     } else {
+    //         bg = bg.clamp(eps, 1.0f - eps);
+    //     }
+    //     return bg;
+    // }
 
-        // Phase 0..2PI
-        const float tR = (periodR > 0) ? float(step % periodR) / float(periodR) : 0.0f;
-        const float phaseR = two_pi * tR;
-
-        const float tG = (periodG > 0) ? float(step % periodG) / float(periodG) : 0.0f;
-        const float phaseG = two_pi * tG;
-
-        const float tB = (periodB > 0) ? float(step % periodB) / float(periodB) : 0.0f;
-        const float phaseB = two_pi * tB;
-
-        torch::Tensor bg;
-        if (grayscale_only) {
-            // Grayscale: g in [0,1]
-            float g = 0.5f * (1.0f + std::sin(phaseG));
-            bg = torch::tensor({g, g, g}, opts);
-        } else {
-            // Phase-shifted RGB: covers the color wheel over the cycle
-            float r = 0.5f * (1.0f + std::sin(phaseR + 0.0f * two_pi / 3.0f));
-            float g = 0.5f * (1.0f + std::sin(phaseG + 1.0f * two_pi / 3.0f));
-            float b = 0.5f * (1.0f + std::sin(phaseB + 2.0f * two_pi / 3.0f));
-            bg = torch::tensor({r, g, b}, opts);
-        }
-
-        // Small jitter to prevent exact periodic lock-in
-        if (jitter_amp > 0.0f) {
-            auto jitter = (torch::rand({3}, opts) - 0.5f) * (2.0f * jitter_amp);
-            bg = (bg + jitter).clamp(eps, 1.0f - eps);
-        } else {
-            bg = bg.clamp(eps, 1.0f - eps);
-        }
-        return bg;
-    }
-
+    // TODO: Port to LibTorch-free implementation
     // Helper to ensure buf matches base (defined, dtype, device, shape)
-    static inline void ensure_like(torch::Tensor& buf, const torch::Tensor& base) {
-        bool is_undefined = !buf.defined();
-        bool dtype_mismatch = (buf.dtype() != base.dtype());
+    // static inline void ensure_like(torch::Tensor& buf, const torch::Tensor& base) {
+    //     bool is_undefined = !buf.defined();
+    //     bool dtype_mismatch = (buf.dtype() != base.dtype());
+    //
+    //     bool need = (is_undefined || dtype_mismatch);
+    //     if (!need) {
+    //         bool device_mismatch = (buf.device() != base.device());
+    //         bool shape_mismatch = (buf.sizes().vec() != base.sizes().vec());
+    //         need = (device_mismatch || shape_mismatch);
+    //     }
+    //
+    //     if (need)
+    //         buf = torch::empty_like(base);
+    // }
 
-        bool need = (is_undefined || dtype_mismatch);
-        if (!need) {
-            bool device_mismatch = (buf.device() != base.device());
-            bool shape_mismatch = (buf.sizes().vec() != base.sizes().vec());
-            need = (device_mismatch || shape_mismatch);
-        }
-
-        if (need)
-            buf = torch::empty_like(base);
-    }
-
-    torch::Tensor& Trainer::background_for_step(int iter) {
-        torch::NoGradGuard no_grad;
-        const auto& opt = params_.optimization;
-
-        // Fast path: modulation disabled: return base background_
-        if (!opt.bg_modulation) {
+    lfs::core::Tensor& Trainer::background_for_step(int iter) {
+        // TODO: Port background modulation to LibTorch-free implementation
+        // torch::NoGradGuard no_grad;
+        // const auto& opt = params_.optimization;
+        //
+        // // Fast path: modulation disabled: return base background_
+        // if (!opt.bg_modulation) {
             return background_;
-        }
-
-        const float w_mix = inv_weight_piecewise(iter, opt.iterations);
-        if (w_mix <= 0.0f) {
-            return background_;
-        }
-
-        // Generate per-iteration sine background
-        auto sine_bg = sine_background_for_step(iter);
-
-        // Ensure reusable buffer exists
-        ensure_like(bg_mix_buffer_, background_);
-
-        bg_mix_buffer_.copy_(background_); // d2d copy of 3 floats
-        bg_mix_buffer_.mul_(1.0f - w_mix);
-        bg_mix_buffer_.add_(sine_bg, w_mix);
-
-        return bg_mix_buffer_; // const ref to mixed background
+        // }
+        //
+        // const float w_mix = inv_weight_piecewise(iter, opt.iterations);
+        // if (w_mix <= 0.0f) {
+        //     return background_;
+        // }
+        //
+        // // Generate per-iteration sine background
+        // auto sine_bg = sine_background_for_step(iter);
+        //
+        // // Ensure reusable buffer exists
+        // ensure_like(bg_mix_buffer_, background_);
+        //
+        // bg_mix_buffer_.copy_(background_); // d2d copy of 3 floats
+        // bg_mix_buffer_.mul_(1.0f - w_mix);
+        // bg_mix_buffer_.add_(sine_bg, w_mix);
+        //
+        // return bg_mix_buffer_; // const ref to mixed background
     }
 
     std::expected<Trainer::StepResult, std::string> Trainer::train_step(
         int iter,
-        Camera* cam,
-        torch::Tensor gt_image,
+        lfs::core::Camera* cam,
+        lfs::core::Tensor gt_image,
         RenderMode render_mode,
         std::stop_token stop_token) {
         try {
-            if (params_.optimization.gut) {
-                if (cam->camera_model_type() == gsplat::CameraModelType::ORTHO) {
-                    return std::unexpected("Training on cameras with ortho model is not supported yet.");
-                }
-            } else {
+            // TODO: Port 3DGUT rasterizer to LibTorch-free implementation
+            // if (params_.optimization.gut) {
+            //     if (cam->camera_model_type() == gsplat::CameraModelType::ORTHO) {
+            //         return std::unexpected("Training on cameras with ortho model is not supported yet.");
+            //     }
+            // } else {
                 if (cam->radial_distortion().numel() != 0 ||
                     cam->tangential_distortion().numel() != 0) {
                     return std::unexpected("Distorted images detected.  You can use --gut option to train on cameras with distortion.");
@@ -604,7 +617,7 @@ namespace gs::training {
                 if (cam->camera_model_type() != gsplat::CameraModelType::PINHOLE) {
                     return std::unexpected("You must use --gut option to train on cameras with non-pinhole model.");
                 }
-            }
+            // }
 
             current_iteration_ = iter;
 
@@ -654,31 +667,34 @@ namespace gs::training {
                 }
             }
 
-            auto adjusted_cam_pos = poseopt_module_->forward(cam->world_view_transform(), torch::tensor({cam->uid()}));
-            auto adjusted_cam = Camera(*cam, adjusted_cam_pos);
+            // TODO: Port pose optimization to LibTorch-free implementation
+            // auto adjusted_cam_pos = poseopt_module_->forward(cam->world_view_transform(), torch::tensor({cam->uid()}));
+            // auto adjusted_cam = Camera(*cam, adjusted_cam_pos);
 
-            torch::Tensor& bg = background_for_step(iter);
+            lfs::core::Tensor& bg = background_for_step(iter);
 
             RenderOutput r_output;
             std::optional<FastRasterizeContext> fast_raster_ctx;
-            std::optional<RasterizeContext> gut_raster_ctx;
+            // TODO: Port 3DGUT rasterizer to LibTorch-free implementation
+            // std::optional<RasterizeContext> gut_raster_ctx;
 
-            // Use the render mode from parameters
-            if (!params_.optimization.gut) {
+            // Use the render mode from parameters (FastGS backend only for now)
+            // TODO: Port 3DGUT rasterizer to LibTorch-free implementation
+            // if (!params_.optimization.gut) {
                 // FastGS backend
-                auto [output, ctx] = fast_rasterize_forward(adjusted_cam, strategy_->get_model(), bg);
+                auto [output, ctx] = fast_rasterize_forward(*cam, strategy_->get_model(), bg);
                 r_output = output;
                 fast_raster_ctx = std::move(ctx);
-            } else {
-                // GUT backend: Use manual rasterizer (no autograd)
-                auto [output, ctx] = rasterize_forward(adjusted_cam, strategy_->get_model(), bg,
-                                                       1.0f, false, false, render_mode, nullptr);
-                r_output = output;
-                gut_raster_ctx = std::move(ctx);
-            }
+            // } else:
+            //     // GUT backend: Use manual rasterizer (no autograd)
+            //     auto [output, ctx] = rasterize_forward(*cam, strategy_->get_model(), bg,
+            //                                            1.0f, false, false, render_mode, nullptr);
+            //     r_output = output;
+            //     gut_raster_ctx = std::move(ctx);
+            // }
 
             // Apply bilateral grid if enabled (manual forward - no autograd)
-            std::optional<bilateral_grid::BilateralGridSliceContext> bilateral_ctx;
+            std::optional<BilateralGridSliceContext> bilateral_ctx;
             if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
                 auto [output_image, ctx] = bilateral_grid_->apply_forward(r_output.image, cam->uid());
                 r_output.image = output_image;
@@ -687,7 +703,7 @@ namespace gs::training {
 
             // Compute photometric loss and gradients manually (no autograd)
             float loss_value;
-            torch::Tensor grad_image;
+            lfs::core::Tensor grad_image;
 
             auto loss_grad_result = compute_photometric_loss_with_gradient(
                 r_output.image,
@@ -702,7 +718,7 @@ namespace gs::training {
 
             // Bilateral grid backward if enabled
             if (bilateral_grid_ && params_.optimization.use_bilateral_grid && bilateral_ctx.has_value()) {
-                grad_image = bilateral_grid_->apply_backward(*bilateral_ctx, grad_image, cam->uid());
+                grad_image = bilateral_grid_->apply_backward(*bilateral_ctx, grad_image);
             }
 
             // Scale regularization loss
@@ -746,49 +762,48 @@ namespace gs::training {
 
             // Backward for sparsity loss (gradient w.r.t. sparsity loss is 1.0)
             if (sparsity_optimizer_ && sparsity_optimizer_->should_apply_loss(iter) && sparsity_loss_value > 0.0f) {
-                auto grad_result = sparsity_optimizer_->compute_loss_backward(sparsity_ctx, 1.0f);
-                if (!grad_result) {
-                    return std::unexpected(grad_result.error());
+                auto backward_result = sparsity_optimizer_->compute_loss_backward(
+                    sparsity_ctx, 1.0f, strategy_->get_model().opacity_grad());
+                if (!backward_result) {
+                    return std::unexpected(backward_result.error());
                 }
-                auto grad_opacities = *grad_result;
-
-                // Accumulate gradient into opacity_raw
-                if (!strategy_->get_model().opacity_raw().grad().defined()) {
-                    strategy_->get_model().opacity_raw().mutable_grad() = torch::zeros_like(strategy_->get_model().opacity_raw());
-                }
-                strategy_->get_model().opacity_raw().mutable_grad().add_(grad_opacities);
             }
 
             // Call explicit backward for rasterizers
             if (fast_raster_ctx.has_value()) {
                 fast_rasterize_backward(*fast_raster_ctx, grad_image, strategy_->get_model());
-            } else if (gut_raster_ctx.has_value()) {
-                // GUT path: Use manual rasterizer backward (no autograd)
-                rasterize_backward(*gut_raster_ctx, grad_image, strategy_->get_model());
             }
+            // TODO: Port 3DGUT rasterizer to LibTorch-free implementation
+            // else if (gut_raster_ctx.has_value()) {
+            //     // GUT path: Use manual rasterizer backward (no autograd)
+            //     rasterize_backward(*gut_raster_ctx, grad_image, strategy_->get_model());
+            // }
 
             // Store the loss value immediately
             current_loss_ = loss_value;
 
+            // TODO: Port progress to LibTorch-free implementation
             // Update progress synchronously if needed
-            if (progress_) {
-                progress_->update(iter, loss_value,
-                                  static_cast<int>(strategy_->get_model().size()),
-                                  strategy_->is_refining(iter));
-            }
+            // if (progress_) {
+            //     progress_->update(iter, loss_value,
+            //                       static_cast<int>(strategy_->get_model().size()),
+            //                       strategy_->is_refining(iter));
+            // }
 
+            // TODO: Port events system to use lfs::core events
             // Emit training progress event (throttled to reduce GUI updates)
-            if (iter % 10 == 0 || iter == 1) {
-                // Only update every 10 iterations
-                events::state::TrainingProgress{
-                    .iteration = iter,
-                    .loss = loss_value,
-                    .num_gaussians = static_cast<int>(strategy_->get_model().size()),
-                    .is_refining = strategy_->is_refining(iter)}
-                    .emit();
-            }
+            // if (iter % 10 == 0 || iter == 1) {
+            //     // Only update every 10 iterations
+            //     events::state::TrainingProgress{
+            //         .iteration = iter,
+            //         .loss = loss_value,
+            //         .num_gaussians = static_cast<int>(strategy_->get_model().size()),
+            //         .is_refining = strategy_->is_refining(iter)}
+            //         .emit();
+            // }
             {
-                torch::NoGradGuard no_grad;
+                // TODO: Port to LibTorch-free implementation
+                // torch::NoGradGuard no_grad;
 
                 DeferredEvents deferred;
                 {
@@ -809,22 +824,26 @@ namespace gs::training {
 
                     strategy_->step(iter);
 
-                    if (params_.optimization.use_bilateral_grid) {
-                        bilateral_grid_optimizer_->step();
-                        bilateral_grid_optimizer_->zero_grad(true);
-                        bilateral_grid_scheduler_->step();
-                    }
-                    if (params_.optimization.pose_optimization != "none") {
-                        poseopt_optimizer_->step();
-                        poseopt_optimizer_->zero_grad(true);
-                    }
+                    // TODO: Implement AdamOptimizer for bilateral grid
+                    // if (params_.optimization.use_bilateral_grid) {
+                    //     bilateral_grid_optimizer_->step(iter);
+                    //     bilateral_grid_optimizer_->zero_grad(iter);
+                    //     bilateral_grid_scheduler_->step();
+                    // }
+                    // TODO: Port pose optimization to LibTorch-free implementation
+                    // if (params_.optimization.pose_optimization != "none") {
+                    //     poseopt_optimizer_->step();
+                    //     poseopt_optimizer_->zero_grad(true);
+                    // }
 
+                    // TODO: Port events system to use lfs::core events
                     // Queue event for emission after lock release
-                    deferred.add(events::state::ModelUpdated{
-                        .iteration = iter,
-                        .num_gaussians = static_cast<size_t>(strategy_->get_model().size())});
+                    // deferred.add(events::state::ModelUpdated{
+                    //     .iteration = iter,
+                    //     .num_gaussians = static_cast<size_t>(strategy_->get_model().size())});
                 } // Lock released here
 
+                // TODO: Port events system to use lfs::core events
                 // Events automatically emitted here when deferred destructs
 
                 // Handle sparsity updates
@@ -837,15 +856,16 @@ namespace gs::training {
                     LOG_ERROR("Sparsity pruning failed: {}", result.error());
                 }
 
+                // TODO: Port metrics to LibTorch-free implementation
                 // Clean evaluation - let the evaluator handle everything
-                if (evaluator_->is_enabled() && evaluator_->should_evaluate(iter)) {
-                    evaluator_->print_evaluation_header(iter);
-                    auto metrics = evaluator_->evaluate(iter,
-                                                        strategy_->get_model(),
-                                                        val_dataset_,
-                                                        background_);
-                    LOG_INFO("{}", metrics.to_string());
-                }
+                // if (evaluator_->is_enabled() && evaluator_->should_evaluate(iter)) {
+                //     evaluator_->print_evaluation_header(iter);
+                //     auto metrics = evaluator_->evaluate(iter,
+                //                                         strategy_->get_model(),
+                //                                         val_dataset_,
+                //                                         background_);
+                //     LOG_INFO("{}", metrics.to_string());
+                // }
 
                 // Save model at specified steps
                 if (!params_.optimization.skip_intermediate_saving) {
@@ -854,11 +874,12 @@ namespace gs::training {
                             const bool join_threads = (iter == params_.optimization.save_steps.back());
                             auto save_path = params_.dataset.output_path;
                             save_ply(save_path, iter, /*join=*/join_threads);
+                            // TODO: Port events system to use lfs::core events
                             // Emit checkpoint saved event
-                            events::state::CheckpointSaved{
-                                .iteration = iter,
-                                .path = save_path}
-                                .emit();
+                            // events::state::CheckpointSaved{
+                            //     .iteration = iter,
+                            //     .path = save_path}
+                            //     .emit();
                         }
                     }
                 }
@@ -868,7 +889,7 @@ namespace gs::training {
                         auto train_cam = train_dataset_->get_camera_by_filename(img_name);
                         auto val_cam = val_dataset_ ? val_dataset_->get_camera_by_filename(img_name) : std::nullopt;
                         if (train_cam.has_value() || val_cam.has_value()) {
-                            Camera* cam_to_use = train_cam.has_value() ? train_cam.value() : val_cam.value();
+                            lfs::core::Camera* cam_to_use = train_cam.has_value() ? train_cam.value() : val_cam.value();
 
                             // Image size isn't correct until the image has been loaded once
                             // If we use the camera before it's loaded, it will render images at the non-scaled size
@@ -879,21 +900,22 @@ namespace gs::training {
                             }
 
                             RenderOutput rendered_timelapse_output;
-                            if (params_.optimization.gut) {
-                                rendered_timelapse_output = rasterize(*cam_to_use, strategy_->get_model(), bg, 1.0f, false,
-                                                                     false, RenderMode::RGB, nullptr);
-                            } else {
+                            // TODO: Port 3DGUT rasterizer to LibTorch-free implementation
+                            // if (params_.optimization.gut) {
+                            //     rendered_timelapse_output = rasterize(*cam_to_use, strategy_->get_model(), bg, 1.0f, false,
+                            //                                          false, RenderMode::RGB, nullptr);
+                            // } else {
                                 rendered_timelapse_output = fast_rasterize(*cam_to_use, strategy_->get_model(), background_);
-                            }
+                            // }
 
                             // Get folder name to save in by stripping file extension
-                            std::string folder_name = loader::strip_extension(img_name);
+                            std::string folder_name = gs::loader::strip_extension(img_name);
 
                             auto output_path = params_.dataset.output_path / "timelapse" / folder_name;
                             std::filesystem::create_directories(output_path);
 
-                            image_io::save_image_async(output_path / std::format("{:06d}.jpg", iter),
-                                                       rendered_timelapse_output.image);
+                            lfs::core::image_io::save_image_async(output_path / std::format("{:06d}.jpg", iter),
+                                                                   rendered_timelapse_output.image);
                         } else {
                             LOG_WARN("Timelapse image '{}' not found in dataset.", img_name);
                         }
@@ -922,22 +944,24 @@ namespace gs::training {
         training_complete_ = false;
         ready_to_start_ = false; // Reset the flag
 
+        // TODO: Port events system to use lfs::core events
         // Event-based ready signaling
-        if (!params_.optimization.headless) {
-            // Subscribe to start signal (no need to store handle)
-            events::internal::TrainingReadyToStart::when([this](const auto&) {
-                ready_to_start_ = true;
-            });
-
-            // Signal we're ready
-            events::internal::TrainerReady{}.emit();
-
-            // Wait for start signal
-            LOG_DEBUG("Waiting for start signal from GUI...");
-            while (!ready_to_start_.load() && !stop_token.stop_requested()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-        }
+        // if (!params_.optimization.headless) {
+        //     // Subscribe to start signal (no need to store handle)
+        //     events::internal::TrainingReadyToStart::when([this](const auto&) {
+        //         ready_to_start_ = true;
+        //     });
+        //
+        //     // Signal we're ready
+        //     events::internal::TrainerReady{}.emit();
+        //
+        //     // Wait for start signal
+        //     LOG_DEBUG("Waiting for start signal from GUI...");
+        //     while (!ready_to_start_.load() && !stop_token.stop_requested()) {
+        //         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        //     }
+        // }
+        ready_to_start_ = true; // Skip GUI wait for now
 
         is_running_ = true; // Now we can start
         LOG_INFO("Starting training loop with {} workers", params_.optimization.num_workers);
@@ -953,15 +977,15 @@ namespace gs::training {
             const int num_workers = params_.optimization.num_workers;
             const RenderMode render_mode = stringToRenderMode(params_.optimization.render_mode);
 
-            if (progress_) {
-                progress_->update(iter, current_loss_.load(),
-                                  static_cast<int>(strategy_->get_model().size()),
-                                  strategy_->is_refining(iter));
-            }
+            // TODO: Port progress to LibTorch-free implementation
+            // if (progress_) {
+            //     progress_->update(iter, current_loss_.load(),
+            //                       static_cast<int>(strategy_->get_model().size()),
+            //                       strategy_->is_refining(iter));
+            // }
 
             // Use infinite dataloader to avoid epoch restarts
             auto train_dataloader = create_infinite_dataloader_from_dataset(train_dataset_, num_workers);
-            auto loader = train_dataloader->begin();
 
             LOG_DEBUG("Starting training iterations");
             // Single loop without epochs
@@ -972,13 +996,19 @@ namespace gs::training {
 
                 // Wait for previous callback if still running
                 if (callback_busy_.load()) {
-                    callback_stream_.synchronize();
+                    cudaStreamSynchronize(callback_stream_);
                 }
 
-                auto& batch = *loader;
+                // Get next batch from dataloader
+                auto batch_opt = train_dataloader->next();
+                if (!batch_opt) {
+                    LOG_ERROR("DataLoader returned nullopt unexpectedly");
+                    break;
+                }
+                auto& batch = *batch_opt;
                 auto camera_with_image = batch[0].data;
-                Camera* cam = camera_with_image.camera;
-                torch::Tensor gt_image = std::move(camera_with_image.image).to(torch::kCUDA, /*non_blocking=*/true);
+                lfs::core::Camera* cam = camera_with_image.camera;
+                lfs::core::Tensor gt_image = std::move(camera_with_image.image);
 
                 auto step_result = train_step(iter, cam, gt_image, render_mode, stop_token);
                 if (!step_result) {
@@ -993,7 +1023,7 @@ namespace gs::training {
                 if (iter > 1 && callback_) {
                     callback_busy_ = true;
                     auto err = cudaLaunchHostFunc(
-                        callback_stream_.stream(),
+                        callback_stream_,
                         [](void* self) {
                             auto* trainer = static_cast<Trainer*>(self);
                             if (trainer->callback_) {
@@ -1009,32 +1039,34 @@ namespace gs::training {
                 }
 
                 ++iter;
-                ++loader;
             }
 
             // Ensure callback is finished before final save
             if (callback_busy_.load()) {
-                callback_stream_.synchronize();
+                cudaStreamSynchronize(callback_stream_);
             }
 
             // Final save if not already saved by stop request
             if (!stop_requested_.load() && !stop_token.stop_requested()) {
                 auto final_path = params_.dataset.output_path;
                 save_ply(final_path, params_.optimization.iterations, /*join=*/true);
+                // TODO: Port events system to use lfs::core events
                 // Emit final checkpoint saved event
-                events::state::CheckpointSaved{
-                    static_cast<int>(params_.optimization.iterations),
-                    final_path}
-                    .emit();
+                // events::state::CheckpointSaved{
+                //     static_cast<int>(params_.optimization.iterations),
+                //     final_path}
+                //     .emit();
             }
 
-            if (progress_) {
-                progress_->complete();
-            }
-            evaluator_->save_report();
-            if (progress_) {
-                progress_->print_final_summary(static_cast<int>(strategy_->get_model().size()));
-            }
+            // TODO: Port progress to LibTorch-free implementation
+            // if (progress_) {
+            //     progress_->complete();
+            // }
+            // TODO: Port metrics to LibTorch-free implementation
+            // evaluator_->save_report();
+            // if (progress_) {
+            //     progress_->print_final_summary(static_cast<int>(strategy_->get_model().size()));
+            // }
 
             is_running_ = false;
             training_complete_ = true;
@@ -1051,7 +1083,7 @@ namespace gs::training {
         }
     }
 
-    std::shared_ptr<const Camera> Trainer::getCamById(int camId) const {
+    std::shared_ptr<const lfs::core::Camera> Trainer::getCamById(int camId) const {
         const auto it = m_cam_id_to_cam.find(camId);
         if (it == m_cam_id_to_cam.end()) {
             LOG_ERROR("getCamById - could not find cam with cam id {}", camId);
@@ -1060,8 +1092,8 @@ namespace gs::training {
         return it->second;
     }
 
-    std::vector<std::shared_ptr<const Camera>> Trainer::getCamList() const {
-        std::vector<std::shared_ptr<const Camera>> cams;
+    std::vector<std::shared_ptr<const lfs::core::Camera>> Trainer::getCamList() const {
+        std::vector<std::shared_ptr<const lfs::core::Camera>> cams;
         cams.reserve(m_cam_id_to_cam.size());
         for (auto& [key, value] : m_cam_id_to_cam) {
             cams.push_back(value);
@@ -1095,4 +1127,4 @@ namespace gs::training {
 
         LOG_DEBUG("PLY save initiated: {} (sync={}), SOG always sync", save_path.string(), join_threads);
     }
-} // namespace gs::training
+} // namespace lfs::training

@@ -78,6 +78,11 @@ set(OPTIONAL_TEST_FILES
     test_mcmc_strategy.cpp
     test_tensor_bool.cpp
     test_dataloader_lfs.cpp
+    test_bilateral_grid.cpp
+    test_sparsity_optimizer.cpp
+    test_sparsity_debug.cpp
+    test_dtype_operations_comprehensive.cpp
+    test_tensor_bugs.cpp
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})

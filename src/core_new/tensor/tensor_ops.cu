@@ -1686,6 +1686,17 @@ namespace lfs::core::tensor_ops {
     template void launch_convert_type<int, float>(const int*, float*, size_t, cudaStream_t);
     template void launch_convert_type<float, int>(const float*, int*, size_t, cudaStream_t);
 
+    // Float16 conversions
+    template void launch_convert_type<float, __half>(const float*, __half*, size_t, cudaStream_t);
+    template void launch_convert_type<__half, float>(const __half*, float*, size_t, cudaStream_t);
+    template void launch_convert_type<int, __half>(const int*, __half*, size_t, cudaStream_t);
+    template void launch_convert_type<__half, int>(const __half*, int*, size_t, cudaStream_t);
+    template void launch_convert_type<int64_t, __half>(const int64_t*, __half*, size_t, cudaStream_t);
+    template void launch_convert_type<__half, int64_t>(const __half*, int64_t*, size_t, cudaStream_t);
+    // Bool/UInt8 (uint8_t = unsigned char) <-> Float16
+    template void launch_convert_type<uint8_t, __half>(const uint8_t*, __half*, size_t, cudaStream_t);
+    template void launch_convert_type<__half, uint8_t>(const __half*, uint8_t*, size_t, cudaStream_t);
+
     // ============= EXPLICIT INSTANTIATIONS FOR C++ FILES =============
     // C++ files (not CUDA) can't see tensor_generic_ops.cuh (which is #ifdef __CUDACC__),
     // so we need explicit instantiations for functors used by C++ expression templates.
@@ -1939,5 +1950,107 @@ namespace lfs::core::tensor_ops {
 
     template void launch_unary_op_generic<float, float, ops::composed_unary_op<ops::scalar_right_op<ops::mul_op, float>, ops::relu_op>>(
         const float*, float*, size_t, ops::composed_unary_op<ops::scalar_right_op<ops::mul_op, float>, ops::relu_op>, cudaStream_t);
+
+    // ============================================================================
+    // Type Promotion Instantiations
+    // ============================================================================
+    // Added to support the type promotion system for mixed-dtype operations.
+    // These cover all combinations that promote_dtypes() might produce.
+    //
+    // Type hierarchy: Bool < UInt8 < Int32 < Int64 < Float16 < Float32
+    // ============================================================================
+
+    // Float16 operations
+    template void launch_binary_op_generic<__half, __half, ops::add_op>(
+        const __half*, const __half*, __half*, size_t, ops::add_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, __half, ops::sub_op>(
+        const __half*, const __half*, __half*, size_t, ops::sub_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, __half, ops::mul_op>(
+        const __half*, const __half*, __half*, size_t, ops::mul_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, __half, ops::div_op>(
+        const __half*, const __half*, __half*, size_t, ops::div_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, __half, ops::maximum_op>(
+        const __half*, const __half*, __half*, size_t, ops::maximum_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, __half, ops::minimum_op>(
+        const __half*, const __half*, __half*, size_t, ops::minimum_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, __half, ops::pow_op>(
+        const __half*, const __half*, __half*, size_t, ops::pow_op, cudaStream_t);
+
+    // Int64 operations
+    template void launch_binary_op_generic<int64_t, int64_t, ops::add_op>(
+        const int64_t*, const int64_t*, int64_t*, size_t, ops::add_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, int64_t, ops::sub_op>(
+        const int64_t*, const int64_t*, int64_t*, size_t, ops::sub_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, int64_t, ops::mul_op>(
+        const int64_t*, const int64_t*, int64_t*, size_t, ops::mul_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, int64_t, ops::div_op>(
+        const int64_t*, const int64_t*, int64_t*, size_t, ops::div_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, int64_t, ops::maximum_op>(
+        const int64_t*, const int64_t*, int64_t*, size_t, ops::maximum_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, int64_t, ops::minimum_op>(
+        const int64_t*, const int64_t*, int64_t*, size_t, ops::minimum_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, int64_t, ops::pow_op>(
+        const int64_t*, const int64_t*, int64_t*, size_t, ops::pow_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, int64_t, ops::mod_op>(
+        const int64_t*, const int64_t*, int64_t*, size_t, ops::mod_op, cudaStream_t);
+
+    // UInt8 operations
+    template void launch_binary_op_generic<uint8_t, uint8_t, ops::add_op>(
+        const uint8_t*, const uint8_t*, uint8_t*, size_t, ops::add_op, cudaStream_t);
+    template void launch_binary_op_generic<uint8_t, uint8_t, ops::sub_op>(
+        const uint8_t*, const uint8_t*, uint8_t*, size_t, ops::sub_op, cudaStream_t);
+    template void launch_binary_op_generic<uint8_t, uint8_t, ops::mul_op>(
+        const uint8_t*, const uint8_t*, uint8_t*, size_t, ops::mul_op, cudaStream_t);
+    template void launch_binary_op_generic<uint8_t, uint8_t, ops::div_op>(
+        const uint8_t*, const uint8_t*, uint8_t*, size_t, ops::div_op, cudaStream_t);
+    template void launch_binary_op_generic<uint8_t, uint8_t, ops::maximum_op>(
+        const uint8_t*, const uint8_t*, uint8_t*, size_t, ops::maximum_op, cudaStream_t);
+    template void launch_binary_op_generic<uint8_t, uint8_t, ops::minimum_op>(
+        const uint8_t*, const uint8_t*, uint8_t*, size_t, ops::minimum_op, cudaStream_t);
+    template void launch_binary_op_generic<uint8_t, uint8_t, ops::pow_op>(
+        const uint8_t*, const uint8_t*, uint8_t*, size_t, ops::pow_op, cudaStream_t);
+
+    // mod_op for float and int (was missing!)
+    template void launch_binary_op_generic<float, float, ops::mod_op>(
+        const float*, const float*, float*, size_t, ops::mod_op, cudaStream_t);
+    template void launch_binary_op_generic<int, int, ops::mod_op>(
+        const int*, const int*, int*, size_t, ops::mod_op, cudaStream_t);
+
+    // Comparison operations for additional types
+    template void launch_binary_op_generic<int64_t, unsigned char, ops::greater_op>(
+        const int64_t*, const int64_t*, unsigned char*, size_t, ops::greater_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, unsigned char, ops::greater_equal_op>(
+        const int64_t*, const int64_t*, unsigned char*, size_t, ops::greater_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, unsigned char, ops::less_op>(
+        const int64_t*, const int64_t*, unsigned char*, size_t, ops::less_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, unsigned char, ops::less_equal_op>(
+        const int64_t*, const int64_t*, unsigned char*, size_t, ops::less_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, unsigned char, ops::equal_op>(
+        const int64_t*, const int64_t*, unsigned char*, size_t, ops::equal_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, unsigned char, ops::not_equal_op>(
+        const int64_t*, const int64_t*, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
+
+    template void launch_binary_op_generic<__half, unsigned char, ops::greater_op>(
+        const __half*, const __half*, unsigned char*, size_t, ops::greater_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, unsigned char, ops::greater_equal_op>(
+        const __half*, const __half*, unsigned char*, size_t, ops::greater_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, unsigned char, ops::less_op>(
+        const __half*, const __half*, unsigned char*, size_t, ops::less_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, unsigned char, ops::less_equal_op>(
+        const __half*, const __half*, unsigned char*, size_t, ops::less_equal_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, unsigned char, ops::equal_op>(
+        const __half*, const __half*, unsigned char*, size_t, ops::equal_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, unsigned char, ops::not_equal_op>(
+        const __half*, const __half*, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
+
+    // Logical operations for additional types
+    template void launch_binary_op_generic<int64_t, unsigned char, ops::logical_and_op>(
+        const int64_t*, const int64_t*, unsigned char*, size_t, ops::logical_and_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, unsigned char, ops::logical_or_op>(
+        const int64_t*, const int64_t*, unsigned char*, size_t, ops::logical_or_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, unsigned char, ops::logical_and_op>(
+        const __half*, const __half*, unsigned char*, size_t, ops::logical_and_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, unsigned char, ops::logical_or_op>(
+        const __half*, const __half*, unsigned char*, size_t, ops::logical_or_op, cudaStream_t);
 
 } // namespace lfs::core::tensor_ops

@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "components/sparsity_optimizer.hpp"
+#include "../components/sparsity_optimizer.hpp"
 #include "core/splat_data.hpp"
 #include <expected>
 #include <memory>

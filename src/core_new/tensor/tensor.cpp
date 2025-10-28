@@ -6,6 +6,7 @@
 #include "internal/tensor_ops.hpp"
 #include <cstring>
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <fstream>
 #include <iomanip>
 #include <numeric>
@@ -722,14 +723,126 @@ namespace lfs::core {
             return result;
         }
 
+        // Bool -> Int64
+        if (dtype_ == DataType::Bool && dtype == DataType::Int64) {
+            auto result = empty(shape_, device_, DataType::Int64);
+            if (numel() == 0)
+                return result;
+
+            if (device_ == Device::CUDA) {
+                // Use generic conversion (unsigned char -> int64_t)
+                tensor_ops::launch_convert_type<unsigned char, int64_t>(
+                    ptr<unsigned char>(), result.ptr<int64_t>(), numel(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                const unsigned char* src = ptr<unsigned char>();
+                int64_t* dst = result.ptr<int64_t>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = static_cast<int64_t>(src[i]);
+                }
+            }
+            return result;
+        }
+
+        // Int64 -> Bool
+        if (dtype_ == DataType::Int64 && dtype == DataType::Bool) {
+            auto result = empty(shape_, device_, DataType::Bool);
+            if (numel() == 0)
+                return result;
+
+            if (device_ == Device::CUDA) {
+                // Copy to CPU, convert, copy back
+                auto result_cpu = empty(shape_, Device::CPU, DataType::Bool);
+                std::vector<int64_t> temp(numel());
+                CHECK_CUDA(cudaMemcpy(temp.data(), ptr<int64_t>(), bytes(), cudaMemcpyDeviceToHost));
+
+                unsigned char* dst_cpu = result_cpu.ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst_cpu[i] = (temp[i] != 0) ? 1 : 0;
+                }
+
+                CHECK_CUDA(cudaMemcpy(result.ptr<unsigned char>(), result_cpu.ptr<unsigned char>(),
+                                     numel() * sizeof(unsigned char), cudaMemcpyHostToDevice));
+            } else {
+                const int64_t* src = ptr<int64_t>();
+                unsigned char* dst = result.ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = (src[i] != 0) ? 1 : 0;
+                }
+            }
+            return result;
+        }
+
         CONVERT_DTYPE_CUDA(int64_t, uint8_t, DataType::Int64, DataType::UInt8)
         CONVERT_DTYPE_CUDA(uint8_t, int64_t, DataType::UInt8, DataType::Int64)
+
+        // Bool -> Float16
+        if (dtype_ == DataType::Bool && dtype == DataType::Float16) {
+            auto result = empty(shape_, device_, DataType::Float16);
+            if (numel() == 0)
+                return result;
+
+            if (device_ == Device::CUDA) {
+                // Use generic conversion (unsigned char -> __half)
+                tensor_ops::launch_convert_type<unsigned char, __half>(
+                    ptr<unsigned char>(), result.ptr<__half>(), numel(), 0);
+                CHECK_CUDA(cudaDeviceSynchronize());
+            } else {
+                const unsigned char* src = ptr<unsigned char>();
+                __half* dst = result.ptr<__half>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = __float2half(static_cast<float>(src[i]));
+                }
+            }
+            return result;
+        }
+
+        // Float16 -> Bool
+        if (dtype_ == DataType::Float16 && dtype == DataType::Bool) {
+            auto result = empty(shape_, device_, DataType::Bool);
+            if (numel() == 0)
+                return result;
+
+            if (device_ == Device::CUDA) {
+                // Copy to CPU, convert, copy back
+                auto result_cpu = empty(shape_, Device::CPU, DataType::Bool);
+                std::vector<__half> temp(numel());
+                CHECK_CUDA(cudaMemcpy(temp.data(), ptr<__half>(), bytes(), cudaMemcpyDeviceToHost));
+                CHECK_CUDA(cudaDeviceSynchronize()); // Ensure copy completes
+
+                unsigned char* dst_cpu = result_cpu.ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst_cpu[i] = (__half2float(temp[i]) != 0.0f) ? 1 : 0;
+                }
+
+                CHECK_CUDA(cudaMemcpy(result.ptr<unsigned char>(), result_cpu.ptr<unsigned char>(),
+                                     numel() * sizeof(unsigned char), cudaMemcpyHostToDevice));
+                CHECK_CUDA(cudaDeviceSynchronize()); // Ensure copy completes
+            } else {
+                const __half* src = ptr<__half>();
+                unsigned char* dst = result.ptr<unsigned char>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = (__half2float(src[i]) != 0.0f) ? 1 : 0;
+                }
+            }
+            return result;
+        }
 
         // Int64 conversions
         CONVERT_DTYPE_CUDA(int64_t, float, DataType::Int64, DataType::Float32)
         CONVERT_DTYPE_CUDA(float, int64_t, DataType::Float32, DataType::Int64)
         CONVERT_DTYPE_CUDA(int, int64_t, DataType::Int32, DataType::Int64)
         CONVERT_DTYPE_CUDA(int64_t, int, DataType::Int64, DataType::Int32)
+
+        // Float16 conversions
+        CONVERT_DTYPE_CUDA(float, __half, DataType::Float32, DataType::Float16)
+        CONVERT_DTYPE_CUDA(__half, float, DataType::Float16, DataType::Float32)
+        CONVERT_DTYPE_CUDA(int, __half, DataType::Int32, DataType::Float16)
+        CONVERT_DTYPE_CUDA(__half, int, DataType::Float16, DataType::Int32)
+        CONVERT_DTYPE_CUDA(int64_t, __half, DataType::Int64, DataType::Float16)
+        CONVERT_DTYPE_CUDA(__half, int64_t, DataType::Float16, DataType::Int64)
+        CONVERT_DTYPE_CUDA(uint8_t, __half, DataType::UInt8, DataType::Float16)
+        CONVERT_DTYPE_CUDA(__half, uint8_t, DataType::Float16, DataType::UInt8)
 
 #undef CONVERT_DTYPE_CUDA
 

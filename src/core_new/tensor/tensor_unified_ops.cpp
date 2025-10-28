@@ -143,6 +143,14 @@ namespace lfs::core {
                             nullptr);
                         // No sync - tensor operation
                     }
+                } else if (result.dtype_ == DataType::Float16) {
+                    if (value == 0.0f) {
+                        cudaMemset(result.data_, 0, result.bytes());
+                    } else {
+                        // Create Float16 values on CPU, then copy to GPU
+                        std::vector<__half> temp(result.numel(), __float2half(value));
+                        cudaMemcpy(result.data_, temp.data(), result.bytes(), cudaMemcpyHostToDevice);
+                    }
                 } else if (result.dtype_ == DataType::Bool) {
                     unsigned char fill_val = (value != 0.0f) ? 1 : 0;
                     cudaMemset(result.data_, fill_val, result.bytes());
@@ -153,17 +161,30 @@ namespace lfs::core {
                         std::vector<int> temp(result.numel(), static_cast<int>(value));
                         cudaMemcpy(result.data_, temp.data(), result.bytes(), cudaMemcpyHostToDevice);
                     }
+                } else if (result.dtype_ == DataType::Int64) {
+                    if (value == 0.0f) {
+                        cudaMemset(result.data_, 0, result.bytes());
+                    } else {
+                        std::vector<int64_t> temp(result.numel(), static_cast<int64_t>(value));
+                        cudaMemcpy(result.data_, temp.data(), result.bytes(), cudaMemcpyHostToDevice);
+                    }
                 }
             } else {
                 if (result.dtype_ == DataType::Float32) {
                     float* ptr = static_cast<float*>(result.data_);
                     std::fill_n(ptr, result.numel(), value);
+                } else if (result.dtype_ == DataType::Float16) {
+                    __half* ptr = static_cast<__half*>(result.data_);
+                    std::fill_n(ptr, result.numel(), __float2half(value));
                 } else if (result.dtype_ == DataType::Bool) {
                     unsigned char* ptr = static_cast<unsigned char*>(result.data_);
                     std::fill_n(ptr, result.numel(), value != 0 ? 1 : 0);
                 } else if (result.dtype_ == DataType::Int32) {
                     int* ptr = static_cast<int*>(result.data_);
                     std::fill_n(ptr, result.numel(), static_cast<int>(value));
+                } else if (result.dtype_ == DataType::Int64) {
+                    int64_t* ptr = static_cast<int64_t*>(result.data_);
+                    std::fill_n(ptr, result.numel(), static_cast<int64_t>(value));
                 }
             }
             break;
@@ -625,6 +646,10 @@ namespace lfs::core {
         if (op == ReduceOp::Any || op == ReduceOp::All) {
             out_dtype = DataType::Bool;
         } else if (op == ReduceOp::Argmax || op == ReduceOp::Argmin) {
+            out_dtype = DataType::Int64;
+        } else if (dtype_ == DataType::Bool && (op == ReduceOp::Sum || op == ReduceOp::Prod)) {
+            // Bool sum/prod should return Int64 (PyTorch behavior)
+            // Summing booleans is counting True values
             out_dtype = DataType::Int64;
         }
 
