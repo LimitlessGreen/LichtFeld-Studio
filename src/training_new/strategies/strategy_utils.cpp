@@ -102,6 +102,8 @@ namespace lfs::training {
                 // Make a copy to pass to the update function
                 AdamParamState state_copy = *state;
                 optimizer_fn(state_copy, new_param);
+                // Write the modified state back to the optimizer
+                optimizer->set_state(param_type, state_copy);
             }
         }
 

@@ -5,20 +5,19 @@
 #pragma once
 
 #include "istrategy.hpp"
-#include "optimizers/scheduler.hpp"
+#include "optimizer/adam_optimizer.hpp"
+#include "optimizer/scheduler.hpp"
 #include <memory>
-#include <torch/torch.h>
 
-namespace gs::training {
+namespace lfs::training {
     // Forward declarations
     struct RenderOutput;
-    class FusedAdam;
 
     class DefaultStrategy : public IStrategy {
     public:
         DefaultStrategy() = delete;
 
-        DefaultStrategy(gs::SplatData&& splat_data);
+        DefaultStrategy(lfs::core::SplatData&& splat_data);
 
         DefaultStrategy(const DefaultStrategy&) = delete;
 
@@ -29,7 +28,7 @@ namespace gs::training {
         DefaultStrategy& operator=(DefaultStrategy&&) = default;
 
         // IStrategy interface implementation
-        void initialize(const gs::param::OptimizationParameters& optimParams) override;
+        void initialize(const lfs::core::param::OptimizationParameters& optimParams) override;
 
         void post_backward(int iter, RenderOutput& render_output) override;
 
@@ -37,29 +36,29 @@ namespace gs::training {
 
         bool is_refining(int iter) const override;
 
-        gs::SplatData& get_model() override { return _splat_data; }
-        const gs::SplatData& get_model() const override { return _splat_data; }
+        lfs::core::SplatData& get_model() override { return _splat_data; }
+        const lfs::core::SplatData& get_model() const override { return _splat_data; }
 
-        void remove_gaussians(const torch::Tensor& mask) override;
+        void remove_gaussians(const lfs::core::Tensor& mask) override;
 
     private:
         // Helper functions
-        void duplicate(const torch::Tensor& is_duplicated);
+        void duplicate(const lfs::core::Tensor& is_duplicated);
 
-        void split(const torch::Tensor& is_split);
+        void split(const lfs::core::Tensor& is_split);
 
         void grow_gs(int iter);
 
-        void remove(const torch::Tensor& is_prune);
+        void remove(const lfs::core::Tensor& is_prune);
 
         void prune_gs(int iter);
 
         void reset_opacity();
 
         // Member variables
-        std::unique_ptr<torch::optim::Optimizer> _optimizer;
+        std::unique_ptr<AdamOptimizer> _optimizer;
         std::unique_ptr<ExponentialLR> _scheduler;
-        gs::SplatData _splat_data;
-        std::unique_ptr<const gs::param::OptimizationParameters> _params;
+        lfs::core::SplatData _splat_data;
+        std::unique_ptr<const lfs::core::param::OptimizationParameters> _params;
     };
-} // namespace gs::training
+} // namespace lfs::training

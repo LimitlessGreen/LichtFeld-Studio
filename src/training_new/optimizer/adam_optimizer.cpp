@@ -293,6 +293,13 @@ namespace lfs::training {
         return it->second.step_count;
     }
 
+    void AdamOptimizer::set_state(ParamType type, const AdamParamState& state) {
+        auto name = param_name(type);
+        states_[name] = state;
+        LOG_DEBUG("Set optimizer state for {} (size: {}, capacity: {})",
+                  name, state.size, state.capacity);
+    }
+
     void AdamOptimizer::add_new_params(ParamType type, const lfs::core::Tensor& new_values, bool validate) {
         auto& param = get_param(type);
         auto& grad = get_grad(type);

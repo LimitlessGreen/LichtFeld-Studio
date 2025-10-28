@@ -4,20 +4,18 @@
 
 #include "default_strategy.hpp"
 #include "Ops.h"
-#include "core/logger.hpp"
-#include "core/parameters.hpp"
-#include "optimizers/fused_adam.hpp"
-#include "rasterization/rasterizer.hpp"
+#include "core_new/logger.hpp"
+#include "core_new/parameters.hpp"
+#include "optimizer/render_output.hpp"
 #include "strategy_utils.hpp"
-#include <c10/cuda/CUDACachingAllocator.h>
 
-namespace gs::training {
-    DefaultStrategy::DefaultStrategy(gs::SplatData&& splat_data)
+namespace lfs::training {
+    DefaultStrategy::DefaultStrategy(lfs::core::SplatData&& splat_data)
         : _splat_data(std::move(splat_data)) {
     }
 
-    void DefaultStrategy::initialize(const gs::param::OptimizationParameters& optimParams) {
-        _params = std::make_unique<const gs::param::OptimizationParameters>(optimParams);
+    void DefaultStrategy::initialize(const lfs::core::param::OptimizationParameters& optimParams) {
+        _params = std::make_unique<const lfs::core::param::OptimizationParameters>(optimParams);
 
         initialize_gaussians(_splat_data);
 
@@ -25,7 +23,7 @@ namespace gs::training {
         _optimizer = create_optimizer(_splat_data, *_params);
 
         // Initialize exponential scheduler
-        _scheduler = create_scheduler(*_params, _optimizer.get(), 0);
+        _scheduler = create_scheduler(*_params, *_optimizer);
     }
 
     bool DefaultStrategy::is_refining(int iter) const {
@@ -34,149 +32,197 @@ namespace gs::training {
                 iter % _params->reset_every >= _params->pause_refine_after_reset);
     }
 
-    void DefaultStrategy::remove_gaussians(const torch::Tensor& mask) {
-        torch::NoGradGuard no_grad;
+    void DefaultStrategy::remove_gaussians(const lfs::core::Tensor& mask) {
+        int mask_sum = mask.to(lfs::core::DataType::Int32).sum().template item<int>();
 
-        if (mask.sum().item<int>() == 0) {
+        if (mask_sum == 0) {
             LOG_DEBUG("No Gaussians to remove");
             return;
         }
 
-        LOG_DEBUG("Removing {} Gaussians", mask.sum().item<int>());
+        LOG_DEBUG("Removing {} Gaussians", mask_sum);
         remove(mask);
     }
 
-    void DefaultStrategy::duplicate(const torch::Tensor& is_duplicated) {
-        torch::NoGradGuard no_grad;
+    void DefaultStrategy::duplicate(const lfs::core::Tensor& is_duplicated) {
+        const lfs::core::Tensor sampled_idxs = is_duplicated.nonzero().squeeze(-1);
 
-        const torch::Tensor sampled_idxs = is_duplicated.nonzero().squeeze(-1);
-
-        const auto param_fn = [&sampled_idxs](const int i, const torch::Tensor& param) {
-            const torch::Tensor new_param = param.index_select(0, sampled_idxs);
-            return torch::cat({param, new_param}).set_requires_grad(param.requires_grad());
+        const auto param_fn = [&sampled_idxs](const int i, const lfs::core::Tensor& param) {
+            const lfs::core::Tensor new_param = param.index_select(0, sampled_idxs);
+            return param.cat(new_param, 0);
         };
 
-        const auto optimizer_fn = [&sampled_idxs](torch::optim::OptimizerParamState& state,
-                                                  const torch::Tensor& full_param)
-            -> std::unique_ptr<torch::optim::OptimizerParamState> {
-            auto new_shape = full_param.sizes().vec();
-            new_shape[0] = sampled_idxs.size(0);
-            if (auto* fused_adam_state = dynamic_cast<FusedAdam::AdamParamState*>(&state)) {
-                // FusedAdam state
-                auto zeros_to_add = torch::zeros(new_shape, fused_adam_state->exp_avg.options());
-                auto new_exp_avg = torch::cat({fused_adam_state->exp_avg, zeros_to_add}, 0);
-                auto new_exp_avg_sq = torch::cat({fused_adam_state->exp_avg_sq, zeros_to_add}, 0);
+        const auto optimizer_fn = [&sampled_idxs](
+            AdamParamState& state,
+            const lfs::core::Tensor& full_param) {
+            // For duplicate, we add zeros to the optimizer state for new Gaussians
+            auto new_shape = full_param.shape();
+            auto zeros_to_add = lfs::core::Tensor::zeros(
+                {sampled_idxs.shape()[0], new_shape[1]},
+                state.exp_avg.device(),
+                state.exp_avg.dtype());
 
-                // Create new state
-                auto new_state = std::make_unique<FusedAdam::AdamParamState>();
-                new_state->step_count = fused_adam_state->step_count;
-                new_state->exp_avg = new_exp_avg;
-                new_state->exp_avg_sq = new_exp_avg_sq;
-                if (fused_adam_state->max_exp_avg_sq.defined()) {
-                    auto new_max_exp_avg_sq = torch::cat({fused_adam_state->max_exp_avg_sq, zeros_to_add}, 0);
-                    new_state->max_exp_avg_sq = new_max_exp_avg_sq;
-                }
-                return new_state;
-            }
-            return nullptr;
+            state.exp_avg = state.exp_avg.cat(zeros_to_add, 0);
+            state.exp_avg_sq = state.exp_avg_sq.cat(zeros_to_add, 0);
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
     }
 
-    void DefaultStrategy::split(const torch::Tensor& is_split) {
-        torch::NoGradGuard no_grad;
+    void DefaultStrategy::split(const lfs::core::Tensor& is_split) {
+        const lfs::core::Tensor sampled_idxs = is_split.nonzero().squeeze(-1);
+        const lfs::core::Tensor rest_idxs = is_split.logical_not().nonzero().squeeze(-1);
 
-        const c10::Device device = is_split.device();
-        const torch::Tensor sampled_idxs = is_split.nonzero().squeeze(-1);
-        const torch::Tensor rest_idxs = is_split.logical_not().nonzero().squeeze(-1);
+        const lfs::core::Tensor sampled_scales = _splat_data.get_scaling().index_select(0, sampled_idxs);
+        const lfs::core::Tensor sampled_quats = _splat_data.get_rotation().index_select(0, sampled_idxs);
 
-        const torch::Tensor sampled_scales = _splat_data.get_scaling().index_select(0, sampled_idxs);
-        const torch::Tensor sampled_quats = _splat_data.get_rotation().index_select(0, sampled_idxs);
-        const torch::Tensor rotmats = gsplat::quats_to_rotmats(sampled_quats); // [N, 3, 3]
+        // Convert quaternions to rotation matrices manually
+        // sampled_quats: [N, 4] with [w, x, y, z]
+        const auto w = sampled_quats.slice(1, 0, 1).squeeze(-1); // [N]
+        const auto x = sampled_quats.slice(1, 1, 2).squeeze(-1); // [N]
+        const auto y = sampled_quats.slice(1, 2, 3).squeeze(-1); // [N]
+        const auto z = sampled_quats.slice(1, 3, 4).squeeze(-1); // [N]
 
-        const auto num_split_gaussians = sampled_idxs.size(0);
+        // Compute rotation matrix elements
+        // R = [[1-2(y²+z²), 2(xy-wz), 2(xz+wy)],
+        //      [2(xy+wz), 1-2(x²+z²), 2(yz-wx)],
+        //      [2(xz-wy), 2(yz+wx), 1-2(x²+y²)]]
+        const auto two = lfs::core::Tensor::full_like(w, 2.0f);
+        const auto one = lfs::core::Tensor::ones_like(w);
+
+        const auto r00 = one - two * (y * y + z * z);
+        const auto r01 = two * (x * y - w * z);
+        const auto r02 = two * (x * z + w * y);
+        const auto r10 = two * (x * y + w * z);
+        const auto r11 = one - two * (x * x + z * z);
+        const auto r12 = two * (y * z - w * x);
+        const auto r20 = two * (x * z - w * y);
+        const auto r21 = two * (y * z + w * x);
+        const auto r22 = one - two * (x * x + y * y);
+
+        // Stack to form rotation matrices [N, 3, 3]
+        // Stack rows first, then stack the 3 rows
+        auto row0 = r00.unsqueeze(-1).cat(r01.unsqueeze(-1), -1).cat(r02.unsqueeze(-1), -1); // [N, 3]
+        auto row1 = r10.unsqueeze(-1).cat(r11.unsqueeze(-1), -1).cat(r12.unsqueeze(-1), -1); // [N, 3]
+        auto row2 = r20.unsqueeze(-1).cat(r21.unsqueeze(-1), -1).cat(r22.unsqueeze(-1), -1); // [N, 3]
+
+        // Stack rows to get [N, 3, 3]
+        const auto rotmats = row0.unsqueeze(1).cat(row1.unsqueeze(1), 1).cat(row2.unsqueeze(1), 1);
+
+        const auto num_split_gaussians = sampled_idxs.shape()[0];
         constexpr auto split_size = 2;
-        const torch::Tensor samples = torch::einsum( // [split_size, N, 3]
-            "nij,nj,bnj->bni",
-            {rotmats,
-             sampled_scales,
-             torch::randn({split_size, num_split_gaussians, 3}, sampled_quats.options().device(device))});
+
+        // Generate random samples [split_size, N, 3]
+        const lfs::core::Tensor randn = lfs::core::Tensor::randn(
+            {split_size, num_split_gaussians, 3},
+            sampled_quats.device());
+
+        // Compute einsum manually: samples[b,n,i] = rotmats[n,i,j] * scales[n,j] * randn[b,n,j]
+        // This is: samples = rotmats @ diag(scales) @ randn[b]
+        // For each split b, compute: rotmats[n] @ (scales[n] * randn[b,n])
+        lfs::core::Tensor samples_list[split_size];
+        for (int b = 0; b < split_size; ++b) {
+            // randn[b] has shape [N, 3]
+            auto randn_b = randn[b]; // [N, 3]
+            // Element-wise multiply with scales: [N, 3]
+            auto scaled_randn = sampled_scales * randn_b; // [N, 3]
+            // Batch matrix-vector multiply: rotmats @ scaled_randn
+            // rotmats: [N, 3, 3], scaled_randn: [N, 3] -> need [N, 3, 1]
+            auto scaled_randn_col = scaled_randn.unsqueeze(-1); // [N, 3, 1]
+            auto rotated = rotmats.bmm(scaled_randn_col).squeeze(-1); // [N, 3]
+            samples_list[b] = rotated;
+        }
+
+        // Stack samples: [split_size, N, 3]
+        lfs::core::Tensor samples = samples_list[0].unsqueeze(0);
+        for (int b = 1; b < split_size; ++b) {
+            samples = samples.cat(samples_list[b].unsqueeze(0), 0);
+        }
 
         const auto param_fn = [this, &sampled_idxs, &rest_idxs, &samples, &sampled_scales](
-                                  const int i, const torch::Tensor& param) {
-            std::vector<int64_t> repeats(param.dim(), 1);
-            repeats[0] = split_size;
+                                  const int i, const lfs::core::Tensor& param) {
+            const lfs::core::Tensor sampled_param = param.index_select(0, sampled_idxs);
+            lfs::core::Tensor split_param;
 
-            const torch::Tensor sampled_param = param.index_select(0, sampled_idxs);
-            torch::Tensor split_param;
             if (i == 0) {
-                // means
+                // means: add offset to each split
                 split_param = (sampled_param.unsqueeze(0) + samples).reshape({-1, 3}); // [split_size * N, 3]
             } else if (i == 3) {
-                // scaling
-                split_param = torch::log(sampled_scales / 1.6).repeat({split_size, 1}); // [split_size * N, 3]
+                // scaling: divide by 1.6 and duplicate
+                auto new_scales = (sampled_scales / 1.6f).log();
+                // Duplicate split_size times
+                split_param = new_scales;
+                for (int s = 1; s < split_size; ++s) {
+                    split_param = split_param.cat(new_scales, 0);
+                }
             } else if (i == 5 && _params->revised_opacity) {
-                // opacity
-                const torch::Tensor new_opacities = 1.0 - torch::sqrt(1.0 - torch::sigmoid(sampled_param));
-                split_param = torch::logit(new_opacities).repeat(repeats); // [split_size * N]
+                // opacity: revised formula
+                // new_opacity = 1 - sqrt(1 - sigmoid(sampled_param))
+                const lfs::core::Tensor sigmoid_vals = sampled_param.sigmoid();
+                const lfs::core::Tensor one_minus_sigmoid = lfs::core::Tensor::ones_like(sigmoid_vals) - sigmoid_vals;
+                const lfs::core::Tensor new_opacities = lfs::core::Tensor::ones_like(sigmoid_vals) - one_minus_sigmoid.sqrt();
+                auto logit_opacities = new_opacities.logit();
+                // Duplicate split_size times
+                split_param = logit_opacities;
+                for (int s = 1; s < split_size; ++s) {
+                    split_param = split_param.cat(logit_opacities, 0);
+                }
             } else {
-                split_param = sampled_param.repeat(repeats);
+                // other parameters: just duplicate
+                split_param = sampled_param;
+                for (int s = 1; s < split_size; ++s) {
+                    split_param = split_param.cat(sampled_param, 0);
+                }
             }
 
-            const torch::Tensor rest_param = param.index_select(0, rest_idxs);
-            return torch::cat({rest_param, split_param}, 0).set_requires_grad(param.requires_grad());
+            const lfs::core::Tensor rest_param = param.index_select(0, rest_idxs);
+            return rest_param.cat(split_param, 0);
         };
 
         const auto optimizer_fn = [&sampled_idxs, &rest_idxs](
-                                      torch::optim::OptimizerParamState& state,
-                                      const torch::Tensor& full_param)
-            -> std::unique_ptr<torch::optim::OptimizerParamState> {
-            auto zero_shape = full_param.sizes().vec();
-            zero_shape[0] = sampled_idxs.size(0) * split_size;
-            if (auto* fused_adam_state = dynamic_cast<FusedAdam::AdamParamState*>(&state)) {
-                // FusedAdam state
-                auto rest_exp_avg = fused_adam_state->exp_avg.index_select(0, rest_idxs);
-                auto rest_exp_avg_sq = fused_adam_state->exp_avg_sq.index_select(0, rest_idxs);
+            AdamParamState& state,
+            const lfs::core::Tensor& full_param) {
+            // For split, we keep the non-split states and add zeros for split Gaussians
+            auto rest_exp_avg = state.exp_avg.index_select(0, rest_idxs);
+            auto rest_exp_avg_sq = state.exp_avg_sq.index_select(0, rest_idxs);
 
-                auto zeros_to_add = torch::zeros(zero_shape, fused_adam_state->exp_avg.options());
-                auto new_exp_avg = torch::cat({rest_exp_avg, zeros_to_add}, 0);
-                auto new_exp_avg_sq = torch::cat({rest_exp_avg_sq, zeros_to_add}, 0);
-
-                // Create new state
-                auto new_state = std::make_unique<FusedAdam::AdamParamState>();
-                new_state->step_count = fused_adam_state->step_count;
-                new_state->exp_avg = new_exp_avg;
-                new_state->exp_avg_sq = new_exp_avg_sq;
-                if (fused_adam_state->max_exp_avg_sq.defined()) {
-                    auto rest_max_exp_avg_sq = fused_adam_state->max_exp_avg_sq.index_select(0, rest_idxs);
-                    auto new_max_exp_avg_sq = torch::cat({rest_max_exp_avg_sq, zeros_to_add}, 0);
-                    new_state->max_exp_avg_sq = new_max_exp_avg_sq;
+            // Create new shape for zeros
+            std::vector<size_t> zero_shape_vec;
+            for (size_t i = 0; i < full_param.ndim(); ++i) {
+                if (i == 0) {
+                    zero_shape_vec.push_back(sampled_idxs.shape()[0] * split_size);
+                } else {
+                    zero_shape_vec.push_back(full_param.shape()[i]);
                 }
-                return new_state;
             }
-            return nullptr;
+            auto zeros_to_add = lfs::core::Tensor::zeros(
+                lfs::core::TensorShape(zero_shape_vec),
+                state.exp_avg.device(),
+                state.exp_avg.dtype());
+
+            state.exp_avg = rest_exp_avg.cat(zeros_to_add, 0);
+            state.exp_avg_sq = rest_exp_avg_sq.cat(zeros_to_add, 0);
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
     }
 
     void DefaultStrategy::grow_gs(int iter) {
-        torch::NoGradGuard no_grad;
+        lfs::core::Tensor numer = _splat_data._densification_info[1];
+        lfs::core::Tensor denom = _splat_data._densification_info[0];
+        const lfs::core::Tensor grads = numer / denom.clamp_min(1.0f);
 
-        const torch::Tensor grads = _splat_data._densification_info[1] / torch::clamp_min(
-                                                                             _splat_data._densification_info[0], 1.0f);
-        const c10::Device device = grads.device();
+        const lfs::core::Tensor is_grad_high = grads > _params->grad_threshold;
 
-        const torch::Tensor is_grad_high = grads > _params->grad_threshold;
-        const auto max_values = std::get<0>(torch::max(_splat_data.get_scaling(), -1));
-        const torch::Tensor is_small = max_values <= _params->grow_scale3d * _splat_data.get_scene_scale();
-        const torch::Tensor is_duplicated = is_grad_high & is_small;
-        const auto num_duplicates = is_duplicated.sum().item<int64_t>();
+        // Get max along last dimension
+        const lfs::core::Tensor max_values = _splat_data.get_scaling().max(-1, false);
+        const lfs::core::Tensor is_small = max_values <= _params->grow_scale3d * _splat_data.get_scene_scale();
+        const lfs::core::Tensor is_duplicated = is_grad_high.logical_and(is_small);
+        const auto num_duplicates = static_cast<int64_t>(is_duplicated.sum_scalar());
 
-        const torch::Tensor is_large = ~is_small;
-        torch::Tensor is_split = is_grad_high & is_large;
-        const auto num_split = is_split.sum().item<int64_t>();
+        const lfs::core::Tensor is_large = is_small.logical_not();
+        lfs::core::Tensor is_split = is_grad_high.logical_and(is_large);
+        const auto num_split = static_cast<int64_t>(is_split.sum_scalar());
 
         // First duplicate
         if (num_duplicates > 0) {
@@ -184,106 +230,69 @@ namespace gs::training {
         }
 
         // New Gaussians added by duplication will not be split
-        is_split = torch::cat({is_split,
-                               torch::zeros(num_duplicates, c10::TensorOptions().dtype(torch::kBool).device(device))});
+        auto zeros_to_concat = lfs::core::Tensor::zeros_bool({static_cast<size_t>(num_duplicates)}, is_split.device());
+        is_split = is_split.cat(zeros_to_concat, 0);
+
         if (num_split > 0) {
             split(is_split);
         }
     }
 
-    void DefaultStrategy::remove(const torch::Tensor& is_prune) {
-        torch::NoGradGuard no_grad;
+    void DefaultStrategy::remove(const lfs::core::Tensor& is_prune) {
+        const lfs::core::Tensor sampled_idxs = is_prune.logical_not().nonzero().squeeze(-1);
 
-        const torch::Tensor sampled_idxs = is_prune.logical_not().nonzero().squeeze(-1);
-
-        const auto param_fn = [&sampled_idxs](const int i, const torch::Tensor& param) {
-            return param.index_select(0, sampled_idxs).set_requires_grad(param.requires_grad());
+        const auto param_fn = [&sampled_idxs](const int i, const lfs::core::Tensor& param) {
+            return param.index_select(0, sampled_idxs);
         };
 
         const auto optimizer_fn = [&sampled_idxs](
-                                      torch::optim::OptimizerParamState& state,
-                                      const torch::Tensor& new_param)
-            -> std::unique_ptr<torch::optim::OptimizerParamState> {
-            if (auto* fused_adam_state = dynamic_cast<FusedAdam::AdamParamState*>(&state)) {
-                // FusedAdam state
-                auto new_exp_avg = fused_adam_state->exp_avg.index_select(0, sampled_idxs);
-                auto new_exp_avg_sq = fused_adam_state->exp_avg_sq.index_select(0, sampled_idxs);
-
-                // Create new state
-                auto new_state = std::make_unique<FusedAdam::AdamParamState>();
-                new_state->step_count = fused_adam_state->step_count;
-                new_state->exp_avg = new_exp_avg;
-                new_state->exp_avg_sq = new_exp_avg_sq;
-                if (fused_adam_state->max_exp_avg_sq.defined()) {
-                    auto new_max_exp_avg_sq = fused_adam_state->max_exp_avg_sq.index_select(0, sampled_idxs);
-                    new_state->max_exp_avg_sq = new_max_exp_avg_sq;
-                }
-                return new_state;
-            }
-            return nullptr;
+            AdamParamState& state,
+            const lfs::core::Tensor& new_param) {
+            // For remove, we select only the surviving Gaussians' optimizer state
+            state.exp_avg = state.exp_avg.index_select(0, sampled_idxs);
+            state.exp_avg_sq = state.exp_avg_sq.index_select(0, sampled_idxs);
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
     }
 
     void DefaultStrategy::prune_gs(int iter) {
-        torch::NoGradGuard no_grad;
-
         // Check for low opacity
-        torch::Tensor is_prune = _splat_data.get_opacity() < _params->prune_opacity;
+        lfs::core::Tensor is_prune = _splat_data.get_opacity() < _params->prune_opacity;
 
         auto rotation_raw = _splat_data.rotation_raw();
-        is_prune |= (rotation_raw * rotation_raw).sum(-1) < 1e-8f;
+        is_prune = is_prune.logical_or((rotation_raw * rotation_raw).sum(-1, false) < 1e-8f);
 
         // Check for too large Gaussians
         if (iter > _params->reset_every) {
-            const auto max_values = std::get<0>(torch::max(_splat_data.get_scaling(), -1));
-            torch::Tensor is_too_big = max_values > _params->prune_scale3d * _splat_data.get_scene_scale();
-            is_prune |= is_too_big;
+            const lfs::core::Tensor max_values = _splat_data.get_scaling().max(-1, false);
+            lfs::core::Tensor is_too_big = max_values > _params->prune_scale3d * _splat_data.get_scene_scale();
+            is_prune = is_prune.logical_or(is_too_big);
         }
 
-        const auto num_prunes = is_prune.sum().item<int64_t>();
+        const auto num_prunes = static_cast<int64_t>(is_prune.sum_scalar());
         if (num_prunes > 0) {
             remove(is_prune);
         }
     }
 
     void DefaultStrategy::reset_opacity() {
-        torch::NoGradGuard no_grad;
-
         const auto threshold = 2.0f * _params->prune_opacity;
 
-        const auto param_fn = [&threshold](const int i, const torch::Tensor& param) {
+        const auto param_fn = [&threshold](const int i, const lfs::core::Tensor& param) {
             if (i == 5) {
-                const torch::Tensor new_opacities = torch::clamp_max(
-                    param,
-                    torch::logit(torch::tensor(threshold)).item());
-                return new_opacities.set_requires_grad(param.requires_grad());
+                // For opacity parameter, clamp to logit(threshold)
+                const float logit_threshold = std::log(threshold / (1.0f - threshold));
+                return param.clamp_max(logit_threshold);
             }
-            throw std::runtime_error("Invalid parameter index for reset_opacity: " + std::to_string(i));
+            LOG_ERROR("Invalid parameter index for reset_opacity: {}", i);
+            return param;
         };
 
-        const auto optimizer_fn = [](torch::optim::OptimizerParamState& state,
-                                     const torch::Tensor& new_param)
-            -> std::unique_ptr<torch::optim::OptimizerParamState> {
-            if (auto* fused_adam_state = dynamic_cast<FusedAdam::AdamParamState*>(&state)) {
-                // FusedAdam state
-                auto new_exp_avg = torch::zeros_like(fused_adam_state->exp_avg);
-                auto new_exp_avg_sq = torch::zeros_like(fused_adam_state->exp_avg_sq);
-
-                // Create new state
-                auto new_state = std::make_unique<FusedAdam::AdamParamState>();
-                new_state->step_count = fused_adam_state->step_count;
-                new_state->exp_avg = new_exp_avg;
-                new_state->exp_avg_sq = new_exp_avg_sq;
-                if (fused_adam_state->max_exp_avg_sq.defined()) {
-                    auto new_max_exp_avg_sq = torch::zeros_like(fused_adam_state->max_exp_avg_sq);
-                    new_state->max_exp_avg_sq = new_max_exp_avg_sq;
-                }
-                return new_state;
-            }
-
-            return nullptr;
+        const auto optimizer_fn = [](AdamParamState& state, const lfs::core::Tensor& new_param) {
+            // Reset optimizer state for opacity to zeros
+            state.exp_avg = lfs::core::Tensor::zeros_like(state.exp_avg);
+            state.exp_avg_sq = lfs::core::Tensor::zeros_like(state.exp_avg_sq);
         };
 
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data, {5});
@@ -291,14 +300,13 @@ namespace gs::training {
 
     void DefaultStrategy::post_backward(int iter, RenderOutput& render_output) {
         // Increment SH degree every 1000 iterations
-        torch::NoGradGuard no_grad;
         if (iter % _params->sh_degree_interval == 0) {
             _splat_data.increment_sh_degree();
         }
 
         if (iter == _params->stop_refine) {
-            // Reset densification info at the end of refinement.Saves memory and processing time.
-            _splat_data._densification_info = torch::empty({0});
+            // Reset densification info at the end of refinement. Saves memory and processing time.
+            _splat_data._densification_info = lfs::core::Tensor::empty({0});
         }
 
         if (iter >= _params->stop_refine) {
@@ -309,28 +317,21 @@ namespace gs::training {
             grow_gs(iter);
             prune_gs(iter);
 
-            _splat_data._densification_info = torch::zeros({2, _splat_data.means().size(0)},
-                                                           _splat_data.means().options())
-                                                  .set_requires_grad(false);
+            _splat_data._densification_info = lfs::core::Tensor::zeros(
+                {2, static_cast<size_t>(_splat_data.size())},
+                _splat_data.means().device());
         }
 
         if (iter % _params->reset_every == 0 && iter > 0) {
             reset_opacity();
         }
-
-#ifdef _WIN32
-        // Windows doesn't support CUDACachingAllocator expandable_segments
-        if (iter % 10 == 0)
-            c10::cuda::CUDACachingAllocator::emptyCache();
-#endif
     }
 
     void DefaultStrategy::step(int iter) {
         if (iter < _params->iterations) {
-            auto* fused_adam = dynamic_cast<FusedAdam*>(_optimizer.get());
-            fused_adam->step(iter);
-            fused_adam->zero_grad(true, iter);
+            _optimizer->step(iter);
+            _optimizer->zero_grad(iter);
             _scheduler->step();
         }
     }
-} // namespace gs::training
+} // namespace lfs::training

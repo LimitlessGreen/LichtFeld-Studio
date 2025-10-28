@@ -187,6 +187,9 @@ namespace lfs::training {
         const AdamParamState* get_state(ParamType type) const;
         int64_t get_step_count(ParamType type) const;
 
+        // Set optimizer state (for manual state updates in strategy operations)
+        void set_state(ParamType type, const AdamParamState& state);
+
     private:
         AdamConfig config_;
         lfs::core::SplatData& splat_data_;
