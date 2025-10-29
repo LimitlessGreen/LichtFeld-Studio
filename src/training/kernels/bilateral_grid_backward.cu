@@ -182,5 +182,50 @@ namespace gs {
             return std::make_tuple(grad_grid, grad_rgb);
         }
 
+        // ============= MANUAL FORWARD/BACKWARD INTERFACE (no autograd) =============
+
+        // Manual bilateral grid slice forward (no autograd)
+        std::pair<torch::Tensor, BilateralGridSliceContext> bilateral_grid_slice_forward(
+            const torch::Tensor& grid,
+            const torch::Tensor& rgb) {
+
+            // Input validation
+            TORCH_CHECK(grid.dim() == 4 && grid.size(0) == 12,
+                        "Grid must be [12, L, H, W]");
+            TORCH_CHECK(rgb.dim() == 3 && rgb.size(2) == 3,
+                        "RGB must be [H, W, 3]");
+            TORCH_CHECK(grid.is_cuda() && rgb.is_cuda(),
+                        "Tensors must be on CUDA");
+
+            auto output = torch::empty_like(rgb);
+
+            // Call CUDA kernel
+            slice_forward_cuda(
+                grid.contiguous(),
+                rgb.contiguous(),
+                output,
+                true // use uniform coordinates
+            );
+
+            // Save context for backward
+            BilateralGridSliceContext ctx;
+            ctx.grid = grid;
+            ctx.rgb = rgb;
+
+            return {output, ctx};
+        }
+
+        // Manual bilateral grid slice backward (no autograd)
+        std::tuple<torch::Tensor, torch::Tensor> bilateral_grid_slice_backward(
+            const BilateralGridSliceContext& ctx,
+            const torch::Tensor& grad_output) {
+
+            // Call CUDA backward kernel
+            auto [grad_grid, grad_rgb] = slice_backward_cuda(
+                ctx.grid, ctx.rgb, grad_output.contiguous());
+
+            return {grad_grid, grad_rgb};
+        }
+
     } // namespace bilateral_grid
 } // namespace gs

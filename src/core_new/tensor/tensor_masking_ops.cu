@@ -502,6 +502,11 @@ namespace lfs::core::tensor_ops {
     void launch_index_select(const float* in, const int* idx, float* out,
                              const size_t* shape, size_t rank, int dim,
                              size_t idx_size, int boundary, cudaStream_t stream) {
+        // Handle empty indices case - no kernel launch needed
+        if (idx_size == 0) {
+            return;
+        }
+
         size_t outer = 1, inner = 1;
         for (int i = 0; i < dim; ++i)
             outer *= shape[i];
@@ -736,24 +741,29 @@ namespace lfs::core::tensor_ops {
     }
 
     // ============= Nonzero Operations =============
-    void launch_nonzero(const float* data, int64_t* indices, size_t n, size_t output_size, cudaStream_t stream) {
+
+    size_t launch_nonzero(const float* data, int64_t* indices, size_t n, size_t output_size, cudaStream_t stream) {
         if (n == 0 || output_size == 0)
-            return;
+            return 0;
         auto data_ptr = thrust::device_pointer_cast(data);
         auto indices_ptr = thrust::device_pointer_cast(indices);
         auto counting = thrust::counting_iterator<int64_t>(0);
-        thrust::copy_if(thrust::cuda::par.on(stream), counting, counting + n, data_ptr,
+        auto end_it = thrust::copy_if(thrust::cuda::par.on(stream), counting, counting + n, data_ptr,
                         indices_ptr, ops::nonzero_predicate<float>());
+        // Return actual count (fixes potential mismatch)
+        return end_it - indices_ptr;
     }
 
-    void launch_nonzero_bool(const unsigned char* data, int64_t* indices, size_t n, size_t output_size, cudaStream_t stream) {
+    size_t launch_nonzero_bool(const unsigned char* data, int64_t* indices, size_t n, size_t output_size, cudaStream_t stream) {
         if (n == 0 || output_size == 0)
-            return;
+            return 0;
         auto data_ptr = thrust::device_pointer_cast(data);
         auto indices_ptr = thrust::device_pointer_cast(indices);
         auto counting = thrust::counting_iterator<int64_t>(0);
-        thrust::copy_if(thrust::cuda::par.on(stream), counting, counting + n, data_ptr,
+        auto end_it = thrust::copy_if(thrust::cuda::par.on(stream), counting, counting + n, data_ptr,
                         indices_ptr, ops::nonzero_bool_predicate());
+        // Return actual count (fixes potential mismatch)
+        return end_it - indices_ptr;
     }
 
     // ============= Multi-Tensor Gather (Zip Gather) =============

@@ -59,7 +59,7 @@ namespace lfs::core {
             // Use CUDA kernel
             tensor_ops::launch_masked_select(ptr<float>(), mask.ptr<unsigned char>(),
                                              result.ptr<float>(), numel(), output_size, 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
+            // No sync - tensor operation
         } else {
             // CPU implementation - FIXED to respect mask
             const float* src = ptr<float>();
@@ -106,7 +106,7 @@ namespace lfs::core {
         if (device_ == Device::CUDA) {
             tensor_ops::launch_masked_fill(ptr<float>(), mask.ptr<unsigned char>(),
                                            value, numel(), 0);
-            CHECK_CUDA(cudaDeviceSynchronize());
+            // No sync - tensor operation
         } else {
             float* data = ptr<float>();
             const unsigned char* mask_data = mask.ptr<unsigned char>();
@@ -149,12 +149,17 @@ namespace lfs::core {
 
         auto indices_same_device = ensure_same_device(indices);
 
+        // Convert Int64 indices to Int32 if needed
+        if (indices_same_device.dtype() == DataType::Int64) {
+            indices_same_device = indices_same_device.to(DataType::Int32);
+        }
+
         if (device_ == Device::CUDA) {
             tensor_ops::launch_index_select(ptr<float>(), indices_same_device.ptr<int>(),
                                             result.ptr<float>(), shape_.dims().data(),
                                             shape_.rank(), dim, indices.numel(),
                                             static_cast<int>(mode), 0);
-            cudaDeviceSynchronize();
+            // No sync - tensor operation
         } else {
             size_t outer = 1, inner = 1;
             for (int i = 0; i < dim; ++i)
@@ -215,7 +220,7 @@ namespace lfs::core {
                                           result.ptr<float>(), shape_.dims().data(),
                                           indices.shape().dims().data(), shape_.rank(), dim,
                                           result.numel(), static_cast<int>(mode), 0);
-                cudaDeviceSynchronize();
+                // No sync - tensor operation
             } else {
                 const float* src = ptr<float>();
                 float* dst = result.ptr<float>();
@@ -272,7 +277,7 @@ namespace lfs::core {
                                       result.ptr<float>(), shape_.dims().data(),
                                       indices.shape().dims().data(), shape_.rank(), dim,
                                       result.numel(), static_cast<int>(mode), 0);
-            cudaDeviceSynchronize();
+            // No sync - tensor operation
         } else {
             const float* src = ptr<float>();
             float* dst = result.ptr<float>();
@@ -326,17 +331,20 @@ namespace lfs::core {
         auto flat = flatten();
         auto result = empty(indices_same_device.shape(), device_, dtype_);
 
+        // DEBUG: Log device and CUDA state
         if (device_ == Device::CUDA) {
             tensor_ops::launch_take(flat.ptr<float>(), indices_same_device.ptr<int>(),
                                     result.ptr<float>(), flat.numel(), indices_same_device.numel(), 0);
-            cudaDeviceSynchronize();
+            // No sync - tensor operation
         } else {
             const float* src = flat.ptr<float>();
             float* dst = result.ptr<float>();
             const int* idx = indices_same_device.ptr<int>();
             size_t total = flat.numel();
 
-            std::transform(std::execution::par_unseq,
+            // IMPORTANT: Use sequential execution to avoid TBB threading issues with CUDA
+            // TBB worker threads don't have CUDA device context, causing cudaErrorInvalidDevice
+            std::transform(std::execution::seq,
                            idx, idx + indices_same_device.numel(), dst,
                            [src, total](int pos) {
                                if (pos < 0)
@@ -384,7 +392,7 @@ namespace lfs::core {
                                            shape_.dims().data(), src.shape().dims().data(),
                                            shape_.rank(), dim, src.numel(),
                                            static_cast<int>(mode), 0);
-                cudaDeviceSynchronize();
+                // No sync - tensor operation
             } else {
                 for (size_t i = 0; i < idx.numel(); ++i) {
                     int pos = indices[i];
@@ -435,7 +443,7 @@ namespace lfs::core {
                                        src.shape().dims().data(),
                                        shape_.rank(), dim, src.numel(),
                                        static_cast<int>(mode), 0);
-            cudaDeviceSynchronize();
+            // No sync - tensor operation
         } else {
             size_t outer = 1;
             for (int i = 0; i < dim; ++i) {
@@ -536,7 +544,7 @@ namespace lfs::core {
             tensor_ops::launch_index_copy(ptr<float>(), idx_same_device.ptr<int>(),
                                           src_same_device.ptr<float>(), shape_.dims().data(),
                                           shape_.rank(), dim, idx.numel(), 0);
-            cudaDeviceSynchronize();
+            // No sync - tensor operation
         } else {
             size_t outer = 1, inner = 1;
             for (int i = 0; i < dim; ++i)
@@ -598,7 +606,7 @@ namespace lfs::core {
                 tensor_ops::launch_index_add(ptr<float>(), idx_same_device.ptr<int>(),
                                              src_same_device.ptr<float>(), shape_.dims().data(),
                                              shape_.rank(), dim, idx.numel(), 0);
-                cudaDeviceSynchronize();
+                // No sync - tensor operation
             } else {
                 float* data = ptr<float>();
                 const int* indices = idx_same_device.ptr<int>();
@@ -632,7 +640,7 @@ namespace lfs::core {
             tensor_ops::launch_index_add(ptr<float>(), idx_same_device.ptr<int>(),
                                          src_same_device.ptr<float>(), shape_.dims().data(),
                                          shape_.rank(), dim, idx.numel(), 0);
-            cudaDeviceSynchronize();
+            // No sync - tensor operation
         } else {
             size_t outer = 1;
             for (int i = 0; i < dim; ++i) {
@@ -679,28 +687,83 @@ namespace lfs::core {
         auto idx_same_device = ensure_same_device(idx);
         auto vals_same_device = ensure_same_device(vals);
 
-        if (device_ == Device::CUDA) {
-            tensor_ops::launch_index_put(ptr<float>(), idx_same_device.ptr<int>(),
-                                         vals_same_device.ptr<float>(), numel(), idx.numel(), 0);
-            cudaDeviceSynchronize();
-        } else {
-            float* data = ptr<float>();
-            const int* indices = idx_same_device.ptr<int>();
-            const float* values = vals_same_device.ptr<float>();
-            size_t num_elements = numel();
+        // Helper lambda for index_put_ implementation
+        auto index_put_impl = [&]<typename DataT, typename IndexT>() {
+            if (device_ == Device::CUDA) {
+                // For CUDA, transfer to CPU, operate, transfer back
+                // This is more reliable than the thrust::scatter implementation
+                auto cpu_tensor = to(Device::CPU);
+                auto cpu_idx = idx_same_device.to(Device::CPU);
+                auto cpu_vals = vals_same_device.to(Device::CPU);
 
-            std::for_each(std::execution::par_unseq,
-                          std::views::iota(size_t(0), idx.numel()).begin(),
-                          std::views::iota(size_t(0), idx.numel()).end(),
-                          [data, indices, values, num_elements](size_t i) {
-                              int pos = indices[i];
-                              if (pos < 0)
-                                  pos += num_elements;
-                              if (pos >= 0 && pos < static_cast<int>(num_elements)) {
-                                  data[pos] = values[i];
-                              }
-                          });
+                DataT* data = cpu_tensor.ptr<DataT>();
+                const IndexT* indices = cpu_idx.ptr<IndexT>();
+                const DataT* values = cpu_vals.ptr<DataT>();
+                size_t num_elements = cpu_tensor.numel();
+
+                for (size_t i = 0; i < cpu_idx.numel(); ++i) {
+                    IndexT pos = indices[i];
+                    if (pos < 0)
+                        pos += num_elements;
+                    if (pos >= 0 && pos < static_cast<IndexT>(num_elements)) {
+                        data[pos] = values[i];
+                    }
+                }
+
+                *this = cpu_tensor.to(device_);
+            } else {
+                // CPU implementation with parallel execution
+                DataT* data = ptr<DataT>();
+                const IndexT* indices = idx_same_device.ptr<IndexT>();
+                const DataT* values = vals_same_device.ptr<DataT>();
+                size_t num_elements = numel();
+
+                // IMPORTANT: Use sequential execution to avoid TBB threading issues with CUDA
+                // TBB worker threads don't have CUDA device context, causing cudaErrorInvalidDevice
+                std::for_each(std::execution::seq,
+                              std::views::iota(size_t(0), idx.numel()).begin(),
+                              std::views::iota(size_t(0), idx.numel()).end(),
+                              [data, indices, values, num_elements](size_t i) {
+                                  IndexT pos = indices[i];
+                                  if (pos < 0)
+                                      pos += num_elements;
+                                  if (pos >= 0 && pos < static_cast<IndexT>(num_elements)) {
+                                      data[pos] = values[i];
+                                  }
+                              });
+            }
+        };
+
+        // Dispatch based on data dtype and index dtype
+        if (idx_same_device.dtype() == DataType::Int32) {
+            if (dtype_ == DataType::Float32) {
+                index_put_impl.template operator()<float, int>();
+            } else if (dtype_ == DataType::Bool) {
+                index_put_impl.template operator()<unsigned char, int>();
+            } else if (dtype_ == DataType::Int32) {
+                index_put_impl.template operator()<int, int>();
+            } else if (dtype_ == DataType::Int64) {
+                index_put_impl.template operator()<int64_t, int>();
+            } else {
+                LOG_ERROR("index_put_: unsupported data dtype {}", static_cast<int>(dtype_));
+            }
+        } else if (idx_same_device.dtype() == DataType::Int64) {
+            if (dtype_ == DataType::Float32) {
+                index_put_impl.template operator()<float, int64_t>();
+            } else if (dtype_ == DataType::Bool) {
+                index_put_impl.template operator()<unsigned char, int64_t>();
+            } else if (dtype_ == DataType::Int32) {
+                index_put_impl.template operator()<int, int64_t>();
+            } else if (dtype_ == DataType::Int64) {
+                index_put_impl.template operator()<int64_t, int64_t>();
+            } else {
+                LOG_ERROR("index_put_: unsupported data dtype {}", static_cast<int>(dtype_));
+            }
+        } else {
+            LOG_ERROR("index_put_: indices must be Int32 or Int64, got dtype {}",
+                      static_cast<int>(idx_same_device.dtype()));
         }
+
         return *this;
     }
 
@@ -794,11 +857,13 @@ namespace lfs::core {
             CHECK_CUDA(cudaMemset(d_count, 0, sizeof(size_t)));
 
             if (dtype_ == DataType::Bool) {
-                tensor_ops::launch_count_nonzero_bool(ptr<unsigned char>(), d_count, numel(), 0);
+                tensor_ops::launch_count_nonzero_bool(ptr<unsigned char>(), d_count, numel(), stream_);
             } else if (dtype_ == DataType::Float32) {
-                tensor_ops::launch_count_nonzero_float(ptr<float>(), d_count, numel(), 0);
+                tensor_ops::launch_count_nonzero_float(ptr<float>(), d_count, numel(), stream_);
             }
 
+            // API BOUNDARY: Sync before reading result from GPU
+            cudaDeviceSynchronize();
             CHECK_CUDA(cudaMemcpy(&count, d_count, sizeof(size_t), cudaMemcpyDeviceToHost));
             CHECK_CUDA(cudaFree(d_count));
 
@@ -851,20 +916,36 @@ namespace lfs::core {
 
         // Special case for 1D tensors
         if (n_dims == 1) {
-            // Create a flat tensor first
-            auto temp = empty({count}, device_, DataType::Int64);
+            // Allocate MAXIMUM size to prevent buffer overflow from Thrust/CUB mismatch
+            auto temp = empty({numel()}, device_, DataType::Int64);
+            size_t actual_count = count; // Start with Thrust's count
 
             if (device_ == Device::CUDA) {
+                // Get ACTUAL count from CUB (not Thrust which may differ!)
                 if (dtype_ == DataType::Bool) {
-                    tensor_ops::launch_nonzero_bool(ptr<unsigned char>(),
+                    actual_count = tensor_ops::launch_nonzero_bool(ptr<unsigned char>(),
                                                     reinterpret_cast<int64_t*>(temp.raw_ptr()),
-                                                    numel(), count, 0);
+                                                    numel(), numel(), 0);
                 } else {
-                    tensor_ops::launch_nonzero(ptr<float>(),
+                    actual_count = tensor_ops::launch_nonzero(ptr<float>(),
                                                reinterpret_cast<int64_t*>(temp.raw_ptr()),
-                                               numel(), count, 0);
+                                               numel(), numel(), 0);
                 }
-                CHECK_CUDA(cudaDeviceSynchronize());
+
+                // DEBUG: Check count mismatch
+                if (actual_count != count) {
+                    LOG_DEBUG("nonzero() count mismatch: Thrust={}, CUB={}, numel={}", count, actual_count, numel());
+                }
+
+                // Slice to actual size - slice is [start, end) exclusive on end
+                if (actual_count < numel()) {
+                    if (actual_count > 0) {
+                        temp = temp.slice(0, 0, actual_count);
+                    } else {
+                        temp = empty({0}, device_, DataType::Int64);
+                    }
+                }
+                // No sync - tensor operation
             } else {
                 int64_t* indices = reinterpret_cast<int64_t*>(temp.raw_ptr());
                 size_t write_idx = 0;
@@ -891,10 +972,22 @@ namespace lfs::core {
                         }
                     }
                 }
+
+                // Update actual_count from write_idx (CPU path)
+                actual_count = write_idx;
             }
 
-            // Reshape to (count, 1) to match PyTorch
-            return temp.reshape({static_cast<int>(count), 1});
+            // Slice to actual size (same as CUDA path does at lines 948-954)
+            if (actual_count < numel()) {
+                if (actual_count > 0) {
+                    temp = temp.slice(0, 0, actual_count);
+                } else {
+                    temp = empty({0}, device_, DataType::Int64);
+                }
+            }
+
+            // Reshape to (actual_count, 1) to match PyTorch
+            return temp.reshape({static_cast<int>(actual_count), 1});
         }
 
         // Multi-dimensional case
@@ -1219,7 +1312,7 @@ namespace lfs::core {
             tensor_ops::launch_masked_scatter(const_cast<Tensor*>(tensor_)->ptr<float>(),
                                               mask_.ptr<unsigned char>(), other.ptr<float>(),
                                               tensor_->numel(), other.numel(), 0);
-            cudaDeviceSynchronize();
+            // No sync - tensor operation
         } else {
             float* data = const_cast<Tensor*>(tensor_)->ptr<float>();
             const unsigned char* mask = mask_.ptr<unsigned char>();

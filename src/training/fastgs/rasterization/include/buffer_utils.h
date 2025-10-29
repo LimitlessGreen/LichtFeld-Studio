@@ -51,35 +51,51 @@ namespace fast_gs::rasterization {
 
         static PerPrimitiveBuffers from_blob(char*& blob, size_t n_primitives) {
             PerPrimitiveBuffers buffers;
+
+            // Make a local copy of blob pointer for modification
+            char* local_blob = blob;
+
             uint* depth_keys_current;
-            obtain(blob, depth_keys_current, n_primitives, 128);
+            obtain(local_blob, depth_keys_current, n_primitives, 128);
             uint* depth_keys_alternate;
-            obtain(blob, depth_keys_alternate, n_primitives, 128);
+            obtain(local_blob, depth_keys_alternate, n_primitives, 128);
             buffers.depth_keys = cub::DoubleBuffer<uint>(depth_keys_current, depth_keys_alternate);
+
             uint* primitive_indices_current;
-            obtain(blob, primitive_indices_current, n_primitives, 128);
+            obtain(local_blob, primitive_indices_current, n_primitives, 128);
             uint* primitive_indices_alternate;
-            obtain(blob, primitive_indices_alternate, n_primitives, 128);
+            obtain(local_blob, primitive_indices_alternate, n_primitives, 128);
             buffers.primitive_indices = cub::DoubleBuffer<uint>(primitive_indices_current, primitive_indices_alternate);
-            obtain(blob, buffers.n_touched_tiles, n_primitives, 128);
-            obtain(blob, buffers.offset, n_primitives, 128);
-            obtain(blob, buffers.screen_bounds, n_primitives, 128);
-            obtain(blob, buffers.mean2d, n_primitives, 128);
-            obtain(blob, buffers.conic_opacity, n_primitives, 128);
-            obtain(blob, buffers.color, n_primitives, 128);
+
+            obtain(local_blob, buffers.n_touched_tiles, n_primitives, 128);
+            obtain(local_blob, buffers.offset, n_primitives, 128);
+            obtain(local_blob, buffers.screen_bounds, n_primitives, 128);
+            obtain(local_blob, buffers.mean2d, n_primitives, 128);
+            obtain(local_blob, buffers.conic_opacity, n_primitives, 128);
+            obtain(local_blob, buffers.color, n_primitives, 128);
+
+            // Calculate CUB workspace requirements
             cub::DeviceScan::ExclusiveSum(
                 nullptr, buffers.cub_workspace_size,
                 buffers.offset, buffers.offset,
                 n_primitives);
+
             size_t sorting_workspace_size;
             cub::DeviceRadixSort::SortPairs(
                 nullptr, sorting_workspace_size,
                 buffers.depth_keys, buffers.primitive_indices,
                 n_primitives);
+
             buffers.cub_workspace_size = max(buffers.cub_workspace_size, sorting_workspace_size);
-            obtain(blob, buffers.cub_workspace, buffers.cub_workspace_size, 128);
-            obtain(blob, buffers.n_visible_primitives, 1, 128);
-            obtain(blob, buffers.n_instances, 1, 128);
+            obtain(local_blob, buffers.cub_workspace, buffers.cub_workspace_size, 128);
+            obtain(local_blob, buffers.n_visible_primitives, 1, 128);
+            obtain(local_blob, buffers.n_instances, 1, 128);
+
+            // Update the original blob pointer if it was passed by reference
+            if (&blob != nullptr) {
+                blob = local_blob;
+            }
+
             return buffers;
         }
     };
@@ -92,21 +108,34 @@ namespace fast_gs::rasterization {
 
         static PerInstanceBuffers from_blob(char*& blob, size_t n_instances) {
             PerInstanceBuffers buffers;
+
+            // Make a local copy of blob pointer for modification
+            char* local_blob = blob;
+
             ushort* keys_current;
-            obtain(blob, keys_current, n_instances, 128);
+            obtain(local_blob, keys_current, n_instances, 128);
             ushort* keys_alternate;
-            obtain(blob, keys_alternate, n_instances, 128);
+            obtain(local_blob, keys_alternate, n_instances, 128);
             buffers.keys = cub::DoubleBuffer<ushort>(keys_current, keys_alternate);
+
             uint* primitive_indices_current;
-            obtain(blob, primitive_indices_current, n_instances, 128);
+            obtain(local_blob, primitive_indices_current, n_instances, 128);
             uint* primitive_indices_alternate;
-            obtain(blob, primitive_indices_alternate, n_instances, 128);
+            obtain(local_blob, primitive_indices_alternate, n_instances, 128);
             buffers.primitive_indices = cub::DoubleBuffer<uint>(primitive_indices_current, primitive_indices_alternate);
+
             cub::DeviceRadixSort::SortPairs(
                 nullptr, buffers.cub_workspace_size,
                 buffers.keys, buffers.primitive_indices,
                 n_instances);
-            obtain(blob, buffers.cub_workspace, buffers.cub_workspace_size, 128);
+
+            obtain(local_blob, buffers.cub_workspace, buffers.cub_workspace_size, 128);
+
+            // Update the original blob pointer if it was passed by reference
+            if (&blob != nullptr) {
+                blob = local_blob;
+            }
+
             return buffers;
         }
     };
@@ -122,16 +151,28 @@ namespace fast_gs::rasterization {
 
         static PerTileBuffers from_blob(char*& blob, size_t n_tiles) {
             PerTileBuffers buffers;
-            obtain(blob, buffers.instance_ranges, n_tiles, 128);
-            obtain(blob, buffers.n_buckets, n_tiles, 128);
-            obtain(blob, buffers.bucket_offsets, n_tiles, 128);
-            obtain(blob, buffers.max_n_contributions, n_tiles, 128);
-            obtain(blob, buffers.n_contributions, n_tiles * config::block_size_blend, 128);
+
+            //Make a local copy of blob pointer for modification
+            char* local_blob = blob;
+
+            obtain(local_blob, buffers.instance_ranges, n_tiles, 128);
+            obtain(local_blob, buffers.n_buckets, n_tiles, 128);
+            obtain(local_blob, buffers.bucket_offsets, n_tiles, 128);
+            obtain(local_blob, buffers.max_n_contributions, n_tiles, 128);
+            obtain(local_blob, buffers.n_contributions, n_tiles * config::block_size_blend, 128);
+
             cub::DeviceScan::InclusiveSum(
                 nullptr, buffers.cub_workspace_size,
                 buffers.n_buckets, buffers.bucket_offsets,
                 n_tiles);
-            obtain(blob, buffers.cub_workspace, buffers.cub_workspace_size, 128);
+
+            obtain(local_blob, buffers.cub_workspace, buffers.cub_workspace_size, 128);
+
+            // Update the original blob pointer if it was passed by reference
+            if (&blob != nullptr) {
+                blob = local_blob;
+            }
+
             return buffers;
         }
     };
@@ -142,8 +183,18 @@ namespace fast_gs::rasterization {
 
         static PerBucketBuffers from_blob(char*& blob, size_t n_buckets) {
             PerBucketBuffers buffers;
-            obtain(blob, buffers.tile_index, n_buckets * config::block_size_blend, 128);
-            obtain(blob, buffers.color_transmittance, n_buckets * config::block_size_blend, 128);
+
+            // Make a local copy of blob pointer for modification
+            char* local_blob = blob;
+
+            obtain(local_blob, buffers.tile_index, n_buckets * config::block_size_blend, 128);
+            obtain(local_blob, buffers.color_transmittance, n_buckets * config::block_size_blend, 128);
+
+            // Update the original blob pointer if it was passed by reference
+            if (&blob != nullptr) {
+                blob = local_blob;
+            }
+
             return buffers;
         }
     };

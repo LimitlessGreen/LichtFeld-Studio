@@ -302,11 +302,11 @@ namespace lfs::core::tensor_ops {
     void launch_index_put(float* data, const int* indices, const float* values,
                           size_t data_size, size_t index_size, cudaStream_t stream);
 
-    void launch_nonzero(const float* data, int64_t* indices,
-                        size_t n, size_t output_size, cudaStream_t stream);
+    size_t launch_nonzero(const float* data, int64_t* indices,
+                          size_t n, size_t output_size, cudaStream_t stream);
 
-    void launch_nonzero_bool(const unsigned char* data, int64_t* indices,
-                             size_t n, size_t output_size, cudaStream_t stream);
+    size_t launch_nonzero_bool(const unsigned char* data, int64_t* indices,
+                               size_t n, size_t output_size, cudaStream_t stream);
 
     // ============= Cumulative Sum Operation =============
     void launch_cumsum(void* data, const size_t* shape, size_t rank,
@@ -352,6 +352,18 @@ namespace lfs::core::tensor_ops {
         size_t rank,
         size_t total_elements,
         DataType dtype,
+        cudaStream_t stream = nullptr);
+
+    // ============= Strided Fill Operations =============
+    // Fill non-contiguous tensors with a constant value (respects strides)
+    template <typename T>
+    void launch_fill_strided(
+        T* data,
+        T value,
+        const std::vector<size_t>& shape,
+        const std::vector<size_t>& strides,
+        size_t storage_offset,
+        size_t n,
         cudaStream_t stream = nullptr);
 
 } // namespace lfs::core::tensor_ops

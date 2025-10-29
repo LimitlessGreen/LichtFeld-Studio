@@ -85,6 +85,25 @@ namespace lfs::core {
         inline Tensor& shN_raw() { return _shN; }
         inline const Tensor& shN_raw() const { return _shN; }
 
+        // Gradient accessors (for LibTorch-free optimization)
+        inline Tensor& means_grad() { return _means_grad; }
+        inline const Tensor& means_grad() const { return _means_grad; }
+        inline Tensor& sh0_grad() { return _sh0_grad; }
+        inline const Tensor& sh0_grad() const { return _sh0_grad; }
+        inline Tensor& shN_grad() { return _shN_grad; }
+        inline const Tensor& shN_grad() const { return _shN_grad; }
+        inline Tensor& scaling_grad() { return _scaling_grad; }
+        inline const Tensor& scaling_grad() const { return _scaling_grad; }
+        inline Tensor& rotation_grad() { return _rotation_grad; }
+        inline const Tensor& rotation_grad() const { return _rotation_grad; }
+        inline Tensor& opacity_grad() { return _opacity_grad; }
+        inline const Tensor& opacity_grad() const { return _opacity_grad; }
+
+        // Gradient management
+        void allocate_gradients();
+        void zero_gradients();
+        bool has_gradients() const;
+
         // Utility methods
         void increment_sh_degree();
         void set_active_sh_degree(int sh_degree);
@@ -108,12 +127,21 @@ namespace lfs::core {
         int _max_sh_degree = 0;
         float _scene_scale = 0.f;
 
+        // Parameters
         Tensor _means;
         Tensor _sh0;
         Tensor _shN;
         Tensor _scaling;
         Tensor _rotation;
         Tensor _opacity;
+
+        // Gradients (for LibTorch-free optimization)
+        Tensor _means_grad;
+        Tensor _sh0_grad;
+        Tensor _shN_grad;
+        Tensor _scaling_grad;
+        Tensor _rotation_grad;
+        Tensor _opacity_grad;
 
         // Async save management
         mutable std::mutex _save_mutex;

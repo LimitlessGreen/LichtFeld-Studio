@@ -4,6 +4,7 @@
 
 #pragma once
 #include <torch/torch.h>
+#include "kernels/bilateral_grid.cuh"
 
 namespace gs::training {
 
@@ -11,11 +12,34 @@ namespace gs::training {
     public:
         BilateralGrid(int num_images, int grid_W = 16, int grid_H = 16, int grid_L = 8);
 
-        // Apply bilateral grid to rendered image
+        // Apply bilateral grid to rendered image (OLD - uses autograd)
         torch::Tensor apply(const torch::Tensor& rgb, int image_idx);
 
-        // Compute total variation loss
+        // MANUAL FORWARD: Apply bilateral grid without autograd
+        // Returns: (output_image, context)
+        std::pair<torch::Tensor, bilateral_grid::BilateralGridSliceContext> apply_forward(
+            const torch::Tensor& rgb, int image_idx);
+
+        // MANUAL BACKWARD: Compute gradients manually
+        // Returns: gradient w.r.t. rgb (grad_rgb)
+        // NOTE: grad_grid is accumulated into grids_.grad()
+        torch::Tensor apply_backward(
+            const bilateral_grid::BilateralGridSliceContext& ctx,
+            const torch::Tensor& grad_output,
+            int image_idx);
+
+        // Compute total variation loss (OLD - uses autograd)
         torch::Tensor tv_loss() const;
+
+        // MANUAL TV LOSS: Compute TV loss without autograd
+        // Returns: (loss_value, context)
+        std::pair<float, bilateral_grid::BilateralGridTVContext> tv_loss_forward() const;
+
+        // MANUAL TV BACKWARD: Compute TV loss gradients manually
+        // NOTE: gradients are accumulated into grids_.grad()
+        void tv_loss_backward(
+            const bilateral_grid::BilateralGridTVContext& ctx,
+            float grad_loss);
 
         // Get parameters for optimizer
         torch::Tensor parameters() { return grids_; }

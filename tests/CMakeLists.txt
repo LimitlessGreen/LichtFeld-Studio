@@ -17,8 +17,13 @@ set(TEST_SOURCES
 
 # Check if new test files exist and add them
 set(OPTIONAL_TEST_FILES
-    test_regularization.cpp
+    test_loss_gradients.cpp
     test_render_modes.cpp
+    test_gut_rasterizer_gradients.cpp
+    test_gut_manual_vs_autograd.cpp
+    test_gut_autograd_vs_manual.cpp
+    test_gut_gradient_comparison.cpp
+    test_activation_gradients.cpp
     test_tensor_basic.cpp
     test_tensor_ops.cpp
     test_tensor_memory.cpp
@@ -43,6 +48,7 @@ set(OPTIONAL_TEST_FILES
     test_tensor_conversions_shape.cpp
     test_kmeans.cpp
     test_critical_fixes.cpp
+    test_cuda_device_state.cpp
     test_tensor_ops_comparison.cpp
     test_sort_minimal.cpp
     test_tensor_debug.cpp
@@ -64,6 +70,31 @@ set(OPTIONAL_TEST_FILES
     benchmark_strided_tensors.cpp
     test_scalar_reduction_benchmark.cpp
     test_permute_upload_benchmark.cpp
+    test_lfs_adam_optimizer.cpp
+    test_lfs_scheduler.cpp
+    benchmark_scheduler.cpp
+    test_lfs_losses.cpp
+    benchmark_losses.cpp
+    test_mcmc_kernels.cpp
+    test_mcmc_strategy.cpp
+    test_tensor_bool.cpp
+    test_dataloader_lfs.cpp
+    test_bilateral_grid.cpp
+    test_sparsity_optimizer.cpp
+    test_sparsity_debug.cpp
+    test_default_strategy.cpp
+    test_default_strategy_comparison.cpp
+    benchmark_default_strategy.cpp
+    test_default_strategy_operations_comparison.cpp
+    test_dtype_operations_comprehensive.cpp
+    test_tensor_bugs.cpp
+    test_densification_performance.cpp
+    test_densification_old_vs_new.cpp
+    test_densification_profile.cpp
+    # Merged test files for better organization
+    test_bug_regressions.cpp        # Bug regressions (binary_search, index_select, minimal_tensor)
+    test_torch_comparisons.cpp      # LibTorch comparisons (naive_split, split_kernel, fill)
+    test_densification.cpp          # Densification tests (exact_pattern, lfs_only, benchmarks, 10M tests)
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})
@@ -88,10 +119,13 @@ set_target_properties(lichtfeld_tests PROPERTIES
 )
 
 # Include directories
+# NOTE: Order matters! We want tests to explicitly choose old vs new headers
 target_include_directories(lichtfeld_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_BINARY_DIR}/include
     ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/src/training_new  # New libtorch-free (for test_lfs_*.cpp)
+    ${CMAKE_SOURCE_DIR}/src               # Old torch-based (for existing tests)
     ${CUDAToolkit_INCLUDE_DIRS}
     ${OPENGL_INCLUDE_DIRS}
 )
@@ -161,6 +195,8 @@ add_custom_target(run_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running all tests with verbose output"
 )
+
+# Note: Profiling executables removed during test cleanup
 
 # Platform-specific settings
 if(WIN32)

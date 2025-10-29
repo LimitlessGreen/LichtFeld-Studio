@@ -10,6 +10,7 @@
 #include "core/events.hpp"
 #include "core/parameters.hpp"
 #include "dataset.hpp"
+#include "kernels/bilateral_grid.cuh"
 #include "metrics/metrics.hpp"
 #include "optimizers/scheduler.hpp"
 #include "progress.hpp"
@@ -122,11 +123,10 @@ namespace gs::training {
             RenderMode render_mode,
             std::stop_token stop_token = {});
 
-        // Protected methods for computing loss
-        std::expected<torch::Tensor, std::string> compute_photometric_loss(
-            const RenderOutput& render_output,
+        // Compute photometric loss AND gradient manually (no autograd)
+        std::expected<std::pair<float, torch::Tensor>, std::string> compute_photometric_loss_with_gradient(
+            const torch::Tensor& rendered,
             const torch::Tensor& gt_image,
-            const SplatData& splatData,
             const param::OptimizationParameters& opt_params);
 
         std::expected<float, std::string> compute_scale_reg_loss(
@@ -137,12 +137,16 @@ namespace gs::training {
             SplatData& splatData,
             const param::OptimizationParameters& opt_params);
 
-        std::expected<torch::Tensor, std::string> compute_bilateral_grid_tv_loss(
+        std::expected<std::pair<float, bilateral_grid::BilateralGridTVContext>, std::string> compute_bilateral_grid_tv_loss(
             const std::unique_ptr<BilateralGrid>& bilateral_grid,
             const param::OptimizationParameters& opt_params);
 
         // Sparsity-related methods
         std::expected<torch::Tensor, std::string> compute_sparsity_loss(
+            int iter,
+            const SplatData& splatData);
+
+        std::expected<std::pair<float, SparsityLossContext>, std::string> compute_sparsity_loss_forward(
             int iter,
             const SplatData& splatData);
 

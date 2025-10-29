@@ -53,13 +53,17 @@ void fast_gs::rasterization::backward(
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const int n_tiles = grid.x * grid.y;
 
+    // These blobs are from the arena and are guaranteed to be valid
     PerPrimitiveBuffers per_primitive_buffers = PerPrimitiveBuffers::from_blob(per_primitive_buffers_blob, n_primitives);
     PerTileBuffers per_tile_buffers = PerTileBuffers::from_blob(per_tile_buffers_blob, n_tiles);
     PerInstanceBuffers per_instance_buffers = PerInstanceBuffers::from_blob(per_instance_buffers_blob, n_instances);
     PerBucketBuffers per_bucket_buffers = PerBucketBuffers::from_blob(per_bucket_buffers_blob, n_buckets);
+
+    // Restore selectors from forward pass
     per_primitive_buffers.primitive_indices.selector = primitive_primitive_indices_selector;
     per_instance_buffers.primitive_indices.selector = instance_primitive_indices_selector;
 
+    // Backward blend
     kernels::backward::blend_backward_cu<<<n_buckets, 32>>>(
         per_tile_buffers.instance_ranges,
         per_tile_buffers.bucket_offsets,
@@ -86,6 +90,7 @@ void fast_gs::rasterization::backward(
         grid.x);
     CHECK_CUDA(config::debug, "blend_backward")
 
+    // Backward preprocess
     kernels::backward::preprocess_backward_cu<<<div_round_up(n_primitives, config::block_size_preprocess_backward), config::block_size_preprocess_backward>>>(
         means,
         scales_raw,

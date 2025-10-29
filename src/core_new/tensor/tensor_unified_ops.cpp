@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <cuda_runtime.h>
+#include <curand.h>
 #include <numeric>
 
 namespace lfs::core {
@@ -103,6 +104,7 @@ namespace lfs::core {
                     CudaMemoryPool::instance().deallocate(p, nullptr);
                 });
                 result.data_ = result.data_owner_.get();
+                result.compute_alignment(); // Compute alignment flags once
             } else {
                 // Use pinned memory for CPU tensors (2-3x faster PCIe bandwidth)
                 void* ptr = PinnedMemoryAllocator::instance().allocate(bytes);
@@ -115,6 +117,7 @@ namespace lfs::core {
                         PinnedMemoryAllocator::instance().deallocate(p);
                 });
                 result.data_ = result.data_owner_.get();
+                result.compute_alignment(); // Compute alignment flags once
             }
             break;
         }
@@ -138,7 +141,15 @@ namespace lfs::core {
                             &value,
                             result.dtype_,
                             nullptr);
-                        cudaDeviceSynchronize();
+                        // No sync - tensor operation
+                    }
+                } else if (result.dtype_ == DataType::Float16) {
+                    if (value == 0.0f) {
+                        cudaMemset(result.data_, 0, result.bytes());
+                    } else {
+                        // Create Float16 values on CPU, then copy to GPU
+                        std::vector<__half> temp(result.numel(), __float2half(value));
+                        cudaMemcpy(result.data_, temp.data(), result.bytes(), cudaMemcpyHostToDevice);
                     }
                 } else if (result.dtype_ == DataType::Bool) {
                     unsigned char fill_val = (value != 0.0f) ? 1 : 0;
@@ -150,17 +161,30 @@ namespace lfs::core {
                         std::vector<int> temp(result.numel(), static_cast<int>(value));
                         cudaMemcpy(result.data_, temp.data(), result.bytes(), cudaMemcpyHostToDevice);
                     }
+                } else if (result.dtype_ == DataType::Int64) {
+                    if (value == 0.0f) {
+                        cudaMemset(result.data_, 0, result.bytes());
+                    } else {
+                        std::vector<int64_t> temp(result.numel(), static_cast<int64_t>(value));
+                        cudaMemcpy(result.data_, temp.data(), result.bytes(), cudaMemcpyHostToDevice);
+                    }
                 }
             } else {
                 if (result.dtype_ == DataType::Float32) {
                     float* ptr = static_cast<float*>(result.data_);
                     std::fill_n(ptr, result.numel(), value);
+                } else if (result.dtype_ == DataType::Float16) {
+                    __half* ptr = static_cast<__half*>(result.data_);
+                    std::fill_n(ptr, result.numel(), __float2half(value));
                 } else if (result.dtype_ == DataType::Bool) {
                     unsigned char* ptr = static_cast<unsigned char*>(result.data_);
                     std::fill_n(ptr, result.numel(), value != 0 ? 1 : 0);
                 } else if (result.dtype_ == DataType::Int32) {
                     int* ptr = static_cast<int*>(result.data_);
                     std::fill_n(ptr, result.numel(), static_cast<int>(value));
+                } else if (result.dtype_ == DataType::Int64) {
+                    int64_t* ptr = static_cast<int64_t*>(result.data_);
+                    std::fill_n(ptr, result.numel(), static_cast<int64_t>(value));
                 }
             }
             break;
@@ -253,12 +277,12 @@ namespace lfs::core {
                 if (result.dtype_ == DataType::Float32) {
                     tensor_ops::launch_uniform(result.ptr<float>(), result.numel(), low, high,
                                                RandomGenerator::instance().get_next_cuda_seed(), 0);
-                    cudaDeviceSynchronize();
+                    // No sync - tensor operation
                 } else if (result.dtype_ == DataType::Int32) {
                     tensor_ops::launch_randint(result.ptr<int>(), result.numel(),
                                                static_cast<int>(low), static_cast<int>(high),
                                                RandomGenerator::instance().get_next_cuda_seed(), 0);
-                    cudaDeviceSynchronize();
+                    // No sync - tensor operation
                 }
             } else {
                 auto& gen = *static_cast<std::mt19937_64*>(
@@ -289,9 +313,17 @@ namespace lfs::core {
                 return result;
 
             if (result.device_ == Device::CUDA) {
-                tensor_ops::launch_normal(result.ptr<float>(), result.numel(), mean, std,
-                                          RandomGenerator::instance().get_next_cuda_seed(), 0);
-                cudaDeviceSynchronize();
+                // Use Philox RNG without resetting offset (stateful like PyTorch - much faster!)
+                curandGenerator_t* gen = static_cast<curandGenerator_t*>(
+                    RandomGenerator::instance().get_generator(Device::CUDA));
+
+                size_t n = result.numel();
+                if (n % 2 == 1) {
+                    curandGenerateNormal(*gen, result.ptr<float>(), n + 1, mean, std);
+                } else {
+                    curandGenerateNormal(*gen, result.ptr<float>(), n, mean, std);
+                }
+                // curandGenerateNormal is blocking, no need for explicit sync
             } else {
                 auto& gen = *static_cast<std::mt19937_64*>(
                     RandomGenerator::instance().get_generator(Device::CPU));
@@ -314,7 +346,7 @@ namespace lfs::core {
                 if (result.dtype_ == DataType::Int32) {
                     tensor_ops::launch_randint(result.ptr<int>(), result.numel(), low, high,
                                                RandomGenerator::instance().get_next_cuda_seed(), 0);
-                    cudaDeviceSynchronize();
+                    // No sync - tensor operation
                 } else if (result.dtype_ == DataType::Float32) {
                     int* temp_buffer = static_cast<int*>(
                         CudaMemoryPool::instance().allocate(result.numel() * sizeof(int), nullptr));
@@ -325,7 +357,7 @@ namespace lfs::core {
 
                         tensor_ops::launch_convert_type<int, float>(temp_buffer, result.ptr<float>(),
                                                                     result.numel(), 0);
-                        cudaDeviceSynchronize();
+                        // No sync - tensor operation
 
                         CudaMemoryPool::instance().deallocate(temp_buffer, nullptr);
                     } else {
@@ -341,7 +373,7 @@ namespace lfs::core {
 
                         tensor_ops::launch_convert_type<int, uint8_t>(temp_buffer, result.ptr<uint8_t>(),
                                                                        result.numel(), 0);
-                        cudaDeviceSynchronize();
+                        // No sync - tensor operation
 
                         CudaMemoryPool::instance().deallocate(temp_buffer, nullptr);
                     } else {
@@ -382,7 +414,7 @@ namespace lfs::core {
             if (result.device_ == Device::CUDA) {
                 tensor_ops::launch_bernoulli(result.ptr<float>(), result.numel(), p,
                                              RandomGenerator::instance().get_next_cuda_seed(), 0);
-                cudaDeviceSynchronize();
+                // No sync - tensor operation
             } else {
                 auto& gen = *static_cast<std::mt19937_64*>(
                     RandomGenerator::instance().get_generator(Device::CPU));
@@ -415,7 +447,7 @@ namespace lfs::core {
                 tensor_ops::launch_multinomial(weights->ptr<float>(), result.ptr<int>(),
                                                n, num_samples, replacement,
                                                RandomGenerator::instance().get_next_cuda_seed(), 0);
-                cudaDeviceSynchronize();
+                // No sync - tensor operation
             } else {
                 auto weights_data = weights->to_vector();
 
@@ -475,8 +507,8 @@ namespace lfs::core {
             size_t min_dim = std::min(m, n);
 
             if (result.device_ == Device::CUDA) {
-                tensor_ops::launch_eye(result.ptr<float>(), m, n, 0);
-                cudaDeviceSynchronize();
+                tensor_ops::launch_eye(result.ptr<float>(), m, n, nullptr);
+                // No sync - tensor operation
             } else {
                 float* data = result.ptr<float>();
                 for (size_t i = 0; i < min_dim; ++i) {
@@ -615,6 +647,10 @@ namespace lfs::core {
             out_dtype = DataType::Bool;
         } else if (op == ReduceOp::Argmax || op == ReduceOp::Argmin) {
             out_dtype = DataType::Int64;
+        } else if (dtype_ == DataType::Bool && (op == ReduceOp::Sum || op == ReduceOp::Prod)) {
+            // Bool sum/prod should return Int64 (PyTorch behavior)
+            // Summing booleans is counting True values
+            out_dtype = DataType::Int64;
         }
 
         auto result = Tensor::empty(TensorShape(out_shape), device_, out_dtype);
@@ -674,9 +710,55 @@ namespace lfs::core {
                 axes.data(), axes.size(),
                 args.keepdim, op,
                 dtype_, nullptr);
-            cudaDeviceSynchronize();
+            // No sync - tensor operation
         } else {
             // CPU implementation
+
+            // Handle Int32 dtype
+            if (dtype_ == DataType::Int32) {
+                const int* src = static_cast<const int*>(raw_ptr());
+                int* dst = static_cast<int*>(result.raw_ptr());
+
+                // Full reduction to scalar (only mode supported for Int32)
+                if (axes.size() == shape_.rank()) {
+                    if (op == ReduceOp::Sum) {
+                        int sum = 0;
+                        for (size_t i = 0; i < numel(); ++i) {
+                            sum += src[i];
+                        }
+                        dst[0] = sum;
+                    } else if (op == ReduceOp::Mean) {
+                        int sum = 0;
+                        for (size_t i = 0; i < numel(); ++i) {
+                            sum += src[i];
+                        }
+                        dst[0] = sum / static_cast<int>(numel());
+                    } else if (op == ReduceOp::Max) {
+                        int max_val = src[0];
+                        for (size_t i = 1; i < numel(); ++i) {
+                            max_val = std::max(max_val, src[i]);
+                        }
+                        dst[0] = max_val;
+                    } else if (op == ReduceOp::Min) {
+                        int min_val = src[0];
+                        for (size_t i = 1; i < numel(); ++i) {
+                            min_val = std::min(min_val, src[i]);
+                        }
+                        dst[0] = min_val;
+                    } else if (op == ReduceOp::Prod) {
+                        int prod = 1;
+                        for (size_t i = 0; i < numel(); ++i) {
+                            prod *= src[i];
+                        }
+                        dst[0] = prod;
+                    }
+                    return result;
+                }
+                // Partial reductions not supported for Int32
+                return result;
+            }
+
+            // Float32 implementation
             const float* src = static_cast<const float*>(raw_ptr());
             float* dst = static_cast<float*>(result.raw_ptr());
 
@@ -927,7 +1009,7 @@ namespace lfs::core {
                 result.shape().rank(),
                 result.numel(),
                 0);
-            cudaDeviceSynchronize();
+            // No sync - tensor operation
         } else {
             // CPU implementation of where operation
             const unsigned char* cond = static_cast<const unsigned char*>(a_broadcast.raw_ptr());
@@ -1081,7 +1163,7 @@ namespace lfs::core {
         }
 
         if (resolved_dim < 0 || resolved_dim >= static_cast<int>(tensors[0].shape().rank())) {
-            LOG_ERROR("Invalid dimension for cat: {}", dim);
+            LOG_ERROR("Invalid dimension for cat: {}, rank=%zu", dim, tensors[0].shape().rank());
             return Tensor();
         }
 
@@ -1123,6 +1205,7 @@ namespace lfs::core {
         // Build result shape
         std::vector<size_t> result_dims = first_shape.dims();
         result_dims[resolved_dim] = total_size_along_dim;
+
         auto result = Tensor::empty(TensorShape(result_dims), first_device, first_dtype);
 
         size_t element_size = dtype_size(first_dtype);
@@ -1173,7 +1256,7 @@ namespace lfs::core {
                     row_size,
                     element_size,
                     nullptr);
-                cudaDeviceSynchronize();
+                // No sync - tensor operation
             } else {
                 // CPU: Simple memcpy per row
                 size_t result_offset = 0;
@@ -1216,7 +1299,7 @@ namespace lfs::core {
                 resolved_dim,
                 element_size,
                 nullptr);
-            cudaDeviceSynchronize();
+            // No sync - tensor operation
         } else {
             // CPU fallback
             for (size_t outer = 0; outer < outer_size; ++outer) {
@@ -1381,14 +1464,14 @@ namespace lfs::core {
                 float* dst = result.ptr<float>();
 
                 // Use our optimized kernel
-                tensor_ops::launch_clamp_fused(src, dst, min_val, max_val, numel(), 0);
+                tensor_ops::launch_clamp_fused(src, dst, min_val, max_val, numel(), nullptr);
             } else if (dtype_ == DataType::Int32) {
                 // Fallback: copy then clamp for int
                 cudaMemcpy(result.data_, data_, bytes(), cudaMemcpyDeviceToDevice);
                 tensor_ops::launch_clamp_scalar_int(result.ptr<int>(),
                                                     static_cast<int>(min_val),
                                                     static_cast<int>(max_val),
-                                                    numel(), 0);
+                                                    numel(), nullptr);
             }
         } else {
             // CPU: simple loop

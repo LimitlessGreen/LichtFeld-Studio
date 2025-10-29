@@ -130,4 +130,103 @@ namespace gs::training {
         return BilateralGridTVLossFunction::apply(grids_);
     }
 
+    // ============= MANUAL FORWARD/BACKWARD IMPLEMENTATIONS (no autograd) =============
+
+    std::pair<torch::Tensor, bilateral_grid::BilateralGridSliceContext> BilateralGrid::apply_forward(
+        const torch::Tensor& rgb, int image_idx) {
+        TORCH_CHECK(image_idx >= 0 && image_idx < num_images_,
+                    "Invalid image index: ", image_idx);
+
+        // Handle different input formats
+        torch::Tensor rgb_processed;
+        if (rgb.dim() == 4 && rgb.size(0) == 1) {
+            // Input is [1, C, H, W] - squeeze batch dimension
+            rgb_processed = rgb.squeeze(0); // Now [C, H, W]
+        } else if (rgb.dim() == 3) {
+            // Input is already [C, H, W]
+            rgb_processed = rgb;
+        } else {
+            TORCH_CHECK(false, "RGB must be [C, H, W] or [1, C, H, W], got ", rgb.sizes());
+        }
+
+        rgb_processed = torch::clamp(rgb_processed, 0, 1);
+        // Convert from [C, H, W] to [H, W, C]
+        auto rgb_hwc = rgb_processed.permute({1, 2, 0}).contiguous();
+
+        // Apply bilateral grid using manual forward
+        auto grid = grids_[image_idx];
+        auto [output, ctx] = bilateral_grid::bilateral_grid_slice_forward(grid, rgb_hwc);
+
+        // Convert back to [C, H, W]
+        auto result = output.permute({2, 0, 1}).contiguous();
+
+        // If input had batch dimension, add it back
+        if (rgb.dim() == 4) {
+            result = result.unsqueeze(0);
+        }
+
+        return {result, ctx};
+    }
+
+    torch::Tensor BilateralGrid::apply_backward(
+        const bilateral_grid::BilateralGridSliceContext& ctx,
+        const torch::Tensor& grad_output,
+        int image_idx) {
+        TORCH_CHECK(image_idx >= 0 && image_idx < num_images_,
+                    "Invalid image index: ", image_idx);
+
+        // Handle different input formats (reverse of forward)
+        torch::Tensor grad_processed;
+        bool had_batch_dim = false;
+
+        if (grad_output.dim() == 4 && grad_output.size(0) == 1) {
+            grad_processed = grad_output.squeeze(0); // [C, H, W]
+            had_batch_dim = true;
+        } else if (grad_output.dim() == 3) {
+            grad_processed = grad_output; // [C, H, W]
+        } else {
+            TORCH_CHECK(false, "grad_output must be [C, H, W] or [1, C, H, W], got ", grad_output.sizes());
+        }
+
+        // Convert from [C, H, W] to [H, W, C]
+        auto grad_hwc = grad_processed.permute({1, 2, 0}).contiguous();
+
+        // Compute gradients using manual backward
+        auto [grad_grid, grad_rgb] = bilateral_grid::bilateral_grid_slice_backward(ctx, grad_hwc);
+
+        // Accumulate grid gradients into the parameter
+        if (!grids_.grad().defined()) {
+            grids_.mutable_grad() = torch::zeros_like(grids_);
+        }
+        grids_.mutable_grad()[image_idx].add_(grad_grid);
+
+        // Convert grad_rgb back to [C, H, W]
+        auto result = grad_rgb.permute({2, 0, 1}).contiguous();
+
+        // Add batch dimension back if needed
+        if (had_batch_dim) {
+            result = result.unsqueeze(0);
+        }
+
+        return result;
+    }
+
+    std::pair<float, bilateral_grid::BilateralGridTVContext> BilateralGrid::tv_loss_forward() const {
+        return bilateral_grid::bilateral_grid_tv_forward(grids_.contiguous());
+    }
+
+    void BilateralGrid::tv_loss_backward(
+        const bilateral_grid::BilateralGridTVContext& ctx,
+        float grad_loss) {
+
+        // Compute gradients
+        auto grad_grids = bilateral_grid::bilateral_grid_tv_backward(ctx, grad_loss);
+
+        // Accumulate into grids_ gradient
+        if (!grids_.grad().defined()) {
+            grids_.mutable_grad() = torch::zeros_like(grids_);
+        }
+        grids_.mutable_grad().add_(grad_grids);
+    }
+
 } // namespace gs::training

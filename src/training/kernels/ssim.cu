@@ -2,6 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include "kernels/ssim.cuh"
 #include <algorithm>
 #include <c10/cuda/CUDAGuard.h>
 #include <cooperative_groups.h>
@@ -507,4 +508,118 @@ fusedssim_backward(
         dm_dsigma12.contiguous().data_ptr<float>());
 
     return dL_dimg1;
+}
+
+// Manual SSIM forward (no autograd)
+std::pair<float, SSIMContext> ssim_forward(
+    const torch::Tensor& img1_input,
+    const torch::Tensor& img2_input,
+    bool apply_valid_padding) {
+
+    const float C1 = 0.01f * 0.01f;
+    const float C2 = 0.03f * 0.03f;
+
+    // Make tensors contiguous and ensure 4D [N, C, H, W]
+    auto img1 = img1_input.contiguous();
+    auto img2 = img2_input.contiguous();
+
+    if (img1.dim() == 3) {
+        img1 = img1.unsqueeze(0);
+    }
+    if (img2.dim() == 3) {
+        img2 = img2.unsqueeze(0);
+    }
+
+    // Call CUDA kernel
+    auto outputs = fusedssim(C1, C2, img1, img2, /*train=*/true);
+    auto ssim_map = std::get<0>(outputs);
+    auto dm_dmu1 = std::get<1>(outputs);
+    auto dm_dsigma1_sq = std::get<2>(outputs);
+    auto dm_dsigma12 = std::get<3>(outputs);
+
+    // Store original dimensions
+    int64_t h = ssim_map.size(2);
+    int64_t w = ssim_map.size(3);
+
+    // Apply valid padding (crop 5 pixels from each side)
+    torch::Tensor ssim_map_cropped = ssim_map;
+    if (apply_valid_padding && h > 10 && w > 10) {
+        using torch::indexing::Slice;
+        ssim_map_cropped = ssim_map.index({Slice(), Slice(), Slice(5, h - 5), Slice(5, w - 5)});
+    }
+
+    // Compute mean SSIM value
+    float ssim_value = ssim_map_cropped.mean().item<float>();
+
+    // Save context for backward
+    SSIMContext ctx;
+    ctx.img1 = img1;
+    ctx.img2 = img2;
+    ctx.dm_dmu1 = dm_dmu1;
+    ctx.dm_dsigma1_sq = dm_dsigma1_sq;
+    ctx.dm_dsigma12 = dm_dsigma12;
+    ctx.original_h = h;
+    ctx.original_w = w;
+    ctx.apply_valid_padding = apply_valid_padding;
+
+    return {ssim_value, ctx};
+}
+
+// Manual SSIM backward (no autograd)
+torch::Tensor ssim_backward(
+    const SSIMContext& ctx,
+    float grad_loss) {
+
+    const float C1 = 0.01f * 0.01f;
+    const float C2 = 0.03f * 0.03f;
+
+    // Compute gradient map size (after cropping if applicable)
+    int64_t grad_h = ctx.original_h;
+    int64_t grad_w = ctx.original_w;
+    int64_t numel = ctx.img1.size(0) * ctx.img1.size(1) * grad_h * grad_w;
+
+    if (ctx.apply_valid_padding && grad_h > 10 && grad_w > 10) {
+        grad_h -= 10;  // Remove 5 pixels from each side
+        grad_w -= 10;
+        numel = ctx.img1.size(0) * ctx.img1.size(1) * grad_h * grad_w;
+    }
+
+    // Create gradient map: d(loss)/d(ssim_scalar) = grad_loss
+    // d(ssim_scalar)/d(ssim_map[i]) = 1/numel
+    // So: d(loss)/d(ssim_map[i]) = grad_loss / numel
+    float grad_per_pixel = grad_loss / static_cast<float>(numel);
+
+    // Create gradient tensor for cropped region
+    torch::Tensor dL_dmap;
+    if (ctx.apply_valid_padding && ctx.original_h > 10 && ctx.original_w > 10) {
+        // Create full-size zero tensor
+        dL_dmap = torch::zeros_like(ctx.img1);
+
+        // Fill cropped region with gradient
+        using torch::indexing::Slice;
+        auto grad_cropped = torch::full(
+            {ctx.img1.size(0), ctx.img1.size(1), grad_h, grad_w},
+            grad_per_pixel,
+            ctx.img1.options());
+        dL_dmap.index_put_({Slice(), Slice(), Slice(5, ctx.original_h - 5), Slice(5, ctx.original_w - 5)},
+                           grad_cropped);
+    } else {
+        // No cropping - fill entire map
+        dL_dmap = torch::full_like(ctx.img1, grad_per_pixel);
+    }
+
+    // Call CUDA backward kernel
+    auto img1_mutable = ctx.img1.clone();
+    auto img2_mutable = ctx.img2.clone();
+    auto dL_dmap_mutable = dL_dmap.clone();
+    auto dm_dmu1_mutable = ctx.dm_dmu1.clone();
+    auto dm_dsigma1_sq_mutable = ctx.dm_dsigma1_sq.clone();
+    auto dm_dsigma12_mutable = ctx.dm_dsigma12.clone();
+
+    auto grad_img1 = fusedssim_backward(
+        C1, C2,
+        img1_mutable, img2_mutable, dL_dmap_mutable,
+        dm_dmu1_mutable, dm_dsigma1_sq_mutable, dm_dsigma12_mutable);
+
+    return grad_img1;
 }

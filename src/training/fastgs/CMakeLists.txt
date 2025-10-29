@@ -4,19 +4,12 @@
 
 cmake_minimum_required(VERSION 3.30)
 
-# TODO: This file is a bit of a mess and needs to be cleaned up.
-
-# Get torch from parent
-if(NOT DEFINED TORCH_INCLUDE_DIRS)
-    find_package(Torch REQUIRED)
-endif()
-
-# All fastgs sources together
 set(FASTGS_SOURCES
         # rasterizer
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/src/rasterization_api.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/src/forward.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/src/backward.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/src/rasterizer_memory_arena.cu
         # optimizer
         ${CMAKE_CURRENT_SOURCE_DIR}/optimizer/src/adam_api.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/optimizer/src/adam.cu
@@ -39,27 +32,29 @@ target_include_directories(fastgs_backend
         ${CMAKE_CURRENT_SOURCE_DIR}/utils
         ${CMAKE_SOURCE_DIR}/include
         ${CUDAToolkit_INCLUDE_DIRS}
-        ${OPENGL_INCLUDE_DIRS}
-        ${TORCH_INCLUDE_DIRS}
         PRIVATE
 )
 
+# Pure CUDA libraries only
 target_link_libraries(fastgs_backend
         PUBLIC
         CUDA::cudart
         CUDA::curand
         CUDA::cublas
-        ${TORCH_LIBRARIES}
+        ${CUDA_CUDA_LIBRARY}
 )
 
 target_compile_options(fastgs_backend PRIVATE
-  # CUDA device code + MSVC host compiler flags (Windows only)
-  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Debug>>:-O0 -g -G -lineinfo -Xcompiler=/Od -Xcompiler=/Z7>
-  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:-O3 --use_fast_math --expt-relaxed-constexpr --diag-suppress=20012,186,221 -Xcompiler=/O2 -Xcompiler=/DNDEBUG>
+  # CUDA
+  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-O0 -g -G -lineinfo>
+  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-O3 --use_fast_math --expt-relaxed-constexpr --diag-suppress=20012,186,221>
 
-  # CUDA device code for non-Windows
-  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<CXX_COMPILER_ID:MSVC>>,$<CONFIG:Debug>>:-O0 -g -G -lineinfo>
-  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<CXX_COMPILER_ID:MSVC>>,$<CONFIG:Release>>:-O3 --use_fast_math --expt-relaxed-constexpr --diag-suppress=20012,186,221>
+  # CUDA on Windows: Pass /utf-8 to MSVC when invoked by nvcc
+  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:
+    -Xcompiler=/utf-8
+    -Xcompiler=/D_CRT_SECURE_NO_WARNINGS
+    --diag-suppress=27  # Suppress "character value out of range" warnings from fmt
+  >
 
   # C++ MSVC
   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Debug>>:/Od /Z7>
@@ -69,6 +64,13 @@ target_compile_options(fastgs_backend PRIVATE
   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CXX_COMPILER_ID:MSVC>>,$<CONFIG:Debug>>:-O0 -g>
   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CXX_COMPILER_ID:MSVC>>,$<CONFIG:Release>>:-O3 -DNDEBUG>
 )
+
+# Windows: Disable fmt Unicode check for CUDA files (nvcc doesn't properly propagate /utf-8)
+if(MSVC)
+    target_compile_definitions(fastgs_backend PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:FMT_UNICODE=0>
+    )
+endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(fastgs_backend PRIVATE _DEBUG DEBUG_BUILD)
