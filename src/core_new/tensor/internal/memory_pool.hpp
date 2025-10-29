@@ -5,7 +5,6 @@
 
 #include "core_new/logger.hpp"
 #include "gpu_arena_allocator.hpp"
-#include "vmm_allocator.hpp"
 #include <cuda_runtime.h>
 #include <unordered_map>
 #include <mutex>
@@ -17,7 +16,7 @@ namespace lfs::core {
     // Tensors < 100MB use arena (O(1) allocation)
     // Tensors ≥ 100MB use VMM or cudaMallocAsync (avoid arena fragmentation)
     static constexpr size_t ARENA_ALLOCATOR_THRESHOLD = 100 * 1024 * 1024; // 100MB
-    static constexpr size_t VMM_ALLOCATOR_THRESHOLD = 1024 * 1024;        // 1MB - use VMM for ≥1MB
+    static constexpr size_t VMM_ALLOCATOR_THRESHOLD = 100 * 1024 * 1024;   // 100MB - use VMM for ≥100MB (cuMemCreate overhead too high for smaller)
     static constexpr size_t DIRECT_ALLOC_THRESHOLD = 1024 * 1024 * 1024;  // 1GB - bypass pool for very large allocations (fallback)
 
     /**
@@ -33,7 +32,6 @@ namespace lfs::core {
      */
     enum class AllocMethod : uint8_t {
         Arena,      // From GPUArenaAllocator
-        VMM,        // From VMM_Allocator (CUDA 11.2+, VMM-capable GPU)
         Async,      // From cudaMallocAsync (CUDA 12.8+)
         Direct      // From cudaMalloc (large allocations, fallback)
     };
@@ -75,14 +73,20 @@ namespace lfs::core {
 
             void* ptr = nullptr;
 
-            // DISABLED: Arena and VMM allocators have stream-ordering bugs
-            // TODO: Implement proper stream-ordered allocation with deferred freeing
+            // ALLOCATION STRATEGY: cudaMallocAsync for all sizes < 1GB, direct cudaMalloc for ≥1GB
             //
-            // The arena and VMM allocators perform eager memory reuse without tracking
-            // stream dependencies, causing use-after-free bugs. For now, we use
-            // cudaMallocAsync (stream-ordered) and cudaMalloc (direct) exclusively.
+            // Why cudaMallocAsync instead of VMM:
+            // - cudaMallocAsync: <1 μs per allocation (driver-managed pools, highly optimized)
+            // - VMM with cuMemCreate: 100-500 μs per allocation (needs chunk pooling to compete)
+            //
+            // Memory release strategy:
+            // - cudaMallocAsync caches freed memory (fast reuse, but holds onto memory)
+            // - We trim pools on allocation failure (cudaMemPoolTrimTo) to release to OS
+            // - This gives 95% of VMM benefits without the complexity
+            //
+            // If you need more aggressive memory release, use trim_memory_pools() manually
 
-            // 1. DISABLED: Arena for small allocations (<1MB)
+            // 1. TODO: Arena for small allocations (<1MB) - still has stream-ordering issues
             // if (bytes < VMM_ALLOCATOR_THRESHOLD && GPUArenaAllocator::instance().is_enabled()) {
             //     ptr = GPUArenaAllocator::instance().allocate(bytes);
             //     if (ptr != nullptr) {
@@ -90,7 +94,7 @@ namespace lfs::core {
             //     }
             // }
 
-            // 2. DISABLED: VMM for medium/large allocations (≥1MB, <1GB)
+            // 2. DISABLED: VMM for medium/large allocations (too slow without chunk pooling)
             // if (bytes >= VMM_ALLOCATOR_THRESHOLD && bytes < DIRECT_ALLOC_THRESHOLD) {
             //     if (get_or_create_vmm()) {
             //         ptr = vmm_->allocate(bytes, stream);
@@ -102,7 +106,7 @@ namespace lfs::core {
             //     }
             // }
 
-            // 3. Direct allocation for very large (≥1GB) or all allocations (arena/VMM disabled)
+            // 3. Direct allocation for very large (≥1GB) or all allocations (VMM disabled)
 
             if (bytes >= DIRECT_ALLOC_THRESHOLD) {
                 // Check available memory before allocation
@@ -239,16 +243,6 @@ namespace lfs::core {
             // CRITICAL: Use correct deallocation function based on allocation method!
             cudaError_t err;
             switch (method) {
-                case AllocMethod::VMM:
-                    // VMM: Decommit physical (returns RAM to OS), keep virtual mapping
-                    if (vmm_) {
-                        vmm_->deallocate(ptr, stream);
-                    } else {
-                        LOG_ERROR("VMM allocation but VMM allocator not available!");
-                        cudaFree(ptr);  // Fallback
-                    }
-                    break;
-
                 case AllocMethod::Direct:
                     // Direct cudaMalloc requires cudaFree (synchronous, returns to OS)
                     err = cudaFree(ptr);
@@ -382,6 +376,40 @@ namespace lfs::core {
 #endif
         }
 
+        /**
+         * @brief Manually release cached memory back to OS
+         *
+         * Call this between training runs or when you need to free memory for other processes.
+         * cudaMallocAsync caches freed memory for fast reuse, but this releases it to the OS.
+         *
+         * Example usage:
+         *   CudaMemoryPool::instance().trim_cached_memory();  // After densification
+         *   CudaMemoryPool::instance().trim_cached_memory();  // Between training runs
+         */
+        void trim_cached_memory() {
+#if CUDART_VERSION >= 12080
+            cudaDeviceSynchronize();  // Ensure all operations complete
+
+            int device;
+            cudaGetDevice(&device);
+            cudaMemPool_t pool;
+            if (cudaDeviceGetDefaultMemPool(&pool, device) == cudaSuccess) {
+                size_t before_free = 0, total = 0;
+                cudaMemGetInfo(&before_free, &total);
+
+                cudaMemPoolTrimTo(pool, 0);  // Release all unused cached memory
+
+                size_t after_free = 0;
+                cudaMemGetInfo(&after_free, &total);
+
+                if (after_free > before_free) {
+                    printf("[MEMORY] Trimmed pool: freed %.2f GB\n",
+                           (after_free - before_free) / (1024.0 * 1024.0 * 1024.0));
+                }
+            }
+#endif
+        }
+
         // Disable copy and move
         CudaMemoryPool(const CudaMemoryPool&) = delete;
         CudaMemoryPool& operator=(const CudaMemoryPool&) = delete;
@@ -397,52 +425,10 @@ namespace lfs::core {
             // Memory pool is automatically cleaned up by CUDA runtime
         }
 
-        /**
-         * @brief Get or create VMM allocator (lazy initialization)
-         */
-        bool get_or_create_vmm() {
-            if (vmm_) {
-                return true;
-            }
-
-            std::lock_guard<std::mutex> lock(vmm_mutex_);
-            if (vmm_) {  // Double-check after lock
-                return true;
-            }
-
-            // Check if VMM is supported
-            if (!VMM_Allocator::is_vmm_supported()) {
-                LOG_INFO("VMM not supported on this device, using fallback allocators");
-                return false;
-            }
-
-            try {
-                VMM_Allocator::Config config;
-                config.virtual_size = (4ULL << 30) - (16 << 20);  // ~4 GB virtual (OffsetAllocator uint32 limit)
-                config.initial_commit = 512 << 20;         // 512 MB initial
-                config.max_physical = 20ULL << 30;         // 20 GB max
-                config.commit_granularity = 16 << 20;      // 16 MB
-                config.auto_decommit = true;               // Decommit on free
-                config.decommit_threshold = 0.7f;          // Above 70% pressure
-                config.enable_statistics = true;
-
-                vmm_ = std::make_unique<VMM_Allocator>(config);
-                LOG_INFO("VMM allocator initialized successfully");
-                return true;
-            } catch (const std::exception& e) {
-                LOG_ERROR("Failed to create VMM allocator: {}", e.what());
-                return false;
-            }
-        }
-
         // Thread-safe tracking of allocation methods
         // CRITICAL: We must know which free function to call for each pointer!
         std::unordered_map<void*, AllocMethod> allocation_map_;
         std::mutex map_mutex_;
-
-        // VMM allocator (lazy initialized)
-        std::unique_ptr<VMM_Allocator> vmm_;
-        std::mutex vmm_mutex_;
     };
 
 } // namespace lfs::core

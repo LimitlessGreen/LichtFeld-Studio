@@ -32,6 +32,18 @@
 #include <thrust/transform.h>
 #include <thrust/tuple.h>
 
+// CUDA error checking macro
+#define CHECK_CUDA(call)                              \
+    do {                                              \
+        cudaError_t error = call;                     \
+        if (error != cudaSuccess) {                   \
+            LOG_ERROR("CUDA error at {}:{} - {}: {}", \
+                      __FILE__, __LINE__,             \
+                      cudaGetErrorName(error),        \
+                      cudaGetErrorString(error));     \
+        }                                             \
+    } while (0)
+
 namespace lfs::core::tensor_ops {
 
     // ============= GENERIC OPERATIONS - NOW IN HEADER =============
@@ -2200,5 +2212,128 @@ namespace lfs::core::tensor_ops {
         const __half*, const __half*, unsigned char*, size_t, ops::logical_and_op, cudaStream_t);
     template void launch_binary_op_generic<__half, unsigned char, ops::logical_or_op>(
         const __half*, const __half*, unsigned char*, size_t, ops::logical_or_op, cudaStream_t);
+
+    // ============= STRIDED FILL KERNEL =============
+
+    // Helper device function to convert linear index to multi-dimensional indices and calculate offset
+    __device__ inline size_t calculate_strided_offset(
+        size_t linear_idx,
+        const size_t* __restrict__ shape,
+        const size_t* __restrict__ strides,
+        size_t storage_offset,
+        int ndim
+    ) {
+        size_t offset = storage_offset;
+        size_t remaining = linear_idx;
+
+        // Convert linear index to multi-dimensional indices
+        for (int d = ndim - 1; d >= 0; --d) {
+            size_t idx = remaining % shape[d];
+            offset += idx * strides[d];
+            remaining /= shape[d];
+        }
+
+        return offset;
+    }
+
+    // Optimized kernel for 2D column fill (common case: rotation.slice(1, 0, 1).fill_())
+    template <typename T>
+    __global__ void fill_strided_2d_kernel(
+        T* __restrict__ data,
+        T value,
+        size_t storage_offset,
+        size_t stride0,  // Stride for dimension 0 (rows)
+        size_t n         // Number of elements to fill
+    ) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (idx < n) {
+            // For column slice: offset = storage_offset + idx * stride0
+            data[storage_offset + idx * stride0] = value;
+        }
+    }
+
+    // Kernel for filling strided tensors with a constant value (general case)
+    template <typename T>
+    __global__ void fill_strided_kernel(
+        T* __restrict__ data,
+        T value,
+        const size_t* __restrict__ shape,
+        const size_t* __restrict__ strides,
+        size_t storage_offset,
+        int ndim,
+        size_t n
+    ) {
+        size_t linear_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (linear_idx < n) {
+            size_t offset = calculate_strided_offset(linear_idx, shape, strides, storage_offset, ndim);
+            data[offset] = value;
+        }
+    }
+
+    // Launch function for strided fill
+    template <typename T>
+    void launch_fill_strided(
+        T* data,
+        T value,
+        const std::vector<size_t>& shape,
+        const std::vector<size_t>& strides,
+        size_t storage_offset,
+        size_t n,
+        cudaStream_t stream
+    ) {
+        if (n == 0) return;
+
+        constexpr int BLOCK_SIZE = 256;
+        int num_blocks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+        // FAST PATH: Optimize for 2D column slice (e.g., rotation.slice(1, 0, 1).fill_())
+        // This is the most common pattern and avoids expensive malloc/memcpy/free
+        if (shape.size() == 2 && shape[1] == 1) {
+            // Column slice: just need stride[0] to step through rows
+            fill_strided_2d_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                data, value, storage_offset, strides[0], n
+            );
+
+            CHECK_CUDA(cudaGetLastError());
+            if (stream == nullptr) {
+                CHECK_CUDA(cudaDeviceSynchronize());
+            }
+            return;
+        }
+
+        // GENERAL PATH: For arbitrary strided fills
+        int ndim = static_cast<int>(shape.size());
+
+        // Copy shape and strides to device
+        size_t* d_shape;
+        size_t* d_strides;
+        CHECK_CUDA(cudaMalloc(&d_shape, ndim * sizeof(size_t)));
+        CHECK_CUDA(cudaMalloc(&d_strides, ndim * sizeof(size_t)));
+        CHECK_CUDA(cudaMemcpy(d_shape, shape.data(), ndim * sizeof(size_t), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_strides, strides.data(), ndim * sizeof(size_t), cudaMemcpyHostToDevice));
+
+        fill_strided_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            data, value, d_shape, d_strides, storage_offset, ndim, n
+        );
+
+        CHECK_CUDA(cudaGetLastError());
+        if (stream == nullptr) {
+            CHECK_CUDA(cudaDeviceSynchronize());
+        }
+
+        // Clean up device memory
+        CHECK_CUDA(cudaFree(d_shape));
+        CHECK_CUDA(cudaFree(d_strides));
+    }
+
+    // Explicit instantiations
+    template void launch_fill_strided<float>(
+        float*, float, const std::vector<size_t>&, const std::vector<size_t>&, size_t, size_t, cudaStream_t);
+    template void launch_fill_strided<int>(
+        int*, int, const std::vector<size_t>&, const std::vector<size_t>&, size_t, size_t, cudaStream_t);
+    template void launch_fill_strided<unsigned char>(
+        unsigned char*, unsigned char, const std::vector<size_t>&, const std::vector<size_t>&, size_t, size_t, cudaStream_t);
 
 } // namespace lfs::core::tensor_ops

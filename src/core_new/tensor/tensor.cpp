@@ -943,6 +943,58 @@ namespace lfs::core {
             return *this;
         }
 
+        // CRITICAL FIX: For non-contiguous tensors (from slice/view operations),
+        // we must respect strides and fill only the elements in the view
+        if (!is_contiguous()) {
+            // For non-contiguous tensors, iterate and use operator[] which respects strides
+            const size_t n = numel();
+
+            // For CUDA non-contiguous tensors: use CUDA kernel that respects strides
+            if (device_ == Device::CUDA) {
+                // Use CUDA kernel for strided fill (much faster than element-by-element cudaMemcpy)
+                if (dtype_ == DataType::Float32) {
+                    tensor_ops::launch_fill_strided<float>(
+                        static_cast<float*>(data_), value, shape_.dims(), strides_, storage_offset_, n, nullptr);
+                } else if (dtype_ == DataType::Int32) {
+                    int int_val = static_cast<int>(value);
+                    tensor_ops::launch_fill_strided<int>(
+                        static_cast<int*>(data_), int_val, shape_.dims(), strides_, storage_offset_, n, nullptr);
+                } else if (dtype_ == DataType::Bool) {
+                    unsigned char bool_val = (value != 0.0f) ? 1 : 0;
+                    tensor_ops::launch_fill_strided<unsigned char>(
+                        static_cast<unsigned char*>(data_), bool_val, shape_.dims(), strides_, storage_offset_, n, nullptr);
+                }
+                return *this;
+            }
+
+            // CPU non-contiguous: manually compute offsets using strides
+            std::vector<size_t> indices(ndim(), 0);
+            for (size_t linear_idx = 0; linear_idx < n; ++linear_idx) {
+                // Convert linear index to multi-dimensional indices
+                size_t remaining = linear_idx;
+                for (int d = static_cast<int>(ndim()) - 1; d >= 0; --d) {
+                    indices[d] = remaining % shape_[d];
+                    remaining /= shape_[d];
+                }
+
+                // Calculate physical offset and set value
+                size_t offset = storage_offset_;
+                for (size_t d = 0; d < ndim(); ++d) {
+                    offset += indices[d] * strides_[d];
+                }
+
+                if (dtype_ == DataType::Float32) {
+                    static_cast<float*>(data_)[offset] = value;
+                } else if (dtype_ == DataType::Int32) {
+                    static_cast<int*>(data_)[offset] = static_cast<int>(value);
+                } else if (dtype_ == DataType::Bool) {
+                    static_cast<unsigned char*>(data_)[offset] = (value != 0.0f) ? 1 : 0;
+                }
+            }
+            return *this;
+        }
+
+        // For contiguous tensors, use the fast path with memcpy
         // Account for storage offset
         void* dest = static_cast<char*>(data_) + storage_offset_ * dtype_size(dtype_);
 

@@ -312,19 +312,8 @@ namespace lfs::core {
         // _rotation is [N, 4], we want to normalize each quaternion
         // norm = sqrt(sum(x^2)) along dim=1, keepdim=true to get [N, 1]
 
-        // DEBUG: Check CUDA device and tensor device
-        int current_device = -1;
-        cudaGetDevice(&current_device);
-        printf("[SPLAT_DATA] get_rotation: current CUDA device = %d, _rotation.device() = %d, shape=[%zu, %zu]\n",
-               current_device, static_cast<int>(_rotation.device()),
-               _rotation.shape()[0], _rotation.shape()[1]);
-
         auto squared = _rotation.square();
-        printf("[SPLAT_DATA] get_rotation: after square()\n");
-
-        auto sum_squared = squared.sum({1}, true);    // [N, 1] - THIS IS WHERE IT FAILS
-        printf("[SPLAT_DATA] get_rotation: after sum() - SUCCESS!\n");
-
+        auto sum_squared = squared.sum({1}, true);    // [N, 1]
         auto norm = sum_squared.sqrt();               // [N, 1]
         return _rotation.div(norm.clamp_min(1e-12f)); // Avoid division by zero
     }

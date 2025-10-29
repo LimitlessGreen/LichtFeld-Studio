@@ -48,6 +48,7 @@ set(OPTIONAL_TEST_FILES
     test_tensor_conversions_shape.cpp
     test_kmeans.cpp
     test_critical_fixes.cpp
+    test_cuda_device_state.cpp
     test_tensor_ops_comparison.cpp
     test_sort_minimal.cpp
     test_tensor_debug.cpp
@@ -87,6 +88,13 @@ set(OPTIONAL_TEST_FILES
     test_default_strategy_operations_comparison.cpp
     test_dtype_operations_comprehensive.cpp
     test_tensor_bugs.cpp
+    test_densification_performance.cpp
+    test_densification_old_vs_new.cpp
+    test_densification_profile.cpp
+    # Merged test files for better organization
+    test_bug_regressions.cpp        # Bug regressions (binary_search, index_select, minimal_tensor)
+    test_torch_comparisons.cpp      # LibTorch comparisons (naive_split, split_kernel, fill)
+    test_densification.cpp          # Densification tests (exact_pattern, lfs_only, benchmarks, 10M tests)
 )
 
 foreach(TEST_FILE ${OPTIONAL_TEST_FILES})
@@ -188,64 +196,7 @@ add_custom_target(run_tests
     COMMENT "Running all tests with verbose output"
 )
 
-# Profiling executable for Nsight Systems
-add_executable(profile_adam_optimizer profile_adam_optimizer.cpp)
-
-set_target_properties(profile_adam_optimizer PROPERTIES
-    CUDA_ARCHITECTURES "${LichtFeld-Studio_CUDA_ARCH}"
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    CXX_STANDARD 23
-    CXX_STANDARD_REQUIRED ON
-)
-
-target_include_directories(profile_adam_optimizer PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_BINARY_DIR}/include
-    ${CMAKE_SOURCE_DIR}/tests
-    ${CUDAToolkit_INCLUDE_DIRS}
-)
-
-target_link_libraries(profile_adam_optimizer PRIVATE
-    # Core libraries (in dependency order - same as lichtfeld_tests)
-    gs_visualizer
-    gs_rendering
-    gs_training
-    gs_training_kernels
-    gs_project
-    gs_geometry
-    gs_core
-    gs_loader
-    gs_kernels
-    lfs_training
-    lfs_core
-    lfs_loader
-    lfs_tensor
-    gs_geometry  # Listed again after lfs_core to resolve circular dependency
-    gsplat_backend
-    fastgs_backend
-
-    # External libraries
-    ${TORCH_LIBRARIES}
-    ${OPENGL_LIBRARIES}
-    OpenImageIO::OpenImageIO
-    CUDA::cudart
-    CUDA::cublas
-    CUDA::curand
-    CUDA::cupti      # Required by PyTorch profiling
-    CUDA::nvToolsExt  # For NVTX
-    spdlog::spdlog
-)
-
-target_compile_options(profile_adam_optimizer PRIVATE
-    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G -lineinfo>
-    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:-O0 -g>
-    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3>
-)
-
-message(STATUS "Profiling tool: profile_adam_optimizer")
-message(STATUS "  Build with: ninja profile_adam_optimizer")
-message(STATUS "  Run with: nsys profile --trace=cuda,nvtx --output=adam_profile ./build/tests/profile_adam_optimizer")
+# Note: Profiling executables removed during test cleanup
 
 # Platform-specific settings
 if(WIN32)

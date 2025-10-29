@@ -332,18 +332,11 @@ namespace lfs::core {
         auto result = empty(indices_same_device.shape(), device_, dtype_);
 
         // DEBUG: Log device and CUDA state
-        int cuda_device = -1;
-        cudaGetDevice(&cuda_device);
-        printf("[TAKE] device_=%d, CUDA device=%d, numel=%zu\n",
-               static_cast<int>(device_), cuda_device, indices_same_device.numel());
-
         if (device_ == Device::CUDA) {
-            printf("[TAKE] Taking CUDA path\n");
             tensor_ops::launch_take(flat.ptr<float>(), indices_same_device.ptr<int>(),
                                     result.ptr<float>(), flat.numel(), indices_same_device.numel(), 0);
             // No sync - tensor operation
         } else {
-            printf("[TAKE] Taking CPU path with parallel execution\n");
             const float* src = flat.ptr<float>();
             float* dst = result.ptr<float>();
             const int* idx = indices_same_device.ptr<int>();

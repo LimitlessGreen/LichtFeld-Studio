@@ -1148,8 +1148,6 @@ namespace lfs::core {
     // ============= STATIC CAT OPERATION =============
 
     Tensor Tensor::cat(const std::vector<Tensor>& tensors, int dim) {
-        printf("[CAT] Called with %zu tensors, dim=%d\n", tensors.size(), dim);
-
         if (tensors.empty()) {
             LOG_ERROR("Cannot concatenate empty vector of tensors");
             return Tensor();
@@ -1173,10 +1171,7 @@ namespace lfs::core {
         const auto first_device = tensors[0].device();
         const auto first_dtype = tensors[0].dtype();
 
-        printf("[CAT] first_shape=%s, resolved_dim=%d\n", first_shape.str().c_str(), resolved_dim);
-
         size_t total_size_along_dim = first_shape[resolved_dim];
-        printf("[CAT] Initial total_size_along_dim=%zu\n", total_size_along_dim);
 
         // Validate all tensors
         for (size_t i = 1; i < tensors.size(); ++i) {
@@ -1205,22 +1200,13 @@ namespace lfs::core {
             }
 
             total_size_along_dim += shape[resolved_dim];
-            printf("[CAT] After tensor %zu, total_size_along_dim=%zu\n", i, total_size_along_dim);
         }
 
         // Build result shape
-        printf("[CAT] Building result with total_size_along_dim=%zu\n", total_size_along_dim);
         std::vector<size_t> result_dims = first_shape.dims();
         result_dims[resolved_dim] = total_size_along_dim;
-        printf("[CAT] Result dims: [");
-        for (size_t i = 0; i < result_dims.size(); ++i) {
-            printf("%zu%s", result_dims[i], (i < result_dims.size() - 1) ? ", " : "");
-        }
-        printf("]\n");
 
         auto result = Tensor::empty(TensorShape(result_dims), first_device, first_dtype);
-        printf("[CAT] After Tensor::empty, result.shape=%s, valid=%d\n",
-               result.shape().str().c_str(), result.is_valid());
 
         size_t element_size = dtype_size(first_dtype);
 

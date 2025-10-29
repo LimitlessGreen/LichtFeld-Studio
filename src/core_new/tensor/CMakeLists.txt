@@ -31,7 +31,6 @@ set(LFS_TENSOR_SOURCES
     tensor_advanced_ops.cpp    # Advanced operations
     pinned_memory_allocator.cpp # Pinned memory allocator for fast CPU-GPU transfers (used by tensor)
     offset_allocator.cpp       # OffsetAllocator for O(1) GPU memory sub-allocation
-    internal/vmm_allocator.cpp  # Virtual Memory Management allocator (CUDA 11.2+)
 )
 
 # CUDA sources (limited to C++20)

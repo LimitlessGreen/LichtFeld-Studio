@@ -8,6 +8,7 @@
 #include "core_new/parameters.hpp"
 #include "optimizer/render_output.hpp"
 #include "strategy_utils.hpp"
+#include "kernels/densification_kernels.hpp"
 
 namespace lfs::training {
     DefaultStrategy::DefaultStrategy(lfs::core::SplatData&& splat_data)
@@ -24,6 +25,11 @@ namespace lfs::training {
 
         // Initialize exponential scheduler
         _scheduler = create_scheduler(*_params, *_optimizer);
+
+        // Initialize densification info: [2, N] tensor for tracking gradients
+        _splat_data._densification_info = lfs::core::Tensor::zeros(
+            {2, static_cast<size_t>(_splat_data.size())},
+            _splat_data.means().device());
     }
 
     bool DefaultStrategy::is_refining(int iter) const {
@@ -46,181 +52,167 @@ namespace lfs::training {
 
     void DefaultStrategy::duplicate(const lfs::core::Tensor& is_duplicated) {
         const lfs::core::Tensor sampled_idxs = is_duplicated.nonzero().squeeze(-1);
+        const int N = _splat_data.size();
+        const int num_selected = sampled_idxs.shape()[0];
 
-        const auto param_fn = [&sampled_idxs](const int i, const lfs::core::Tensor& param) {
-            const lfs::core::Tensor new_param = param.index_select(0, sampled_idxs);
-            return param.cat(new_param, 0);
+        if (num_selected == 0) {
+            return;  // Nothing to duplicate
+        }
+
+        // Use optimized index_select + cat (same as OLD LibTorch approach, proven faster than custom kernel)
+        auto pos_selected = _splat_data.means().index_select(0, sampled_idxs);
+        _splat_data.means() = _splat_data.means().cat(pos_selected, 0);
+
+        auto rot_selected = _splat_data.rotation_raw().index_select(0, sampled_idxs);
+        _splat_data.rotation_raw() = _splat_data.rotation_raw().cat(rot_selected, 0);
+
+        auto scale_selected = _splat_data.scaling_raw().index_select(0, sampled_idxs);
+        _splat_data.scaling_raw() = _splat_data.scaling_raw().cat(scale_selected, 0);
+
+        auto sh0_selected = _splat_data.sh0().index_select(0, sampled_idxs);
+        _splat_data.sh0() = _splat_data.sh0().cat(sh0_selected, 0);
+
+        auto shN_selected = _splat_data.shN().index_select(0, sampled_idxs);
+        _splat_data.shN() = _splat_data.shN().cat(shN_selected, 0);
+
+        auto op_selected = _splat_data.opacity_raw().index_select(0, sampled_idxs);
+        _splat_data.opacity_raw() = _splat_data.opacity_raw().cat(op_selected, 0);
+
+        // Update gradients to match new size
+        if (_splat_data.has_gradients()) {
+            _splat_data.means_grad() = lfs::core::Tensor::zeros(_splat_data.means().shape(), _splat_data.means().device());
+            _splat_data.rotation_grad() = lfs::core::Tensor::zeros(_splat_data.rotation_raw().shape(), _splat_data.rotation_raw().device());
+            _splat_data.scaling_grad() = lfs::core::Tensor::zeros(_splat_data.scaling_raw().shape(), _splat_data.scaling_raw().device());
+            _splat_data.sh0_grad() = lfs::core::Tensor::zeros(_splat_data.sh0().shape(), _splat_data.sh0().device());
+            _splat_data.shN_grad() = lfs::core::Tensor::zeros(_splat_data.shN().shape(), _splat_data.shN().device());
+            _splat_data.opacity_grad() = lfs::core::Tensor::zeros(_splat_data.opacity_raw().shape(), _splat_data.opacity_raw().device());
+        }
+
+        // Update optimizer states: add zeros for new Gaussians
+        auto update_state = [&](ParamType param_type, const lfs::core::Tensor& zeros) {
+            if (const auto* state = _optimizer->get_state(param_type)) {
+                AdamParamState new_state = *state;
+                new_state.exp_avg = state->exp_avg.cat(zeros, 0);
+                new_state.exp_avg_sq = state->exp_avg_sq.cat(zeros, 0);
+                _optimizer->set_state(param_type, new_state);
+            }
         };
 
-        const auto optimizer_fn = [&sampled_idxs](
-            AdamParamState& state,
-            const lfs::core::Tensor& full_param) {
-            // For duplicate, we add zeros to the optimizer state for new Gaussians
-            auto new_shape = full_param.shape();
-            auto zeros_to_add = lfs::core::Tensor::zeros(
-                {sampled_idxs.shape()[0], new_shape[1]},
-                state.exp_avg.device(),
-                state.exp_avg.dtype());
+        auto zeros_3 = lfs::core::Tensor::zeros({static_cast<size_t>(num_selected), 3}, _splat_data.sh0().device());
+        auto zeros_4 = lfs::core::Tensor::zeros({static_cast<size_t>(num_selected), 4}, _splat_data.rotation_raw().device());
+        const int shN_dim = _splat_data.shN().shape()[1];
+        auto zeros_shN = lfs::core::Tensor::zeros({static_cast<size_t>(num_selected), static_cast<size_t>(shN_dim)}, _splat_data.shN().device());
+        auto zeros_opacity = lfs::core::Tensor::zeros({static_cast<size_t>(num_selected), 1}, _splat_data.opacity_raw().device());
 
-            state.exp_avg = state.exp_avg.cat(zeros_to_add, 0);
-            state.exp_avg_sq = state.exp_avg_sq.cat(zeros_to_add, 0);
-        };
-
-        update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
+        update_state(ParamType::Means, zeros_3);
+        update_state(ParamType::Rotation, zeros_4);
+        update_state(ParamType::Scaling, zeros_3);
+        update_state(ParamType::Sh0, zeros_3);
+        update_state(ParamType::ShN, zeros_shN);
+        update_state(ParamType::Opacity, zeros_opacity);
     }
 
     void DefaultStrategy::split(const lfs::core::Tensor& is_split) {
-        const lfs::core::Tensor sampled_idxs = is_split.nonzero().squeeze(-1);
-        const lfs::core::Tensor rest_idxs = is_split.logical_not().nonzero().squeeze(-1);
+        const lfs::core::Tensor split_idxs = is_split.nonzero().squeeze(-1);
+        const lfs::core::Tensor keep_idxs = is_split.logical_not().nonzero().squeeze(-1);
 
-        printf("[SPLIT] About to call get_scaling().index_select\n");
-        const lfs::core::Tensor sampled_scales = _splat_data.get_scaling().index_select(0, sampled_idxs);
-        printf("[SPLIT] After get_scaling().index_select\n");
+        const int N = _splat_data.size();
+        const int num_split = split_idxs.shape()[0];
+        const int num_keep = keep_idxs.shape()[0];
 
-        printf("[SPLIT] About to call get_rotation().index_select\n");
-        const lfs::core::Tensor sampled_quats = _splat_data.get_rotation().index_select(0, sampled_idxs);
-        printf("[SPLIT] After get_rotation().index_select\n");
-
-        // Convert quaternions to rotation matrices manually
-        // sampled_quats: [N, 4] with [w, x, y, z]
-        const auto w = sampled_quats.slice(1, 0, 1).squeeze(-1); // [N]
-        const auto x = sampled_quats.slice(1, 1, 2).squeeze(-1); // [N]
-        const auto y = sampled_quats.slice(1, 2, 3).squeeze(-1); // [N]
-        const auto z = sampled_quats.slice(1, 3, 4).squeeze(-1); // [N]
-
-        // Compute rotation matrix elements
-        // R = [[1-2(y²+z²), 2(xy-wz), 2(xz+wy)],
-        //      [2(xy+wz), 1-2(x²+z²), 2(yz-wx)],
-        //      [2(xz-wy), 2(yz+wx), 1-2(x²+y²)]]
-        const auto two = lfs::core::Tensor::full_like(w, 2.0f);
-        const auto one = lfs::core::Tensor::ones_like(w);
-
-        const auto r00 = one - two * (y * y + z * z);
-        const auto r01 = two * (x * y - w * z);
-        const auto r02 = two * (x * z + w * y);
-        const auto r10 = two * (x * y + w * z);
-        const auto r11 = one - two * (x * x + z * z);
-        const auto r12 = two * (y * z - w * x);
-        const auto r20 = two * (x * z - w * y);
-        const auto r21 = two * (y * z + w * x);
-        const auto r22 = one - two * (x * x + y * y);
-
-        // Stack to form rotation matrices [N, 3, 3]
-        // Stack rows first, then stack the 3 rows
-        auto row0 = r00.unsqueeze(-1).cat(r01.unsqueeze(-1), -1).cat(r02.unsqueeze(-1), -1); // [N, 3]
-        auto row1 = r10.unsqueeze(-1).cat(r11.unsqueeze(-1), -1).cat(r12.unsqueeze(-1), -1); // [N, 3]
-        auto row2 = r20.unsqueeze(-1).cat(r21.unsqueeze(-1), -1).cat(r22.unsqueeze(-1), -1); // [N, 3]
-
-        // Stack rows to get [N, 3, 3]
-        const auto rotmats = row0.unsqueeze(1).cat(row1.unsqueeze(1), 1).cat(row2.unsqueeze(1), 1);
-
-        const auto num_split_gaussians = sampled_idxs.shape()[0];
-        constexpr auto split_size = 2;
-
-        // Generate random samples [split_size, N, 3]
-        const lfs::core::Tensor randn = lfs::core::Tensor::randn(
-            {split_size, num_split_gaussians, 3},
-            sampled_quats.device());
-
-        // Compute einsum manually: samples[b,n,i] = rotmats[n,i,j] * scales[n,j] * randn[b,n,j]
-        // This is: samples = rotmats @ diag(scales) @ randn[b]
-        // For each split b, compute: rotmats[n] @ (scales[n] * randn[b,n])
-        lfs::core::Tensor samples_list[split_size];
-        for (int b = 0; b < split_size; ++b) {
-            // randn[b] has shape [N, 3]
-            auto randn_b = randn[b]; // [N, 3]
-            // Element-wise multiply with scales: [N, 3]
-            auto scaled_randn = sampled_scales * randn_b; // [N, 3]
-            // Batch matrix-vector multiply: rotmats @ scaled_randn
-            // rotmats: [N, 3, 3], scaled_randn: [N, 3] -> need [N, 3, 1]
-            printf("[SPLIT] About to call bmm for split %d\n", b);
-            auto scaled_randn_col = scaled_randn.unsqueeze(-1); // [N, 3, 1]
-            auto rotated = rotmats.bmm(scaled_randn_col).squeeze(-1); // [N, 3]
-            printf("[SPLIT] After bmm for split %d\n", b);
-            samples_list[b] = rotated;
+        if (num_split == 0) {
+            return;  // Nothing to split
         }
 
-        // Stack samples: [split_size, N, 3] - MEMORY OPTIMIZED: single allocation
-        printf("[SPLIT] About to stack samples\n");
-        std::vector<lfs::core::Tensor> samples_vec;
-        for (int b = 0; b < split_size; ++b) {
-            samples_vec.push_back(samples_list[b]);
+        constexpr int split_size = 2;
+
+        // Get SH dimensions
+        const int shN_dim = _splat_data.shN().shape()[1];
+
+        // Generate random noise [2, num_split, 3]
+        const lfs::core::Tensor random_noise = lfs::core::Tensor::randn(
+            {split_size, static_cast<size_t>(num_split), 3},
+            _splat_data.sh0().device());
+
+        // Allocate output tensors [num_keep + num_split*2, ...]
+        const int out_size = num_keep + num_split * split_size;
+        auto positions_out = lfs::core::Tensor::empty({static_cast<size_t>(out_size), 3}, _splat_data.means().device());
+        auto rotations_out = lfs::core::Tensor::empty({static_cast<size_t>(out_size), 4}, _splat_data.rotation_raw().device());
+        auto scales_out = lfs::core::Tensor::empty({static_cast<size_t>(out_size), 3}, _splat_data.scaling_raw().device());
+        auto sh0_out = lfs::core::Tensor::empty({static_cast<size_t>(out_size), 3}, _splat_data.sh0().device());
+        auto shN_out = lfs::core::Tensor::empty({static_cast<size_t>(out_size), static_cast<size_t>(shN_dim)}, _splat_data.shN().device());
+        auto opacities_out = lfs::core::Tensor::empty({static_cast<size_t>(out_size), 1}, _splat_data.opacity_raw().device());
+
+        // Call custom CUDA kernel (outputs sh0 and shN separately - NO slice/contiguous overhead!)
+        kernels::launch_split_gaussians(
+            _splat_data.means().ptr<float>(),
+            _splat_data.rotation_raw().ptr<float>(),
+            _splat_data.scaling_raw().ptr<float>(),
+            _splat_data.sh0().ptr<float>(),
+            _splat_data.shN().ptr<float>(),
+            _splat_data.opacity_raw().ptr<float>(),
+            positions_out.ptr<float>(),
+            rotations_out.ptr<float>(),
+            scales_out.ptr<float>(),
+            sh0_out.ptr<float>(),
+            shN_out.ptr<float>(),
+            opacities_out.ptr<float>(),
+            split_idxs.ptr<int64_t>(),
+            keep_idxs.ptr<int64_t>(),
+            random_noise.ptr<float>(),
+            N,
+            num_split,
+            num_keep,
+            shN_dim,
+            _params->revised_opacity,
+            nullptr  // default stream
+        );
+
+        // Update SplatData with new tensors (already contiguous from kernel!)
+        _splat_data.means() = positions_out;
+        _splat_data.rotation_raw() = rotations_out;
+        _splat_data.scaling_raw() = scales_out;
+        _splat_data.sh0() = sh0_out;
+        _splat_data.shN() = shN_out;
+        _splat_data.opacity_raw() = opacities_out.squeeze(-1);
+
+        // Update gradients to match new size
+        if (_splat_data.has_gradients()) {
+            _splat_data.means_grad() = lfs::core::Tensor::zeros(positions_out.shape(), positions_out.device());
+            _splat_data.rotation_grad() = lfs::core::Tensor::zeros(rotations_out.shape(), rotations_out.device());
+            _splat_data.scaling_grad() = lfs::core::Tensor::zeros(scales_out.shape(), scales_out.device());
+            _splat_data.sh0_grad() = lfs::core::Tensor::zeros(sh0_out.shape(), sh0_out.device());
+            _splat_data.shN_grad() = lfs::core::Tensor::zeros(shN_out.shape(), shN_out.device());
+            _splat_data.opacity_grad() = lfs::core::Tensor::zeros(opacities_out.squeeze(-1).shape(), opacities_out.device());
         }
-        lfs::core::Tensor samples = lfs::core::Tensor::stack(samples_vec, 0);
-        printf("[SPLIT] After stack samples\n");
 
-        printf("[SPLIT] About to call update_param_with_optimizer\n");
-        const auto param_fn = [this, &sampled_idxs, &rest_idxs, &samples, &sampled_scales](
-                                  const int i, const lfs::core::Tensor& param) {
-            printf("[PARAM_FN] Called for param %d, param.shape=%s\n", i, param.shape().str().c_str());
-            printf("[PARAM_FN] sampled_idxs.shape=%s, rest_idxs.shape=%s\n",
-                   sampled_idxs.shape().str().c_str(), rest_idxs.shape().str().c_str());
+        // Update optimizer states: keep old states for kept Gaussians, add zeros for split Gaussians
+        auto update_optimizer_state = [&](ParamType param_type, size_t param_dim) {
+            if (const auto* state = _optimizer->get_state(param_type)) {
+                // Keep states for kept Gaussians
+                lfs::core::Tensor keep_exp_avg = state->exp_avg.index_select(0, keep_idxs);
+                lfs::core::Tensor keep_exp_avg_sq = state->exp_avg_sq.index_select(0, keep_idxs);
 
-            printf("[PARAM_FN] About to call index_select for sampled_param\n");
-            const lfs::core::Tensor sampled_param = param.index_select(0, sampled_idxs);
-            printf("[PARAM_FN] After index_select for sampled_param, shape=%s\n", sampled_param.shape().str().c_str());
-            lfs::core::Tensor split_param;
+                // Add zeros for split Gaussians
+                auto zeros = lfs::core::Tensor::zeros(
+                    {static_cast<size_t>(num_split * split_size), param_dim},
+                    state->exp_avg.device(),
+                    state->exp_avg.dtype());
 
-            if (i == 0) {
-                // means: add offset to each split
-                split_param = (sampled_param.unsqueeze(0) + samples).reshape({-1, 3}); // [split_size * N, 3]
-            } else if (i == 3) {
-                // scaling: divide by 1.6 and duplicate - MEMORY OPTIMIZED
-                auto new_scales = (sampled_scales / 1.6f).log();
-                std::vector<lfs::core::Tensor> scales_vec(split_size, new_scales);
-                split_param = lfs::core::Tensor::cat(scales_vec, 0);
-            } else if (i == 5 && _params->revised_opacity) {
-                // opacity: revised formula - MEMORY OPTIMIZED
-                const lfs::core::Tensor sigmoid_vals = sampled_param.sigmoid();
-                const lfs::core::Tensor one_minus_sigmoid = lfs::core::Tensor::ones_like(sigmoid_vals) - sigmoid_vals;
-                const lfs::core::Tensor new_opacities = lfs::core::Tensor::ones_like(sigmoid_vals) - one_minus_sigmoid.sqrt();
-                auto logit_opacities = new_opacities.logit();
-                std::vector<lfs::core::Tensor> opacity_vec(split_size, logit_opacities);
-                split_param = lfs::core::Tensor::cat(opacity_vec, 0);
-            } else {
-                // other parameters: just duplicate - MEMORY OPTIMIZED
-                printf("[PARAM_FN] Taking else branch (duplicate), split_size=%d\n", split_size);
-                std::vector<lfs::core::Tensor> param_vec(split_size, sampled_param);
-                printf("[PARAM_FN] About to cat param_vec\n");
-                split_param = lfs::core::Tensor::cat(param_vec, 0);
-                printf("[PARAM_FN] After cat, split_param.shape=%s\n", split_param.shape().str().c_str());
+                // Create new state and set it
+                AdamParamState new_state = *state;
+                new_state.exp_avg = keep_exp_avg.cat(zeros, 0);
+                new_state.exp_avg_sq = keep_exp_avg_sq.cat(zeros, 0);
+                _optimizer->set_state(param_type, new_state);
             }
-
-            printf("[PARAM_FN] About to index_select rest_param\n");
-            const lfs::core::Tensor rest_param = param.index_select(0, rest_idxs);
-            printf("[PARAM_FN] After rest_param, shape=%s\n", rest_param.shape().str().c_str());
-            printf("[PARAM_FN] About to cat rest_param and split_param\n");
-            auto result = rest_param.cat(split_param, 0);
-            printf("[PARAM_FN] After final cat, result.shape=%s\n", result.shape().str().c_str());
-            return result;
         };
 
-        const auto optimizer_fn = [&sampled_idxs, &rest_idxs](
-            AdamParamState& state,
-            const lfs::core::Tensor& full_param) {
-            // For split, we keep the non-split states and add zeros for split Gaussians
-            auto rest_exp_avg = state.exp_avg.index_select(0, rest_idxs);
-            auto rest_exp_avg_sq = state.exp_avg_sq.index_select(0, rest_idxs);
-
-            // Create new shape for zeros
-            std::vector<size_t> zero_shape_vec;
-            for (size_t i = 0; i < full_param.ndim(); ++i) {
-                if (i == 0) {
-                    zero_shape_vec.push_back(sampled_idxs.shape()[0] * split_size);
-                } else {
-                    zero_shape_vec.push_back(full_param.shape()[i]);
-                }
-            }
-            auto zeros_to_add = lfs::core::Tensor::zeros(
-                lfs::core::TensorShape(zero_shape_vec),
-                state.exp_avg.device(),
-                state.exp_avg.dtype());
-
-            state.exp_avg = rest_exp_avg.cat(zeros_to_add, 0);
-            state.exp_avg_sq = rest_exp_avg_sq.cat(zeros_to_add, 0);
-        };
-
-        update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
+        update_optimizer_state(ParamType::Means, 3);
+        update_optimizer_state(ParamType::Rotation, 4);
+        update_optimizer_state(ParamType::Scaling, 3);
+        update_optimizer_state(ParamType::Sh0, 3);
+        update_optimizer_state(ParamType::ShN, shN_dim);
+        update_optimizer_state(ParamType::Opacity, 1);
     }
 
     void DefaultStrategy::grow_gs(int iter) {
@@ -235,45 +227,19 @@ namespace lfs::training {
         const lfs::core::Tensor is_small = max_values <= _params->grow_scale3d * _splat_data.get_scene_scale();
         const lfs::core::Tensor is_duplicated = is_grad_high.logical_and(is_small);
 
-        // DEBUG: Detailed logging of sum_scalar() call
-        printf("[CALLSITE] About to call is_duplicated.sum_scalar()\n");
-        printf("[CALLSITE] is_duplicated dtype=%d, shape=%s\n",
-               static_cast<int>(is_duplicated.dtype()), is_duplicated.shape().str().c_str());
-
-        float sum_value = is_duplicated.sum_scalar();
-        printf("[CALLSITE] sum_scalar() returned: %f\n", sum_value);
-
-        const auto num_duplicates = static_cast<int64_t>(sum_value);
-        printf("[CALLSITE] After cast to int64_t: %lld\n", static_cast<long long>(num_duplicates));
-
-        // DEBUG: Check num_duplicates
-        printf("[DEBUG] num_duplicates=%lld\n", static_cast<long long>(num_duplicates));
+        const auto num_duplicates = static_cast<int64_t>(is_duplicated.sum_scalar());
 
         const lfs::core::Tensor is_large = is_small.logical_not();
-
-        // DEBUG: Check tensor sizes before potential corruption
-        printf("[DEBUG] Before is_split: is_grad_high.numel()=%zu, is_large.numel()=%zu\n",
-               is_grad_high.numel(), is_large.numel());
-
         lfs::core::Tensor is_split = is_grad_high.logical_and(is_large);
         const auto num_split = static_cast<int64_t>(is_split.sum_scalar());
 
         // First duplicate
         if (num_duplicates > 0) {
             duplicate(is_duplicated);
-
-            // DEBUG: Check if duplicate() corrupted anything
-            printf("[DEBUG] After duplicate: _splat_data.size()=%d, is_grad_high.numel()=%zu\n",
-                   _splat_data.size(), is_grad_high.numel());
         }
 
         // New Gaussians added by duplication will not be split
         auto zeros_to_concat = lfs::core::Tensor::zeros_bool({static_cast<size_t>(num_duplicates)}, is_split.device());
-
-        // DEBUG: Check is_split before cat
-        printf("[DEBUG] Before cat: is_split.numel()=%zu, zeros.numel()=%zu\n",
-               is_split.numel(), zeros_to_concat.numel());
-
         is_split = is_split.cat(zeros_to_concat, 0);
 
         if (num_split > 0) {

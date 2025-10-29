@@ -354,4 +354,16 @@ namespace lfs::core::tensor_ops {
         DataType dtype,
         cudaStream_t stream = nullptr);
 
+    // ============= Strided Fill Operations =============
+    // Fill non-contiguous tensors with a constant value (respects strides)
+    template <typename T>
+    void launch_fill_strided(
+        T* data,
+        T value,
+        const std::vector<size_t>& shape,
+        const std::vector<size_t>& strides,
+        size_t storage_offset,
+        size_t n,
+        cudaStream_t stream = nullptr);
+
 } // namespace lfs::core::tensor_ops

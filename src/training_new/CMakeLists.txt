@@ -15,6 +15,7 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/bilateral_grid_backward.cu
     kernels/bilateral_grid_tv.cu
     kernels/mcmc_kernels.cu
+    kernels/densification_kernels.cu
     components/sparsity_optimizer_kernels.cu
 )
 

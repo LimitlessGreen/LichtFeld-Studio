@@ -197,13 +197,13 @@ TEST(TensorBoolTest, BoolComparisonResult) {
 TEST(TensorBoolTest, MCMCRemoveGaussiansScenario) {
     // Reproduce the exact scenario from MCMC remove_gaussians
     const int N = 100;
-    
+
     // Create mask to remove indices 10-39 (30 elements)
     std::vector<int32_t> mask_vec(N, 0);
     for (int i = 10; i < 40; i++) {
         mask_vec[i] = 1;
     }
-    
+
     auto mask_int = Tensor::from_vector(mask_vec, TensorShape({N}), Device::CUDA);
     auto mask = mask_int.to(DataType::Bool);
 
@@ -212,11 +212,146 @@ TEST(TensorBoolTest, MCMCRemoveGaussiansScenario) {
     int n_remove = mask_int_back.sum().item<int>();
 
     EXPECT_EQ(n_remove, 30) << "Should detect 30 Gaussians to remove";
-    
+
     // Get keep indices
     auto keep_mask = mask.logical_not();
     auto keep_indices = keep_mask.nonzero().squeeze(-1);
-    
+
     EXPECT_EQ(keep_indices.numel(), 70) << "Should have 70 Gaussians to keep";
+}
+
+// ===================================================================================
+// Bool Reduction Kernel Tests (NEW - tests launch_reduce_op_bool directly)
+// ===================================================================================
+
+TEST(BoolReductionKernel, SumScalarAllTrue) {
+    // Create tensor with all True values
+    auto t = Tensor::full({10000}, true, Device::CUDA, DataType::Bool);
+    float sum = t.sum_scalar();
+    EXPECT_FLOAT_EQ(sum, 10000.0f) << "Should count all True values";
+}
+
+TEST(BoolReductionKernel, SumScalarAllFalse) {
+    // Create tensor with all False values
+    auto t = Tensor::full({10000}, false, Device::CUDA, DataType::Bool);
+    float sum = t.sum_scalar();
+    EXPECT_FLOAT_EQ(sum, 0.0f) << "Should count zero True values";
+}
+
+TEST(BoolReductionKernel, SumScalarMixed) {
+    // Create tensor with mixed true/false
+    std::vector<int32_t> int_vec(10000, 1);
+    for (int i = 0; i < 5000; i++) {
+        int_vec[i] = 0;  // First half false
+    }
+
+    auto int_tensor = Tensor::from_vector(int_vec, TensorShape({10000}), Device::CUDA);
+    auto bool_tensor = int_tensor.to(DataType::Bool);
+
+    float sum = bool_tensor.sum_scalar();
+    EXPECT_FLOAT_EQ(sum, 5000.0f) << "Should count 5000 True values";
+}
+
+TEST(BoolReductionKernel, LargeSum10M) {
+    // Test with 10M elements (same scale as the densification bug)
+    auto t = Tensor::full({10000000}, true, Device::CUDA, DataType::Bool);
+    float sum = t.sum_scalar();
+    EXPECT_FLOAT_EQ(sum, 10000000.0f) << "Should handle 10M elements without corruption";
+}
+
+TEST(BoolReductionKernel, MeanOperation) {
+    // Mean on Bool: convert to Int32 first for meaningful result
+    std::vector<int32_t> int_vec(1000, 1);
+    for (int i = 0; i < 500; i++) {
+        int_vec[i] = 0;  // First half false
+    }
+
+    auto int_tensor = Tensor::from_vector(int_vec, TensorShape({1000}), Device::CUDA);
+    auto bool_tensor = int_tensor.to(DataType::Bool);
+
+    // Convert to Int32 for mean operation (returns int with integer division)
+    auto as_int = bool_tensor.to(DataType::Int32);
+    auto result = as_int.mean();
+    int mean = result.item<int>();
+    EXPECT_EQ(mean, 0) << "Mean with int division should be 0 (500/1000=0)";
+}
+
+TEST(BoolReductionKernel, MaxOperation) {
+    // Max on Bool: convert to Int32 first
+    auto t_all_false = Tensor::full({1000}, false, Device::CUDA, DataType::Bool);
+    auto max_false = t_all_false.to(DataType::Int32).max();
+    EXPECT_EQ(max_false.item<int>(), 0) << "Max of all false should be 0";
+
+    std::vector<int32_t> int_vec(1000, 0);
+    int_vec[500] = 1;  // Set one to true
+    auto int_tensor = Tensor::from_vector(int_vec, TensorShape({1000}), Device::CUDA);
+    auto t_some_true = int_tensor.to(DataType::Bool);
+
+    auto max_true = t_some_true.to(DataType::Int32).max();
+    EXPECT_EQ(max_true.item<int>(), 1) << "Max with any true should be 1";
+}
+
+TEST(BoolReductionKernel, MinOperation) {
+    // Min on Bool: convert to Int32 first
+    auto t_all_true = Tensor::full({1000}, true, Device::CUDA, DataType::Bool);
+    auto min_true = t_all_true.to(DataType::Int32).min();
+    EXPECT_EQ(min_true.item<int>(), 1) << "Min of all true should be 1";
+
+    std::vector<int32_t> int_vec(1000, 1);
+    int_vec[500] = 0;  // Set one to false
+    auto int_tensor = Tensor::from_vector(int_vec, TensorShape({1000}), Device::CUDA);
+    auto t_some_false = int_tensor.to(DataType::Bool);
+
+    auto min_false = t_some_false.to(DataType::Int32).min();
+    EXPECT_EQ(min_false.item<int>(), 0) << "Min with any false should be 0";
+}
+
+TEST(BoolReductionKernel, ComparisonResultSum) {
+    // Test that comparison results can be summed correctly
+    auto t = Tensor::arange(0, 100, 1);  // Creates Float32 tensor on CUDA by default
+    auto mask = t > 50.0f;  // Should create Bool tensor
+
+    EXPECT_EQ(mask.dtype(), DataType::Bool);
+
+    float count = mask.sum_scalar();
+    EXPECT_FLOAT_EQ(count, 49.0f) << "Should count values 51-99 (49 values)";
+}
+
+TEST(BoolReductionKernel, ZerosTensorBugFix) {
+    // This is the specific bug that was happening in densification:
+    // zeros.sum_scalar() was returning 1065353216 (garbage)
+    auto zeros = Tensor::zeros({1000000}, Device::CUDA, DataType::Bool);
+    float sum = zeros.sum_scalar();
+
+    // Before fix: returned 1065353216 (float bits interpreted as int)
+    // After fix: should return 0
+    EXPECT_FLOAT_EQ(sum, 0.0f) << "Bool zeros sum should be 0, not garbage";
+}
+
+TEST(BoolReductionKernel, DensificationNumDuplicatesBugFix) {
+    // Exact scenario from densification where num_duplicates was corrupted
+    const int N = 5000000;  // 5M elements
+
+    // Create all-zeros bool tensor (simulating no duplicates)
+    auto zeros = Tensor::zeros({N}, Device::CUDA, DataType::Bool);
+
+    // This was returning 1065353216 before the fix
+    float num_duplicates = zeros.sum_scalar();
+
+    EXPECT_FLOAT_EQ(num_duplicates, 0.0f) << "num_duplicates should be 0 when no duplicates exist";
+    EXPECT_LT(num_duplicates, 100.0f) << "num_duplicates should be reasonable, not 1065353216";
+}
+
+TEST(BoolReductionKernel, DirectSumWithoutConversion) {
+    // Verify we can sum Bool tensors directly without converting to Int32 first
+    std::vector<int32_t> int_vec = {0, 1, 0, 1, 1, 0, 1, 1};
+    auto int_tensor = Tensor::from_vector(int_vec, TensorShape({8}), Device::CUDA);
+    auto bool_tensor = int_tensor.to(DataType::Bool);
+
+    // Direct sum on Bool tensor (returns Int64)
+    auto sum_result = bool_tensor.sum();
+    int64_t sum = sum_result.item<int64_t>();
+
+    EXPECT_EQ(sum, 5) << "Should directly sum Bool tensor to count True values";
 }
 

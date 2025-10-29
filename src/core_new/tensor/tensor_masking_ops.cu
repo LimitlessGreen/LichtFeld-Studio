@@ -502,6 +502,11 @@ namespace lfs::core::tensor_ops {
     void launch_index_select(const float* in, const int* idx, float* out,
                              const size_t* shape, size_t rank, int dim,
                              size_t idx_size, int boundary, cudaStream_t stream) {
+        // Handle empty indices case - no kernel launch needed
+        if (idx_size == 0) {
+            return;
+        }
+
         size_t outer = 1, inner = 1;
         for (int i = 0; i < dim; ++i)
             outer *= shape[i];

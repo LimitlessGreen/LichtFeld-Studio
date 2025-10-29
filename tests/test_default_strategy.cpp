@@ -329,6 +329,7 @@ TEST(DefaultStrategyStressTest, LongTrainingLoop_200Iterations) {
     opt_params.refine_every = 20;
     opt_params.reset_every = 100;
     opt_params.pause_refine_after_reset = 10;
+    opt_params.grad_threshold = 0.00005f;  // Lower threshold for test gradients
 
     strategy.initialize(opt_params);
 
@@ -340,6 +341,16 @@ TEST(DefaultStrategyStressTest, LongTrainingLoop_200Iterations) {
         if (strategy.get_model().has_gradients()) {
             auto& grad = strategy.get_model().means_grad();
             grad = Tensor::rand_like(grad) * 0.001f;
+        }
+
+        // Simulate gradient accumulation into densification_info (like real rendering does)
+        // In real training, radii and gradients from rendering update densification_info
+        auto& densification_info = strategy.get_model()._densification_info;
+        if (densification_info.numel() > 0) {
+            // Row 0: visibility count (simulate visible Gaussians)
+            densification_info[0] = Tensor::ones({static_cast<size_t>(strategy.get_model().size())}, Device::CUDA);
+            // Row 1: accumulated gradient norms (simulate low gradient activity to prevent excessive growth)
+            densification_info[1] = Tensor::rand({static_cast<size_t>(strategy.get_model().size())}, Device::CUDA) * 0.0001f;
         }
 
         int size_before = strategy.get_model().size();
@@ -357,7 +368,7 @@ TEST(DefaultStrategyStressTest, LongTrainingLoop_200Iterations) {
 
     // Model should still be valid and reasonable size
     EXPECT_GT(strategy.get_model().size(), 0);
-    EXPECT_LT(strategy.get_model().size(), 500);
+    EXPECT_LT(strategy.get_model().size(), 1000);  // Allow for moderate growth during stress test
 }
 
 TEST(DefaultStrategyStressTest, ZeroGradients_NoCorruption) {

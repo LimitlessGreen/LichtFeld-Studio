@@ -95,20 +95,18 @@ namespace lfs::training {
         // First pass: Compute new parameters and update optimizer state
         for (auto i : param_idxs) {
             auto param = params[i];
-            printf("[UPDATE_PARAM] Processing param %zu\n", i);
             cudaError_t err_before = cudaGetLastError();
             if (err_before != cudaSuccess) {
-                printf("[UPDATE_PARAM] CUDA error BEFORE param_fn: %s\n", cudaGetErrorString(err_before));
+                LOG_ERROR("CUDA error before param_fn: {}", cudaGetErrorString(err_before));
             }
 
             auto new_param = param_fn(i, *param);
 
             cudaError_t err_after = cudaGetLastError();
             if (err_after != cudaSuccess) {
-                printf("[UPDATE_PARAM] CUDA error AFTER param_fn(%zu): %s\n", i, cudaGetErrorString(err_after));
+                LOG_ERROR("CUDA error after param_fn({}): {}", i, cudaGetErrorString(err_after));
                 throw std::runtime_error(std::string("CUDA error in param_fn: ") + cudaGetErrorString(err_after));
             }
-            printf("[UPDATE_PARAM] Completed param %zu\n", i);
             new_params[i] = new_param;
 
             // Get optimizer state for this parameter type
