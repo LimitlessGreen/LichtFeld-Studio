@@ -81,6 +81,9 @@ namespace lfs::core {
          *
          * Thread-safe: Protected by mutex
          * Time complexity: O(1)
+         *
+         * CRITICAL: Synchronizes CUDA device before returning memory to pool
+         * to avoid use-after-free bugs with asynchronous CUDA operations.
          */
         void deallocate(void* ptr) {
             if (!ptr) {
@@ -93,6 +96,16 @@ namespace lfs::core {
             if (it == allocations_.end()) {
                 LOG_ERROR("Attempted to free pointer not allocated by arena: {}", ptr);
                 return;
+            }
+
+            // CRITICAL: Synchronize device before returning memory to pool!
+            // Without this, CUDA operations may still be using this memory when we reuse it.
+            // This prevents use-after-free bugs that cause "illegal memory access" errors.
+            cudaError_t err = cudaDeviceSynchronize();
+            if (err != cudaSuccess) {
+                LOG_WARN("cudaDeviceSynchronize failed in arena deallocate: {}",
+                         cudaGetErrorString(err));
+                // Continue anyway - better to potentially reuse memory than leak it
             }
 
             // Free the allocation in OffsetAllocator
@@ -174,8 +187,9 @@ namespace lfs::core {
         GPUArenaAllocator() : gpu_base_(nullptr),
                               arena_size_(0),
                               allocator_(nullptr) {
-            // Default: 8GB arena, support 128K allocations
-            initialize(8ULL * 1024 * 1024 * 1024, 128 * 1024);
+            // Default: ~4GB arena (OffsetAllocator uint32 limit), support 128K allocations
+            // Must be < 4GB due to OffsetAllocator's uint32 size limit
+            initialize((4ULL << 30) - (16 << 20), 128 * 1024);  // 4GB - 16MB
         }
 
         ~GPUArenaAllocator() {
@@ -183,10 +197,18 @@ namespace lfs::core {
         }
 
         void initialize(size_t size_bytes, uint32_t max_allocs) {
+            // CRITICAL: OffsetAllocator uses uint32 for sizes, maximum ~4GB
+            if (size_bytes > UINT32_MAX) {
+                LOG_ERROR("Arena size {} exceeds OffsetAllocator limit (~4 GB)", size_bytes);
+                gpu_base_ = nullptr;
+                arena_size_ = 0;
+                return;
+            }
+
             // Allocate GPU memory for arena
             cudaError_t err = cudaMalloc(&gpu_base_, size_bytes);
             if (err != cudaSuccess) {
-                LOG_ERROR("Failed to allocate {}GB GPU arena: {}",
+                LOG_ERROR("Failed to allocate {:.2f} GB GPU arena: {}",
                           size_bytes / (1024.0 * 1024.0 * 1024.0),
                           cudaGetErrorString(err));
                 gpu_base_ = nullptr;
@@ -197,7 +219,6 @@ namespace lfs::core {
             arena_size_ = size_bytes;
 
             // Create OffsetAllocator with arena size (in bytes)
-            // OffsetAllocator uses uint32 for sizes, so limit to 4GB per allocation
             uint32_t allocator_size = static_cast<uint32_t>(size_bytes);
             allocator_ = std::make_unique<OffsetAllocator::Allocator>(allocator_size, max_allocs);
 

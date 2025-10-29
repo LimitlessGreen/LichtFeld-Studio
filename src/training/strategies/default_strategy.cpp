@@ -48,8 +48,10 @@ namespace gs::training {
 
     void DefaultStrategy::duplicate(const torch::Tensor& is_duplicated) {
         torch::NoGradGuard no_grad;
+        LOG_DEBUG("[REF] duplicate: start");
 
         const torch::Tensor sampled_idxs = is_duplicated.nonzero().squeeze(-1);
+        LOG_DEBUG("[REF] duplicate: got sampled_idxs, count={}", sampled_idxs.size(0));
 
         const auto param_fn = [&sampled_idxs](const int i, const torch::Tensor& param) {
             const torch::Tensor new_param = param.index_select(0, sampled_idxs);
@@ -81,14 +83,18 @@ namespace gs::training {
             return nullptr;
         };
 
+        LOG_DEBUG("[REF] duplicate: calling update_param_with_optimizer");
         update_param_with_optimizer(param_fn, optimizer_fn, _optimizer, _splat_data);
+        LOG_DEBUG("[REF] duplicate: done");
     }
 
     void DefaultStrategy::split(const torch::Tensor& is_split) {
         torch::NoGradGuard no_grad;
+        LOG_DEBUG("[REF] split: start");
 
         const c10::Device device = is_split.device();
         const torch::Tensor sampled_idxs = is_split.nonzero().squeeze(-1);
+        LOG_DEBUG("[REF] split: got sampled_idxs, count={}", sampled_idxs.size(0));
         const torch::Tensor rest_idxs = is_split.logical_not().nonzero().squeeze(-1);
 
         const torch::Tensor sampled_scales = _splat_data.get_scaling().index_select(0, sampled_idxs);
@@ -163,23 +169,28 @@ namespace gs::training {
 
     void DefaultStrategy::grow_gs(int iter) {
         torch::NoGradGuard no_grad;
+        LOG_DEBUG("[REF] grow_gs: start, iter={}", iter);
 
         const torch::Tensor grads = _splat_data._densification_info[1] / torch::clamp_min(
                                                                              _splat_data._densification_info[0], 1.0f);
         const c10::Device device = grads.device();
+        LOG_DEBUG("[REF] grow_gs: computed grads, device={}", device.str());
 
         const torch::Tensor is_grad_high = grads > _params->grad_threshold;
         const auto max_values = std::get<0>(torch::max(_splat_data.get_scaling(), -1));
         const torch::Tensor is_small = max_values <= _params->grow_scale3d * _splat_data.get_scene_scale();
         const torch::Tensor is_duplicated = is_grad_high & is_small;
         const auto num_duplicates = is_duplicated.sum().item<int64_t>();
+        LOG_DEBUG("[REF] grow_gs: num_duplicates={}", num_duplicates);
 
         const torch::Tensor is_large = ~is_small;
         torch::Tensor is_split = is_grad_high & is_large;
         const auto num_split = is_split.sum().item<int64_t>();
+        LOG_DEBUG("[REF] grow_gs: num_split={}", num_split);
 
         // First duplicate
         if (num_duplicates > 0) {
+            LOG_DEBUG("[REF] grow_gs: calling duplicate");
             duplicate(is_duplicated);
         }
 
@@ -187,8 +198,10 @@ namespace gs::training {
         is_split = torch::cat({is_split,
                                torch::zeros(num_duplicates, c10::TensorOptions().dtype(torch::kBool).device(device))});
         if (num_split > 0) {
+            LOG_DEBUG("[REF] grow_gs: calling split");
             split(is_split);
         }
+        LOG_DEBUG("[REF] grow_gs: done");
     }
 
     void DefaultStrategy::remove(const torch::Tensor& is_prune) {

@@ -331,17 +331,27 @@ namespace lfs::core {
         auto flat = flatten();
         auto result = empty(indices_same_device.shape(), device_, dtype_);
 
+        // DEBUG: Log device and CUDA state
+        int cuda_device = -1;
+        cudaGetDevice(&cuda_device);
+        printf("[TAKE] device_=%d, CUDA device=%d, numel=%zu\n",
+               static_cast<int>(device_), cuda_device, indices_same_device.numel());
+
         if (device_ == Device::CUDA) {
+            printf("[TAKE] Taking CUDA path\n");
             tensor_ops::launch_take(flat.ptr<float>(), indices_same_device.ptr<int>(),
                                     result.ptr<float>(), flat.numel(), indices_same_device.numel(), 0);
             // No sync - tensor operation
         } else {
+            printf("[TAKE] Taking CPU path with parallel execution\n");
             const float* src = flat.ptr<float>();
             float* dst = result.ptr<float>();
             const int* idx = indices_same_device.ptr<int>();
             size_t total = flat.numel();
 
-            std::transform(std::execution::par_unseq,
+            // IMPORTANT: Use sequential execution to avoid TBB threading issues with CUDA
+            // TBB worker threads don't have CUDA device context, causing cudaErrorInvalidDevice
+            std::transform(std::execution::seq,
                            idx, idx + indices_same_device.numel(), dst,
                            [src, total](int pos) {
                                if (pos < 0)
@@ -715,7 +725,9 @@ namespace lfs::core {
                 const DataT* values = vals_same_device.ptr<DataT>();
                 size_t num_elements = numel();
 
-                std::for_each(std::execution::par_unseq,
+                // IMPORTANT: Use sequential execution to avoid TBB threading issues with CUDA
+                // TBB worker threads don't have CUDA device context, causing cudaErrorInvalidDevice
+                std::for_each(std::execution::seq,
                               std::views::iota(size_t(0), idx.numel()).begin(),
                               std::views::iota(size_t(0), idx.numel()).end(),
                               [data, indices, values, num_elements](size_t i) {
@@ -911,18 +923,34 @@ namespace lfs::core {
 
         // Special case for 1D tensors
         if (n_dims == 1) {
-            // Create a flat tensor first
-            auto temp = empty({count}, device_, DataType::Int64);
+            // Allocate MAXIMUM size to prevent buffer overflow from Thrust/CUB mismatch
+            auto temp = empty({numel()}, device_, DataType::Int64);
+            size_t actual_count = count; // Start with Thrust's count
 
             if (device_ == Device::CUDA) {
+                // Get ACTUAL count from CUB (not Thrust which may differ!)
                 if (dtype_ == DataType::Bool) {
-                    tensor_ops::launch_nonzero_bool(ptr<unsigned char>(),
+                    actual_count = tensor_ops::launch_nonzero_bool(ptr<unsigned char>(),
                                                     reinterpret_cast<int64_t*>(temp.raw_ptr()),
-                                                    numel(), count, 0);
+                                                    numel(), numel(), 0);
                 } else {
-                    tensor_ops::launch_nonzero(ptr<float>(),
+                    actual_count = tensor_ops::launch_nonzero(ptr<float>(),
                                                reinterpret_cast<int64_t*>(temp.raw_ptr()),
-                                               numel(), count, 0);
+                                               numel(), numel(), 0);
+                }
+
+                // DEBUG: Check count mismatch
+                if (actual_count != count) {
+                    LOG_DEBUG("nonzero() count mismatch: Thrust={}, CUB={}, numel={}", count, actual_count, numel());
+                }
+
+                // Slice to actual size - slice is [start, end) exclusive on end
+                if (actual_count < numel()) {
+                    if (actual_count > 0) {
+                        temp = temp.slice(0, 0, actual_count);
+                    } else {
+                        temp = empty({0}, device_, DataType::Int64);
+                    }
                 }
                 // No sync - tensor operation
             } else {
@@ -951,10 +979,22 @@ namespace lfs::core {
                         }
                     }
                 }
+
+                // Update actual_count from write_idx (CPU path)
+                actual_count = write_idx;
             }
 
-            // Reshape to (count, 1) to match PyTorch
-            return temp.reshape({static_cast<int>(count), 1});
+            // Slice to actual size (same as CUDA path does at lines 948-954)
+            if (actual_count < numel()) {
+                if (actual_count > 0) {
+                    temp = temp.slice(0, 0, actual_count);
+                } else {
+                    temp = empty({0}, device_, DataType::Int64);
+                }
+            }
+
+            // Reshape to (actual_count, 1) to match PyTorch
+            return temp.reshape({static_cast<int>(actual_count), 1});
         }
 
         // Multi-dimensional case

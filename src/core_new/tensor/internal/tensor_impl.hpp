@@ -1867,7 +1867,15 @@ namespace lfs::core {
         Tensor cumsum(int dim = 0) const;
 
         // Scalar reduce operations
-        float sum_scalar() const { return sum().item(); }
+        float sum_scalar() const {
+            // Bool reduction is now properly handled by launch_reduce_op_bool()
+            // It returns Int64 for Bool dtype (PyTorch behavior)
+            auto result = sum();
+            if (dtype_ == DataType::Bool) {
+                return static_cast<float>(result.item<int64_t>());
+            }
+            return result.item<float>();
+        }
         float mean_scalar() const { return mean().item(); }
         float min_scalar() const { return min().item(); }
         float max_scalar() const { return max().item(); }
@@ -1932,6 +1940,10 @@ namespace lfs::core {
 
             if (device_ == Device::CUDA) {
                 cudaMemcpy(&value, data_ptr, sizeof(T), cudaMemcpyDeviceToHost);
+                // DEBUG: Log for int type
+                if constexpr (std::is_same_v<T, int> || std::is_same_v<T, int32_t>) {
+                    printf("[item<int>] dtype=%d, value=%d\n", static_cast<int>(dtype_), static_cast<int>(value));
+                }
             } else {
                 value = *static_cast<const T*>(static_cast<const void*>(data_ptr));
             }

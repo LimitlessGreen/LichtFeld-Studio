@@ -222,15 +222,32 @@ namespace lfs::core::tensor_ops {
         }
     };
 
+    // Custom CUDA kernel for type conversion (replaces Thrust to handle arbitrary sizes)
+    template <typename SrcT, typename DstT>
+    __global__ void convert_type_kernel(const SrcT* __restrict__ src, DstT* __restrict__ dst, size_t n) {
+        // Grid-stride loop to handle any number of elements
+        size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+        size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+
+        for (size_t i = idx; i < n; i += stride) {
+            dst[i] = ConvertFunctor<SrcT, DstT>()(src[i]);
+        }
+    }
+
     template <typename SrcT, typename DstT>
     void launch_convert_type(const SrcT* src, DstT* dst, size_t n, cudaStream_t stream) {
         if (n == 0)
             return;
-        auto src_ptr = thrust::device_pointer_cast(src);
-        auto dst_ptr = thrust::device_pointer_cast(dst);
-        run_with_thrust_policy(stream, [&](auto policy) {
-            thrust::transform(policy, src_ptr, src_ptr + n, dst_ptr, ConvertFunctor<SrcT, DstT>());
-        });
+
+        // Use custom kernel with grid-stride loop to handle billions of elements
+        // Grid size chosen for good occupancy, kernel loops to cover all elements
+        constexpr int block_size = 256;
+        const int grid_size = std::min(
+            static_cast<int>((n + block_size - 1) / block_size),
+            32768  // Reasonable grid size for good occupancy, kernel will loop
+        );
+
+        convert_type_kernel<<<grid_size, block_size, 0, stream>>>(src, dst, n);
     }
 
     // ============= BROADCASTING BINARY OPERATIONS =============

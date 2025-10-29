@@ -657,7 +657,40 @@ namespace lfs::core {
         }
 
         // Float32 <-> Int32
-        CONVERT_DTYPE_CUDA(float, int, DataType::Float32, DataType::Int32)
+        // DEBUG: Add logging for Float32->Int32 conversion
+        if (dtype_ == DataType::Float32 && dtype == DataType::Int32) {
+            auto result = empty(shape_, device_, DataType::Int32);
+            if (numel() == 0)
+                return result;
+
+            // Read source value before conversion (for debugging)
+            if (numel() == 1 && device_ == Device::CUDA) {
+                float src_val;
+                cudaMemcpy(&src_val, ptr<float>(), sizeof(float), cudaMemcpyDeviceToHost);
+                printf("[to Float32->Int32] Source value: %f\n", src_val);
+            }
+
+            if (device_ == Device::CUDA) {
+                tensor_ops::launch_convert_type<float, int>(
+                    ptr<float>(), result.ptr<int>(), numel(), 0);
+                // CRITICAL: Sync to ensure conversion completes before item() reads
+                cudaDeviceSynchronize();
+
+                // Read result value after conversion (for debugging)
+                if (numel() == 1) {
+                    int dst_val;
+                    cudaMemcpy(&dst_val, result.ptr<int>(), sizeof(int), cudaMemcpyDeviceToHost);
+                    printf("[to Float32->Int32] Result value: %d\n", dst_val);
+                }
+            } else {
+                const float* src = ptr<float>();
+                int* dst = result.ptr<int>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = static_cast<int>(src[i]);
+                }
+            }
+            return result;
+        }
         CONVERT_DTYPE_CUDA(int, float, DataType::Int32, DataType::Float32)
 
         // UInt8 conversions
@@ -832,7 +865,42 @@ namespace lfs::core {
         CONVERT_DTYPE_CUDA(int64_t, float, DataType::Int64, DataType::Float32)
         CONVERT_DTYPE_CUDA(float, int64_t, DataType::Float32, DataType::Int64)
         CONVERT_DTYPE_CUDA(int, int64_t, DataType::Int32, DataType::Int64)
-        CONVERT_DTYPE_CUDA(int64_t, int, DataType::Int64, DataType::Int32)
+
+        // Int64 -> Int32: CRITICAL SYNCHRONIZATION for item() reads
+        // Without sync, item<int>() may read before conversion completes, getting garbage
+        if (dtype_ == DataType::Int64 && dtype == DataType::Int32) {
+            auto result = empty(shape_, device_, DataType::Int32);
+            if (numel() == 0)
+                return result;
+
+            // Read source value before conversion (for debugging)
+            if (numel() == 1 && device_ == Device::CUDA) {
+                int64_t src_val;
+                cudaMemcpy(&src_val, ptr<int64_t>(), sizeof(int64_t), cudaMemcpyDeviceToHost);
+                printf("[to Int64->Int32] Source value: %lld\n", static_cast<long long>(src_val));
+            }
+
+            if (device_ == Device::CUDA) {
+                tensor_ops::launch_convert_type<int64_t, int>(
+                    ptr<int64_t>(), result.ptr<int>(), numel(), 0);
+                // CRITICAL: Sync to ensure conversion completes before item() reads
+                cudaDeviceSynchronize();
+
+                // Read result value after conversion (for debugging)
+                if (numel() == 1) {
+                    int dst_val;
+                    cudaMemcpy(&dst_val, result.ptr<int>(), sizeof(int), cudaMemcpyDeviceToHost);
+                    printf("[to Int64->Int32] Result value: %d\n", dst_val);
+                }
+            } else {
+                const int64_t* src = ptr<int64_t>();
+                int* dst = result.ptr<int>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    dst[i] = static_cast<int>(src[i]);
+                }
+            }
+            return result;
+        }
 
         // Float16 conversions
         CONVERT_DTYPE_CUDA(float, __half, DataType::Float32, DataType::Float16)
