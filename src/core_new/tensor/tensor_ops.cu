@@ -895,9 +895,9 @@ namespace lfs::core::tensor_ops {
     }
 
     // Internal Int32 implementation (simplified - only handles full reductions)
-    static void launch_reduce_op_int32(const void* input, void* output, const size_t* shape, size_t rank,
-                                       const int* axes, size_t num_axes, bool keepdim, ReduceOp op,
-                                       cudaStream_t stream) {
+    void launch_reduce_op_int32(const void* input, void* output, const size_t* shape, size_t rank,
+                                const int* axes, size_t num_axes, bool keepdim, ReduceOp op,
+                                cudaStream_t stream) {
         size_t n = 1;
         for (size_t i = 0; i < rank; ++i)
             n *= shape[i];
@@ -966,9 +966,9 @@ namespace lfs::core::tensor_ops {
     };
 
     // Internal Bool implementation (converts to int64 and reduces)
-    static void launch_reduce_op_bool(const void* input, void* output, const size_t* shape, size_t rank,
-                                      const int* axes, size_t num_axes, bool keepdim, ReduceOp op,
-                                      cudaStream_t stream) {
+    void launch_reduce_op_bool(const void* input, void* output, const size_t* shape, size_t rank,
+                               const int* axes, size_t num_axes, bool keepdim, ReduceOp op,
+                               cudaStream_t stream) {
         size_t n = 1;
         for (size_t i = 0; i < rank; ++i)
             n *= shape[i];
