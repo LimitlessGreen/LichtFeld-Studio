@@ -40,6 +40,13 @@ set_target_properties(lfs_training_kernels PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
+# Windows: Add compile definition to tell fmt that UTF-8 is enabled for CUDA files
+if(MSVC)
+    target_compile_definitions(lfs_training_kernels PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:FMT_UNICODE=0>
+    )
+endif()
+
 # Optimizer sources
 set(TRAINING_NEW_SOURCES
     optimizer/adam_optimizer.cpp
