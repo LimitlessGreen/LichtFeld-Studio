@@ -88,6 +88,8 @@ set(OPTIONAL_TEST_FILES
     test_default_strategy_operations_comparison.cpp
     test_dtype_operations_comprehensive.cpp
     test_tensor_bugs.cpp
+    test_tensor_struct_init.cpp
+    benchmark_slice_assignment.cpp
     test_densification_performance.cpp
     test_densification_old_vs_new.cpp
     test_densification_profile.cpp

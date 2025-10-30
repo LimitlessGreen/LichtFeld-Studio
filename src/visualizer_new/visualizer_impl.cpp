@@ -14,6 +14,8 @@
 
 namespace lfs::vis {
 
+    using namespace lfs::core::events;
+
     VisualizerImpl::VisualizerImpl(const ViewerOptions& options)
         : options_(options),
           viewport_(options.width, options.height),
@@ -185,7 +187,7 @@ namespace lfs::vis {
         });
 
         // Listen to TrainingCompleted
-        events::state::TrainingCompleted::when([this](const auto& event) {
+        state::TrainingCompleted::when([this](const auto& event) {
             handleTrainingCompleted(event);
         });
 
@@ -399,7 +401,9 @@ namespace lfs::vis {
                 LOG_TIMER("LoadProject");
                 // write to project file on every change - maybe configurable in the future?
                 project_->setUpdateFileOnChange(true);
-                // slicing intended
+                // TODO: Fix this - gs::management::DataSetInfo != lfs::core::param::DatasetConfig
+                // Temporarily disabled during migration
+                #if 0
                 auto dataset = static_cast<const lfs::core::param::DatasetConfig&>(project_->getProjectData().data_set_info);
                 if (!dataset.data_path.empty()) {
                     LOG_DEBUG("Loading dataset from project: {}", dataset.data_path.string());
@@ -416,6 +420,7 @@ namespace lfs::vis {
 
                 auto plys = project_->getPlys();
                 LOG_INFO("Project loaded successfully with {} PLY files", plys.size());
+                #endif
             } catch (const std::exception& e) {
                 LOG_ERROR("Failed to load project: {}", e.what());
                 throw std::runtime_error(std::format("Failed to load project: {}", e.what()));
@@ -437,7 +442,7 @@ namespace lfs::vis {
 
         // sort according to iter numbers
         std::sort(plys.begin(), plys.end(),
-                  [](const gs::lfs::core::management::PlyData& a, const gs::lfs::core::management::PlyData& b) {
+                  [](const gs::management::PlyData& a, const gs::management::PlyData& b) {
                       return a.ply_training_iter_number < b.ply_training_iter_number;
                   });
 
@@ -505,7 +510,7 @@ namespace lfs::vis {
                 data_config.data_path = path;
                 project_->setDataInfo(data_config);
             } else {
-                project_ = gs::lfs::core::management::CreateTempNewProject(data_config, project_->getOptimizationParams());
+                project_ = gs::management::CreateTempNewProject(data_config, project_->getOptimizationParams());
                 updateProjectOnModules();
             }
         }
@@ -520,7 +525,7 @@ namespace lfs::vis {
     bool VisualizerImpl::openProject(const std::filesystem::path& path) {
         LOG_TIMER("OpenProject");
 
-        auto project = std::make_shared<gs::lfs::core::lfs::core::management::Project>();
+        auto project = std::make_shared<gs::management::Project>();
 
         if (!project) {
             LOG_ERROR("Failed to create project object");
@@ -563,12 +568,12 @@ namespace lfs::vis {
         return success;
     }
 
-    void VisualizerImpl::attachProject(std::shared_ptr<gs::lfs::core::lfs::core::management::Project> _project) {
+    void VisualizerImpl::attachProject(std::shared_ptr<gs::management::Project> _project) {
         project_ = _project;
         updateProjectOnModules();
     }
 
-    std::shared_ptr<gs::lfs::core::lfs::core::management::Project> VisualizerImpl::getProject() {
+    std::shared_ptr<gs::management::Project> VisualizerImpl::getProject() {
         return project_;
     }
 
@@ -598,7 +603,7 @@ namespace lfs::vis {
 
             if (project_->getIsTempProject()) {
                 data_config.output_path.clear();
-                project_ = gs::lfs::core::management::CreateTempNewProject(data_config, project_->getOptimizationParams());
+                project_ = gs::management::CreateTempNewProject(data_config, project_->getOptimizationParams());
             } else { // else: project already exits (with output dir) - only need to replace data path
                 project_->setDataInfo(data_config);
             }
@@ -637,7 +642,7 @@ namespace lfs::vis {
         }
     }
 
-    void VisualizerImpl::handleTrainingCompleted([[maybe_unused]] const events::state::TrainingCompleted& event) {
+    void VisualizerImpl::handleTrainingCompleted([[maybe_unused]] const state::TrainingCompleted& event) {
 
         if (!scene_manager_) {
             LOG_ERROR("scene manager is not initialized");

@@ -7,10 +7,12 @@
 #include "loader_new/loader.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "training/training_manager.hpp"
-#include "training_setup.hpp"
+#include "training_new/training_setup.hpp"
 #include <stdexcept>
 
 namespace lfs::vis {
+
+    using namespace lfs::core::events;
 
     SceneManager::SceneManager() {
         setupEventHandlers();
@@ -20,7 +22,6 @@ namespace lfs::vis {
     SceneManager::~SceneManager() = default;
 
     void SceneManager::setupEventHandlers() {
-        using namespace lfs::core::events;
 
         // Handle PLY commands
         cmd::AddPLY::when([this](const auto& cmd) {
@@ -44,7 +45,7 @@ namespace lfs::vis {
             // Check if rendering manager has split view enabled (in PLY comparison mode)
             if (rendering_manager_) {
                 auto settings = rendering_manager_->getSettings();
-                if (settings.split_view_mode == visualizer::SplitViewMode::PLYComparison) {
+                if (settings.split_view_mode == lfs::vis::SplitViewMode::PLYComparison) {
                     // In split mode: advance the offset
                     rendering_manager_->advanceSplitOffset();
                     LOG_DEBUG("Advanced split view offset");
@@ -57,10 +58,10 @@ namespace lfs::vis {
                 auto [hidden, shown] = scene_.cycleVisibilityWithNames();
 
                 if (!hidden.empty()) {
-                    lfs::core::events::cmd::SetPLYVisibility{.name = hidden, .visible = false}.emit();
+                    cmd::SetPLYVisibility{.name = hidden, .visible = false}.emit();
                 }
                 if (!shown.empty()) {
-                    lfs::core::events::cmd::SetPLYVisibility{.name = shown, .visible = true}.emit();
+                    cmd::SetPLYVisibility{.name = shown, .visible = true}.emit();
                     LOG_DEBUG("Cycled to: {}", shown);
                 }
 
@@ -112,7 +113,7 @@ namespace lfs::vis {
                 throw std::runtime_error(load_result.error());
             }
 
-            auto* splat_data = std::get_if<std::shared_ptr<gs::SplatData>>(&load_result->data);
+            auto* splat_data = std::get_if<std::shared_ptr<lfs::core::SplatData>>(&load_result->data);
             if (!splat_data || !*splat_data) {
                 LOG_ERROR("Expected splat file but got different data type from: {}", path.string());
                 throw std::runtime_error("Expected splat file but got different data type");
@@ -123,7 +124,7 @@ namespace lfs::vis {
             size_t gaussian_count = (*splat_data)->size();
             LOG_DEBUG("Adding '{}' to scene with {} gaussians", name, gaussian_count);
 
-            scene_.addNode(name, std::make_unique<SplatData>(std::move(**splat_data)));
+            scene_.addNode(name, std::make_unique<lfs::core::SplatData>(std::move(**splat_data)));
 
             // Update content state
             {
@@ -136,17 +137,17 @@ namespace lfs::vis {
             // Determine file type for event
             auto ext = path.extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            auto file_type = (ext == ".sog") ? events::state::SceneLoaded::Type::SOG : events::state::SceneLoaded::Type::PLY;
+            auto file_type = (ext == ".sog") ? state::SceneLoaded::Type::SOG : state::SceneLoaded::Type::PLY;
 
             // Emit events
-            events::state::SceneLoaded{
+            state::SceneLoaded{
                 .scene = nullptr,
                 .path = path,
                 .type = file_type,
                 .num_gaussians = scene_.getTotalGaussianCount()}
                 .emit();
 
-            events::state::PLYAdded{
+            state::PLYAdded{
                 .name = name,
                 .node_gaussians = gaussian_count,
                 .total_gaussians = scene_.getTotalGaussianCount(),
@@ -192,7 +193,7 @@ namespace lfs::vis {
                 throw std::runtime_error(load_result.error());
             }
 
-            auto* splat_data = std::get_if<std::shared_ptr<gs::SplatData>>(&load_result->data);
+            auto* splat_data = std::get_if<std::shared_ptr<lfs::core::SplatData>>(&load_result->data);
             if (!splat_data || !*splat_data) {
                 LOG_ERROR("Expected splat file from: {}", path.string());
                 throw std::runtime_error("Expected splat file");
@@ -211,7 +212,7 @@ namespace lfs::vis {
             size_t gaussian_count = (*splat_data)->size();
             LOG_DEBUG("Adding node '{}' with {} gaussians", name, gaussian_count);
 
-            scene_.addNode(name, std::make_unique<SplatData>(std::move(**splat_data)));
+            scene_.addNode(name, std::make_unique<lfs::core::SplatData>(std::move(**splat_data)));
 
             // Update paths
             {
@@ -219,7 +220,7 @@ namespace lfs::vis {
                 splat_paths_[name] = path;
             }
 
-            events::state::PLYAdded{
+            state::PLYAdded{
                 .name = name,
                 .node_gaussians = gaussian_count,
                 .total_gaussians = scene_.getTotalGaussianCount(),
@@ -257,7 +258,7 @@ namespace lfs::vis {
             LOG_DEBUG("No nodes remaining, transitioning to empty state");
         }
 
-        events::state::PLYRemoved{.name = name}.emit();
+        state::PLYRemoved{.name = name}.emit();
         emitSceneChanged();
 
         LOG_INFO("Removed '{}' from scene", name);
@@ -294,7 +295,7 @@ namespace lfs::vis {
             LOG_TRACE("Dataset path: {}", path.string());
             LOG_TRACE("Iterations: {}", dataset_params.optimization.iterations);
 
-            auto setup_result = gs::training::setupTraining(dataset_params);
+            auto setup_result = lfs::training::setupTraining(dataset_params);
             if (!setup_result) {
                 LOG_ERROR("Failed to setup training: {}", setup_result.error());
                 throw std::runtime_error(setup_result.error());
@@ -323,20 +324,20 @@ namespace lfs::vis {
                                              .size();
 
             LOG_INFO("Dataset loaded successfully - {} images, {} initial gaussians",
-                     setup_result->dataset->size().value(), num_gaussians);
+                     setup_result->dataset->size(), num_gaussians);
 
-            events::state::SceneLoaded{
+            state::SceneLoaded{
                 .scene = nullptr,
                 .path = path,
-                .type = events::state::SceneLoaded::Type::Dataset,
+                .type = state::SceneLoaded::Type::Dataset,
                 .num_gaussians = num_gaussians}
                 .emit();
 
-            events::state::DatasetLoadCompleted{
+            state::DatasetLoadCompleted{
                 .path = path,
                 .success = true,
                 .error = std::nullopt,
-                .num_images = setup_result->dataset->size().value(),
+                .num_images = setup_result->dataset->size(),
                 .num_points = num_gaussians}
                 .emit();
 
@@ -354,7 +355,7 @@ namespace lfs::vis {
         // Stop training if active
         if (trainer_manager_ && content_type_ == ContentType::Dataset) {
             LOG_DEBUG("Stopping training before clearing");
-            lfs::core::events::cmd::StopTraining{}.emit();
+            cmd::StopTraining{}.emit();
             trainer_manager_->clearTrainer();
         }
 
@@ -367,7 +368,7 @@ namespace lfs::vis {
             dataset_path_.clear();
         }
 
-        events::state::SceneCleared{}.emit();
+        state::SceneCleared{}.emit();
         emitSceneChanged();
 
         LOG_INFO("Scene cleared");
@@ -436,10 +437,10 @@ namespace lfs::vis {
     }
 
     void SceneManager::emitSceneChanged() {
-        events::state::SceneChanged{}.emit();
+        state::SceneChanged{}.emit();
     }
 
-    void SceneManager::setRenderingManager(visualizer::RenderingManager* rm) {
+    void SceneManager::setRenderingManager(RenderingManager* rm) {
         rendering_manager_ = rm;
     }
 
@@ -601,7 +602,7 @@ namespace lfs::vis {
 
         return success;
     }
-    void SceneManager::handleRenamePly(const lfs::core::events::cmd::RenamePLY& event) {
+    void SceneManager::handleRenamePly(const cmd::RenamePLY& event) {
         renamePLY(event.old_name, event.new_name);
     }
 } // namespace lfs::vis

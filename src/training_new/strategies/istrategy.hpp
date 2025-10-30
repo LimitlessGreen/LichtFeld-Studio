@@ -6,7 +6,7 @@
 
 #include "core_new/parameters.hpp"
 #include "core_new/splat_data.hpp"
-#include "optimizer/render_output.hpp"
+#include "training_new/optimizer/render_output.hpp"
 
 namespace lfs::training {
 

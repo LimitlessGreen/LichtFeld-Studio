@@ -8,7 +8,7 @@
 #include "components/bilateral_grid.hpp"
 #include "components/sparsity_optimizer.hpp"
 // #include "components/poseopt.hpp"
-#include "core/events.hpp"         // Using old events system for now
+#include "core_new/events.hpp"
 #include "core_new/parameters.hpp"
 #include "dataset.hpp"
 #include "lfs/kernels/bilateral_grid.cuh"  // Kernels are ported

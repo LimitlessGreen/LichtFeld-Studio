@@ -16,6 +16,8 @@
 
 namespace lfs::vis::gui::panels {
 
+    using namespace lfs::core::events;
+
     void DrawWindowControls(const UIContext& ctx) {
 
         ImGui::Text("Windows");
@@ -70,7 +72,7 @@ namespace lfs::vis::gui::panels {
         if (ImGui::Checkbox("Point Cloud Mode", &settings.point_cloud_mode)) {
             settings_changed = true;
 
-            events::ui::PointCloudModeChanged{
+            ui::PointCloudModeChanged{
                 .enabled = settings.point_cloud_mode,
                 .voxel_size = settings.voxel_size}
                 .emit();
@@ -81,7 +83,7 @@ namespace lfs::vis::gui::panels {
             if (widgets::SliderWithReset("Voxel Size", &settings.voxel_size, 0.001f, 0.1f, 0.01f)) {
                 settings_changed = true;
 
-                events::ui::PointCloudModeChanged{
+                ui::PointCloudModeChanged{
                     .enabled = settings.point_cloud_mode,
                     .voxel_size = settings.voxel_size}
                     .emit();
@@ -134,7 +136,7 @@ namespace lfs::vis::gui::panels {
         // Camera Rotation
         if (ImGui::Checkbox("Lock Gimbal", &settings.lock_gimbal)) {
             settings_changed = true;
-            lfs::core::events::cmd::ToggleGimbalLock{
+            cmd::ToggleGimbalLock{
                 .locked = settings.lock_gimbal}
                 .emit();
         }
@@ -174,7 +176,7 @@ namespace lfs::vis::gui::panels {
             settings_changed = true;
 
             // Emit grid settings changed event
-            events::ui::GridSettingsChanged{
+            ui::GridSettingsChanged{
                 .enabled = settings.show_grid,
                 .plane = static_cast<int>(settings.grid_plane),
                 .opacity = settings.grid_opacity}
@@ -192,7 +194,7 @@ namespace lfs::vis::gui::panels {
                 settings.grid_plane = current_plane;
                 settings_changed = true;
 
-                events::ui::GridSettingsChanged{
+                ui::GridSettingsChanged{
                     .enabled = settings.show_grid,
                     .plane = current_plane,
                     .opacity = settings.grid_opacity}
@@ -203,7 +205,7 @@ namespace lfs::vis::gui::panels {
             if (ImGui::SliderFloat("Grid Opacity", &settings.grid_opacity, 0.0f, 1.0f)) {
                 settings_changed = true;
 
-                events::ui::GridSettingsChanged{
+                ui::GridSettingsChanged{
                     .enabled = settings.show_grid,
                     .plane = static_cast<int>(settings.grid_plane),
                     .opacity = settings.grid_opacity}
@@ -225,7 +227,7 @@ namespace lfs::vis::gui::panels {
         if (widgets::SliderWithReset("Scale", &scaling_modifier, 0.01f, 3.0f, 1.0f)) {
             render_manager->setScalingModifier(scaling_modifier);
 
-            events::ui::RenderSettingsChanged{
+            ui::RenderSettingsChanged{
                 .sh_degree = std::nullopt,
                 .fov = std::nullopt,
                 .scaling_modifier = scaling_modifier,
@@ -239,7 +241,7 @@ namespace lfs::vis::gui::panels {
         if (widgets::SliderWithReset("FoV", &fov, 45.0f, 120.0f, 75.0f)) {
             render_manager->setFov(fov);
 
-            events::ui::RenderSettingsChanged{
+            ui::RenderSettingsChanged{
                 .fov = fov,
                 .scaling_modifier = std::nullopt,
                 .antialiasing = std::nullopt,
@@ -255,7 +257,7 @@ namespace lfs::vis::gui::panels {
             settings.sh_degree = current_sh_degree;
             settings_changed = true;
 
-            events::ui::RenderSettingsChanged{
+            ui::RenderSettingsChanged{
                 .sh_degree = current_sh_degree,
                 .fov = std::nullopt,
                 .scaling_modifier = std::nullopt,
@@ -268,7 +270,7 @@ namespace lfs::vis::gui::panels {
         if (ImGui::Checkbox("Equirectangular", &settings.equirectangular)) {
             settings_changed = true;
 
-            events::ui::RenderSettingsChanged{
+            ui::RenderSettingsChanged{
                 .sh_degree = std::nullopt,
                 .fov = std::nullopt,
                 .scaling_modifier = std::nullopt,

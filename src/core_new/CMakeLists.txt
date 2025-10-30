@@ -53,6 +53,7 @@ endif()
 # Core module - fundamental data structures and utilities
 # Note: lfs_tensor library is now in src/core_new/tensor
 set(CORE_SOURCES
+        application.cpp
         argument_parser.cpp
         camera.cpp
         image_io.cpp
@@ -116,6 +117,9 @@ target_link_libraries(lfs_core
         lfs_loader      # For CacheLoader used in camera.cpp
     PRIVATE
         taywee::args    # Only used in argument_parser.cpp
+        lfs_training    # For application.cpp training setup
+        lfs_visualizer  # For application.cpp GUI
+        gs_project      # For application.cpp project management (not yet migrated)
 )
 
 # Platform-specific settings

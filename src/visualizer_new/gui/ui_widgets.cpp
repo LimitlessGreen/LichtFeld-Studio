@@ -11,6 +11,8 @@
 
 namespace lfs::vis::gui::widgets {
 
+    using namespace lfs::core::events;
+
     bool SliderWithReset(const char* label, float* v, float min, float max, float reset_value) {
         bool changed = ImGui::SliderFloat(label, v, min, max);
 
@@ -184,17 +186,17 @@ namespace lfs::vis::gui::widgets {
         auto content_type = scene_manager->getContentType();
 
         // Only show button if content type is not Empty
-        if (content_type != gs::SceneManager::ContentType::Empty) {
+        if (content_type != lfs::vis::SceneManager::ContentType::Empty) {
 
             ImGui::SameLine();
 
             // Determine button label based on current content type
             const char* button_label = "";
             SceneManager::ContentType change_to;
-            if (content_type == gs::SceneManager::ContentType::SplatFiles) {
+            if (content_type == lfs::vis::SceneManager::ContentType::SplatFiles) {
                 button_label = "Go to Dataset Mode";
                 change_to = SceneManager::ContentType::Dataset;
-            } else if (content_type == gs::SceneManager::ContentType::Dataset) {
+            } else if (content_type == lfs::vis::SceneManager::ContentType::Dataset) {
                 button_label = "Go to Splat Mode";
                 change_to = SceneManager::ContentType::SplatFiles;
             }

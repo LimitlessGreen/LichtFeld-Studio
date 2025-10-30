@@ -9,11 +9,9 @@
 #include <memory>
 #include <string>
 
-namespace gs {
-    namespace param {
-        struct TrainingParameters;
-    }
-} // namespace gs
+namespace lfs::core::param {
+    struct TrainingParameters;
+}
 
 namespace gs::management {
     class Project;

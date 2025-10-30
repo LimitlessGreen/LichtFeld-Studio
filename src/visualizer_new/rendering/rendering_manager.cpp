@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "rendering_manager.hpp"
+#include "core_new/camera.hpp"
 #include "core_new/image_io.hpp" // Use existing image_io utilities
 #include "core_new/logger.hpp"
 #include "core_new/splat_data.hpp"
@@ -14,6 +15,8 @@
 #include <stdexcept>
 
 namespace lfs::vis {
+
+    using namespace lfs::core::events;
 
     // GTTextureCache Implementation
     GTTextureCache::GTTextureCache() {
@@ -177,7 +180,7 @@ namespace lfs::vis {
 
         LOG_TIMER("RenderingEngine initialization");
 
-        engine_ = gs::rendering::RenderingEngine::create();
+        engine_ = lfs::rendering::RenderingEngine::create();
         auto init_result = engine_->initialize();
         if (!init_result) {
             LOG_ERROR("Failed to initialize rendering engine: {}", init_result.error());
@@ -198,7 +201,7 @@ namespace lfs::vis {
 
     void RenderingManager::setupEventHandlers() {
         // Listen for split view toggle
-        lfs::core::events::cmd::ToggleSplitView::when([this](const auto&) {
+        cmd::ToggleSplitView::when([this](const auto&) {
             std::lock_guard<std::mutex> lock(settings_mutex_);
 
             // V key toggles between Disabled and PLYComparison only
@@ -216,7 +219,7 @@ namespace lfs::vis {
         });
 
         // Listen for GT comparison toggle (G key - for camera/GT comparison)
-        lfs::core::events::cmd::ToggleGTComparison::when([this](const auto&) {
+        cmd::ToggleGTComparison::when([this](const auto&) {
             std::lock_guard<std::mutex> lock(settings_mutex_);
 
             // G key toggles between Disabled and GTComparison only
@@ -239,13 +242,13 @@ namespace lfs::vis {
             markDirty();
 
             // Emit UI event
-            events::ui::GTComparisonModeChanged{
+            ui::GTComparisonModeChanged{
                 .enabled = (settings_.split_view_mode == SplitViewMode::GTComparison)}
                 .emit();
         });
 
         // Listen for camera view changes
-        lfs::core::events::cmd::GoToCamView::when([this](const auto& event) {
+        cmd::GoToCamView::when([this](const auto& event) {
             setCurrentCameraId(event.cam_id);
             LOG_DEBUG("Current camera ID set to: {}", event.cam_id);
 
@@ -257,7 +260,7 @@ namespace lfs::vis {
         });
 
         // Listen for split position changes
-        events::ui::SplitPositionChanged::when([this](const auto& event) {
+        ui::SplitPositionChanged::when([this](const auto& event) {
             std::lock_guard<std::mutex> lock(settings_mutex_);
             settings_.split_position = event.position;
             LOG_TRACE("Split position changed to: {}", event.position);
@@ -265,7 +268,7 @@ namespace lfs::vis {
         });
 
         // Listen for settings changes
-        events::ui::RenderSettingsChanged::when([this](const auto& event) {
+        ui::RenderSettingsChanged::when([this](const auto& event) {
             std::lock_guard<std::mutex> lock(settings_mutex_);
             if (event.sh_degree) {
                 settings_.sh_degree = *event.sh_degree;
@@ -295,7 +298,7 @@ namespace lfs::vis {
         });
 
         // Window resize
-        events::ui::WindowResized::when([this](const auto&) {
+        ui::WindowResized::when([this](const auto&) {
             LOG_DEBUG("Window resized, clearing render cache");
             markDirty();
             cached_result_ = {};                  // Clear cache on resize
@@ -305,7 +308,7 @@ namespace lfs::vis {
         });
 
         // Grid settings
-        events::ui::GridSettingsChanged::when([this](const auto& event) {
+        ui::GridSettingsChanged::when([this](const auto& event) {
             std::lock_guard<std::mutex> lock(settings_mutex_);
             settings_.show_grid = event.enabled;
             settings_.grid_plane = event.plane;
@@ -316,7 +319,7 @@ namespace lfs::vis {
         });
 
         // Scene changes
-        events::state::SceneLoaded::when([this](const auto&) {
+        state::SceneLoaded::when([this](const auto&) {
             LOG_DEBUG("Scene loaded, marking render dirty");
             markDirty();
             gt_texture_cache_.clear(); // Clear GT cache when scene changes
@@ -331,28 +334,28 @@ namespace lfs::vis {
             }
         });
 
-        events::state::SceneChanged::when([this](const auto&) {
+        state::SceneChanged::when([this](const auto&) {
             markDirty();
         });
 
         // PLY visibility changes
-        lfs::core::events::cmd::SetPLYVisibility::when([this](const auto&) {
+        cmd::SetPLYVisibility::when([this](const auto&) {
             markDirty();
         });
 
         // PLY added/removed
-        events::state::PLYAdded::when([this](const auto&) {
+        state::PLYAdded::when([this](const auto&) {
             LOG_DEBUG("PLY added, marking render dirty");
             markDirty();
         });
 
-        events::state::PLYRemoved::when([this](const auto&) {
+        state::PLYRemoved::when([this](const auto&) {
             LOG_DEBUG("PLY removed, marking render dirty");
             markDirty();
         });
 
         // Crop box changes
-        events::ui::CropBoxChanged::when([this](const auto& event) {
+        ui::CropBoxChanged::when([this](const auto& event) {
             std::lock_guard<std::mutex> lock(settings_mutex_);
             settings_.crop_min = event.min_bounds;
             settings_.crop_max = event.max_bounds;
@@ -362,7 +365,7 @@ namespace lfs::vis {
         });
 
         // Point cloud mode changes
-        events::ui::PointCloudModeChanged::when([this](const auto& event) {
+        ui::PointCloudModeChanged::when([this](const auto& event) {
             std::lock_guard<std::mutex> lock(settings_mutex_);
             settings_.point_cloud_mode = event.enabled;
             settings_.voxel_size = event.voxel_size;
@@ -422,7 +425,7 @@ namespace lfs::vis {
         return current_split_info_;
     }
 
-    gs::rendering::RenderingEngine* RenderingManager::getRenderingEngine() {
+    lfs::rendering::RenderingEngine* RenderingManager::getRenderingEngine() {
         if (!initialized_) {
             initialize();
         }
@@ -447,7 +450,7 @@ namespace lfs::vis {
         return hovered_camera_id_; // Return current value
     }
 
-    void RenderingManager::renderToTexture(const RenderContext& context, SceneManager* scene_manager, const SplatData* model) {
+    void RenderingManager::renderToTexture(const RenderContext& context, SceneManager* scene_manager, const lfs::core::SplatData* model) {
         if (!model || model->size() == 0) {
             render_texture_valid_ = false;
             return;
@@ -519,7 +522,7 @@ namespace lfs::vis {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         // Create viewport data
-        gs::rendering::ViewportData viewport_data{
+        lfs::rendering::ViewportData viewport_data{
             .rotation = context.viewport.getRotationMatrix(),
             .translation = context.viewport.getTranslation(),
             .size = render_size,
@@ -533,7 +536,7 @@ namespace lfs::vis {
             viewport_data.translation = glm::transpose(world_rot) * (viewport_data.translation - world_trans);
         }
 
-        gs::rendering::RenderRequest request{
+        lfs::rendering::RenderRequest request{
             .viewport = viewport_data,
             .scaling_modifier = settings_.scaling_modifier,
             .antialiasing = settings_.antialiasing,
@@ -541,14 +544,12 @@ namespace lfs::vis {
             .crop_box = std::nullopt,
             .point_cloud_mode = settings_.point_cloud_mode,
             .voxel_size = settings_.voxel_size,
-            .gut = settings_.gut,
-            .equirectangular = settings_.equirectangular,
-            .sh_degree = settings_.sh_degree};
+            .gut = settings_.gut};
 
         // Add crop box if enabled
         if (settings_.use_crop_box) {
             auto transform = settings_.crop_transform;
-            request.crop_box = gs::rendering::BoundingBox{
+            request.crop_box = lfs::rendering::BoundingBox{
                 .min = settings_.crop_min,
                 .max = settings_.crop_max,
                 .transform = transform.inv().toMat4()};
@@ -614,7 +615,7 @@ namespace lfs::vis {
         }
 
         // Get current model
-        const SplatData* model = scene_manager ? scene_manager->getModelForRendering() : nullptr;
+        const lfs::core::SplatData* model = scene_manager ? scene_manager->getModelForRendering() : nullptr;
         size_t model_ptr = reinterpret_cast<size_t>(model);
 
         // Detect model switch
@@ -694,7 +695,7 @@ namespace lfs::vis {
         framerate_controller_.endFrame();
     }
 
-    void RenderingManager::doFullRender(const RenderContext& context, SceneManager* scene_manager, const SplatData* model) {
+    void RenderingManager::doFullRender(const RenderContext& context, SceneManager* scene_manager, const lfs::core::SplatData* model) {
         LOG_TIMER_TRACE("Full render pass");
 
         render_count_++;
@@ -766,7 +767,7 @@ namespace lfs::vis {
         renderOverlays(context);
     }
 
-    std::optional<gs::rendering::SplitViewRequest>
+    std::optional<lfs::rendering::SplitViewRequest>
     RenderingManager::createSplitViewRequest(const RenderContext& context, SceneManager* scene_manager) {
         if (settings_.split_view_mode == SplitViewMode::Disabled || !scene_manager) {
             return std::nullopt;
@@ -781,7 +782,7 @@ namespace lfs::vis {
         }
 
         // Create viewport data
-        gs::rendering::ViewportData viewport_data{
+        lfs::rendering::ViewportData viewport_data{
             .rotation = context.viewport.getRotationMatrix(),
             .translation = context.viewport.getTranslation(),
             .size = render_size,
@@ -796,10 +797,10 @@ namespace lfs::vis {
         }
 
         // Create crop box if enabled
-        std::optional<gs::rendering::BoundingBox> crop_box;
+        std::optional<lfs::rendering::BoundingBox> crop_box;
         if (settings_.use_crop_box) {
             auto transform = settings_.crop_transform;
-            crop_box = gs::rendering::BoundingBox{
+            crop_box = lfs::rendering::BoundingBox{
                 .min = settings_.crop_min,
                 .max = settings_.crop_max,
                 .transform = transform.inv().toMat4()};
@@ -842,7 +843,7 @@ namespace lfs::vis {
             // Make sure we have a valid render texture
             if (!render_texture_valid_) {
                 // Force a render to texture
-                const SplatData* model = scene_manager->getModelForRendering();
+                const lfs::core::SplatData* model = scene_manager->getModelForRendering();
                 if (model) {
                     renderToTexture(context, scene_manager, model);
                 }
@@ -855,15 +856,15 @@ namespace lfs::vis {
 
             LOG_TRACE("Creating GT comparison split view for camera {}", current_camera_id_);
 
-            return gs::rendering::SplitViewRequest{
+            return lfs::rendering::SplitViewRequest{
                 .panels = {
-                    {.content_type = gs::rendering::PanelContentType::Image2D,
+                    {.content_type = lfs::rendering::PanelContentType::Image2D,
                      .model = nullptr,
                      .texture_id = gt_texture,
                      .label = "Ground Truth",
                      .start_position = 0.0f,
                      .end_position = settings_.split_position},
-                    {.content_type = gs::rendering::PanelContentType::CachedRender,
+                    {.content_type = lfs::rendering::PanelContentType::CachedRender,
                      .model = nullptr,
                      .texture_id = cached_render_texture_,
                      .label = "Rendered",
@@ -879,8 +880,7 @@ namespace lfs::vis {
                 .gut = settings_.gut,
                 .show_dividers = true,
                 .divider_color = glm::vec4(1.0f, 0.85f, 0.0f, 1.0f),
-                .show_labels = true,
-                .sh_degree = settings_.sh_degree};
+                .show_labels = true};
         }
 
         // Handle PLY comparison mode
@@ -898,15 +898,15 @@ namespace lfs::vis {
             LOG_TRACE("Creating PLY comparison split view: {} vs {}",
                       visible_nodes[left_idx]->name, visible_nodes[right_idx]->name);
 
-            return gs::rendering::SplitViewRequest{
+            return lfs::rendering::SplitViewRequest{
                 .panels = {
-                    {.content_type = gs::rendering::PanelContentType::Model3D,
+                    {.content_type = lfs::rendering::PanelContentType::Model3D,
                      .model = visible_nodes[left_idx]->model.get(),
                      .texture_id = 0,
                      .label = visible_nodes[left_idx]->name,
                      .start_position = 0.0f,
                      .end_position = settings_.split_position},
-                    {.content_type = gs::rendering::PanelContentType::Model3D,
+                    {.content_type = lfs::rendering::PanelContentType::Model3D,
                      .model = visible_nodes[right_idx]->model.get(),
                      .texture_id = 0,
                      .label = visible_nodes[right_idx]->name,
@@ -922,8 +922,7 @@ namespace lfs::vis {
                 .gut = settings_.gut,
                 .show_dividers = true,
                 .divider_color = glm::vec4(1.0f, 0.85f, 0.0f, 1.0f),
-                .show_labels = true,
-                .sh_degree = settings_.sh_degree,
+                .show_labels = true
             };
         }
 
@@ -942,7 +941,7 @@ namespace lfs::vis {
             return;
         }
 
-        gs::rendering::ViewportData viewport{
+        lfs::rendering::ViewportData viewport{
             .rotation = context.viewport.getRotationMatrix(),
             .translation = context.viewport.getTranslation(),
             .size = render_size,
@@ -952,7 +951,7 @@ namespace lfs::vis {
         if (settings_.show_grid && engine_) {
             auto grid_result = engine_->renderGrid(
                 viewport,
-                static_cast<gs::rendering::GridPlane>(settings_.grid_plane),
+                static_cast<lfs::rendering::GridPlane>(settings_.grid_plane),
                 settings_.grid_opacity);
 
             if (!grid_result) {
@@ -964,7 +963,7 @@ namespace lfs::vis {
         if (settings_.show_crop_box && engine_) {
             auto transform = settings_.crop_transform;
 
-            gs::rendering::BoundingBox box{
+            lfs::rendering::BoundingBox box{
                 .min = settings_.crop_min,
                 .max = settings_.crop_max,
                 .transform = transform.inv().toMat4()};
@@ -993,7 +992,7 @@ namespace lfs::vis {
             }
 
             // Get cameras from scene manager's trainer
-            std::vector<std::shared_ptr<const Camera>> cameras;
+            std::vector<std::shared_ptr<const lfs::core::Camera>> cameras;
             auto* trainer_manager = context.scene_manager->getTrainerManager();
 
             if (!trainer_manager) {
@@ -1033,8 +1032,7 @@ namespace lfs::vis {
                     settings_.camera_frustum_scale,
                     settings_.train_camera_color,
                     settings_.eval_camera_color,
-                    highlight_index,
-                    world_transform);
+                    highlight_index);
 
                 if (!frustum_result) {
                     LOG_ERROR("Failed to render camera frustums: {}", frustum_result.error());
@@ -1050,8 +1048,7 @@ namespace lfs::vis {
                         glm::vec2(context.viewport_region->x, context.viewport_region->y),
                         glm::vec2(context.viewport_region->width, context.viewport_region->height),
                         viewport,
-                        settings_.camera_frustum_scale,
-                        world_transform);
+                        settings_.camera_frustum_scale);
 
                     if (pick_result) {
                         int cam_id = *pick_result;

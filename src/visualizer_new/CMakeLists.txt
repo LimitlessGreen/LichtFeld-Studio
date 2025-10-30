@@ -61,14 +61,13 @@ target_include_directories(lfs_visualizer
 # Link dependencies
 target_link_libraries(lfs_visualizer
         PRIVATE
-        lfs_core           # Use modular core library
+        lfs_core           # Use modular core library (LibTorch-free)
         gs_geometry        # If needed for geometry operations
         gs_project         # For project management
         gs_kernels         # Use modular kernels library
         lfs_loader
         lfs_rendering
         lfs_training
-        ${TORCH_LIBRARIES}
         glad::glad
         glfw
         imgui::imgui

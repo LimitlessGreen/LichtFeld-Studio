@@ -4,7 +4,8 @@
 
 #pragma once
 
-#include "trainer.hpp"
+#include "core_new/camera.hpp"
+#include "training_new/trainer.hpp"
 #include <atomic>
 #include <deque>
 #include <memory>
@@ -15,9 +16,7 @@
 namespace lfs::vis {
 
     // Forward declarations
-    namespace visualizer {
-        class VisualizerImpl;
-    }
+    class VisualizerImpl;
 
     class TrainerManager {
     public:
@@ -43,12 +42,12 @@ namespace lfs::vis {
         TrainerManager& operator=(TrainerManager&&) = default;
 
         // Setup and teardown
-        void setTrainer(std::unique_ptr<gs::training::Trainer> trainer);
+        void setTrainer(std::unique_ptr<lfs::training::Trainer> trainer);
         void clearTrainer();
         bool hasTrainer() const;
 
         // Link to viewer for notifications
-        void setViewer(visualizer::VisualizerImpl* viewer) { viewer_ = viewer; }
+        void setViewer(VisualizerImpl* viewer) { viewer_ = viewer; }
 
         // Training control
         bool startTraining();
@@ -86,8 +85,8 @@ namespace lfs::vis {
         void updateLoss(float loss);
 
         // Access to trainer (for rendering, etc.)
-        gs::training::Trainer* getTrainer() { return trainer_.get(); }
-        const gs::training::Trainer* getTrainer() const { return trainer_.get(); }
+        lfs::training::Trainer* getTrainer() { return trainer_.get(); }
+        const lfs::training::Trainer* getTrainer() const { return trainer_.get(); }
 
         // Wait for training to complete (blocking)
         void waitForCompletion();
@@ -96,12 +95,12 @@ namespace lfs::vis {
         const std::string& getLastError() const { return last_error_; }
 
         // Camera access
-        std::shared_ptr<const Camera> getCamById(int camId) const;
-        std::vector<std::shared_ptr<const Camera>> getCamList() const;
+        std::shared_ptr<const lfs::core::Camera> getCamById(int camId) const;
+        std::vector<std::shared_ptr<const lfs::core::Camera>> getCamList() const;
 
-        void setProject(std::shared_ptr<gs::lfs::core::lfs::core::management::Project> project);
+        void setProject(std::shared_ptr<gs::management::Project> project);
 
-        std::shared_ptr<gs::lfs::core::lfs::core::management::Project> getProject() const { return project_; }
+        std::shared_ptr<gs::management::Project> getProject() const { return project_; }
 
     private:
         // Helper method to avoid duplicated initialization logic
@@ -116,9 +115,9 @@ namespace lfs::vis {
         void setupEventHandlers();
 
         // Member variables
-        std::unique_ptr<gs::training::Trainer> trainer_;
+        std::unique_ptr<lfs::training::Trainer> trainer_;
         std::unique_ptr<std::jthread> training_thread_;
-        visualizer::VisualizerImpl* viewer_ = nullptr;
+        VisualizerImpl* viewer_ = nullptr;
 
         // State tracking
         std::atomic<State> state_{State::Idle};
@@ -136,7 +135,7 @@ namespace lfs::vis {
         mutable std::mutex loss_buffer_mutex_;
 
         // project
-        std::shared_ptr<gs::lfs::core::lfs::core::management::Project> project_ = nullptr;
+        std::shared_ptr<gs::management::Project> project_ = nullptr;
     };
 
 } // namespace lfs::vis

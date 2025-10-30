@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <print>
 #include <ranges>
-#include <torch/torch.h>
 
 namespace lfs::vis {
 
@@ -180,104 +179,75 @@ namespace lfs::vis {
             [](ModelStats acc, const lfs::core::SplatData* model) {
                 acc.total_gaussians += model->size();
 
-                // Calculate SH degree from the actual shN tensor dimensions
-                // Degree 0: shN is empty or has 0 coefficients
-                // Degree 1: shN has 3 coefficients (for l=1)
-                // Degree 2: shN has 8 coefficients (for l=1,2)
-                // Degree 3: shN has 15 coefficients (for l=1,2,3)
+                // Calculate SH degree from shN dimensions
                 int sh_degree = 0;
-                if (model->shN().defined() && model->shN().dim() >= 2 && model->shN().size(1) > 0) {
-                    int shN_coeffs = model->shN().size(1);
-                    // shN contains (degree+1)^2 - 1 coefficients
-                    // Solve: shN_coeffs = (degree+1)^2 - 1
-                    // Therefore: degree = sqrt(shN_coeffs + 1) - 1
+                const auto& shN_tensor = model->shN_raw();
+                if (shN_tensor.is_valid() && shN_tensor.ndim() >= 2 && shN_tensor.size(1) > 0) {
+                    int shN_coeffs = static_cast<int>(shN_tensor.size(1));
                     sh_degree = static_cast<int>(std::round(std::sqrt(shN_coeffs + 1))) - 1;
-
-                    // Validate the degree is reasonable (0-3)
                     sh_degree = std::clamp(sh_degree, 0, 3);
                 }
 
                 acc.max_sh_degree = std::max(acc.max_sh_degree, sh_degree);
                 acc.total_scene_scale += model->get_scene_scale();
-                acc.has_shN = acc.has_shN || (model->shN().numel() > 0 && model->shN().size(1) > 0);
+                acc.has_shN = acc.has_shN || (shN_tensor.numel() > 0 && shN_tensor.size(1) > 0);
                 return acc;
             });
 
-        std::println("Scene: Combining {} models, {} gaussians, max SH degree {}",
-                     visible_models.size(), stats.total_gaussians, stats.max_sh_degree);
+        // Get device from first model (all should be on CUDA)
+        lfs::core::Device device = visible_models[0]->means_raw().device();
 
-        // Setup tensor options from first model
-        const auto [device, dtype] = [&] {
-            const auto& first = visible_models[0]->means();
-            return std::pair{first.device(), first.dtype()};
-        }();
-        auto opts = torch::TensorOptions().dtype(dtype).device(device);
-
-        // Calculate SH dimensions based on max degree
-        // Degree 0: sh0=1, shN=0
-        // Degree 1: sh0=1, shN=3
-        // Degree 2: sh0=1, shN=8
-        // Degree 3: sh0=1, shN=15
-        int sh0_coeffs = 1; // Always 1 for l=0
+        // Calculate SH dimensions
+        int sh0_coeffs = 1;
         int shN_coeffs = (stats.max_sh_degree > 0) ? ((stats.max_sh_degree + 1) * (stats.max_sh_degree + 1) - 1) : 0;
 
-        // Pre-allocate all tensors at once
-        struct CombinedTensors {
-            torch::Tensor means, sh0, shN, opacity, scaling, rotation;
-        } combined{
-            .means = torch::empty({static_cast<int64_t>(stats.total_gaussians), 3}, opts),
-            .sh0 = torch::empty({static_cast<int64_t>(stats.total_gaussians), sh0_coeffs, 3}, opts),
-            .shN = (shN_coeffs > 0) ? torch::zeros({static_cast<int64_t>(stats.total_gaussians), shN_coeffs, 3}, opts) : torch::empty({static_cast<int64_t>(stats.total_gaussians), 0, 3}, opts),
-            .opacity = torch::empty({static_cast<int64_t>(stats.total_gaussians), 1}, opts),
-            .scaling = torch::empty({static_cast<int64_t>(stats.total_gaussians), 3}, opts),
-            .rotation = torch::empty({static_cast<int64_t>(stats.total_gaussians), 4}, opts)};
-
-        // Helper to create a slice for current model
-        auto make_slice = [](size_t start, size_t size) {
-            return torch::indexing::Slice(start, start + size);
-        };
+        // Pre-allocate all tensors
+        using lfs::core::Tensor;
+        Tensor means = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 3}, device);
+        Tensor sh0 = Tensor::empty({static_cast<size_t>(stats.total_gaussians), static_cast<size_t>(sh0_coeffs), 3}, device);
+        Tensor shN = (shN_coeffs > 0) ? Tensor::zeros({static_cast<size_t>(stats.total_gaussians), static_cast<size_t>(shN_coeffs), 3}, device) : Tensor::empty({static_cast<size_t>(stats.total_gaussians), 0, 3}, device);
+        Tensor opacity = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 1}, device);
+        Tensor scaling = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 3}, device);
+        Tensor rotation = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 4}, device);
 
         // Copy data from each model
         size_t offset = 0;
         for (const auto* model : visible_models) {
             const auto size = model->size();
-            const auto slice = make_slice(offset, size);
 
-            // Direct copy for simple tensors
-            combined.means.index({slice}) = model->means();
-            combined.opacity.index({slice}) = model->opacity_raw();
-            combined.scaling.index({slice}) = model->scaling_raw();
-            combined.rotation.index({slice}) = model->rotation_raw();
+            // Copy each tensor using slice assignment (operator= now properly handles views)
+            means.slice(0, offset, offset + size) = model->means_raw();
+            sh0.slice(0, offset, offset + size) = model->sh0_raw();
+            opacity.slice(0, offset, offset + size) = model->opacity_raw();
+            scaling.slice(0, offset, offset + size) = model->scaling_raw();
+            rotation.slice(0, offset, offset + size) = model->rotation_raw();
 
-            // Copy sh0 (always present)
-            combined.sh0.index({slice}) = model->sh0();
-
-            // Copy shN if we have coefficients to copy
+            // Copy shN if we have coefficients
             if (shN_coeffs > 0) {
-                // Check how many coefficients this model has
-                int model_shN_coeffs = (model->shN().defined() && model->shN().dim() >= 2) ? model->shN().size(1) : 0;
+                const auto& model_shN = model->shN_raw();
+                int model_shN_coeffs = (model_shN.is_valid() && model_shN.ndim() >= 2) ? static_cast<int>(model_shN.size(1)) : 0;
 
                 if (model_shN_coeffs > 0) {
-                    // Copy as many coefficients as the model has, up to our max
                     int coeffs_to_copy = std::min(model_shN_coeffs, shN_coeffs);
-                    combined.shN.index({slice, torch::indexing::Slice(0, coeffs_to_copy)}) =
-                        model->shN().index({torch::indexing::Slice(), torch::indexing::Slice(0, coeffs_to_copy)});
+
+                    // Slice in both dimensions: rows and coefficients
+                    shN.slice(0, offset, offset + size).slice(1, 0, coeffs_to_copy) =
+                        model_shN.slice(1, 0, coeffs_to_copy);
                 }
-                // If model has fewer coefficients than max, the rest remain zero (already initialized)
             }
 
             offset += size;
         }
 
         // Create the combined model
-        cached_combined_ = std::make_unique<SplatData>(
+        cached_combined_ = std::make_unique<lfs::core::SplatData>(
             stats.max_sh_degree,
-            std::move(combined.means),
-            std::move(combined.sh0),
-            std::move(combined.shN),
-            std::move(combined.scaling),
-            std::move(combined.rotation),
-            std::move(combined.opacity),
+            std::move(means),
+            std::move(sh0),
+            std::move(shN),
+            std::move(scaling),
+            std::move(rotation),
+            std::move(opacity),
             stats.total_scene_scale / visible_models.size());
 
         cache_valid_ = true;

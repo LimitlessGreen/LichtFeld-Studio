@@ -5,10 +5,79 @@
 #include "training/training_manager.hpp"
 #include "core_new/logger.hpp"
 #include "training_new/training_setup.hpp"
-#include <c10/cuda/CUDACachingAllocator.h>
+#include <cuda_runtime.h>
+#include <cstring>
 #include <stdexcept>
 
 namespace lfs::vis {
+
+    using namespace lfs::core::events;
+
+    // Helper function to convert gs::param types to lfs::core::param types
+    // Cannot use memcpy because structures contain non-trivial types (std::string, std::vector)
+    static lfs::core::param::OptimizationParameters convertOptimizationParams(const gs::param::OptimizationParameters& src) {
+        lfs::core::param::OptimizationParameters dst;
+        dst.iterations = src.iterations;
+        dst.sh_degree_interval = src.sh_degree_interval;
+        dst.means_lr = src.means_lr;
+        dst.shs_lr = src.shs_lr;
+        dst.opacity_lr = src.opacity_lr;
+        dst.scaling_lr = src.scaling_lr;
+        dst.rotation_lr = src.rotation_lr;
+        dst.lambda_dssim = src.lambda_dssim;
+        dst.min_opacity = src.min_opacity;
+        dst.refine_every = src.refine_every;
+        dst.start_refine = src.start_refine;
+        dst.stop_refine = src.stop_refine;
+        dst.grad_threshold = src.grad_threshold;
+        dst.sh_degree = src.sh_degree;
+        dst.opacity_reg = src.opacity_reg;
+        dst.scale_reg = src.scale_reg;
+        dst.init_opacity = src.init_opacity;
+        dst.init_scaling = src.init_scaling;
+        dst.num_workers = src.num_workers;
+        dst.max_cap = src.max_cap;
+        dst.eval_steps = src.eval_steps;
+        dst.save_steps = src.save_steps;
+        dst.skip_intermediate_saving = src.skip_intermediate_saving;
+        dst.bg_modulation = src.bg_modulation;
+        dst.enable_eval = src.enable_eval;
+        dst.rc = src.rc;
+        dst.enable_save_eval_images = src.enable_save_eval_images;
+        dst.headless = src.headless;
+        dst.render_mode = src.render_mode;
+        dst.strategy = src.strategy;
+        dst.preload_to_ram = src.preload_to_ram;
+        dst.pose_optimization = src.pose_optimization;
+        dst.use_bilateral_grid = src.use_bilateral_grid;
+        dst.bilateral_grid_X = src.bilateral_grid_X;
+        dst.bilateral_grid_Y = src.bilateral_grid_Y;
+        dst.bilateral_grid_W = src.bilateral_grid_W;
+        dst.bilateral_grid_lr = src.bilateral_grid_lr;
+        dst.tv_loss_weight = src.tv_loss_weight;
+        dst.prune_opacity = src.prune_opacity;
+        dst.grow_scale3d = src.grow_scale3d;
+        dst.grow_scale2d = src.grow_scale2d;
+        dst.prune_scale3d = src.prune_scale3d;
+        dst.prune_scale2d = src.prune_scale2d;
+        dst.reset_every = src.reset_every;
+        dst.pause_refine_after_reset = src.pause_refine_after_reset;
+        dst.revised_opacity = src.revised_opacity;
+        dst.gut = src.gut;
+        dst.steps_scaler = src.steps_scaler;
+        dst.antialiasing = src.antialiasing;
+        dst.random = src.random;
+        dst.init_num_pts = src.init_num_pts;
+        dst.init_extent = src.init_extent;
+        dst.save_sog = src.save_sog;
+        dst.sog_iterations = src.sog_iterations;
+        dst.enable_sparsity = src.enable_sparsity;
+        dst.sparsify_steps = src.sparsify_steps;
+        dst.init_rho = src.init_rho;
+        dst.prune_ratio = src.prune_ratio;
+        dst.config_file = src.config_file;
+        return dst;
+    }
 
     TrainerManager::TrainerManager() {
         setupEventHandlers();
@@ -24,7 +93,7 @@ namespace lfs::vis {
         }
     }
 
-    void TrainerManager::setTrainer(std::unique_ptr<gs::training::Trainer> trainer) {
+    void TrainerManager::setTrainer(std::unique_ptr<lfs::training::Trainer> trainer) {
         LOG_TIMER_TRACE("TrainerManager::setTrainer");
 
         // Clear any existing trainer first
@@ -105,9 +174,22 @@ namespace lfs::vis {
 
         // Create training parameters from project
         lfs::core::param::TrainingParameters params;
-        params.dataset = project_->getProjectData().data_set_info;
-        params.optimization = project_->getOptimizationParams();
+
+        // Convert gs::management::DataSetInfo to lfs::core::param::DatasetConfig
+        // DataSetInfo inherits from DatasetConfig, so we can slice-copy the base
+        const auto& old_dataset = project_->getProjectData().data_set_info;
+        params.dataset.data_path = old_dataset.data_path;
         params.dataset.output_path = project_->getProjectOutputFolder();
+        params.dataset.project_path = old_dataset.project_path;
+        params.dataset.images = old_dataset.images;
+        params.dataset.resize_factor = old_dataset.resize_factor;
+        params.dataset.test_every = old_dataset.test_every;
+        params.dataset.timelapse_images = old_dataset.timelapse_images;
+        params.dataset.timelapse_every = old_dataset.timelapse_every;
+        params.dataset.max_width = old_dataset.max_width;
+
+        // Convert gs::param::OptimizationParameters to lfs::core::param::OptimizationParameters
+        params.optimization = convertOptimizationParams(project_->getOptimizationParams());
 
         // Initialize trainer
         auto init_result = trainer_->initialize(params);
@@ -151,7 +233,7 @@ namespace lfs::vis {
         setState(State::Running);
 
         // Emit training started event
-        events::state::TrainingStarted{
+        state::TrainingStarted{
             .total_iterations = getTotalIterations()}
             .emit();
 
@@ -175,7 +257,7 @@ namespace lfs::vis {
             trainer_->request_pause();
             setState(State::Paused);
 
-            events::state::TrainingPaused{
+            state::TrainingPaused{
                 .iteration = getCurrentIteration()}
                 .emit();
 
@@ -193,7 +275,7 @@ namespace lfs::vis {
             trainer_->request_resume();
             setState(State::Running);
 
-            events::state::TrainingResumed{
+            state::TrainingResumed{
                 .iteration = getCurrentIteration()}
                 .emit();
 
@@ -219,7 +301,7 @@ namespace lfs::vis {
             training_thread_->request_stop();
         }
 
-        events::state::TrainingStopped{
+        state::TrainingStopped{
             .iteration = getCurrentIteration(),
             .user_requested = true}
             .emit();
@@ -259,14 +341,13 @@ namespace lfs::vis {
             // Destroy the trainer to release all tensors
             trainer_.reset();
 
-            // Force PyTorch to release cached memory back to system
-            c10::cuda::CUDACachingAllocator::emptyCache();
+            // Synchronize to ensure all GPU operations are complete
             cudaDeviceSynchronize();
 
-            LOG_DEBUG("GPU memory cache cleared");
+            LOG_DEBUG("GPU memory released");
 
             // Recreate trainer
-            auto setup_result = gs::training::setupTraining(params);
+            auto setup_result = lfs::training::setupTraining(params);
             if (setup_result) {
                 trainer_ = std::move(setup_result->trainer);
                 trainer_->setProject(project_);
@@ -401,7 +482,7 @@ namespace lfs::vis {
         LOG_INFO("Training finished - Success: {}, Final iteration: {}, Final loss: {:.6f}",
                  success, final_iteration, final_loss);
 
-        events::state::TrainingCompleted{
+        state::TrainingCompleted{
             .iteration = final_iteration,
             .final_loss = final_loss,
             .success = success,
@@ -425,7 +506,7 @@ namespace lfs::vis {
         });
     }
 
-    std::shared_ptr<const Camera> TrainerManager::getCamById(int camId) const {
+    std::shared_ptr<const lfs::core::Camera> TrainerManager::getCamById(int camId) const {
         if (trainer_) {
             LOG_TRACE("Retrieving camera with ID: {}", camId);
             return trainer_->getCamById(camId);
@@ -434,7 +515,7 @@ namespace lfs::vis {
         return nullptr;
     }
 
-    std::vector<std::shared_ptr<const Camera>> TrainerManager::getCamList() const {
+    std::vector<std::shared_ptr<const lfs::core::Camera>> TrainerManager::getCamList() const {
         if (trainer_) {
             auto cams = trainer_->getCamList();
             LOG_TRACE("Retrieved {} cameras from trainer", cams.size());
@@ -444,7 +525,7 @@ namespace lfs::vis {
         return {};
     }
 
-    void TrainerManager::setProject(std::shared_ptr<gs::lfs::core::lfs::core::management::Project> project) {
+    void TrainerManager::setProject(std::shared_ptr<gs::management::Project> project) {
         project_ = project;
         if (trainer_) {
             trainer_->setProject(project);

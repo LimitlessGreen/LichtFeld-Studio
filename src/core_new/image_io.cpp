@@ -9,7 +9,7 @@
 
 #include <algorithm>
 #include <condition_variable>
-#include <core/logger.hpp>
+#include "core_new/logger.hpp"
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -114,19 +114,23 @@ load_image_with_alpha(std::filesystem::path p) {
 
 std::tuple<unsigned char*, int, int, int>
 load_image(std::filesystem::path p, int res_div, int max_width) {
-    init_oiio();
+    LOG_TIMER("load_image total");
 
-    std::unique_ptr<OIIO::ImageInput> in(OIIO::ImageInput::open(p.string()));
-    if (!in)
-        throw std::runtime_error("Load failed: " + p.string() + " : " + OIIO::geterror());
+    {
+        LOG_TIMER("init_oiio");
+        init_oiio();
+    }
+
+    std::unique_ptr<OIIO::ImageInput> in;
+    {
+        LOG_TIMER("OIIO::ImageInput::open");
+        in = std::unique_ptr<OIIO::ImageInput>(OIIO::ImageInput::open(p.string()));
+        if (!in)
+            throw std::runtime_error("Load failed: " + p.string() + " : " + OIIO::geterror());
+    }
 
     const OIIO::ImageSpec& spec = in->spec();
     int w = spec.width, h = spec.height, file_c = spec.nchannels;
-
-    auto finish = [&](unsigned char* data, int W, int H, int C) {
-        in->close();
-        return std::make_tuple(data, W, H, C);
-    };
 
     // Decide threading for the resample (see notes below)
     const int nthreads = 0; // set to 1 if you call this from multiple worker threads
@@ -134,24 +138,35 @@ load_image(std::filesystem::path p, int res_div, int max_width) {
     // Fast path: read 3 channels directly (drop alpha if present)
     if (file_c >= 3) {
         if (res_div <= 1) {
+            LOG_PERF("Fast path: reading 3 channels directly");
             // allocate and read directly into final RGB buffer
-            auto* out = static_cast<unsigned char*>(std::malloc((size_t)w * h * 3));
+            auto* out = [&]() {
+                LOG_TIMER("malloc RGB buffer");
+                return static_cast<unsigned char*>(std::malloc((size_t)w * h * 3));
+            }();
             if (!out) {
                 in->close();
                 throw std::bad_alloc();
             }
 
-            if (!in->read_image(/*subimage*/ 0, /*miplevel*/ 0,
-                                /*chbegin*/ 0, /*chend*/ 3,
-                                OIIO::TypeDesc::UINT8, out)) {
-                std::string e = in->geterror();
-                std::free(out);
-                in->close();
-                throw std::runtime_error("Read failed: " + p.string() + (e.empty() ? "" : (" : " + e)));
+            {
+                LOG_TIMER("OIIO read_image");
+                if (!in->read_image(/*subimage*/ 0, /*miplevel*/ 0,
+                                    /*chbegin*/ 0, /*chend*/ 3,
+                                    OIIO::TypeDesc::UINT8, out)) {
+                    std::string e = in->geterror();
+                    std::free(out);
+                    in->close();
+                    throw std::runtime_error("Read failed: " + p.string() + (e.empty() ? "" : (" : " + e)));
+                }
             }
-            in->close();
+
+            {
+                in->close();
+            }
 
             if (max_width > 0 && (w > max_width || h > max_width)) {
+                LOG_PERF("Need downscaling: {}x{} -> max_width {}", w, h, max_width);
                 int scale_w;
                 int scale_h;
                 if (w > h) {
@@ -163,35 +178,49 @@ load_image(std::filesystem::path p, int res_div, int max_width) {
                 }
                 unsigned char* ret = nullptr;
                 try {
+                    LOG_TIMER("downscale_resample_direct");
                     ret = downscale_resample_direct(out, w, h, scale_w, scale_h, nthreads);
                 } catch (...) {
                     std::free(out);
                     throw;
                 }
                 std::free(out);
+                LOG_PERF("Downscaled to {}x{}", scale_w, scale_h);
                 return {ret, scale_w, scale_h, 3};
             } else {
                 return {out, w, h, 3};
             }
 
         } else if (res_div == 2 || res_div == 4 || res_div == 8) {
+            LOG_PERF("res_div path: res_div={}", res_div);
             // read full, then downscale in-place into a new buffer without extra copy
-            auto* full = static_cast<unsigned char*>(std::malloc((size_t)w * h * 3));
+            auto* full = [&]() {
+                LOG_TIMER("malloc full buffer for res_div");
+                return static_cast<unsigned char*>(std::malloc((size_t)w * h * 3));
+            }();
             if (!full) {
                 in->close();
                 throw std::bad_alloc();
             }
 
-            if (!in->read_image(0, 0, 0, 3, OIIO::TypeDesc::UINT8, full)) {
-                std::string e = in->geterror();
-                std::free(full);
-                in->close();
-                throw std::runtime_error("Read failed: " + p.string() + (e.empty() ? "" : (" : " + e)));
+            {
+                LOG_TIMER("OIIO read_image (res_div)");
+                if (!in->read_image(0, 0, 0, 3, OIIO::TypeDesc::UINT8, full)) {
+                    std::string e = in->geterror();
+                    std::free(full);
+                    in->close();
+                    throw std::runtime_error("Read failed: " + p.string() + (e.empty() ? "" : (" : " + e)));
+                }
             }
-            in->close();
+
+            {
+                LOG_TIMER("OIIO close (res_div)");
+                in->close();
+            }
 
             const int nw = std::max(1, w / res_div);
             const int nh = std::max(1, h / res_div);
+            LOG_PERF("Target size after res_div: {}x{}", nw, nh);
             int scale_w = nw;
             int scale_h = nh;
             if (max_width > 0 && (nw > max_width || nh > max_width)) {
@@ -206,12 +235,14 @@ load_image(std::filesystem::path p, int res_div, int max_width) {
 
             unsigned char* out = nullptr;
             try {
+                LOG_TIMER("downscale_resample_direct (res_div)");
                 out = downscale_resample_direct(full, w, h, scale_w, scale_h, nthreads);
             } catch (...) {
                 std::free(full);
                 throw;
             }
             std::free(full);
+            LOG_PERF("Final size: {}x{}", scale_w, scale_h);
             return {out, scale_w, scale_h, 3};
         } else {
             LOG_ERROR("load_image: unsupported resize factor {}", res_div);
@@ -221,35 +252,54 @@ load_image(std::filesystem::path p, int res_div, int max_width) {
 
     // 1–2 channel inputs -> read native, then expand to RGB
     {
+        LOG_PERF("Grayscale/2-channel path: file_c={}", file_c);
         const int in_c = std::min(2, std::max(1, file_c));
-        std::vector<unsigned char> tmp((size_t)w * h * in_c);
-        if (!in->read_image(0, 0, 0, in_c, OIIO::TypeDesc::UINT8, tmp.data())) {
-            auto e = in->geterror();
-            in->close();
-            throw std::runtime_error("Read failed: " + p.string() + (e.empty() ? "" : (" : " + e)));
+        std::vector<unsigned char> tmp;
+        {
+            LOG_TIMER("allocate temp buffer");
+            tmp.resize((size_t)w * h * in_c);
         }
-        in->close();
 
-        auto* base = static_cast<unsigned char*>(std::malloc((size_t)w * h * 3));
+        {
+            LOG_TIMER("OIIO read_image (grayscale)");
+            if (!in->read_image(0, 0, 0, in_c, OIIO::TypeDesc::UINT8, tmp.data())) {
+                auto e = in->geterror();
+                in->close();
+                throw std::runtime_error("Read failed: " + p.string() + (e.empty() ? "" : (" : " + e)));
+            }
+        }
+
+        {
+            LOG_TIMER("OIIO close (grayscale)");
+            in->close();
+        }
+
+        auto* base = [&]() {
+            LOG_TIMER("malloc RGB base buffer");
+            return static_cast<unsigned char*>(std::malloc((size_t)w * h * 3));
+        }();
         if (!base)
             throw std::bad_alloc();
 
-        if (in_c == 1) {
-            const unsigned char* g = tmp.data();
-            for (size_t i = 0, N = (size_t)w * h; i < N; ++i) {
-                unsigned char v = g[i];
-                base[3 * i + 0] = v;
-                base[3 * i + 1] = v;
-                base[3 * i + 2] = v;
-            }
-        } else { // 2 channels -> (R,G,avg)
-            const unsigned char* src = tmp.data();
-            for (size_t i = 0, N = (size_t)w * h; i < N; ++i) {
-                unsigned char r = src[2 * i + 0];
-                unsigned char g = src[2 * i + 1];
-                base[3 * i + 0] = r;
-                base[3 * i + 1] = g;
-                base[3 * i + 2] = (unsigned char)(((int)r + (int)g) / 2);
+        {
+            LOG_TIMER("expand to RGB");
+            if (in_c == 1) {
+                const unsigned char* g = tmp.data();
+                for (size_t i = 0, N = (size_t)w * h; i < N; ++i) {
+                    unsigned char v = g[i];
+                    base[3 * i + 0] = v;
+                    base[3 * i + 1] = v;
+                    base[3 * i + 2] = v;
+                }
+            } else { // 2 channels -> (R,G,avg)
+                const unsigned char* src = tmp.data();
+                for (size_t i = 0, N = (size_t)w * h; i < N; ++i) {
+                    unsigned char r = src[2 * i + 0];
+                    unsigned char g = src[2 * i + 1];
+                    base[3 * i + 0] = r;
+                    base[3 * i + 1] = g;
+                    base[3 * i + 2] = (unsigned char)(((int)r + (int)g) / 2);
+                }
             }
         }
 

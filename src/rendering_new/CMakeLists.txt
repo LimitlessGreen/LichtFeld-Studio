@@ -26,7 +26,9 @@ set(RENDERING_SOURCES
 
 # Conditionally add CUDA GL interop
 if(CUDA_GL_INTEROP_ENABLED)
-    list(APPEND RENDERING_SOURCES cuda_gl_interop.cpp)
+    list(APPEND RENDERING_SOURCES
+        cuda_gl_interop.cpp
+        cuda_gl_kernels.cu)
 endif()
 
 add_library(lfs_rendering STATIC ${RENDERING_SOURCES})

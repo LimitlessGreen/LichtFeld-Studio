@@ -463,7 +463,7 @@ target_include_directories(${PROJECT_NAME}
 
 target_link_libraries(${PROJECT_NAME}
         PRIVATE
-        gs_core
+        lfs_core           # Use LibTorch-free core library
         gs_geometry
         gs_project
         gs_loader

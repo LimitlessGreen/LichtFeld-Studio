@@ -48,7 +48,7 @@ namespace lfs::vis {
     // Concrete context passed to tools for accessing visualizer resources
     class ToolContext {
     public:
-        ToolContext(RenderingManager* rm, gs::SceneManager* sm, const Viewport* vp, GLFWwindow* win)
+        ToolContext(RenderingManager* rm, SceneManager* sm, const Viewport* vp, GLFWwindow* win)
             : rendering_manager(rm),
               scene_manager(sm),
               viewport(vp),
@@ -56,7 +56,7 @@ namespace lfs::vis {
 
         // Direct access to components
         RenderingManager* getRenderingManager() const { return rendering_manager; }
-        gs::SceneManager* getSceneManager() const { return scene_manager; }
+        SceneManager* getSceneManager() const { return scene_manager; }
         const Viewport& getViewport() const { return *viewport; }
         GLFWwindow* getWindow() const { return window; }
 
@@ -71,7 +71,7 @@ namespace lfs::vis {
 
     private:
         RenderingManager* rendering_manager;
-        gs::SceneManager* scene_manager;
+        SceneManager* scene_manager;
         const Viewport* viewport;
         GLFWwindow* window;
     };

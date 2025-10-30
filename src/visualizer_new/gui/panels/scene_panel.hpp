@@ -90,10 +90,10 @@ namespace lfs::vis {
 
             // Event handlers
             void setupEventHandlers();
-            void handleSceneLoaded(const events::state::SceneLoaded& event);
+            void handleSceneLoaded(const lfs::core::events::state::SceneLoaded& event);
             void handleSceneCleared();
-            void handlePLYAdded(const events::state::PLYAdded& event);
-            void handlePLYRemoved(const events::state::PLYRemoved& event);
+            void handlePLYAdded(const lfs::core::events::state::PLYAdded& event);
+            void handlePLYRemoved(const lfs::core::events::state::PLYRemoved& event);
             void handlePLYRenamed(const lfs::core::events::cmd::RenamePLY& event);
             void handleGoToCamView(const lfs::core::events::cmd::GoToCamView& event);
             void loadImageCams(const std::filesystem::path& path);

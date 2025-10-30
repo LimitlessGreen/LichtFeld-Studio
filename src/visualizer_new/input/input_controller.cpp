@@ -4,6 +4,7 @@
 
 #include "input/input_controller.hpp"
 #include "core_new/logger.hpp"
+#include "loader_new/loader.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "tools/tool_base.hpp"
 #include "tools/translation_gizmo_tool.hpp"
@@ -13,23 +14,26 @@
 #include <imgui.h>
 
 namespace lfs::vis {
+
+    using namespace lfs::core::events;
+
     InputController* InputController::instance_ = nullptr;
 
     InputController::InputController(GLFWwindow* window, Viewport& viewport)
         : window_(window),
           viewport_(viewport) {
         // Subscribe to GoToCamView events
-        lfs::core::events::cmd::GoToCamView::when([this](const auto& e) {
+        cmd::GoToCamView::when([this](const auto& e) {
             handleGoToCamView(e);
         });
         // Subscribe to WindowFocusLost to reset states
-        lfs::core::events::internal::WindowFocusLost::when([this](const auto&) {
+        internal::WindowFocusLost::when([this](const auto&) {
             drag_mode_ = DragMode::None;
             std::fill(std::begin(keys_wasd_), std::end(keys_wasd_), false);
             hovered_camera_id_ = -1;
         });
         // Subscribe to GimbalLock events
-        lfs::core::events::cmd::ToggleGimbalLock::when([this](const lfs::core::events::cmd::ToggleGimbalLock& e) {
+        cmd::ToggleGimbalLock::when([this](const cmd::ToggleGimbalLock& e) {
             gimbal_locked = e.locked;
         });
 
@@ -206,7 +210,7 @@ namespace lfs::vis {
             if (hovered_camera_id_ >= 0) {
                 if (is_double_click && hovered_camera_id_ == last_clicked_camera_id_) {
                     LOG_INFO("Double-clicked on camera ID: {}", hovered_camera_id_);
-                    lfs::core::events::cmd::GoToCamView{.cam_id = hovered_camera_id_}.emit();
+                    cmd::GoToCamView{.cam_id = hovered_camera_id_}.emit();
 
                     // Reset click tracking to prevent triple-click
                     last_click_time_ = std::chrono::steady_clock::time_point();
@@ -308,7 +312,7 @@ namespace lfs::vis {
 
             // Force publish on mouse release
             if (was_dragging) {
-                events::ui::CameraMove{
+                ui::CameraMove{
                     .rotation = viewport_.getRotationMatrix(),
                     .translation = viewport_.getTranslation()}
                     .emit();
@@ -328,7 +332,7 @@ namespace lfs::vis {
             // FIX: Allow dragging all the way to the edges - no margins!
             new_pos = std::clamp(new_pos, 0.0f, 1.0f);
 
-            events::ui::SplitPositionChanged{.position = new_pos}.emit();
+            ui::SplitPositionChanged{.position = new_pos}.emit();
             last_mouse_pos_ = {x, y};
             return;
         }
@@ -490,17 +494,17 @@ namespace lfs::vis {
         }
 
         if (key == GLFW_KEY_T && action == GLFW_PRESS && !ImGui::GetIO().WantCaptureKeyboard) {
-            lfs::core::events::cmd::CyclePLY{}.emit();
+            cmd::CyclePLY{}.emit();
             return;
         }
 
         if (key == GLFW_KEY_V && action == GLFW_PRESS && !ImGui::GetIO().WantCaptureKeyboard) {
-            lfs::core::events::cmd::ToggleSplitView{}.emit();
+            cmd::ToggleSplitView{}.emit();
             return;
         }
 
         if (key == GLFW_KEY_G && action == GLFW_PRESS && !ImGui::GetIO().WantCaptureKeyboard) {
-            lfs::core::events::cmd::ToggleGTComparison{}.emit();
+            cmd::ToggleGTComparison{}.emit();
             LOG_DEBUG("Toggled GT comparison mode");
             return;
         }
@@ -520,7 +524,7 @@ namespace lfs::vis {
                 last_camview = 0; // Wrap to beginning
             }
 
-            lfs::core::events::cmd::GoToCamView{
+            cmd::GoToCamView{
                 .cam_id = last_camview}
                 .emit();
             return;
@@ -541,7 +545,7 @@ namespace lfs::vis {
                 last_camview = num_cams - 1; // Wrap to end
             }
 
-            lfs::core::events::cmd::GoToCamView{
+            cmd::GoToCamView{
                 .cam_id = last_camview}
                 .emit();
             return;
@@ -683,21 +687,21 @@ namespace lfs::vis {
 
         // Load splat files (PLY or SOG)
         for (const auto& splat : splat_files) {
-            lfs::core::events::cmd::LoadFile{.path = splat, .is_dataset = false}.emit();
+            cmd::LoadFile{.path = splat, .is_dataset = false}.emit();
             LOG_INFO("Loading {} via drag-and-drop: {}",
                      splat.extension().string(), splat.filename().string());
         }
 
         // Load dataset if found
         if (dataset_path) {
-            lfs::core::events::cmd::LoadFile{.path = *dataset_path, .is_dataset = true}.emit();
+            cmd::LoadFile{.path = *dataset_path, .is_dataset = true}.emit();
             LOG_INFO("Loading dataset via drag-and-drop: {}", dataset_path->filename().string());
         }
 
         if (paths.size() == 1) {
             auto project_path = std::filesystem::path(paths[0]);
-            if (project_path.extension() == gs::lfs::core::lfs::core::management::Project::EXTENSION) {
-                lfs::core::events::cmd::LoadProject{.path = project_path}.emit();
+            if (project_path.extension() == gs::management::Project::EXTENSION) {
+                cmd::LoadProject{.path = project_path}.emit();
                 LOG_INFO("Loading LS Project via drag-and-drop: {}", project_path.filename().string());
             }
         }
@@ -719,45 +723,37 @@ namespace lfs::vis {
 
         LOG_DEBUG("Moving camera to view ID: {} ({})", event.cam_id, cam_data->image_name());
 
-        // Transform from WorldToCam to CamToWorld
+        // Get rotation and translation tensors and ensure they're on CPU
+        auto R_tensor = cam_data->R().cpu();
+        auto T_tensor = cam_data->T().cpu();
+
+        // Get raw CPU pointers - safer and more efficient
+        const float* R_data = R_tensor.ptr<float>();
+        const float* T_data = T_tensor.ptr<float>();
+
+        if (!R_data || !T_data) {
+            LOG_ERROR("Failed to get camera R/T data pointers");
+            return;
+        }
+
+        // R_data is world_to_cam rotation stored row-major
+        // We need cam_to_world for the viewport
         glm::mat3 world_to_cam_R;
-        auto R_accessor = cam_data->R().accessor<float, 2>();
-        for (int i = 0; i < 3; ++i) {
-            for (int j = 0; j < 3; ++j) {
-                world_to_cam_R[j][i] = R_accessor[i][j];
+
+        // Load the matrix properly: R_data is row-major, GLM is column-major
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 3; ++col) {
+                // R_data[row * 3 + col] is element at [row][col] in row-major
+                // GLM[col][row] is element at [row][col] when thinking row-major
+                world_to_cam_R[col][row] = R_data[row * 3 + col];
             }
         }
 
-        auto T_accessor = cam_data->T().accessor<float, 1>();
-        glm::vec3 world_to_cam_T(T_accessor[0], T_accessor[1], T_accessor[2]);
+        glm::vec3 world_to_cam_T(T_data[0], T_data[1], T_data[2]);
 
+        // Convert to camera-to-world transform
         glm::mat3 cam_to_world_R = glm::transpose(world_to_cam_R);
         glm::vec3 cam_to_world_T = -cam_to_world_R * world_to_cam_T;
-
-        // Apply world transform to sync camera with transformed gaussian splat
-        if (rendering_manager_) {
-            auto settings = rendering_manager_->getSettings();
-            if (!settings.world_transform.isIdentity()) {
-                glm::mat4 world_transform = settings.world_transform.toMat4();
-
-                // Build camera matrix using GLM constructor
-                glm::mat4 cam_mat(
-                    glm::vec4(cam_to_world_R[0], 0),
-                    glm::vec4(cam_to_world_R[1], 0),
-                    glm::vec4(cam_to_world_R[2], 0),
-                    glm::vec4(cam_to_world_T, 1)
-                );
-
-                // Apply world transform
-                glm::mat4 transformed_cam = world_transform * cam_mat;
-
-                // Extract transformed rotation and translation
-                cam_to_world_R = glm::mat3(transformed_cam);
-                cam_to_world_T = glm::vec3(transformed_cam[3]);
-
-                LOG_DEBUG("Applied world transform to camera view for 'go to image'");
-            }
-        }
 
         viewport_.camera.R = cam_to_world_R;
         viewport_.camera.t = cam_to_world_T;
@@ -784,7 +780,7 @@ namespace lfs::vis {
         }
 
         // Set the FOV
-        events::ui::RenderSettingsChanged{
+        ui::RenderSettingsChanged{
             .sh_degree = std::nullopt,
             .fov = fov_y_deg,
             .scaling_modifier = std::nullopt,
@@ -794,7 +790,7 @@ namespace lfs::vis {
             .emit();
 
         // Force immediate camera update
-        events::ui::CameraMove{
+        ui::CameraMove{
             .rotation = viewport_.getRotationMatrix(),
             .translation = viewport_.getTranslation()}
             .emit();
@@ -846,7 +842,7 @@ namespace lfs::vis {
 
         LOG_DEBUG("Camera speed changed to: {:.3f} (max: {:.3f})", new_speed, max_speed);
 
-        events::ui::SpeedChanged{
+        ui::SpeedChanged{
             .current_speed = new_speed,
             .max_speed = max_speed}
             .emit();
@@ -855,7 +851,7 @@ namespace lfs::vis {
     void InputController::publishCameraMove() {
         auto now = std::chrono::steady_clock::now();
         if (now - last_camera_publish_ >= camera_publish_interval_) {
-            events::ui::CameraMove{
+            ui::CameraMove{
                 .rotation = viewport_.getRotationMatrix(),
                 .translation = viewport_.getTranslation()}
                 .emit();

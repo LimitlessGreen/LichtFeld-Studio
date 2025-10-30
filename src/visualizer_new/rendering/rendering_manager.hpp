@@ -41,7 +41,7 @@ namespace lfs::vis {
         glm::vec3 crop_max = glm::vec3(1.0f, 1.0f, 1.0f);
         glm::vec3 crop_color = glm::vec3(1.0f, 1.0f, 0.0f);
         float crop_line_width = 2.0f;
-        geometry::EuclideanTransform crop_transform;
+        gs::geometry::EuclideanTransform crop_transform;
 
         // Background
         glm::vec3 background_color = glm::vec3(0.0f, 0.0f, 0.0f);
@@ -55,7 +55,7 @@ namespace lfs::vis {
         bool lock_gimbal = false;
 
         // World transform
-        geometry::EuclideanTransform world_transform;
+        gs::geometry::EuclideanTransform world_transform;
 
         // Grid
         bool show_grid = true;
@@ -174,7 +174,7 @@ namespace lfs::vis {
         float getAverageFPS() const { return framerate_controller_.getAverageFPS(); }
 
         // Access to rendering engine (for initialization only)
-        gs::rendering::RenderingEngine* getRenderingEngine();
+        lfs::rendering::RenderingEngine* getRenderingEngine();
 
         // Camera frustum picking
         int pickCameraFrustum(const glm::vec2& mouse_pos);
@@ -182,17 +182,17 @@ namespace lfs::vis {
         int getHoveredCameraId() const { return hovered_camera_id_; }
 
     private:
-        void doFullRender(const RenderContext& context, SceneManager* scene_manager, const SplatData* model);
+        void doFullRender(const RenderContext& context, SceneManager* scene_manager, const lfs::core::SplatData* model);
         void renderOverlays(const RenderContext& context);
         void setupEventHandlers();
-        void renderToTexture(const RenderContext& context, SceneManager* scene_manager, const SplatData* model);
+        void renderToTexture(const RenderContext& context, SceneManager* scene_manager, const lfs::core::SplatData* model);
 
-        std::optional<gs::rendering::SplitViewRequest> createSplitViewRequest(
+        std::optional<lfs::rendering::SplitViewRequest> createSplitViewRequest(
             const RenderContext& context,
             SceneManager* scene_manager);
 
         // Core components
-        std::unique_ptr<gs::rendering::RenderingEngine> engine_;
+        std::unique_ptr<lfs::rendering::RenderingEngine> engine_;
         FramerateController framerate_controller_;
 
         // GT texture cache
@@ -204,7 +204,7 @@ namespace lfs::vis {
 
         // State tracking
         std::atomic<bool> needs_render_{true};
-        gs::rendering::RenderResult cached_result_;
+        lfs::rendering::RenderResult cached_result_;
         size_t last_model_ptr_ = 0;
         glm::ivec2 last_render_size_{0, 0};
         std::chrono::steady_clock::time_point last_training_render_;

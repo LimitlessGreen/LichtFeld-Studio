@@ -12,9 +12,11 @@
 
 namespace lfs::vis::tools {
 
+    using namespace lfs::core::events;
+
     TranslationGizmoTool::TranslationGizmoTool() {
         // Initialize with identity transform
-        current_transform_ = geometry::EuclideanTransform();
+        current_transform_ = gs::geometry::EuclideanTransform();
     }
 
     bool TranslationGizmoTool::initialize(const ToolContext& ctx) {
@@ -49,8 +51,8 @@ namespace lfs::vis::tools {
     void TranslationGizmoTool::shutdown() {
         gizmo_interaction_.reset();
         is_dragging_ = false;
-        selected_element_ = gs::rendering::GizmoElement::None;
-        hovered_element_ = gs::rendering::GizmoElement::None;
+        selected_element_ = lfs::rendering::GizmoElement::None;
+        hovered_element_ = lfs::rendering::GizmoElement::None;
         tool_context_ = nullptr;
     }
 
@@ -58,7 +60,7 @@ namespace lfs::vis::tools {
         if (!enabled && is_dragging_) {
             // Cancel any ongoing drag
             is_dragging_ = false;
-            selected_element_ = gs::rendering::GizmoElement::None;
+            selected_element_ = lfs::rendering::GizmoElement::None;
             if (gizmo_interaction_) {
                 gizmo_interaction_->endDrag();
             }
@@ -96,7 +98,7 @@ namespace lfs::vis::tools {
                 auto hit_element = gizmo_interaction_->pick(
                     glm::vec2(x, y), view, projection, position);
 
-                if (hit_element != gs::rendering::GizmoElement::None) {
+                if (hit_element != lfs::rendering::GizmoElement::None) {
                     // Start dragging
                     selected_element_ = hit_element;
                     is_dragging_ = true;
@@ -113,7 +115,7 @@ namespace lfs::vis::tools {
             } else if (action == GLFW_RELEASE && is_dragging_) {
                 // End dragging
                 is_dragging_ = false;
-                selected_element_ = gs::rendering::GizmoElement::None;
+                selected_element_ = lfs::rendering::GizmoElement::None;
                 gizmo_interaction_->endDrag();
 
                 // Apply the final transform
@@ -144,7 +146,7 @@ namespace lfs::vis::tools {
                 glm::vec2(x, y), view, projection);
 
             // Update transform with new position
-            current_transform_ = geometry::EuclideanTransform(
+            current_transform_ = gs::geometry::EuclideanTransform(
                 current_transform_.getRotationMat(),
                 new_position);
 
@@ -191,7 +193,7 @@ namespace lfs::vis::tools {
                 // Display current position
                 glm::vec3 position = current_transform_.getTranslation();
                 if (ImGui::DragFloat3("Position", &position.x, 0.01f)) {
-                    current_transform_ = geometry::EuclideanTransform(
+                    current_transform_ = gs::geometry::EuclideanTransform(
                         current_transform_.getRotationMat(),
                         position);
                     if (tool_context_) {
@@ -201,7 +203,7 @@ namespace lfs::vis::tools {
 
                 // Reset button
                 if (ImGui::Button("Reset Transform")) {
-                    current_transform_ = geometry::EuclideanTransform();
+                    current_transform_ = gs::geometry::EuclideanTransform();
                     if (tool_context_) {
                         updateWorldTransform(*tool_context_);
                     }
@@ -211,19 +213,19 @@ namespace lfs::vis::tools {
                 ImGui::Separator();
                 if (is_dragging_) {
                     ImGui::TextColored(ImVec4(0, 1, 0, 1), "Dragging: %s",
-                                       selected_element_ == gs::rendering::GizmoElement::XAxis ? "X Axis" : selected_element_ == gs::rendering::GizmoElement::YAxis ? "Y Axis"
-                                                                                                        : selected_element_ == gs::rendering::GizmoElement::ZAxis   ? "Z Axis"
-                                                                                                        : selected_element_ == gs::rendering::GizmoElement::XYPlane ? "XY Plane"
-                                                                                                        : selected_element_ == gs::rendering::GizmoElement::XZPlane ? "XZ Plane"
-                                                                                                        : selected_element_ == gs::rendering::GizmoElement::YZPlane ? "YZ Plane"
+                                       selected_element_ == lfs::rendering::GizmoElement::XAxis ? "X Axis" : selected_element_ == lfs::rendering::GizmoElement::YAxis ? "Y Axis"
+                                                                                                        : selected_element_ == lfs::rendering::GizmoElement::ZAxis   ? "Z Axis"
+                                                                                                        : selected_element_ == lfs::rendering::GizmoElement::XYPlane ? "XY Plane"
+                                                                                                        : selected_element_ == lfs::rendering::GizmoElement::XZPlane ? "XZ Plane"
+                                                                                                        : selected_element_ == lfs::rendering::GizmoElement::YZPlane ? "YZ Plane"
                                                                                                                                                                     : "Unknown");
-                } else if (hovered_element_ != gs::rendering::GizmoElement::None) {
+                } else if (hovered_element_ != lfs::rendering::GizmoElement::None) {
                     ImGui::Text("Hovering: %s",
-                                hovered_element_ == gs::rendering::GizmoElement::XAxis ? "X Axis" : hovered_element_ == gs::rendering::GizmoElement::YAxis ? "Y Axis"
-                                                                                                : hovered_element_ == gs::rendering::GizmoElement::ZAxis   ? "Z Axis"
-                                                                                                : hovered_element_ == gs::rendering::GizmoElement::XYPlane ? "XY Plane"
-                                                                                                : hovered_element_ == gs::rendering::GizmoElement::XZPlane ? "XZ Plane"
-                                                                                                : hovered_element_ == gs::rendering::GizmoElement::YZPlane ? "YZ Plane"
+                                hovered_element_ == lfs::rendering::GizmoElement::XAxis ? "X Axis" : hovered_element_ == lfs::rendering::GizmoElement::YAxis ? "Y Axis"
+                                                                                                : hovered_element_ == lfs::rendering::GizmoElement::ZAxis   ? "Z Axis"
+                                                                                                : hovered_element_ == lfs::rendering::GizmoElement::XYPlane ? "XY Plane"
+                                                                                                : hovered_element_ == lfs::rendering::GizmoElement::XZPlane ? "XZ Plane"
+                                                                                                : hovered_element_ == lfs::rendering::GizmoElement::YZPlane ? "YZ Plane"
                                                                                                                                                            : "Unknown");
                 } else {
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "Ready");
@@ -257,7 +259,7 @@ namespace lfs::vis::tools {
         render_manager->updateSettings(settings);
 
         // Also emit event to update the world transform panel if it exists
-        events::ui::RenderSettingsChanged{}.emit();
+        ui::RenderSettingsChanged{}.emit();
     }
 
 } // namespace lfs::vis::tools

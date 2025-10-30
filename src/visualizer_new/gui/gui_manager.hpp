@@ -17,9 +17,7 @@
 #include <unordered_map>
 
 namespace lfs::vis {
-    namespace visualizer {
-        class VisualizerImpl;
-    }
+    class VisualizerImpl;
 
     namespace gui {
         class FileBrowser;
@@ -28,7 +26,7 @@ namespace lfs::vis {
 
         class GuiManager {
         public:
-            GuiManager(visualizer::VisualizerImpl* viewer);
+            GuiManager(VisualizerImpl* viewer);
             ~GuiManager();
 
             // Lifecycle
@@ -65,7 +63,7 @@ namespace lfs::vis {
             void initMenuBar();
 
             // Core dependencies
-            visualizer::VisualizerImpl* viewer_;
+            VisualizerImpl* viewer_;
 
             // Owned components
             std::unique_ptr<FileBrowser> file_browser_;

@@ -102,13 +102,48 @@ namespace lfs::core {
         }
     }
 
-    // ============= Copy Assignment - SHALLOW COPY (LibTorch behavior) =============
+    // ============= Copy Assignment - Context-aware (Shallow or Deep) =============
     Tensor& Tensor::operator=(const Tensor& other) {
         if (this == &other) {
             return *this;
         }
 
-        // Shallow copy - share data via shared_ptr
+        // PyTorch semantics: slice/view assignment does deep copy, regular assignment does shallow copy
+        // Example: t1[0:5] = t2  -> deep copy into the slice
+        //          t1 = t2        -> shallow copy (both point to same data)
+
+        // If LHS is a view/slice and shapes match, do deep copy
+        if (is_view_ && is_valid() && other.is_valid() &&
+            shape_ == other.shape_ && dtype_ == other.dtype_) {
+
+            // Deep copy the data, accounting for storage offsets
+            if (numel() > 0) {
+                // Calculate actual data pointers accounting for storage offsets
+                void* dst_ptr = static_cast<char*>(data_) + storage_offset_ * dtype_size(dtype_);
+                const void* src_ptr = static_cast<const char*>(other.data_) +
+                                      other.storage_offset_ * dtype_size(other.dtype_);
+
+                if (device_ == Device::CUDA && other.device_ == Device::CUDA) {
+                    CHECK_CUDA(cudaMemcpy(dst_ptr, src_ptr, bytes(), cudaMemcpyDeviceToDevice));
+                } else if (device_ == Device::CUDA && other.device_ == Device::CPU) {
+                    CHECK_CUDA(cudaMemcpy(dst_ptr, src_ptr, bytes(), cudaMemcpyHostToDevice));
+                } else if (device_ == Device::CPU && other.device_ == Device::CUDA) {
+                    CHECK_CUDA(cudaMemcpy(dst_ptr, src_ptr, bytes(), cudaMemcpyDeviceToHost));
+                } else {
+                    std::memcpy(dst_ptr, src_ptr, bytes());
+                }
+            }
+
+            if (profiling_enabled_) {
+                LOG_DEBUG("Deep copy assign (view): tensor #{} from #{}: shape={}, device={}, dtype={}, offset={}, src_offset={}",
+                          id_, other.id_, shape_.str(), device_name(device_), dtype_name(dtype_),
+                          storage_offset_, other.storage_offset_);
+            }
+
+            return *this;
+        }
+
+        // Otherwise do shallow copy - share data via shared_ptr (LibTorch behavior)
         data_ = other.data_;
         data_owner_ = other.data_owner_; // shared_ptr handles refcounting automatically
         shape_ = other.shape_;
@@ -156,6 +191,39 @@ namespace lfs::core {
     // ============= Move Assignment =============
     Tensor& Tensor::operator=(Tensor&& other) noexcept {
         if (this != &other) {
+            // PyTorch semantics: slice/view assignment does deep copy even for rvalues
+            // This handles: t1.slice(0, 0, 5) = t2.slice(0, 5, 10)
+            // where the RHS is a temporary view
+
+            if (is_view_ && is_valid() && other.is_valid() &&
+                shape_ == other.shape_ && dtype_ == other.dtype_) {
+
+                // Deep copy the data from the temporary view
+                if (numel() > 0) {
+                    void* dst_ptr = static_cast<char*>(data_) + storage_offset_ * dtype_size(dtype_);
+                    const void* src_ptr = static_cast<const char*>(other.data_) +
+                                          other.storage_offset_ * dtype_size(other.dtype_);
+
+                    if (device_ == Device::CUDA && other.device_ == Device::CUDA) {
+                        CHECK_CUDA(cudaMemcpy(dst_ptr, src_ptr, bytes(), cudaMemcpyDeviceToDevice));
+                    } else if (device_ == Device::CUDA && other.device_ == Device::CPU) {
+                        CHECK_CUDA(cudaMemcpy(dst_ptr, src_ptr, bytes(), cudaMemcpyHostToDevice));
+                    } else if (device_ == Device::CPU && other.device_ == Device::CUDA) {
+                        CHECK_CUDA(cudaMemcpy(dst_ptr, src_ptr, bytes(), cudaMemcpyDeviceToHost));
+                    } else {
+                        std::memcpy(dst_ptr, src_ptr, bytes());
+                    }
+                }
+
+                if (profiling_enabled_) {
+                    LOG_DEBUG("Deep copy move assign (view): tensor #{} from #{}: shape={}, device={}, dtype={}",
+                              id_, other.id_, shape_.str(), device_name(device_), dtype_name(dtype_));
+                }
+
+                return *this;
+            }
+
+            // Normal move assignment - transfer ownership
             data_ = std::exchange(other.data_, nullptr);
             data_owner_ = std::move(other.data_owner_);
             shape_ = std::move(other.shape_);

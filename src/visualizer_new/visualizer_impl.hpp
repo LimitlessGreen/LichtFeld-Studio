@@ -48,14 +48,14 @@ namespace lfs::vis {
         // open project file and attach it to viewer
         bool openProject(const std::filesystem::path& path) override;
         bool closeProject(const std::filesystem::path& path = {}) override;
-        std::shared_ptr<gs::lfs::core::lfs::core::management::Project> getProject() override;
-        void attachProject(std::shared_ptr<gs::lfs::core::lfs::core::management::Project> _project) override;
+        std::shared_ptr<gs::management::Project> getProject() override;
+        void attachProject(std::shared_ptr<gs::management::Project> _project) override;
         // load project content to viewer
         bool LoadProject();
         void LoadProjectPlys();
 
         // Getters for GUI (delegating to state manager)
-        gs::training::Trainer* getTrainer() const { return trainer_manager_->getTrainer(); }
+        lfs::training::Trainer* getTrainer() const { return trainer_manager_->getTrainer(); }
 
         // Component access
         TrainerManager* getTrainerManager() { return trainer_manager_.get(); }
@@ -118,7 +118,7 @@ namespace lfs::vis {
         void setupEventHandlers();
         void setupComponentConnections();
         void handleLoadProjectCommand(const lfs::core::events::cmd::LoadProject& cmd);
-        void handleTrainingCompleted(const events::state::TrainingCompleted& event);
+        void handleTrainingCompleted(const lfs::core::events::state::TrainingCompleted& event);
         void handleLoadFileCommand(const lfs::core::events::cmd::LoadFile& cmd);
         void handleSaveProject(const lfs::core::events::cmd::SaveProject& cmd);
 
@@ -146,7 +146,7 @@ namespace lfs::vis {
         bool gui_initialized_ = false;
         bool tools_initialized_ = false; // Added this member!
         // Project
-        std::shared_ptr<gs::lfs::core::lfs::core::management::Project> project_ = nullptr;
+        std::shared_ptr<gs::management::Project> project_ = nullptr;
         void updateProjectOnModules();
     };
 

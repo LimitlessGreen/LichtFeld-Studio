@@ -170,7 +170,7 @@ namespace lfs::vis::gui::panels {
             glm::vec3 rot_rad(glm::radians(rotation_degrees[0]),
                               glm::radians(rotation_degrees[1]),
                               glm::radians(rotation_degrees[2]));
-            settings.world_transform = geometry::EuclideanTransform(
+            settings.world_transform = gs::geometry::EuclideanTransform(
                 rot_rad.x, rot_rad.y, rot_rad.z,
                 translation[0], translation[1], translation[2]);
 
@@ -181,7 +181,7 @@ namespace lfs::vis::gui::panels {
 
         // Reset button
         if (ImGui::Button("Reset Transform", ImVec2(-1, 0))) {
-            settings.world_transform = geometry::EuclideanTransform();
+            settings.world_transform = gs::geometry::EuclideanTransform();
             rotation_degrees[0] = rotation_degrees[1] = rotation_degrees[2] = 0.0f;
             translation[0] = translation[1] = translation[2] = 0.0f;
 

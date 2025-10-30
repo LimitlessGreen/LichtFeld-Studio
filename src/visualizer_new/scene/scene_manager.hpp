@@ -16,11 +16,7 @@ namespace lfs::vis {
     // Forward declarations
     class Trainer;
     class TrainerManager;
-    class SplatData;
-
-    namespace visualizer {
-        class RenderingManager;
-    }
+    class RenderingManager;
 
     class SceneManager {
     public:
@@ -93,8 +89,8 @@ namespace lfs::vis {
         const TrainerManager* getTrainerManager() const { return trainer_manager_; }
 
         // Rendering manager link
-        void setRenderingManager(visualizer::RenderingManager* rm);
-        visualizer::RenderingManager* getRenderingManager() { return rendering_manager_; }
+        void setRenderingManager(RenderingManager* rm);
+        RenderingManager* getRenderingManager() { return rendering_manager_; }
 
         void changeContentType(const ContentType& type);
 
@@ -110,7 +106,7 @@ namespace lfs::vis {
         void clear();
 
         // For rendering - gets appropriate model
-        const SplatData* getModelForRendering() const;
+        const lfs::core::SplatData* getModelForRendering() const;
 
         // Direct info queries
         struct SceneInfo {
@@ -123,9 +119,9 @@ namespace lfs::vis {
 
         SceneInfo getSceneInfo() const;
 
-        void setProject(std::shared_ptr<gs::lfs::core::lfs::core::management::Project> project) { lfs_project_ = project; }
+        void setProject(std::shared_ptr<gs::management::Project> project) { lfs_project_ = project; }
 
-        [[nodiscard]] std::shared_ptr<gs::lfs::core::lfs::core::management::Project> getProject() const { return lfs_project_; }
+        [[nodiscard]] std::shared_ptr<gs::management::Project> getProject() const { return lfs_project_; }
 
         bool renamePLY(const std::string& old_name, const std::string& new_name);
         void updatePlyPath(const std::string& ply_name, const std::filesystem::path& ply_path);
@@ -148,12 +144,12 @@ namespace lfs::vis {
         TrainerManager* trainer_manager_ = nullptr;
 
         // Rendering support
-        visualizer::RenderingManager* rendering_manager_ = nullptr;
+        RenderingManager* rendering_manager_ = nullptr;
 
         // Cache for parameters
         std::optional<lfs::core::param::TrainingParameters> cached_params_;
         // project
-        std::shared_ptr<gs::lfs::core::lfs::core::management::Project> lfs_project_ = nullptr;
+        std::shared_ptr<gs::management::Project> lfs_project_ = nullptr;
     };
 
 } // namespace lfs::vis

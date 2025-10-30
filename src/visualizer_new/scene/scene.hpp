@@ -43,7 +43,7 @@ namespace lfs::vis {
         std::pair<std::string, std::string> cycleVisibilityWithNames();
 
         // Get combined model for rendering
-        const lfs::core::lfs::core::SplatData* getCombinedModel() const;
+        const lfs::core::SplatData* getCombinedModel() const;
 
         // Direct queries
         size_t getNodeCount() const { return nodes_.size(); }

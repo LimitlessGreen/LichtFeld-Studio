@@ -11,8 +11,10 @@
 
 namespace lfs::vis::gui::panels {
 
+    using namespace lfs::core::events;
+
     // Apply rotation to crop box transform
-    static void updateRotationMatrix(geometry::EuclideanTransform& transform,
+    static void updateRotationMatrix(gs::geometry::EuclideanTransform& transform,
                                      const glm::vec3& min_bounds,
                                      const glm::vec3& max_bounds,
                                      float delta_rot_x, float delta_rot_y, float delta_rot_z) {
@@ -20,12 +22,12 @@ namespace lfs::vis::gui::panels {
         float rad_y = glm::radians(delta_rot_y);
         float rad_z = glm::radians(delta_rot_z);
 
-        geometry::EuclideanTransform rotate(rad_x, rad_y, rad_z, 0.0f, 0.0f, 0.0f);
+        gs::geometry::EuclideanTransform rotate(rad_x, rad_y, rad_z, 0.0f, 0.0f, 0.0f);
 
         glm::vec3 center = (min_bounds + max_bounds) * 0.5f;
 
-        geometry::EuclideanTransform translate_to_origin(-center);
-        geometry::EuclideanTransform translate_back = translate_to_origin.inv();
+        gs::geometry::EuclideanTransform translate_to_origin(-center);
+        gs::geometry::EuclideanTransform translate_back = translate_to_origin.inv();
 
         transform = translate_back * rotate * translate_to_origin * transform;
     }
@@ -57,7 +59,7 @@ namespace lfs::vis::gui::panels {
         if (ImGui::Button("Crop Active PLY")) {
             gs::geometry::BoundingBox crop_box;
             crop_box.setBounds(settings.crop_min, settings.crop_max);
-            geometry::EuclideanTransform transform(settings.crop_transform.inv());
+            gs::geometry::EuclideanTransform transform(settings.crop_transform.inv());
             crop_box.setworld2BBox(transform);
             // Emit event for bounds change
             lfs::core::events::cmd::CropPLY{
@@ -86,7 +88,7 @@ namespace lfs::vis::gui::panels {
             if (ImGui::Button("Reset to Default")) {
                 settings.crop_min = glm::vec3(-1.0f, -1.0f, -1.0f);
                 settings.crop_max = glm::vec3(1.0f, 1.0f, 1.0f);
-                settings.crop_transform = geometry::EuclideanTransform();
+                settings.crop_transform = gs::geometry::EuclideanTransform();
                 settings_changed = true;
             }
 
@@ -278,7 +280,7 @@ namespace lfs::vis::gui::panels {
                     settings_changed = true;
 
                     // Emit event for bounds change
-                    events::ui::CropBoxChanged{
+                    ui::CropBoxChanged{
                         .min_bounds = settings.crop_min,
                         .max_bounds = settings.crop_max,
                         .enabled = settings.use_crop_box}

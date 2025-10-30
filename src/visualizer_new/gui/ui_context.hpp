@@ -10,16 +10,14 @@
 
 namespace lfs::vis {
     // Forward declarations
-    namespace visualizer {
-        class VisualizerImpl;
-    }
+    class VisualizerImpl;
 
     namespace gui {
         class FileBrowser;
 
         // Shared context passed to all UI functions
         struct UIContext {
-            visualizer::VisualizerImpl* viewer;
+            VisualizerImpl* viewer;
             FileBrowser* file_browser;
             std::unordered_map<std::string, bool>* window_states;
         };

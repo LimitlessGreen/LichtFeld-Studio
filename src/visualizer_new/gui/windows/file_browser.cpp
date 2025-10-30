@@ -9,7 +9,7 @@
 #include <imgui.h>
 
 namespace lfs::vis::gui {
-    using lfs::core::lfs::core::management::Project;
+    using gs::management::Project;
 }
 
 namespace lfs::vis::gui {

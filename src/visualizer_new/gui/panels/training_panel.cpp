@@ -10,10 +10,141 @@
 #include "visualizer_impl.hpp"
 
 #include <chrono>
+#include <cstring>
 #include <deque>
 #include <imgui.h>
 
 namespace lfs::vis::gui::panels {
+
+    // Helper to convert between old and new parameter types
+    // Cannot use memcpy because structures contain non-trivial types (std::string, std::vector)
+    static lfs::core::param::OptimizationParameters convertOptimizationParams(const gs::param::OptimizationParameters& src) {
+        lfs::core::param::OptimizationParameters dst;
+        dst.iterations = src.iterations;
+        dst.sh_degree_interval = src.sh_degree_interval;
+        dst.means_lr = src.means_lr;
+        dst.shs_lr = src.shs_lr;
+        dst.opacity_lr = src.opacity_lr;
+        dst.scaling_lr = src.scaling_lr;
+        dst.rotation_lr = src.rotation_lr;
+        dst.lambda_dssim = src.lambda_dssim;
+        dst.min_opacity = src.min_opacity;
+        dst.refine_every = src.refine_every;
+        dst.start_refine = src.start_refine;
+        dst.stop_refine = src.stop_refine;
+        dst.grad_threshold = src.grad_threshold;
+        dst.sh_degree = src.sh_degree;
+        dst.opacity_reg = src.opacity_reg;
+        dst.scale_reg = src.scale_reg;
+        dst.init_opacity = src.init_opacity;
+        dst.init_scaling = src.init_scaling;
+        dst.num_workers = src.num_workers;
+        dst.max_cap = src.max_cap;
+        dst.eval_steps = src.eval_steps;
+        dst.save_steps = src.save_steps;
+        dst.skip_intermediate_saving = src.skip_intermediate_saving;
+        dst.bg_modulation = src.bg_modulation;
+        dst.enable_eval = src.enable_eval;
+        dst.rc = src.rc;
+        dst.enable_save_eval_images = src.enable_save_eval_images;
+        dst.headless = src.headless;
+        dst.render_mode = src.render_mode;
+        dst.strategy = src.strategy;
+        dst.preload_to_ram = src.preload_to_ram;
+        dst.pose_optimization = src.pose_optimization;
+        dst.use_bilateral_grid = src.use_bilateral_grid;
+        dst.bilateral_grid_X = src.bilateral_grid_X;
+        dst.bilateral_grid_Y = src.bilateral_grid_Y;
+        dst.bilateral_grid_W = src.bilateral_grid_W;
+        dst.bilateral_grid_lr = src.bilateral_grid_lr;
+        dst.tv_loss_weight = src.tv_loss_weight;
+        dst.prune_opacity = src.prune_opacity;
+        dst.grow_scale3d = src.grow_scale3d;
+        dst.grow_scale2d = src.grow_scale2d;
+        dst.prune_scale3d = src.prune_scale3d;
+        dst.prune_scale2d = src.prune_scale2d;
+        dst.reset_every = src.reset_every;
+        dst.pause_refine_after_reset = src.pause_refine_after_reset;
+        dst.revised_opacity = src.revised_opacity;
+        dst.gut = src.gut;
+        dst.steps_scaler = src.steps_scaler;
+        dst.antialiasing = src.antialiasing;
+        dst.random = src.random;
+        dst.init_num_pts = src.init_num_pts;
+        dst.init_extent = src.init_extent;
+        dst.save_sog = src.save_sog;
+        dst.sog_iterations = src.sog_iterations;
+        dst.enable_sparsity = src.enable_sparsity;
+        dst.sparsify_steps = src.sparsify_steps;
+        dst.init_rho = src.init_rho;
+        dst.prune_ratio = src.prune_ratio;
+        dst.config_file = src.config_file;
+        return dst;
+    }
+
+    static gs::param::OptimizationParameters convertOptimizationParamsReverse(const lfs::core::param::OptimizationParameters& src) {
+        gs::param::OptimizationParameters dst;
+        dst.iterations = src.iterations;
+        dst.sh_degree_interval = src.sh_degree_interval;
+        dst.means_lr = src.means_lr;
+        dst.shs_lr = src.shs_lr;
+        dst.opacity_lr = src.opacity_lr;
+        dst.scaling_lr = src.scaling_lr;
+        dst.rotation_lr = src.rotation_lr;
+        dst.lambda_dssim = src.lambda_dssim;
+        dst.min_opacity = src.min_opacity;
+        dst.refine_every = src.refine_every;
+        dst.start_refine = src.start_refine;
+        dst.stop_refine = src.stop_refine;
+        dst.grad_threshold = src.grad_threshold;
+        dst.sh_degree = src.sh_degree;
+        dst.opacity_reg = src.opacity_reg;
+        dst.scale_reg = src.scale_reg;
+        dst.init_opacity = src.init_opacity;
+        dst.init_scaling = src.init_scaling;
+        dst.num_workers = src.num_workers;
+        dst.max_cap = src.max_cap;
+        dst.eval_steps = src.eval_steps;
+        dst.save_steps = src.save_steps;
+        dst.skip_intermediate_saving = src.skip_intermediate_saving;
+        dst.bg_modulation = src.bg_modulation;
+        dst.enable_eval = src.enable_eval;
+        dst.rc = src.rc;
+        dst.enable_save_eval_images = src.enable_save_eval_images;
+        dst.headless = src.headless;
+        dst.render_mode = src.render_mode;
+        dst.strategy = src.strategy;
+        dst.preload_to_ram = src.preload_to_ram;
+        dst.pose_optimization = src.pose_optimization;
+        dst.use_bilateral_grid = src.use_bilateral_grid;
+        dst.bilateral_grid_X = src.bilateral_grid_X;
+        dst.bilateral_grid_Y = src.bilateral_grid_Y;
+        dst.bilateral_grid_W = src.bilateral_grid_W;
+        dst.bilateral_grid_lr = src.bilateral_grid_lr;
+        dst.tv_loss_weight = src.tv_loss_weight;
+        dst.prune_opacity = src.prune_opacity;
+        dst.grow_scale3d = src.grow_scale3d;
+        dst.grow_scale2d = src.grow_scale2d;
+        dst.prune_scale3d = src.prune_scale3d;
+        dst.prune_scale2d = src.prune_scale2d;
+        dst.reset_every = src.reset_every;
+        dst.pause_refine_after_reset = src.pause_refine_after_reset;
+        dst.revised_opacity = src.revised_opacity;
+        dst.gut = src.gut;
+        dst.steps_scaler = src.steps_scaler;
+        dst.antialiasing = src.antialiasing;
+        dst.random = src.random;
+        dst.init_num_pts = src.init_num_pts;
+        dst.init_extent = src.init_extent;
+        dst.save_sog = src.save_sog;
+        dst.sog_iterations = src.sog_iterations;
+        dst.enable_sparsity = src.enable_sparsity;
+        dst.sparsify_steps = src.sparsify_steps;
+        dst.init_rho = src.init_rho;
+        dst.prune_ratio = src.prune_ratio;
+        dst.config_file = src.config_file;
+        return dst;
+    }
 
     // Iteration rate tracking
     struct IterationRateTracker {
@@ -101,8 +232,19 @@ namespace lfs::vis::gui::panels {
 
         if (trainer_state == TrainerManager::State::Ready) {
             // Before training - get from project (editable)
-            opt_params = project->getOptimizationParams();
-            dataset_params = project->getProjectData().data_set_info;
+            opt_params = convertOptimizationParams(project->getOptimizationParams());
+
+            // Convert DataSetInfo to DatasetConfig
+            const auto& old_dataset = project->getProjectData().data_set_info;
+            dataset_params.data_path = old_dataset.data_path;
+            dataset_params.output_path = old_dataset.output_path;
+            dataset_params.project_path = old_dataset.project_path;
+            dataset_params.images = old_dataset.images;
+            dataset_params.resize_factor = old_dataset.resize_factor;
+            dataset_params.test_every = old_dataset.test_every;
+            dataset_params.timelapse_images = old_dataset.timelapse_images;
+            dataset_params.timelapse_every = old_dataset.timelapse_every;
+            dataset_params.max_width = old_dataset.max_width;
         } else {
             // During/after training - get from trainer (read-only)
             const auto* trainer = trainer_manager->getTrainer();
@@ -664,7 +806,7 @@ namespace lfs::vis::gui::panels {
         if ((opt_params_changed || dataset_params_changed) && can_edit) {
             // Update optimization parameters if they changed
             if (opt_params_changed) {
-                project->setOptimizationParams(opt_params);
+                project->setOptimizationParams(convertOptimizationParamsReverse(opt_params));
             }
 
             // Update dataset parameters if they changed

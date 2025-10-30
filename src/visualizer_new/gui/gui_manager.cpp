@@ -2,6 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include <glad/glad.h> // Must be first to get OpenGL functions
 #include "gui/gui_manager.hpp"
 #include "core_new/image_io.hpp"
 #include "core_new/logger.hpp"
@@ -17,7 +18,6 @@
 #include "internal/resource_paths.hpp"
 #include "visualizer_impl.hpp"
 
-#include <GLFW/glfw3.h>
 #include <chrono>
 #include <cstdarg>
 #include <format>
@@ -27,7 +27,7 @@
 
 namespace lfs::vis::gui {
 
-    GuiManager::GuiManager(visualizer::VisualizerImpl* viewer)
+    GuiManager::GuiManager(VisualizerImpl* viewer)
         : viewer_(viewer) {
 
         // Create components
@@ -155,7 +155,7 @@ namespace lfs::vis::gui {
 
         // Configure file browser callback
         setFileSelectedCallback([this](const std::filesystem::path& path, bool is_dataset) {
-            if (path.extension() == gs::lfs::core::lfs::core::management::Project::EXTENSION) {
+            if (path.extension() == gs::management::Project::EXTENSION) {
                 lfs::core::events::cmd::LoadProject{.path = path}.emit();
             } else {
                 lfs::core::events::cmd::LoadFile{.path = path, .is_dataset = is_dataset}.emit();
@@ -399,7 +399,7 @@ namespace lfs::vis::gui {
 
                     // Draw the split view info - check mode
                     const auto& settings = rendering_manager->getSettings();
-                    if (settings.split_view_mode == visualizer::SplitViewMode::GTComparison) {
+                    if (settings.split_view_mode == SplitViewMode::GTComparison) {
                         // GT comparison mode
                         int cam_id = rendering_manager->getCurrentCameraId();
                         ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f),
@@ -487,12 +487,25 @@ namespace lfs::vis::gui {
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
+        // Clean up GL state after ImGui rendering (ImGui can leave VAO/shader bindings corrupted)
+        glBindVertexArray(0);
+        glUseProgram(0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        // Clear any errors ImGui might have generated
+        while (glGetError() != GL_NO_ERROR) {}
+
         // Update and Render additional Platform Windows (for multi-viewport)
         if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
             GLFWwindow* backup_current_context = glfwGetCurrentContext();
             ImGui::UpdatePlatformWindows();
             ImGui::RenderPlatformWindowsDefault();
             glfwMakeContextCurrent(backup_current_context);
+
+            // Clean up GL state after multi-viewport rendering too
+            glBindVertexArray(0);
+            glUseProgram(0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            while (glGetError() != GL_NO_ERROR) {}
         }
     }
 

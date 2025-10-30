@@ -15,6 +15,8 @@
 
 namespace lfs::vis::gui {
 
+    using namespace lfs::core::events;
+
     // ScenePanel Implementation
     ScenePanel::ScenePanel(std::shared_ptr<const TrainerManager> trainer_manager) : m_trainer_manager(trainer_manager) {
         // Create image preview window
@@ -29,24 +31,24 @@ namespace lfs::vis::gui {
 
     void ScenePanel::setupEventHandlers() {
         // Subscribe to events using the new event system
-        events::state::SceneLoaded::when([this](const auto& event) {
+        state::SceneLoaded::when([this](const auto& event) {
             handleSceneLoaded(event);
         });
 
-        events::state::SceneCleared::when([this](const auto&) {
+        state::SceneCleared::when([this](const auto&) {
             handleSceneCleared();
         });
 
-        events::state::PLYAdded::when([this](const auto& event) {
+        state::PLYAdded::when([this](const auto& event) {
             handlePLYAdded(event);
         });
 
-        events::state::PLYRemoved::when([this](const auto& event) {
+        state::PLYRemoved::when([this](const auto& event) {
             handlePLYRemoved(event);
         });
 
         // Listen for PLY visibility changes to update checkboxes
-        lfs::core::events::cmd::SetPLYVisibility::when([this](const auto& event) {
+        cmd::SetPLYVisibility::when([this](const auto& event) {
             // Update the visibility state in our local PLY nodes
             auto it = std::find_if(m_plyNodes.begin(), m_plyNodes.end(),
                                    [&event](const PLYNode& node) { return node.name == event.name; });
@@ -57,26 +59,26 @@ namespace lfs::vis::gui {
         });
 
         // Listen for GoToCamView to sync selection
-        lfs::core::events::cmd::GoToCamView::when([this](const auto& event) {
+        cmd::GoToCamView::when([this](const auto& event) {
             handleGoToCamView(event);
         });
 
-        lfs::core::events::cmd::RenamePLY::when([this](const auto& event) {
+        cmd::RenamePLY::when([this](const auto& event) {
             handlePLYRenamed(event);
         });
     }
 
-    void ScenePanel::handleSceneLoaded(const events::state::SceneLoaded& event) {
+    void ScenePanel::handleSceneLoaded(const state::SceneLoaded& event) {
         LOG_DEBUG("Scene loaded event - type: {}",
-                  event.type == events::state::SceneLoaded::Type::PLY ? "PLY" : "Dataset");
+                  event.type == state::SceneLoaded::Type::PLY ? "PLY" : "Dataset");
 
-        if (event.type == events::state::SceneLoaded::Type::PLY) {
+        if (event.type == state::SceneLoaded::Type::PLY) {
             m_currentMode = DisplayMode::PLYSceneGraph;
             m_plyNodes.clear();
             m_selectedPLYIndex = -1;
             m_activeTab = TabType::PLYs; // Switch to PLY tab
             LOG_TRACE("Switched to PLY scene graph mode");
-        } else if (event.type == events::state::SceneLoaded::Type::Dataset) {
+        } else if (event.type == state::SceneLoaded::Type::Dataset) {
             m_currentMode = DisplayMode::DatasetImages;
             m_plyNodes.clear();
             m_selectedPLYIndex = -1;
@@ -99,7 +101,7 @@ namespace lfs::vis::gui {
         // Keep the active tab as is - user might want to stay on the same tab
     }
 
-    void ScenePanel::handlePLYAdded(const events::state::PLYAdded& event) {
+    void ScenePanel::handlePLYAdded(const state::PLYAdded& event) {
         LOG_DEBUG("PLY added to scene panel: '{}' ({} gaussians, {} total)",
                   event.name, event.node_gaussians, event.total_gaussians);
 
@@ -126,7 +128,7 @@ namespace lfs::vis::gui {
         updateModeFromTab();
     }
 
-    void ScenePanel::handlePLYRemoved(const events::state::PLYRemoved& event) {
+    void ScenePanel::handlePLYRemoved(const state::PLYRemoved& event) {
         LOG_DEBUG("PLY removed from scene panel: '{}'", event.name);
 
         // Remove the node from our list
@@ -147,7 +149,7 @@ namespace lfs::vis::gui {
         updateModeFromTab();
     }
 
-    void ScenePanel::handleGoToCamView(const lfs::core::events::cmd::GoToCamView& event) {
+    void ScenePanel::handleGoToCamView(const cmd::GoToCamView& event) {
         // Find the image path for this camera ID
         for (const auto& [path, cam_id] : m_PathToCamId) {
             if (cam_id == event.cam_id) {
@@ -227,7 +229,7 @@ namespace lfs::vis::gui {
             OpenDatasetFolderDialog();
 
             // hide the file browser
-            lfs::core::events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
+            cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
 #endif // WIN32
         }
 
@@ -244,7 +246,7 @@ namespace lfs::vis::gui {
             OpenPlyFileDialog();
 
             // hide the file browser
-            lfs::core::events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
+            cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
 #endif // WIN32
         }
 
@@ -266,7 +268,7 @@ namespace lfs::vis::gui {
             handleSceneCleared();
 
             // Also clear the actual scene data
-            lfs::core::events::cmd::ClearScene{}.emit();
+            cmd::ClearScene{}.emit();
         }
 
         ImGui::Separator();
@@ -357,7 +359,7 @@ namespace lfs::vis::gui {
                     LOG_WARN("Name '{}' already exists, keeping original name '{}'", new_name, old_name);
                 } else {
                     // Emit rename command
-                    lfs::core::events::cmd::RenamePLY{
+                    cmd::RenamePLY{
                         .old_name = old_name,
                         .new_name = new_name}
                         .emit();
@@ -390,13 +392,13 @@ namespace lfs::vis::gui {
         // Add PLY button
         if (ImGui::Button("Add PLY", ImVec2(-1, 0))) {
             // Open file browser for adding PLY
-            lfs::core::events::cmd::ShowWindow{.window_name = "file_browser", .show = true}.emit();
+            cmd::ShowWindow{.window_name = "file_browser", .show = true}.emit();
             LOG_DEBUG("Opening file browser to add PLY");
 #ifdef WIN32
             // show native windows file dialog for folder selection
             OpenPlyFileDialog();
             // hide the file browser
-            lfs::core::events::cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
+            cmd::ShowWindow{.window_name = "file_browser", .show = false}.emit();
 #endif // WIN32
         }
 
@@ -437,7 +439,7 @@ namespace lfs::vis::gui {
                 bool visible = node.visible;
                 if (ImGui::Checkbox("##vis", &visible)) {
                     node.visible = visible;
-                    lfs::core::events::cmd::SetPLYVisibility{
+                    cmd::SetPLYVisibility{
                         .name = node.name,
                         .visible = visible}
                         .emit();
@@ -498,7 +500,7 @@ namespace lfs::vis::gui {
                         LOG_DEBUG("PLY '{}' selected", node.name);
 
                         // Emit selection event
-                        events::ui::NodeSelected{
+                        ui::NodeSelected{
                             .path = node.name,
                             .type = "PLY",
                             .metadata = {
@@ -516,7 +518,7 @@ namespace lfs::vis::gui {
                         }
                         if (ImGui::MenuItem("Remove PLY")) {
                             LOG_INFO("Removing PLY '{}' via context menu", node.name);
-                            lfs::core::events::cmd::RemovePLY{.name = node.name}.emit();
+                            cmd::RemovePLY{.name = node.name}.emit();
                         }
                         ImGui::EndPopup();
                     }
@@ -604,7 +606,7 @@ namespace lfs::vis::gui {
                         auto cam_data_it = m_PathToCamId.find(imagePath);
                         if (cam_data_it != m_PathToCamId.end()) {
                             // Emit the new GoToCamView command event with camera data
-                            lfs::core::events::cmd::GoToCamView{
+                            cmd::GoToCamView{
                                 .cam_id = cam_data_it->second}
                                 .emit();
 
@@ -670,7 +672,7 @@ namespace lfs::vis::gui {
         LOG_DEBUG("Selected image: {}", imagePath.filename().string());
 
         // Publish NodeSelectedEvent for other components to react
-        events::ui::NodeSelected{
+        ui::NodeSelected{
             .path = imagePath.string(),
             .type = "Images",
             .metadata = {{"filename", imagePath.filename().string()}, {"path", imagePath.string()}}}
@@ -694,7 +696,7 @@ namespace lfs::vis::gui {
         }
     }
 
-    void ScenePanel::handlePLYRenamed(const lfs::core::events::cmd::RenamePLY& event) {
+    void ScenePanel::handlePLYRenamed(const cmd::RenamePLY& event) {
         LOG_DEBUG("PLY renamed from '{}' to '{}'", event.old_name, event.new_name);
 
         // Update the node name in our list

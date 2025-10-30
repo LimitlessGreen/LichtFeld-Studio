@@ -94,30 +94,39 @@ namespace lfs::vis::gui {
     }
 
     std::unique_ptr<ImageData> ImagePreview::loadImageData(const std::filesystem::path& path) {
-        LOG_TIMER_TRACE("LoadImageData");
+        LOG_TIMER("LoadImageData");
 
         LOG_TRACE("Loading image data from: {}", path.string());
 
-        // Load image
-        auto [data, width, height, channels] = ::load_image(path);
+        // Load image (max_width = -1 disables downscaling for preview)
+        auto [data, width, height, channels] = [&]() {
+            LOG_TIMER("load_image call");
+            return ::load_image(path, -1, -1);
+        }();
 
         // Wrap in RAII immediately
-        auto image_data = std::make_unique<ImageData>(data, width, height, channels);
+        auto image_data = [&]() {
+            LOG_TIMER("ImageData construction");
+            return std::make_unique<ImageData>(data, width, height, channels);
+        }();
 
         // Validate
-        if (!image_data->valid()) {
-            LOG_ERROR("Failed to load image data from: {}", path.string());
-            throw std::runtime_error("Failed to load image data");
-        }
+        {
+            LOG_TIMER("Image validation");
+            if (!image_data->valid()) {
+                LOG_ERROR("Failed to load image data from: {}", path.string());
+                throw std::runtime_error("Failed to load image data");
+            }
 
-        if (width <= 0 || height <= 0) {
-            LOG_ERROR("Invalid image dimensions: {}x{} for: {}", width, height, path.string());
-            throw std::runtime_error(std::format("Invalid image dimensions: {}x{}", width, height));
-        }
+            if (width <= 0 || height <= 0) {
+                LOG_ERROR("Invalid image dimensions: {}x{} for: {}", width, height, path.string());
+                throw std::runtime_error(std::format("Invalid image dimensions: {}x{}", width, height));
+            }
 
-        if (channels < 1 || channels > 4) {
-            LOG_ERROR("Invalid number of channels: {} for: {}", channels, path.string());
-            throw std::runtime_error(std::format("Invalid number of channels: {}", channels));
+            if (channels < 1 || channels > 4) {
+                LOG_ERROR("Invalid number of channels: {} for: {}", channels, path.string());
+                throw std::runtime_error(std::format("Invalid number of channels: {}", channels));
+            }
         }
 
         LOG_TRACE("Loaded image: {}x{}, {} channels", width, height, channels);
@@ -126,9 +135,12 @@ namespace lfs::vis::gui {
 
     std::unique_ptr<ImagePreview::ImageTexture> ImagePreview::createTexture(
         ImageData&& data, const std::filesystem::path& path) {
-        LOG_TIMER_TRACE("CreateTexture");
+        LOG_TIMER("CreateTexture");
 
-        ensureMaxTextureSizeInitialized();
+        {
+            LOG_TIMER("ensureMaxTextureSizeInitialized");
+            ensureMaxTextureSizeInitialized();
+        }
 
         int width = data.width();
         int height = data.height();
@@ -165,25 +177,28 @@ namespace lfs::vis::gui {
         texture->height = height;
         texture->path = path;
 
-        // Clear any existing OpenGL errors
-        while (glGetError() != GL_NO_ERROR) {}
-
-        // Generate texture
-        if (!texture->texture.generate()) {
-            LOG_ERROR("Failed to generate texture ID for: {}", path.string());
-            throw std::runtime_error("Failed to generate texture ID");
+        {
+            LOG_TIMER("GL texture generation");
+            // Generate texture
+            if (!texture->texture.generate()) {
+                LOG_ERROR("Failed to generate texture ID for: {}", path.string());
+                throw std::runtime_error("Failed to generate texture ID");
+            }
         }
 
-        texture->texture.bind();
+        {
+            LOG_TIMER("GL texture bind and setup");
+            texture->texture.bind();
 
-        // Set texture parameters
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            // Set texture parameters
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-        // Set pixel alignment
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            // Set pixel alignment
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        }
 
         // Determine format
         GLenum format = GL_RGB;
@@ -210,32 +225,36 @@ namespace lfs::vis::gui {
         LOG_TRACE("Creating {}x{} texture with {} channels", width, height, channels);
 
         // Upload texture
-        glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0,
-                     format, GL_UNSIGNED_BYTE, data.data());
+        {
+            LOG_TIMER("glTexImage2D upload");
+            glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0,
+                         format, GL_UNSIGNED_BYTE, data.data());
+        }
 
-        // Check for errors
-        GLenum error = glGetError();
-        if (error != GL_NO_ERROR) {
-            std::string error_str;
-            switch (error) {
-            case GL_INVALID_ENUM: error_str = "GL_INVALID_ENUM"; break;
-            case GL_INVALID_VALUE: error_str = "GL_INVALID_VALUE"; break;
-            case GL_INVALID_OPERATION: error_str = "GL_INVALID_OPERATION"; break;
-            case GL_OUT_OF_MEMORY: error_str = "GL_OUT_OF_MEMORY"; break;
-            default: error_str = std::format("0x{:X}", error); break;
+        {
+            // Check for errors
+            GLenum error = glGetError();
+            if (error != GL_NO_ERROR) {
+                std::string error_str;
+                switch (error) {
+                case GL_INVALID_ENUM: error_str = "GL_INVALID_ENUM"; break;
+                case GL_INVALID_VALUE: error_str = "GL_INVALID_VALUE"; break;
+                case GL_INVALID_OPERATION: error_str = "GL_INVALID_OPERATION"; break;
+                case GL_OUT_OF_MEMORY: error_str = "GL_OUT_OF_MEMORY"; break;
+                default: error_str = std::format("0x{:X}", error); break;
+                }
+                LOG_ERROR("OpenGL error creating texture: {} for: {}", error_str, path.string());
+                throw std::runtime_error(std::format("OpenGL error: {}", error_str));
             }
-            LOG_ERROR("OpenGL error creating texture: {} for: {}", error_str, path.string());
-            throw std::runtime_error(std::format("OpenGL error: {}", error_str));
+
+            // Set swizzle for grayscale
+            if (channels == 1) {
+                GLint swizzleMask[] = {GL_RED, GL_RED, GL_RED, GL_ONE};
+                glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzleMask);
+            }
         }
 
-        // Set swizzle for grayscale
-        if (channels == 1) {
-            GLint swizzleMask[] = {GL_RED, GL_RED, GL_RED, GL_ONE};
-            glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzleMask);
-        }
-
-        GLTexture::unbind();
-
+        // State guard will restore texture binding automatically
         LOG_DEBUG("Created texture {}x{} for: {}", width, height, path.filename().string());
         return texture;
     }
@@ -265,7 +284,7 @@ namespace lfs::vis::gui {
     }
 
     void ImagePreview::preloadAdjacentImages() {
-        LOG_TIMER_TRACE("PreloadAdjacentImages");
+        LOG_TIMER("PreloadAdjacentImages");
 
         // Don't start new preload if one is already in progress
         bool expected = false;
@@ -294,6 +313,7 @@ namespace lfs::vis::gui {
             LOG_TRACE("Starting preload of previous image (index {})", current_index_ - 1);
             std::thread([this, prev_idx = current_index_ - 1, max_size]() {
                 try {
+                    LOG_TIMER("Preload prev image data");
                     auto image_data = loadImageData(image_paths_[prev_idx]);
 
                     // Check if downscaling is needed
@@ -305,8 +325,8 @@ namespace lfs::vis::gui {
                         }
 
                         LOG_TRACE("Preloaded image needs downscaling by factor of {}", scale);
-                        // Reload at lower resolution
-                        auto [data, w, h, c] = ::load_image(image_paths_[prev_idx], scale);
+                        // Reload at lower resolution (max_width = -1 disables additional downscaling)
+                        auto [data, w, h, c] = ::load_image(image_paths_[prev_idx], scale, -1);
                         image_data = std::make_unique<ImageData>(data, w, h, c);
                     }
 
@@ -318,7 +338,7 @@ namespace lfs::vis::gui {
 
                     std::lock_guard<std::mutex> lock(preload_mutex_);
                     prev_result_ = std::move(result);
-                    LOG_TRACE("Successfully preloaded previous image");
+                    LOG_TRACE("Successfully preloaded previous image data");
                 } catch (const std::exception& e) {
                     auto result = std::make_unique<LoadResult>();
                     result->error = e.what();
@@ -335,6 +355,7 @@ namespace lfs::vis::gui {
             LOG_TRACE("Starting preload of next image (index {})", current_index_ + 1);
             std::thread([this, next_idx = current_index_ + 1, max_size]() {
                 try {
+                    LOG_TIMER("Preload next image data");
                     auto image_data = loadImageData(image_paths_[next_idx]);
 
                     // Check if downscaling is needed
@@ -346,8 +367,8 @@ namespace lfs::vis::gui {
                         }
 
                         LOG_TRACE("Preloaded image needs downscaling by factor of {}", scale);
-                        // Reload at lower resolution
-                        auto [data, w, h, c] = ::load_image(image_paths_[next_idx], scale);
+                        // Reload at lower resolution (max_width = -1 disables additional downscaling)
+                        auto [data, w, h, c] = ::load_image(image_paths_[next_idx], scale, -1);
                         image_data = std::make_unique<ImageData>(data, w, h, c);
                     }
 
@@ -359,7 +380,7 @@ namespace lfs::vis::gui {
 
                     std::lock_guard<std::mutex> lock(preload_mutex_);
                     next_result_ = std::move(result);
-                    LOG_TRACE("Successfully preloaded next image");
+                    LOG_TRACE("Successfully preloaded next image data");
                 } catch (const std::exception& e) {
                     auto result = std::make_unique<LoadResult>();
                     result->error = e.what();
@@ -377,12 +398,14 @@ namespace lfs::vis::gui {
     }
 
     void ImagePreview::checkPreloadedImages() {
+        LOG_TIMER("CheckPreloadedImages");
         std::lock_guard<std::mutex> lock(preload_mutex_);
 
         // Check previous image
         if (prev_result_ && !prev_texture_) {
             if (prev_result_->image) {
                 try {
+                    LOG_TIMER("Create prev texture");
                     prev_texture_ = createTexture(
                         std::move(prev_result_->image->data),
                         prev_result_->image->path);
@@ -398,6 +421,7 @@ namespace lfs::vis::gui {
         if (next_result_ && !next_texture_) {
             if (next_result_->image) {
                 try {
+                    LOG_TIMER("Create next texture");
                     next_texture_ = createTexture(
                         std::move(next_result_->image->data),
                         next_result_->image->path);
@@ -429,6 +453,7 @@ namespace lfs::vis::gui {
             current_texture_ = std::move(next_texture_);
             LOG_TRACE("Using preloaded texture for next image");
         } else {
+            LOG_WARN("No preloaded texture available, loading synchronously");
             if (!loadImage(image_paths_[current_index_])) {
                 LOG_ERROR("Failed to load next image: {}", load_error_);
                 // Don't throw here, GUI will display error
@@ -457,6 +482,7 @@ namespace lfs::vis::gui {
             current_texture_ = std::move(prev_texture_);
             LOG_TRACE("Using preloaded texture for previous image");
         } else {
+            LOG_WARN("No preloaded texture available, loading synchronously");
             if (!loadImage(image_paths_[current_index_])) {
                 LOG_ERROR("Failed to load previous image: {}", load_error_);
                 // Don't throw here, GUI will display error
