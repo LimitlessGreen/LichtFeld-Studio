@@ -501,7 +501,7 @@ namespace lfs::training::kernels {
         ctx.original_w = w;
         ctx.apply_valid_padding = apply_valid_padding;
 
-        return {ssim_value, ctx};
+        return std::make_pair(ssim_value, std::move(ctx));
     }
 
     lfs::core::Tensor ssim_backward(
