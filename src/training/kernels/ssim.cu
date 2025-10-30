@@ -579,7 +579,7 @@ torch::Tensor ssim_backward(
     int64_t numel = ctx.img1.size(0) * ctx.img1.size(1) * grad_h * grad_w;
 
     if (ctx.apply_valid_padding && grad_h > 10 && grad_w > 10) {
-        grad_h -= 10;  // Remove 5 pixels from each side
+        grad_h -= 10; // Remove 5 pixels from each side
         grad_w -= 10;
         numel = ctx.img1.size(0) * ctx.img1.size(1) * grad_h * grad_w;
     }

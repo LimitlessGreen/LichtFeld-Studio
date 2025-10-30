@@ -36,7 +36,7 @@ namespace lfs::training::mcmc {
         float denom_sum = 0.0f;
 
         // Compute new opacity: 1 - (1 - old_opacity)^(1/n_idx)
-        float opacity_base = fmaxf(0.0f, fminf(1.0f, opacities[idx]));  // Clamp to [0, 1]
+        float opacity_base = fmaxf(0.0f, fminf(1.0f, opacities[idx])); // Clamp to [0, 1]
         new_opacities[idx] = 1.0f - powf(1.0f - opacity_base, 1.0f / static_cast<float>(n_idx));
 
         // Compute new scale
@@ -175,7 +175,7 @@ namespace lfs::training::mcmc {
         matvec3(covariance, noise_vec, transformed_noise);
 
         // Compute opacity-based scaling factor
-        float opacity = __frcp_rn(1.f + __expf(-raw_opacities[idx]));  // sigmoid
+        float opacity = __frcp_rn(1.f + __expf(-raw_opacities[idx])); // sigmoid
         float op_sigmoid = __frcp_rn(1.f + __expf(100.f * opacity - 0.5f));
         float noise_factor = current_lr * op_sigmoid;
 

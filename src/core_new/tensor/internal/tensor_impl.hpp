@@ -90,11 +90,14 @@ namespace lfs::core {
 
     constexpr DataType promote_dtypes(DataType lhs, DataType rhs) {
         // Same types - no promotion needed
-        if (lhs == rhs) return lhs;
+        if (lhs == rhs)
+            return lhs;
 
         // Bool promotes to any other type
-        if (lhs == DataType::Bool) return rhs;
-        if (rhs == DataType::Bool) return lhs;
+        if (lhs == DataType::Bool)
+            return rhs;
+        if (rhs == DataType::Bool)
+            return lhs;
 
         // Type promotion table for different type combinations
         // Order of precedence: Float32 > Float16 > Int64 > Int32 > UInt8
@@ -286,7 +289,7 @@ namespace lfs::core {
         uint64_t get_seed() const { return seed_; }
         void* get_generator(Device device);
         uint64_t get_next_cuda_seed();
-        uint64_t get_next_cuda_offset();  // Get next offset for cuRAND generator
+        uint64_t get_next_cuda_offset(); // Get next offset for cuRAND generator
         void* get_impl() { return impl_; }
         const void* get_impl() const { return impl_; }
 
@@ -320,8 +323,8 @@ namespace lfs::core {
         bool is_view_ = false;
 
         // Cached alignment flags (computed once on allocation)
-        bool is_aligned_16_ = false;   // 16-byte alignment for float4 vectorization
-        bool is_aligned_128_ = false;  // 128-byte alignment for cache line optimization
+        bool is_aligned_16_ = false;  // 16-byte alignment for float4 vectorization
+        bool is_aligned_128_ = false; // 128-byte alignment for cache line optimization
 
         // CUDA stream for async execution (assigned round-robin from StreamPool)
         cudaStream_t stream_ = nullptr;
@@ -556,7 +559,7 @@ namespace lfs::core {
 
         // Helper for binary operations with automatic type promotion
         // Promotes types, converts operands if needed, and creates BinaryExpr
-        template<typename Op>
+        template <typename Op>
         Tensor binary_op_with_promotion(const Tensor& other, Op op) const {
             if (!validate_binary_op(other, false, true)) {
                 return Tensor();
@@ -580,7 +583,7 @@ namespace lfs::core {
 
         // Helper for comparison operations with automatic type promotion
         // Promotes operand types for comparison, but always returns Bool
-        template<typename Op>
+        template <typename Op>
         Tensor comparison_op_with_promotion(const Tensor& other, Op op) const {
             if (!validate_binary_op(other, false, true)) {
                 return Tensor();

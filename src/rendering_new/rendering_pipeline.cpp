@@ -4,7 +4,6 @@
 
 #include "rendering_pipeline.hpp"
 #include "core_new/camera.hpp"
-#include "core_new/camera.hpp"
 #include "core_new/splat_data.hpp"
 #include "gs_rasterizer_tensor.hpp"
 

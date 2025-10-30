@@ -1,14 +1,14 @@
 /* Test the EXACT pattern from densification */
-#include "core_new/tensor.hpp"
-#include "core_new/splat_data.hpp"
 #include "core/splat_data.hpp"
+#include "core_new/splat_data.hpp"
+#include "core_new/tensor.hpp"
 #include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <iostream>
+#include <torch/torch.h>
 
 using namespace lfs::core;
 
-// Helper to convert torch to lfs tensor  
+// Helper to convert torch to lfs tensor
 Tensor from_torch(const torch::Tensor& t) {
     auto cpu_t = t.cpu().contiguous();
     std::vector<size_t> shape;
@@ -17,7 +17,7 @@ Tensor from_torch(const torch::Tensor& t) {
     }
     if (cpu_t.dtype() == torch::kFloat32) {
         std::vector<float> data(cpu_t.data_ptr<float>(),
-                                 cpu_t.data_ptr<float>() + cpu_t.numel());
+                                cpu_t.data_ptr<float>() + cpu_t.numel());
         return Tensor::from_vector(data, TensorShape(shape), Device::CUDA);
     }
     throw std::runtime_error("Unsupported dtype");
@@ -25,43 +25,43 @@ Tensor from_torch(const torch::Tensor& t) {
 
 TEST(ExactDensificationPattern, TorchFirst_Then_LFS_SplatData) {
     std::cout << "\n=== EXACT DENSIFICATION PATTERN ===" << std::endl;
-    
+
     // Step 1: Create and use LibTorch SplatData (like reference impl)
     std::cout << "Step 1: Creating LibTorch SplatData (100K)..." << std::endl;
     torch::manual_seed(999);
     auto torch_rotation_ref = torch::zeros({100000, 4}, torch::kCUDA);
     torch_rotation_ref.index({torch::indexing::Slice(), 0}) = 1.0f;
-    
-    gs::SplatData gs_splat(3, 
-        torch::randn({100000, 3}, torch::kCUDA),
-        torch::randn({100000, 3}, torch::kCUDA),
-        torch::randn({100000, 48}, torch::kCUDA),
-        torch::randn({100000, 3}, torch::kCUDA) - 2.0f,
-        torch_rotation_ref,
-        torch::randn({100000, 1}, torch::kCUDA),
-        1.0f);
-    
+
+    gs::SplatData gs_splat(3,
+                           torch::randn({100000, 3}, torch::kCUDA),
+                           torch::randn({100000, 3}, torch::kCUDA),
+                           torch::randn({100000, 48}, torch::kCUDA),
+                           torch::randn({100000, 3}, torch::kCUDA) - 2.0f,
+                           torch_rotation_ref,
+                           torch::randn({100000, 1}, torch::kCUDA),
+                           1.0f);
+
     // Use it (like reference densification)
     std::cout << "Step 2: Using LibTorch SplatData..." << std::endl;
     auto ref_rotation = gs_splat.get_rotation();
     std::cout << "  LibTorch get_rotation() succeeded" << std::endl;
-    
+
     // Step 3: Now create LFS SplatData (like new impl)
     std::cout << "Step 3: Creating LFS SplatData (100K)..." << std::endl;
     torch::manual_seed(999);
     auto torch_rotation = torch::zeros({100000, 4}, torch::kCUDA);
     torch_rotation.index({torch::indexing::Slice(), 0}) = 1.0f;
-    
+
     auto lfs_rotation = from_torch(torch_rotation);
     lfs::core::SplatData lfs_splat(3,
-        from_torch(torch::randn({100000, 3}, torch::kCUDA)),
-        from_torch(torch::randn({100000, 3}, torch::kCUDA)),
-        from_torch(torch::randn({100000, 48}, torch::kCUDA)),
-        from_torch(torch::randn({100000, 3}, torch::kCUDA) - 2.0f),
-        lfs_rotation,
-        from_torch(torch::randn({100000, 1}, torch::kCUDA)),
-        1.0f);
-    
+                                   from_torch(torch::randn({100000, 3}, torch::kCUDA)),
+                                   from_torch(torch::randn({100000, 3}, torch::kCUDA)),
+                                   from_torch(torch::randn({100000, 48}, torch::kCUDA)),
+                                   from_torch(torch::randn({100000, 3}, torch::kCUDA) - 2.0f),
+                                   lfs_rotation,
+                                   from_torch(torch::randn({100000, 1}, torch::kCUDA)),
+                                   1.0f);
+
     // Step 4: NOW try to use LFS SplatData (THIS IS WHERE IT FAILS)
     std::cout << "Step 4: Using LFS SplatData get_rotation()..." << std::endl;
     try {
@@ -74,11 +74,11 @@ TEST(ExactDensificationPattern, TorchFirst_Then_LFS_SplatData) {
     }
 }
 /* Test LFS densification WITHOUT LibTorch reference */
-#include "core_new/tensor.hpp"
-#include "core_new/splat_data.hpp"
 #include "core_new/parameters.hpp"
-#include "training_new/strategies/default_strategy.hpp"
+#include "core_new/splat_data.hpp"
+#include "core_new/tensor.hpp"
 #include "optimizer/render_output.hpp"
+#include "training_new/strategies/default_strategy.hpp"
 #include <gtest/gtest.h>
 #include <iostream>
 
@@ -114,16 +114,16 @@ TEST(LFSOnlyDensification, WorksAt100K) {
 
         // Create LFS SplatData (NO LIBTORCH!)
         auto rotation = Tensor::zeros({n_gaussians, 4}, Device::CUDA);
-        rotation.slice(1, 0, 1).fill_(1.0f);  // w=1, x=y=z=0
+        rotation.slice(1, 0, 1).fill_(1.0f); // w=1, x=y=z=0
 
         lfs::core::SplatData splat(3,
-            Tensor::randn({n_gaussians, 3}, Device::CUDA),
-            Tensor::randn({n_gaussians, 3}, Device::CUDA),
-            Tensor::randn({n_gaussians, 48}, Device::CUDA),
-            Tensor::randn({n_gaussians, 3}, Device::CUDA) - 2.0f,
-            rotation,
-            Tensor::randn({n_gaussians, 1}, Device::CUDA),
-            1.0f);
+                                   Tensor::randn({n_gaussians, 3}, Device::CUDA),
+                                   Tensor::randn({n_gaussians, 3}, Device::CUDA),
+                                   Tensor::randn({n_gaussians, 48}, Device::CUDA),
+                                   Tensor::randn({n_gaussians, 3}, Device::CUDA) - 2.0f,
+                                   rotation,
+                                   Tensor::randn({n_gaussians, 1}, Device::CUDA),
+                                   1.0f);
 
         // Initialize densification_info with high gradients
         // Shape: [2, n_gaussians] - row 0 is denom (count), row 1 is numer (accumulated grads)
@@ -142,10 +142,10 @@ TEST(LFSOnlyDensification, WorksAt100K) {
         params.start_refine = 500;
         params.refine_every = 100;
         params.stop_refine = 15000;
-        params.grad_threshold = 0.0002f;  // Default threshold
-        params.grow_scale3d = 0.01f;      // Default grow threshold
-        params.prune_scale3d = 0.15f;     // Default prune threshold
-        params.prune_opacity = 0.005f;    // Default opacity threshold
+        params.grad_threshold = 0.0002f; // Default threshold
+        params.grow_scale3d = 0.01f;     // Default grow threshold
+        params.prune_scale3d = 0.15f;    // Default prune threshold
+        params.prune_opacity = 0.005f;   // Default opacity threshold
         params.reset_every = 3000;
         params.pause_refine_after_reset = 0;
         params.sh_degree_interval = 1000;
@@ -160,7 +160,7 @@ TEST(LFSOnlyDensification, WorksAt100K) {
         // Create fake render output (not used by current implementation)
         lfs::training::RenderOutput render_output;
 
-        int test_iter = 600;  // Within refine range (500 < 600 < 15000, divisible by 100)
+        int test_iter = 600; // Within refine range (500 < 600 < 15000, divisible by 100)
 
         // Run densification
         try {
@@ -185,91 +185,91 @@ TEST(LFSOnlyDensification, WorksAt100K) {
 
 // Densification test: Compare reference and new implementations
 
-#include "training_new/strategies/default_strategy.hpp"
-#include "training/strategies/default_strategy.hpp"
-#include "core_new/splat_data.hpp"
 #include "core/splat_data.hpp"
-#include "training_new/optimizer/render_output.hpp"
+#include "core_new/splat_data.hpp"
 #include "training/rasterization/rasterizer.hpp"
+#include "training/strategies/default_strategy.hpp"
+#include "training_new/optimizer/render_output.hpp"
+#include "training_new/strategies/default_strategy.hpp"
+#include <chrono>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
-#include <chrono>
 
 namespace {
 
-// Helper to convert torch to lfs tensor
-lfs::core::Tensor from_torch(const torch::Tensor& t) {
-    auto cpu_t = t.cpu().contiguous();
-    std::vector<size_t> shape;
-    for (int64_t i = 0; i < cpu_t.dim(); ++i) {
-        shape.push_back(cpu_t.size(i));
+    // Helper to convert torch to lfs tensor
+    lfs::core::Tensor from_torch(const torch::Tensor& t) {
+        auto cpu_t = t.cpu().contiguous();
+        std::vector<size_t> shape;
+        for (int64_t i = 0; i < cpu_t.dim(); ++i) {
+            shape.push_back(cpu_t.size(i));
+        }
+
+        if (cpu_t.dtype() == torch::kFloat32) {
+            std::vector<float> data(cpu_t.data_ptr<float>(),
+                                    cpu_t.data_ptr<float>() + cpu_t.numel());
+            return lfs::core::Tensor::from_vector(data, lfs::core::TensorShape(shape),
+                                                  lfs::core::Device::CUDA);
+        } else if (cpu_t.dtype() == torch::kBool) {
+            auto uint8_tensor = cpu_t.to(torch::kUInt8);
+            auto result = lfs::core::Tensor::zeros_bool(lfs::core::TensorShape(shape), lfs::core::Device::CPU);
+            auto ptr = result.ptr<unsigned char>();
+            std::memcpy(ptr, uint8_tensor.data_ptr<uint8_t>(), uint8_tensor.numel());
+            return result.to(lfs::core::Device::CUDA);
+        }
+        throw std::runtime_error("Unsupported dtype");
     }
 
-    if (cpu_t.dtype() == torch::kFloat32) {
-        std::vector<float> data(cpu_t.data_ptr<float>(),
-                                 cpu_t.data_ptr<float>() + cpu_t.numel());
-        return lfs::core::Tensor::from_vector(data, lfs::core::TensorShape(shape),
-                                               lfs::core::Device::CUDA);
-    } else if (cpu_t.dtype() == torch::kBool) {
-        auto uint8_tensor = cpu_t.to(torch::kUInt8);
-        auto result = lfs::core::Tensor::zeros_bool(lfs::core::TensorShape(shape), lfs::core::Device::CPU);
-        auto ptr = result.ptr<unsigned char>();
-        std::memcpy(ptr, uint8_tensor.data_ptr<uint8_t>(), uint8_tensor.numel());
-        return result.to(lfs::core::Device::CUDA);
+    // Create matching splat data with realistic parameters
+    std::pair<lfs::core::SplatData, gs::SplatData> create_matching_data(int n, int seed = 42) {
+        torch::manual_seed(seed);
+
+        auto torch_means = torch::randn({n, 3}, torch::kCUDA) * 0.5f;
+        auto torch_sh0 = torch::randn({n, 3}, torch::kCUDA) * 0.3f;
+        auto torch_shN = torch::randn({n, 48}, torch::kCUDA) * 0.1f;
+        auto torch_scaling = torch::randn({n, 3}, torch::kCUDA) * 0.5f - 2.0f;
+        auto torch_rotation = torch::zeros({n, 4}, torch::kCUDA);
+        torch_rotation.index({torch::indexing::Slice(), 0}) = 1.0f;
+        auto torch_opacity = torch::randn({n, 1}, torch::kCUDA) * 0.5f;
+
+        auto lfs_means = from_torch(torch_means);
+        auto lfs_sh0 = from_torch(torch_sh0);
+        auto lfs_shN = from_torch(torch_shN);
+        auto lfs_scaling = from_torch(torch_scaling);
+        auto lfs_rotation = from_torch(torch_rotation);
+        auto lfs_opacity = from_torch(torch_opacity);
+
+        lfs::core::SplatData lfs_splat(3, lfs_means, lfs_sh0, lfs_shN, lfs_scaling, lfs_rotation, lfs_opacity, 1.0f);
+        gs::SplatData gs_splat(3, torch_means, torch_sh0, torch_shN, torch_scaling, torch_rotation, torch_opacity, 1.0f);
+
+        return {std::move(lfs_splat), std::move(gs_splat)};
     }
-    throw std::runtime_error("Unsupported dtype");
-}
 
-// Create matching splat data with realistic parameters
-std::pair<lfs::core::SplatData, gs::SplatData> create_matching_data(int n, int seed = 42) {
-    torch::manual_seed(seed);
+    // Simulate realistic densification info (accumulated gradients + counts)
+    void setup_densification_info(lfs::core::SplatData& lfs_splat, gs::SplatData& gs_splat,
+                                  float grad_mean = 0.0005f, float grad_std = 0.0003f) {
+        int n = lfs_splat.size();
 
-    auto torch_means = torch::randn({n, 3}, torch::kCUDA) * 0.5f;
-    auto torch_sh0 = torch::randn({n, 3}, torch::kCUDA) * 0.3f;
-    auto torch_shN = torch::randn({n, 48}, torch::kCUDA) * 0.1f;
-    auto torch_scaling = torch::randn({n, 3}, torch::kCUDA) * 0.5f - 2.0f;
-    auto torch_rotation = torch::zeros({n, 4}, torch::kCUDA);
-    torch_rotation.index({torch::indexing::Slice(), 0}) = 1.0f;
-    auto torch_opacity = torch::randn({n, 1}, torch::kCUDA) * 0.5f;
+        // Create matching densification info for both implementations
+        torch::manual_seed(123);
+        auto torch_dinfo = torch::randn({2, n}, torch::kCUDA) * grad_std + grad_mean;
+        torch_dinfo = torch_dinfo.abs(); // Gradients are positive
 
-    auto lfs_means = from_torch(torch_means);
-    auto lfs_sh0 = from_torch(torch_sh0);
-    auto lfs_shN = from_torch(torch_shN);
-    auto lfs_scaling = from_torch(torch_scaling);
-    auto lfs_rotation = from_torch(torch_rotation);
-    auto lfs_opacity = from_torch(torch_opacity);
+        // densification_info layout: [0] = denom (counts), [1] = numer (accumulated grads)
+        torch_dinfo.index({0, torch::indexing::Slice()}) = 100.0f; // Set counts to 100
+        // Index 1 already has the accumulated gradients from randn above
 
-    lfs::core::SplatData lfs_splat(3, lfs_means, lfs_sh0, lfs_shN, lfs_scaling, lfs_rotation, lfs_opacity, 1.0f);
-    gs::SplatData gs_splat(3, torch_means, torch_sh0, torch_shN, torch_scaling, torch_rotation, torch_opacity, 1.0f);
+        auto lfs_dinfo = from_torch(torch_dinfo);
 
-    return {std::move(lfs_splat), std::move(gs_splat)};
-}
+        lfs_splat._densification_info = lfs_dinfo;
+        gs_splat._densification_info = torch_dinfo;
+    }
 
-// Simulate realistic densification info (accumulated gradients + counts)
-void setup_densification_info(lfs::core::SplatData& lfs_splat, gs::SplatData& gs_splat,
-                                float grad_mean = 0.0005f, float grad_std = 0.0003f) {
-    int n = lfs_splat.size();
-
-    // Create matching densification info for both implementations
-    torch::manual_seed(123);
-    auto torch_dinfo = torch::randn({2, n}, torch::kCUDA) * grad_std + grad_mean;
-    torch_dinfo = torch_dinfo.abs();  // Gradients are positive
-
-    // densification_info layout: [0] = denom (counts), [1] = numer (accumulated grads)
-    torch_dinfo.index({0, torch::indexing::Slice()}) = 100.0f;  // Set counts to 100
-    // Index 1 already has the accumulated gradients from randn above
-
-    auto lfs_dinfo = from_torch(torch_dinfo);
-
-    lfs_splat._densification_info = lfs_dinfo;
-    gs_splat._densification_info = torch_dinfo;
-}
-
-}  // anonymous namespace
+} // anonymous namespace
 
 // Test densification comparison
 TEST(DensificationBenchmark, CompareImplementations) {
-    std::vector<int> gaussian_counts = {10000, 100000, 500000, 1000000, 2000000};  // Scale up
+    std::vector<int> gaussian_counts = {10000, 100000, 500000, 1000000, 2000000}; // Scale up
 
     std::cout << "\n=== DENSIFICATION COMPARISON (REF vs NEW) ===" << std::endl;
 
@@ -355,17 +355,17 @@ TEST(DensificationBenchmark, CompareImplementations) {
     }
 }
 /* Profile duplicate and split operations separately */
-#include <gtest/gtest.h>
-#include <cuda_runtime.h>
-#include <torch/torch.h>
+#include "core_new/parameters.hpp"
+#include "core_new/splat_data.hpp"
+#include "core_new/tensor.hpp"
+#include "optimizer/render_output.hpp"
+#include "training_new/strategies/default_strategy.hpp"
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <chrono>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
 #include <iostream>
-#include "core_new/tensor.hpp"
-#include "core_new/splat_data.hpp"
-#include "training_new/strategies/default_strategy.hpp"
-#include "optimizer/render_output.hpp"
-#include "core_new/parameters.hpp"
+#include <torch/torch.h>
 
 using namespace lfs::core;
 
@@ -389,7 +389,6 @@ private:
 TEST(ProfileOps, DuplicateOnly) {
     std::cout << "\n=== PROFILE DUPLICATE OPERATION ===" << std::endl;
 
-
     const int n = 10000000;
     std::cout << "Gaussians to duplicate: " << static_cast<double>(n) << std::endl;
 
@@ -401,13 +400,13 @@ TEST(ProfileOps, DuplicateOnly) {
     rotation.slice(1, 0, 1).fill_(1.0f);
 
     lfs::core::SplatData splat(3,
-        Tensor::randn({n, 3}, Device::CUDA),
-        Tensor::randn({n, 3}, Device::CUDA),
-        Tensor::randn({n, 48}, Device::CUDA),
-        Tensor::randn({n, 3}, Device::CUDA) - 2.0f,
-        rotation,
-        Tensor::randn({n, 1}, Device::CUDA),
-        1.0f);
+                               Tensor::randn({n, 3}, Device::CUDA),
+                               Tensor::randn({n, 3}, Device::CUDA),
+                               Tensor::randn({n, 48}, Device::CUDA),
+                               Tensor::randn({n, 3}, Device::CUDA) - 2.0f,
+                               rotation,
+                               Tensor::randn({n, 1}, Device::CUDA),
+                               1.0f);
 
     splat._densification_info = Tensor::ones({2, static_cast<size_t>(n)}, Device::CUDA);
     auto numer = Tensor::ones({static_cast<size_t>(n)}, Device::CUDA) * 10.0f;
@@ -416,7 +415,7 @@ TEST(ProfileOps, DuplicateOnly) {
     lfs::training::DefaultStrategy strat(std::move(splat));
     lfs::core::param::OptimizationParameters params;
     params.grad_threshold = 0.0002f;
-    params.grow_scale3d = 100.0f;  // Make everything "small" so all duplicate
+    params.grow_scale3d = 100.0f; // Make everything "small" so all duplicate
     strat.initialize(params);
 
     strat.get_model()._densification_info = Tensor::ones({2, static_cast<size_t>(n)}, Device::CUDA);
@@ -447,7 +446,6 @@ TEST(ProfileOps, DuplicateOnly) {
 TEST(ProfileOps, SplitOnly) {
     std::cout << "\n=== PROFILE SPLIT OPERATION ===" << std::endl;
 
-
     const int n = 10000000;
     std::cout << "Gaussians to split: " << static_cast<double>(n) << std::endl;
 
@@ -459,13 +457,13 @@ TEST(ProfileOps, SplitOnly) {
     rotation.slice(1, 0, 1).fill_(1.0f);
 
     lfs::core::SplatData splat(3,
-        Tensor::randn({n, 3}, Device::CUDA),
-        Tensor::randn({n, 3}, Device::CUDA),
-        Tensor::randn({n, 48}, Device::CUDA),
-        Tensor::randn({n, 3}, Device::CUDA) - 2.0f,
-        rotation,
-        Tensor::randn({n, 1}, Device::CUDA),
-        1.0f);
+                               Tensor::randn({n, 3}, Device::CUDA),
+                               Tensor::randn({n, 3}, Device::CUDA),
+                               Tensor::randn({n, 48}, Device::CUDA),
+                               Tensor::randn({n, 3}, Device::CUDA) - 2.0f,
+                               rotation,
+                               Tensor::randn({n, 1}, Device::CUDA),
+                               1.0f);
 
     splat._densification_info = Tensor::ones({2, static_cast<size_t>(n)}, Device::CUDA);
     auto numer = Tensor::ones({static_cast<size_t>(n)}, Device::CUDA) * 10.0f;
@@ -474,7 +472,7 @@ TEST(ProfileOps, SplitOnly) {
     lfs::training::DefaultStrategy strat(std::move(splat));
     lfs::core::param::OptimizationParameters params;
     params.grad_threshold = 0.0002f;
-    params.grow_scale3d = 0.0f;  // Make everything "large" so all split
+    params.grow_scale3d = 0.0f; // Make everything "large" so all split
     strat.initialize(params);
 
     strat.get_model()._densification_info = Tensor::ones({2, static_cast<size_t>(n)}, Device::CUDA);
@@ -505,19 +503,19 @@ TEST(ProfileOps, SplitOnly) {
 // Test OLD LibTorch-based densification at 10M scale
 // Uses src/training/strategies/default_strategy.cpp
 
-#include <gtest/gtest.h>
-#include <cuda_runtime.h>
-#include <iostream>
-#include <chrono>
-#include "core/splat_data.hpp"
-#include "training/strategies/default_strategy.hpp"
-#include "training/rasterization/rasterizer.hpp"
 #include "core/parameters.hpp"
+#include "core/splat_data.hpp"
+#include "training/rasterization/rasterizer.hpp"
+#include "training/strategies/default_strategy.hpp"
+#include <chrono>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
+#include <iostream>
 
 TEST(OldDensification, WorksAt10M) {
     std::cout << "\n=== OLD LIBTORCH-BASED DENSIFICATION TEST ===\n";
 
-    const int N = 10000000;  // 10M Gaussians
+    const int N = 10000000; // 10M Gaussians
 
     std::cout << "Testing with " << N << " Gaussians...\n";
 
@@ -525,21 +523,21 @@ TEST(OldDensification, WorksAt10M) {
     auto positions = torch::randn({N, 3}, torch::device(torch::kCUDA).dtype(torch::kFloat32));
     auto rotations = torch::randn({N, 4}, torch::device(torch::kCUDA).dtype(torch::kFloat32));
     // Make scales SMALL so they qualify for duplication (grow_scale3d * scene_scale = 0.01 * 1.0 = 0.01)
-    auto scales = torch::rand({N, 3}, torch::device(torch::kCUDA).dtype(torch::kFloat32)) * 0.005f;  // All < 0.01
+    auto scales = torch::rand({N, 3}, torch::device(torch::kCUDA).dtype(torch::kFloat32)) * 0.005f; // All < 0.01
     auto sh0 = torch::randn({N, 3}, torch::device(torch::kCUDA).dtype(torch::kFloat32));
     auto shN = torch::randn({N, 45}, torch::device(torch::kCUDA).dtype(torch::kFloat32));
     auto opacities = torch::randn({N, 1}, torch::device(torch::kCUDA).dtype(torch::kFloat32));
 
     // Create SplatData (OLD API requires sh_degree as first arg)
     gs::SplatData splat_data(
-        3,  // sh_degree
+        3, // sh_degree
         positions,
         sh0,
         shN,
         scales,
         rotations,
         opacities,
-        1.0f  // scene_scale
+        1.0f // scene_scale
     );
 
     // Create strategy
@@ -562,7 +560,7 @@ TEST(OldDensification, WorksAt10M) {
 
     // Re-initialize densification info AFTER initialize() (which resets it)
     strategy.get_model()._densification_info = torch::ones({2, N}, torch::device(torch::kCUDA).dtype(torch::kFloat32));
-    strategy.get_model()._densification_info[1] = torch::ones({N}, torch::device(torch::kCUDA)) * 10.0f;  // High gradients
+    strategy.get_model()._densification_info[1] = torch::ones({N}, torch::device(torch::kCUDA)) * 10.0f; // High gradients
 
     int before = strategy.get_model().means().size(0);
     std::cout << "Before: " << before << "\n";
@@ -579,7 +577,7 @@ TEST(OldDensification, WorksAt10M) {
     auto start = std::chrono::high_resolution_clock::now();
 
     // Run densification through post_backward (which calls grow_gs internally)
-    strategy.post_backward(1000, render_output);  // Iteration 1000
+    strategy.post_backward(1000, render_output); // Iteration 1000
 
     cudaDeviceSynchronize();
     auto end = std::chrono::high_resolution_clock::now();
@@ -593,13 +591,13 @@ TEST(OldDensification, WorksAt10M) {
     std::cout << "✓ SUCCESS at " << N << " Gaussians\n";
 }
 /* Test OLD LibTorch-based densification - EXACT same test as LFSOnlyDensification */
-#include "core/splat_data.hpp"
 #include "core/parameters.hpp"
-#include "training/strategies/default_strategy.hpp"
+#include "core/splat_data.hpp"
 #include "training/rasterization/rasterizer.hpp"
+#include "training/strategies/default_strategy.hpp"
+#include <chrono>
 #include <gtest/gtest.h>
 #include <iostream>
-#include <chrono>
 
 TEST(OldLibTorchDensification, WorksAt10M) {
     std::cout << "\n=== OLD LIBTORCH DENSIFICATION TEST (10M) ===" << std::endl;
@@ -620,13 +618,13 @@ TEST(OldLibTorchDensification, WorksAt10M) {
     cudaFree(dummy_ptr);
     printf("[TEST] CUDA runtime initialized\n");
 
-    const int n_gaussians = 10000000;  // 10M Gaussians
+    const int n_gaussians = 10000000; // 10M Gaussians
 
     std::cout << "\nTesting with " << n_gaussians << " Gaussians..." << std::endl;
 
     // Create OLD LibTorch-based SplatData
     auto rotation = torch::zeros({n_gaussians, 4}, torch::device(torch::kCUDA).dtype(torch::kFloat32));
-    rotation.slice(1, 0, 1).fill_(1.0f);  // w=1, x=y=z=0
+    rotation.slice(1, 0, 1).fill_(1.0f); // w=1, x=y=z=0
 
     auto positions = torch::randn({n_gaussians, 3}, torch::device(torch::kCUDA).dtype(torch::kFloat32));
     auto sh0 = torch::randn({n_gaussians, 3}, torch::device(torch::kCUDA).dtype(torch::kFloat32));
@@ -635,14 +633,14 @@ TEST(OldLibTorchDensification, WorksAt10M) {
     auto opacities = torch::randn({n_gaussians, 1}, torch::device(torch::kCUDA).dtype(torch::kFloat32));
 
     gs::SplatData splat(
-        3,  // sh_degree
+        3, // sh_degree
         positions,
         sh0,
         shN,
         scales,
         rotation,
         opacities,
-        1.0f  // scene_scale
+        1.0f // scene_scale
     );
 
     // Initialize densification_info with high gradients
@@ -680,7 +678,7 @@ TEST(OldLibTorchDensification, WorksAt10M) {
     render_output.alpha = torch::zeros({1, 800, 800}, torch::device(torch::kCUDA));
     render_output.radii = torch::zeros({n_gaussians}, torch::device(torch::kCUDA).dtype(torch::kInt32));
 
-    int test_iter = 600;  // Within refine range (500 < 600 < 15000, divisible by 100)
+    int test_iter = 600; // Within refine range (500 < 600 < 15000, divisible by 100)
 
     // Run densification and TIME it
     cudaDeviceSynchronize();

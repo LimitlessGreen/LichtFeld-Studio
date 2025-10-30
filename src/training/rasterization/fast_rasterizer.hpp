@@ -14,7 +14,7 @@ namespace gs::training {
     struct FastRasterizeContext {
         torch::Tensor image;
         torch::Tensor alpha;
-        torch::Tensor bg_color;  // Saved for alpha gradient computation
+        torch::Tensor bg_color; // Saved for alpha gradient computation
 
         // Gaussian parameters (saved to avoid re-fetching in backward)
         torch::Tensor means;

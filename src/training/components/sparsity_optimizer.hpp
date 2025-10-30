@@ -16,11 +16,11 @@ namespace gs::training {
      * @brief Context for manual sparsity loss forward/backward
      */
     struct SparsityLossContext {
-        torch::Tensor opacities;     // Opacity values (raw, before sigmoid)
-        torch::Tensor opa_sigmoid;   // Sigmoid(opacities)
-        torch::Tensor z;             // ADMM auxiliary variable
-        torch::Tensor u;             // ADMM dual variable
-        float rho;                   // ADMM penalty parameter
+        torch::Tensor opacities;   // Opacity values (raw, before sigmoid)
+        torch::Tensor opa_sigmoid; // Sigmoid(opacities)
+        torch::Tensor z;           // ADMM auxiliary variable
+        torch::Tensor u;           // ADMM dual variable
+        float rho;                 // ADMM penalty parameter
     };
 
     /**

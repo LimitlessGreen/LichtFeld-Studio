@@ -4,9 +4,9 @@
 
 #pragma once
 
+#include "core_new/tensor.hpp"
 #include "dataset.hpp"
 #include "trainer.hpp"
-#include "core_new/tensor.hpp"
 #include <expected>
 #include <memory>
 

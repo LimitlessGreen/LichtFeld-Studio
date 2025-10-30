@@ -84,7 +84,7 @@ namespace lfs::training {
 
                         // Use lfs::core::Tensor for random generation
                         auto positions = lfs::core::Tensor::rand({numInitGaussian, 3}, lfs::core::Device::CUDA); // in [0, 1]
-                        positions = positions * 2.0f - 1.0f;                                                      // now in [-1, 1]
+                        positions = positions * 2.0f - 1.0f;                                                     // now in [-1, 1]
                         auto colors = lfs::core::Tensor::randint({numInitGaussian, 3}, 0, 256, lfs::core::Device::CUDA, lfs::core::DataType::UInt8);
 
                         point_cloud_to_use = lfs::core::PointCloud(positions, colors);

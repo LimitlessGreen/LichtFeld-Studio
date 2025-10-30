@@ -152,7 +152,7 @@ namespace fast_gs::rasterization {
         static PerTileBuffers from_blob(char*& blob, size_t n_tiles) {
             PerTileBuffers buffers;
 
-            //Make a local copy of blob pointer for modification
+            // Make a local copy of blob pointer for modification
             char* local_blob = blob;
 
             obtain(local_blob, buffers.instance_ranges, n_tiles, 128);

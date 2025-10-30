@@ -28,7 +28,8 @@ namespace lfs::training {
     class ExponentialLR {
     public:
         ExponentialLR(AdamOptimizer& optimizer, double gamma)
-            : optimizer_(optimizer), gamma_(gamma) {
+            : optimizer_(optimizer),
+              gamma_(gamma) {
         }
 
         void step();

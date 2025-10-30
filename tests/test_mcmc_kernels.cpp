@@ -2,13 +2,13 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <chrono>
+#include <gtest/gtest.h>
 #include <iomanip>
+#include <torch/torch.h>
 
-#include "Ops.h"  // gsplat reference (high-level API)
-#include "Relocation.h"  // gsplat launch functions (direct kernel access)
+#include "Ops.h"        // gsplat reference (high-level API)
+#include "Relocation.h" // gsplat launch functions (direct kernel access)
 #include "core_new/tensor.hpp"
 #include "kernels/mcmc_kernels.hpp"
 
@@ -227,7 +227,7 @@ TEST(MCMCKernelsTest, AddNoiseZeroLearningRate) {
         raw_quats_torch.data_ptr<float>(),
         noise_torch.data_ptr<float>(),
         means_tensor.ptr<float>(),
-        0.0f,  // Zero learning rate
+        0.0f, // Zero learning rate
         N);
 
     cudaDeviceSynchronize();
@@ -274,7 +274,7 @@ TEST(MCMCKernelsTest, BenchmarkRelocation_Comprehensive) {
         // Warmup
         for (int i = 0; i < 10; ++i) {
             launch_relocation_kernel(opacities.ptr<float>(), scales.ptr<float>(), ratios.ptr<int32_t>(),
-                                   binoms.ptr<float>(), n_max, new_opacities.ptr<float>(), new_scales.ptr<float>(), N);
+                                     binoms.ptr<float>(), n_max, new_opacities.ptr<float>(), new_scales.ptr<float>(), N);
         }
         cudaDeviceSynchronize();
 
@@ -282,7 +282,7 @@ TEST(MCMCKernelsTest, BenchmarkRelocation_Comprehensive) {
         auto start_lfs = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < num_iterations; ++i) {
             launch_relocation_kernel(opacities.ptr<float>(), scales.ptr<float>(), ratios.ptr<int32_t>(),
-                                   binoms.ptr<float>(), n_max, new_opacities.ptr<float>(), new_scales.ptr<float>(), N);
+                                     binoms.ptr<float>(), n_max, new_opacities.ptr<float>(), new_scales.ptr<float>(), N);
         }
         cudaDeviceSynchronize();
         auto end_lfs = std::chrono::high_resolution_clock::now();
@@ -292,7 +292,7 @@ TEST(MCMCKernelsTest, BenchmarkRelocation_Comprehensive) {
         auto start_gsplat = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < num_iterations; ++i) {
             gsplat::launch_relocation_kernel(opacities_torch, scales_torch, ratios_torch, binoms_torch, n_max,
-                                           new_opacities_gsplat, new_scales_gsplat);
+                                             new_opacities_gsplat, new_scales_gsplat);
         }
         cudaDeviceSynchronize();
         auto end_gsplat = std::chrono::high_resolution_clock::now();
@@ -356,8 +356,8 @@ TEST(MCMCKernelsTest, BenchmarkAddNoise_Comprehensive) {
         // Warmup
         for (int i = 0; i < 10; ++i) {
             launch_add_noise_kernel(raw_opacities_torch.data_ptr<float>(), raw_scales_torch.data_ptr<float>(),
-                                  raw_quats_torch.data_ptr<float>(), noise_torch.data_ptr<float>(),
-                                  means_lfs.ptr<float>(), current_lr, N);
+                                    raw_quats_torch.data_ptr<float>(), noise_torch.data_ptr<float>(),
+                                    means_lfs.ptr<float>(), current_lr, N);
         }
         cudaDeviceSynchronize();
 
@@ -365,8 +365,8 @@ TEST(MCMCKernelsTest, BenchmarkAddNoise_Comprehensive) {
         auto start_lfs = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < num_iterations; ++i) {
             launch_add_noise_kernel(raw_opacities_torch.data_ptr<float>(), raw_scales_torch.data_ptr<float>(),
-                                  raw_quats_torch.data_ptr<float>(), noise_torch.data_ptr<float>(),
-                                  means_lfs.ptr<float>(), current_lr, N);
+                                    raw_quats_torch.data_ptr<float>(), noise_torch.data_ptr<float>(),
+                                    means_lfs.ptr<float>(), current_lr, N);
         }
         cudaDeviceSynchronize();
         auto end_lfs = std::chrono::high_resolution_clock::now();
@@ -376,7 +376,7 @@ TEST(MCMCKernelsTest, BenchmarkAddNoise_Comprehensive) {
         auto start_gsplat = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < num_iterations; ++i) {
             gsplat::launch_add_noise_kernel(raw_opacities_torch, raw_scales_torch, raw_quats_torch,
-                                          noise_torch, means_gsplat, current_lr);
+                                            noise_torch, means_gsplat, current_lr);
         }
         cudaDeviceSynchronize();
         auto end_gsplat = std::chrono::high_resolution_clock::now();
@@ -448,8 +448,8 @@ TEST(MCMCKernelsTest, BenchmarkMCMCWorkflow) {
         // Warmup
         for (int i = 0; i < 5; ++i) {
             launch_add_noise_kernel(raw_opacities_torch.data_ptr<float>(), raw_scales_torch.data_ptr<float>(),
-                                  raw_quats_torch.data_ptr<float>(), noise_torch.data_ptr<float>(),
-                                  means_lfs.ptr<float>(), current_lr, N);
+                                    raw_quats_torch.data_ptr<float>(), noise_torch.data_ptr<float>(),
+                                    means_lfs.ptr<float>(), current_lr, N);
         }
         cudaDeviceSynchronize();
 
@@ -459,13 +459,13 @@ TEST(MCMCKernelsTest, BenchmarkMCMCWorkflow) {
             // Every 10 iterations: relocate (simulating refine_every)
             if (iter % 10 == 0 && iter > 0) {
                 launch_relocation_kernel(opacities.ptr<float>(), scales.ptr<float>(), ratios.ptr<int32_t>(),
-                                       binoms.ptr<float>(), n_max, new_opacities.ptr<float>(), new_scales.ptr<float>(), N);
+                                         binoms.ptr<float>(), n_max, new_opacities.ptr<float>(), new_scales.ptr<float>(), N);
             }
 
             // Every iteration: inject noise
             launch_add_noise_kernel(raw_opacities_torch.data_ptr<float>(), raw_scales_torch.data_ptr<float>(),
-                                  raw_quats_torch.data_ptr<float>(), noise_torch.data_ptr<float>(),
-                                  means_lfs.ptr<float>(), current_lr, N);
+                                    raw_quats_torch.data_ptr<float>(), noise_torch.data_ptr<float>(),
+                                    means_lfs.ptr<float>(), current_lr, N);
         }
         cudaDeviceSynchronize();
         auto end = std::chrono::high_resolution_clock::now();

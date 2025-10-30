@@ -4,11 +4,11 @@
 
 #pragma once
 
+#include "core_new/splat_data.hpp"
+#include "core_new/tensor.hpp"
 #include "istrategy.hpp"
 #include "optimizer/adam_optimizer.hpp"
 #include "optimizer/scheduler.hpp"
-#include "core_new/splat_data.hpp"
-#include "core_new/tensor.hpp"
 #include <memory>
 
 namespace lfs::training {
@@ -42,8 +42,8 @@ namespace lfs::training {
         int add_new_gs();
         void inject_noise();
         void update_optimizer_for_relocate(const lfs::core::Tensor& sampled_indices,
-                                          const lfs::core::Tensor& dead_indices,
-                                          ParamType param_type);
+                                           const lfs::core::Tensor& dead_indices,
+                                           ParamType param_type);
 
         // Member variables
         std::unique_ptr<AdamOptimizer> _optimizer;
@@ -55,7 +55,7 @@ namespace lfs::training {
         const float _noise_lr = 5e5f;
 
         // State variables
-        lfs::core::Tensor _binoms;  // [n_max, n_max] binomial coefficients
+        lfs::core::Tensor _binoms; // [n_max, n_max] binomial coefficients
     };
 
 } // namespace lfs::training

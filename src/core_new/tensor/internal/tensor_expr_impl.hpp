@@ -6,9 +6,9 @@
 // This file contains template method implementations that require the full Tensor definition
 // It should be included at the END of tensor.hpp, after Tensor class is fully defined
 
-#include <cuda_fp16.h>
 #include "tensor_expr.hpp"
 #include "tensor_functors.hpp" // For ops::compose
+#include <cuda_fp16.h>
 
 namespace lfs::core {
 

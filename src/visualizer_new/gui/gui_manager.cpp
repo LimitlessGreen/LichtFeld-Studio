@@ -2,7 +2,11 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <glad/glad.h> // Must be first to get OpenGL functions
+// IMPORTANT: glad must be included FIRST, before any header that includes OpenGL
+// clang-format off
+#include <glad/glad.h>
+// clang-format on
+
 #include "gui/gui_manager.hpp"
 #include "core_new/image_io.hpp"
 #include "core_new/logger.hpp"

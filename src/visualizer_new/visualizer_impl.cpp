@@ -401,9 +401,9 @@ namespace lfs::vis {
                 LOG_TIMER("LoadProject");
                 // write to project file on every change - maybe configurable in the future?
                 project_->setUpdateFileOnChange(true);
-                // TODO: Fix this - gs::management::DataSetInfo != lfs::core::param::DatasetConfig
-                // Temporarily disabled during migration
-                #if 0
+// TODO: Fix this - gs::management::DataSetInfo != lfs::core::param::DatasetConfig
+// Temporarily disabled during migration
+#if 0
                 auto dataset = static_cast<const lfs::core::param::DatasetConfig&>(project_->getProjectData().data_set_info);
                 if (!dataset.data_path.empty()) {
                     LOG_DEBUG("Loading dataset from project: {}", dataset.data_path.string());
@@ -420,7 +420,7 @@ namespace lfs::vis {
 
                 auto plys = project_->getPlys();
                 LOG_INFO("Project loaded successfully with {} PLY files", plys.size());
-                #endif
+#endif
             } catch (const std::exception& e) {
                 LOG_ERROR("Failed to load project: {}", e.what());
                 throw std::runtime_error(std::format("Failed to load project: {}", e.what()));

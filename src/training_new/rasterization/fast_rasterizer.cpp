@@ -66,7 +66,7 @@ namespace lfs::training {
         // Prepare render output
         RenderOutput render_output;
         // output = image + (1 - alpha) * bg_color
-        auto alpha_complement = (alpha * -1.0f) + 1.0f;  // 1 - alpha
+        auto alpha_complement = (alpha * -1.0f) + 1.0f; // 1 - alpha
         auto bg_contribution = alpha_complement * bg_color.unsqueeze(-1).unsqueeze(-1);
         render_output.image = image + bg_contribution;
         render_output.alpha = alpha;
@@ -75,7 +75,7 @@ namespace lfs::training {
         FastRasterizeContext ctx;
         ctx.image = image;
         ctx.alpha = alpha;
-        ctx.bg_color = bg_color;  // Save bg_color for alpha gradient
+        ctx.bg_color = bg_color; // Save bg_color for alpha gradient
 
         // Save parameters (avoid re-fetching in backward)
         ctx.means = means;
@@ -125,13 +125,13 @@ namespace lfs::training {
         if (grad_image.shape()[0] == 3) {
             // Layout: [3, H, W]
             // ∂L/∂alpha[h,w] = -sum_c(grad_image[c,h,w] * bg_color[c])
-            auto bg_expanded = ctx.bg_color.reshape({3, 1, 1});  // [3, 1, 1]
-            grad_alpha = (grad_image * bg_expanded).sum({0}, false) * -1.0f;  // [H, W]
+            auto bg_expanded = ctx.bg_color.reshape({3, 1, 1});              // [3, 1, 1]
+            grad_alpha = (grad_image * bg_expanded).sum({0}, false) * -1.0f; // [H, W]
         } else if (grad_image.shape()[2] == 3) {
             // Layout: [H, W, 3]
             // ∂L/∂alpha[h,w] = -sum_c(grad_image[h,w,c] * bg_color[c])
-            auto bg_expanded = ctx.bg_color.reshape({1, 1, 3});  // [1, 1, 3]
-            grad_alpha = (grad_image * bg_expanded).sum({2}, false) * -1.0f;  // [H, W]
+            auto bg_expanded = ctx.bg_color.reshape({1, 1, 3});              // [1, 1, 3]
+            grad_alpha = (grad_image * bg_expanded).sum({2}, false) * -1.0f; // [H, W]
         } else {
             throw std::runtime_error("Unexpected grad_image shape in fast_rasterize_backward");
         }
@@ -169,7 +169,7 @@ namespace lfs::training {
             grad_opacities_raw.ptr<float>(),
             grad_sh_coefficients_0.ptr<float>(),
             grad_sh_coefficients_rest.ptr<float>(),
-            nullptr,  // grad_w2c not needed for now
+            nullptr, // grad_w2c not needed for now
             n_primitives,
             ctx.active_sh_bases,
             ctx.total_bases_sh_rest,

@@ -576,7 +576,7 @@ namespace lfs::training {
         //
         // // Fast path: modulation disabled: return base background_
         // if (!opt.bg_modulation) {
-            return background_;
+        return background_;
         // }
         //
         // const float w_mix = inv_weight_piecewise(iter, opt.iterations);
@@ -610,13 +610,13 @@ namespace lfs::training {
             //         return std::unexpected("Training on cameras with ortho model is not supported yet.");
             //     }
             // } else {
-                if (cam->radial_distortion().numel() != 0 ||
-                    cam->tangential_distortion().numel() != 0) {
-                    return std::unexpected("Distorted images detected.  You can use --gut option to train on cameras with distortion.");
-                }
-                if (cam->camera_model_type() != gsplat::CameraModelType::PINHOLE) {
-                    return std::unexpected("You must use --gut option to train on cameras with non-pinhole model.");
-                }
+            if (cam->radial_distortion().numel() != 0 ||
+                cam->tangential_distortion().numel() != 0) {
+                return std::unexpected("Distorted images detected.  You can use --gut option to train on cameras with distortion.");
+            }
+            if (cam->camera_model_type() != gsplat::CameraModelType::PINHOLE) {
+                return std::unexpected("You must use --gut option to train on cameras with non-pinhole model.");
+            }
             // }
 
             current_iteration_ = iter;
@@ -681,10 +681,10 @@ namespace lfs::training {
             // Use the render mode from parameters (FastGS backend only for now)
             // TODO: Port 3DGUT rasterizer to LibTorch-free implementation
             // if (!params_.optimization.gut) {
-                // FastGS backend
-                auto [output, ctx] = fast_rasterize_forward(*cam, strategy_->get_model(), bg);
-                r_output = output;
-                fast_raster_ctx = std::move(ctx);
+            // FastGS backend
+            auto [output, ctx] = fast_rasterize_forward(*cam, strategy_->get_model(), bg);
+            r_output = output;
+            fast_raster_ctx = std::move(ctx);
             // } else:
             //     // GUT backend: Use manual rasterizer (no autograd)
             //     auto [output, ctx] = rasterize_forward(*cam, strategy_->get_model(), bg,
@@ -905,7 +905,7 @@ namespace lfs::training {
                             //     rendered_timelapse_output = rasterize(*cam_to_use, strategy_->get_model(), bg, 1.0f, false,
                             //                                          false, RenderMode::RGB, nullptr);
                             // } else {
-                                rendered_timelapse_output = fast_rasterize(*cam_to_use, strategy_->get_model(), background_);
+                            rendered_timelapse_output = fast_rasterize(*cam_to_use, strategy_->get_model(), background_);
                             // }
 
                             // Get folder name to save in by stripping file extension
@@ -915,7 +915,7 @@ namespace lfs::training {
                             std::filesystem::create_directories(output_path);
 
                             lfs::core::image_io::save_image_async(output_path / std::format("{:06d}.jpg", iter),
-                                                                   rendered_timelapse_output.image);
+                                                                  rendered_timelapse_output.image);
                         } else {
                             LOG_WARN("Timelapse image '{}' not found in dataset.", img_name);
                         }

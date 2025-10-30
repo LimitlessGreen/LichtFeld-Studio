@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #pragma once
-#include <torch/torch.h>
 #include "kernels/bilateral_grid.cuh"
+#include <torch/torch.h>
 
 namespace gs::training {
 

@@ -14,7 +14,7 @@ namespace lfs::training {
     struct FastRasterizeContext {
         lfs::core::Tensor image;
         lfs::core::Tensor alpha;
-        lfs::core::Tensor bg_color;  // Saved for alpha gradient computation
+        lfs::core::Tensor bg_color; // Saved for alpha gradient computation
 
         // Gaussian parameters (saved to avoid re-fetching in backward)
         lfs::core::Tensor means;

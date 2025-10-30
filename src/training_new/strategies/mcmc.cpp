@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "mcmc.hpp"
+#include "core_new/logger.hpp"
 #include "kernels/mcmc_kernels.hpp"
 #include "strategy_utils.hpp"
-#include "core_new/logger.hpp"
 #include <cmath>
 
 namespace lfs::training {
@@ -29,8 +29,7 @@ namespace lfs::training {
         _optimizer->relocate_params_at_indices_gpu(
             param_type,
             sampled_indices.ptr<int64_t>(),
-            sampled_indices.numel()
-        );
+            sampled_indices.numel());
     }
 
     int MCMC::relocate_gs() {
@@ -90,8 +89,7 @@ namespace lfs::training {
             n_max,
             new_opacities.ptr<float>(),
             new_scales.ptr<float>(),
-            sampled_opacities.numel()
-        );
+            sampled_opacities.numel());
 
         // Clamp new opacities
         new_opacities = new_opacities.clamp(_params->min_opacity, 1.0f - 1e-7f);
@@ -178,8 +176,7 @@ namespace lfs::training {
             n_max,
             new_opacities.ptr<float>(),
             new_scales.ptr<float>(),
-            sampled_opacities.numel()
-        );
+            sampled_opacities.numel());
 
         // Clamp new opacities
         new_opacities = new_opacities.clamp(_params->min_opacity, 1.0f - 1e-7f);
@@ -231,8 +228,7 @@ namespace lfs::training {
             noise.ptr<float>(),
             _splat_data.means().ptr<float>(),
             current_lr,
-            _splat_data.size()
-        );
+            _splat_data.size());
     }
 
     void MCMC::post_backward(int iter, RenderOutput& render_output) {
@@ -253,7 +249,7 @@ namespace lfs::training {
             int n_added = add_new_gs();
             if (n_added > 0) {
                 LOG_DEBUG("MCMC: Added {} new Gaussians at iteration {} (total: {})",
-                         n_added, iter, _splat_data.size());
+                          n_added, iter, _splat_data.size());
             }
         }
 

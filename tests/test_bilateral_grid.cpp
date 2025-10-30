@@ -1,98 +1,98 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <gtest/gtest.h>
-#include <torch/torch.h>
-#include <cuda_runtime.h>
 #include <chrono>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
 #include <iomanip>
+#include <torch/torch.h>
 
 // LibTorch-free implementation
-#include "training_new/components/bilateral_grid.hpp"
 #include "core_new/tensor.hpp"
+#include "training_new/components/bilateral_grid.hpp"
 
 // Reference LibTorch implementation
 #include "training/components/bilateral_grid.hpp"
 
 namespace {
 
-// Helper to convert lfs::core::Tensor to torch::Tensor
-torch::Tensor to_torch(const lfs::core::Tensor& lfs_tensor) {
-    auto vec = lfs_tensor.cpu().to_vector();
-    std::vector<int64_t> torch_shape;
-    for (size_t i = 0; i < lfs_tensor.ndim(); i++) {
-        torch_shape.push_back(lfs_tensor.shape()[i]);
-    }
-    auto torch_t = torch::from_blob(vec.data(), torch_shape, torch::TensorOptions().dtype(torch::kFloat32)).clone();
-    return lfs_tensor.device() == lfs::core::Device::CUDA ? torch_t.to(torch::kCUDA) : torch_t;
-}
-
-// Helper to convert torch::Tensor to lfs::core::Tensor
-lfs::core::Tensor from_torch(const torch::Tensor& torch_tensor) {
-    auto cpu_t = torch_tensor.cpu().contiguous();
-    std::vector<float> vec(cpu_t.data_ptr<float>(),
-                           cpu_t.data_ptr<float>() + cpu_t.numel());
-
-    std::vector<size_t> shape;
-    for (int i = 0; i < cpu_t.dim(); i++) {
-        shape.push_back(cpu_t.size(i));
+    // Helper to convert lfs::core::Tensor to torch::Tensor
+    torch::Tensor to_torch(const lfs::core::Tensor& lfs_tensor) {
+        auto vec = lfs_tensor.cpu().to_vector();
+        std::vector<int64_t> torch_shape;
+        for (size_t i = 0; i < lfs_tensor.ndim(); i++) {
+            torch_shape.push_back(lfs_tensor.shape()[i]);
+        }
+        auto torch_t = torch::from_blob(vec.data(), torch_shape, torch::TensorOptions().dtype(torch::kFloat32)).clone();
+        return lfs_tensor.device() == lfs::core::Device::CUDA ? torch_t.to(torch::kCUDA) : torch_t;
     }
 
-    auto device = torch_tensor.is_cuda() ? lfs::core::Device::CUDA : lfs::core::Device::CPU;
-    return lfs::core::Tensor::from_vector(vec, lfs::core::TensorShape(shape), device);
-}
+    // Helper to convert torch::Tensor to lfs::core::Tensor
+    lfs::core::Tensor from_torch(const torch::Tensor& torch_tensor) {
+        auto cpu_t = torch_tensor.cpu().contiguous();
+        std::vector<float> vec(cpu_t.data_ptr<float>(),
+                               cpu_t.data_ptr<float>() + cpu_t.numel());
 
-// Compare floats with tolerance
-bool float_close(float a, float b, float rtol = 1e-4f, float atol = 1e-5f) {
-    float diff = std::abs(a - b);
-    float threshold = atol + rtol * std::abs(b);
-    return diff <= threshold;
-}
+        std::vector<size_t> shape;
+        for (int i = 0; i < cpu_t.dim(); i++) {
+            shape.push_back(cpu_t.size(i));
+        }
 
-// Compare tensors with tolerance
-bool tensors_close(const lfs::core::Tensor& lfs_tensor, const torch::Tensor& torch_tensor,
-                   float rtol = 1e-4f, float atol = 1e-5f) {
-    if (lfs_tensor.numel() != torch_tensor.numel()) {
-        std::cerr << "Size mismatch: " << lfs_tensor.numel() << " vs " << torch_tensor.numel() << std::endl;
-        return false;
+        auto device = torch_tensor.is_cuda() ? lfs::core::Device::CUDA : lfs::core::Device::CPU;
+        return lfs::core::Tensor::from_vector(vec, lfs::core::TensorShape(shape), device);
     }
 
-    auto lfs_vec = lfs_tensor.cpu().to_vector();
-    auto torch_cpu = torch_tensor.cpu().contiguous();
-    auto torch_ptr = torch_cpu.data_ptr<float>();
+    // Compare floats with tolerance
+    bool float_close(float a, float b, float rtol = 1e-4f, float atol = 1e-5f) {
+        float diff = std::abs(a - b);
+        float threshold = atol + rtol * std::abs(b);
+        return diff <= threshold;
+    }
 
-    size_t mismatch_count = 0;
-    float max_diff = 0.0f;
-    for (size_t i = 0; i < lfs_vec.size(); i++) {
-        float diff = std::abs(lfs_vec[i] - torch_ptr[i]);
-        max_diff = std::max(max_diff, diff);
-        if (!float_close(lfs_vec[i], torch_ptr[i], rtol, atol)) {
-            mismatch_count++;
-            if (mismatch_count <= 5) {  // Print first 5 mismatches
-                std::cerr << "Mismatch at idx " << i << ": " << lfs_vec[i]
-                         << " vs " << torch_ptr[i] << " (diff=" << diff << ")" << std::endl;
+    // Compare tensors with tolerance
+    bool tensors_close(const lfs::core::Tensor& lfs_tensor, const torch::Tensor& torch_tensor,
+                       float rtol = 1e-4f, float atol = 1e-5f) {
+        if (lfs_tensor.numel() != torch_tensor.numel()) {
+            std::cerr << "Size mismatch: " << lfs_tensor.numel() << " vs " << torch_tensor.numel() << std::endl;
+            return false;
+        }
+
+        auto lfs_vec = lfs_tensor.cpu().to_vector();
+        auto torch_cpu = torch_tensor.cpu().contiguous();
+        auto torch_ptr = torch_cpu.data_ptr<float>();
+
+        size_t mismatch_count = 0;
+        float max_diff = 0.0f;
+        for (size_t i = 0; i < lfs_vec.size(); i++) {
+            float diff = std::abs(lfs_vec[i] - torch_ptr[i]);
+            max_diff = std::max(max_diff, diff);
+            if (!float_close(lfs_vec[i], torch_ptr[i], rtol, atol)) {
+                mismatch_count++;
+                if (mismatch_count <= 5) { // Print first 5 mismatches
+                    std::cerr << "Mismatch at idx " << i << ": " << lfs_vec[i]
+                              << " vs " << torch_ptr[i] << " (diff=" << diff << ")" << std::endl;
+                }
             }
         }
+
+        if (mismatch_count > 0) {
+            std::cerr << "Total mismatches: " << mismatch_count << " / " << lfs_vec.size()
+                      << " (max_diff=" << max_diff << ")" << std::endl;
+        }
+        return mismatch_count == 0;
     }
 
-    if (mismatch_count > 0) {
-        std::cerr << "Total mismatches: " << mismatch_count << " / " << lfs_vec.size()
-                  << " (max_diff=" << max_diff << ")" << std::endl;
+    // Copy grids from reference to new implementation for fair comparison
+    void copy_grids(lfs::training::BilateralGrid& new_grid, gs::training::BilateralGrid& ref_grid) {
+        auto ref_params = ref_grid.parameters();
+        auto new_params_tensor = from_torch(ref_params);
+
+        // Copy data directly
+        cudaMemcpy(new_grid.parameters().ptr<float>(),
+                   new_params_tensor.ptr<float>(),
+                   new_params_tensor.numel() * sizeof(float),
+                   cudaMemcpyDeviceToDevice);
     }
-    return mismatch_count == 0;
-}
-
-// Copy grids from reference to new implementation for fair comparison
-void copy_grids(lfs::training::BilateralGrid& new_grid, gs::training::BilateralGrid& ref_grid) {
-    auto ref_params = ref_grid.parameters();
-    auto new_params_tensor = from_torch(ref_params);
-
-    // Copy data directly
-    cudaMemcpy(new_grid.parameters().ptr<float>(),
-               new_params_tensor.ptr<float>(),
-               new_params_tensor.numel() * sizeof(float),
-               cudaMemcpyDeviceToDevice);
-}
 
 } // namespace
 
@@ -365,7 +365,7 @@ TEST_F(BilateralGridTest, DISABLED_Benchmark_Forward_LargeDataset_2K) {
     // Realistic: 2000 images at 800x800 (typical training scenario)
     const int num_images = 2000;
     const int H = 800, W = 800;
-    const int num_iterations = 50;  // Process 50 random images
+    const int num_iterations = 50; // Process 50 random images
 
     std::cout << "\n=== Large Dataset Benchmark (2000 images, 800x800) ===" << std::endl;
     std::cout << "Initializing grids..." << std::flush;

@@ -11,9 +11,9 @@ namespace lfs::training {
     // Context for manual bilateral grid slice forward/backward
     // Optimized: store only minimal data (no tensor copies, no refcount overhead)
     struct BilateralGridSliceContext {
-        const float* rgb_ptr;    // Pointer to RGB data [H, W, 3]
-        int h, w;                // Image dimensions
-        int image_idx;           // Image index for gradient accumulation
+        const float* rgb_ptr; // Pointer to RGB data [H, W, 3]
+        int h, w;             // Image dimensions
+        int image_idx;        // Image index for gradient accumulation
     };
 
     // Context for manual TV loss forward/backward
@@ -101,8 +101,8 @@ namespace lfs::training {
         int num_images() const { return num_images_; }
 
     private:
-        lfs::core::Tensor grids_;      // [N, 12, L, H, W] - grid parameters
-        lfs::core::Tensor grids_grad_; // [N, 12, L, H, W] - accumulated gradients
+        lfs::core::Tensor grids_;          // [N, 12, L, H, W] - grid parameters
+        lfs::core::Tensor grids_grad_;     // [N, 12, L, H, W] - accumulated gradients
         lfs::core::Tensor tv_temp_buffer_; // Temporary buffer for TV loss reduction
 
         int num_images_;

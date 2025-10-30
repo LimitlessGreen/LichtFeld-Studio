@@ -189,7 +189,7 @@ namespace lfs::core {
                               allocator_(nullptr) {
             // Default: ~4GB arena (OffsetAllocator uint32 limit), support 128K allocations
             // Must be < 4GB due to OffsetAllocator's uint32 size limit
-            initialize((4ULL << 30) - (16 << 20), 128 * 1024);  // 4GB - 16MB
+            initialize((4ULL << 30) - (16 << 20), 128 * 1024); // 4GB - 16MB
         }
 
         ~GPUArenaAllocator() {
@@ -250,7 +250,7 @@ namespace lfs::core {
 
         void* gpu_base_;                                                     // Pre-allocated GPU buffer
         size_t arena_size_;                                                  // Total size in bytes
-        std::unique_ptr<OffsetAllocator::Allocator> allocator_;             // OffsetAllocator instance
+        std::unique_ptr<OffsetAllocator::Allocator> allocator_;              // OffsetAllocator instance
         std::unordered_map<void*, OffsetAllocator::Allocation> allocations_; // Track allocations
         mutable std::mutex mutex_;                                           // Thread safety
     };

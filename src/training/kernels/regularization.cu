@@ -18,11 +18,11 @@ namespace gs {
          * This is much more efficient than separate exp() and gradient operations
          */
         __global__ void exp_l1_regularization_kernel(
-            const float* __restrict__ params,      // Input: raw parameters
-            float* __restrict__ param_grads,       // Output: accumulated gradients
-            float* __restrict__ block_sums,        // Output: partial sums
+            const float* __restrict__ params, // Input: raw parameters
+            float* __restrict__ param_grads,  // Output: accumulated gradients
+            float* __restrict__ block_sums,   // Output: partial sums
             const int n,
-            const float grad_scale) {               // weight / n
+            const float grad_scale) { // weight / n
 
             // CUB block reduction
             typedef cub::BlockReduce<float, 256> BlockReduce;
@@ -36,7 +36,7 @@ namespace gs {
             // Grid-stride loop
             for (int i = tid; i < n; i += stride) {
                 const float x = params[i];
-                const float exp_x = expf(x);  // exp(scaling_raw)
+                const float exp_x = expf(x); // exp(scaling_raw)
 
                 // Accumulate to loss sum
                 local_sum += exp_x;
@@ -99,7 +99,7 @@ namespace gs {
             TORCH_CHECK(scaling_raw.dim() == 2, "scaling_raw must be 2D [N, 3], got ", scaling_raw.dim(), "D");
             TORCH_CHECK(scaling_raw.size(1) == 3, "scaling_raw must have 3 columns, got ", scaling_raw.size(1));
 
-            const int n = scaling_raw.numel();  // Total elements N * 3
+            const int n = scaling_raw.numel(); // Total elements N * 3
             if (n == 0) {
                 return 0.0f;
             }
@@ -118,14 +118,14 @@ namespace gs {
 
             // Allocate temporary storage for block sums
             auto block_sums = torch::empty({blocks}, torch::TensorOptions()
-                .dtype(torch::kFloat32)
-                .device(scaling_raw.device()));
+                                                         .dtype(torch::kFloat32)
+                                                         .device(scaling_raw.device()));
             float* block_sums_ptr = block_sums.data_ptr<float>();
 
             // Allocate output for loss value
             auto loss_tensor = torch::empty({1}, torch::TensorOptions()
-                .dtype(torch::kFloat32)
-                .device(scaling_raw.device()));
+                                                     .dtype(torch::kFloat32)
+                                                     .device(scaling_raw.device()));
             float* loss_ptr = loss_tensor.data_ptr<float>();
 
             // Launch first kernel: compute exp, accumulate gradients, and partial sums
@@ -140,7 +140,7 @@ namespace gs {
             // Check for errors
             cudaError_t err = cudaGetLastError();
             TORCH_CHECK(err == cudaSuccess, "exp_l1_regularization_kernel launch failed: ",
-                       cudaGetErrorString(err));
+                        cudaGetErrorString(err));
 
             // Launch second kernel: reduce block sums to scalar
             reduce_block_sums_kernel<<<1, threads>>>(
@@ -152,7 +152,7 @@ namespace gs {
 
             err = cudaGetLastError();
             TORCH_CHECK(err == cudaSuccess, "reduce_block_sums_kernel launch failed: ",
-                       cudaGetErrorString(err));
+                        cudaGetErrorString(err));
 
             // Copy result back to CPU
             float loss_value;
@@ -169,11 +169,11 @@ namespace gs {
          * Fused kernel: computes sigmoid(x), accumulates gradient, and sums for loss
          */
         __global__ void sigmoid_l1_regularization_kernel(
-            const float* __restrict__ params,      // Input: raw parameters [N, 1]
-            float* __restrict__ param_grads,       // Output: accumulated gradients [N, 1]
-            float* __restrict__ block_sums,        // Output: partial sums
+            const float* __restrict__ params, // Input: raw parameters [N, 1]
+            float* __restrict__ param_grads,  // Output: accumulated gradients [N, 1]
+            float* __restrict__ block_sums,   // Output: partial sums
             const int n,
-            const float grad_scale) {               // weight / n
+            const float grad_scale) { // weight / n
 
             // CUB block reduction
             typedef cub::BlockReduce<float, 256> BlockReduce;
@@ -187,7 +187,7 @@ namespace gs {
             // Grid-stride loop
             for (int i = tid; i < n; i += stride) {
                 const float x = params[i];
-                const float sigmoid_x = 1.0f / (1.0f + expf(-x));  // sigmoid(opacity_raw)
+                const float sigmoid_x = 1.0f / (1.0f + expf(-x)); // sigmoid(opacity_raw)
 
                 // Accumulate to loss sum
                 local_sum += sigmoid_x;
@@ -242,14 +242,14 @@ namespace gs {
 
             // Allocate temporary storage for block sums
             auto block_sums = torch::empty({blocks}, torch::TensorOptions()
-                .dtype(torch::kFloat32)
-                .device(opacity_raw.device()));
+                                                         .dtype(torch::kFloat32)
+                                                         .device(opacity_raw.device()));
             float* block_sums_ptr = block_sums.data_ptr<float>();
 
             // Allocate output for loss value
             auto loss_tensor = torch::empty({1}, torch::TensorOptions()
-                .dtype(torch::kFloat32)
-                .device(opacity_raw.device()));
+                                                     .dtype(torch::kFloat32)
+                                                     .device(opacity_raw.device()));
             float* loss_ptr = loss_tensor.data_ptr<float>();
 
             // Launch first kernel: compute sigmoid, accumulate gradients, and partial sums
@@ -264,7 +264,7 @@ namespace gs {
             // Check for errors
             cudaError_t err = cudaGetLastError();
             TORCH_CHECK(err == cudaSuccess, "sigmoid_l1_regularization_kernel launch failed: ",
-                       cudaGetErrorString(err));
+                        cudaGetErrorString(err));
 
             // Launch second kernel: reduce block sums to scalar
             reduce_block_sums_kernel<<<1, threads>>>(
@@ -276,7 +276,7 @@ namespace gs {
 
             err = cudaGetLastError();
             TORCH_CHECK(err == cudaSuccess, "reduce_block_sums_kernel launch failed: ",
-                       cudaGetErrorString(err));
+                        cudaGetErrorString(err));
 
             // Copy result back to CPU
             float loss_value;

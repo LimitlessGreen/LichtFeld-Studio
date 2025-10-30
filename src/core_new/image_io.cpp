@@ -7,9 +7,9 @@
 #include <OpenImageIO/imagebufalgo.h>
 #include <OpenImageIO/imageio.h>
 
+#include "core_new/logger.hpp"
 #include <algorithm>
 #include <condition_variable>
-#include "core_new/logger.hpp"
 #include <filesystem>
 #include <iostream>
 #include <memory>

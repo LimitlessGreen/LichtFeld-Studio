@@ -48,7 +48,7 @@ namespace lfs::core {
             tensor_ops::launch_cdist(ptr<float>(), other_same_device.ptr<float>(),
                                      result.ptr<float>(), N, M, D, p, 0);
             // No sync - returns tensor
-        } else{
+        } else {
             const float* a_data = ptr<float>();
             const float* b_data = other_same_device.ptr<float>();
             float* out_data = result.ptr<float>();

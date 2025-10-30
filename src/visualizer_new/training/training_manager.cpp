@@ -5,8 +5,8 @@
 #include "training/training_manager.hpp"
 #include "core_new/logger.hpp"
 #include "training_new/training_setup.hpp"
-#include <cuda_runtime.h>
 #include <cstring>
+#include <cuda_runtime.h>
 #include <stdexcept>
 
 namespace lfs::vis {

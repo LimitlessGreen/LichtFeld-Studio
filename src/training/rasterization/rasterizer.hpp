@@ -4,10 +4,10 @@
 
 #pragma once
 
+#include "Ops.h"
 #include "core/camera.hpp"
 #include "core/splat_data.hpp"
 #include "geometry/bounding_box.hpp"
-#include "Ops.h"
 #include <torch/torch.h>
 
 namespace gs::training {
@@ -86,7 +86,7 @@ namespace gs::training {
         std::optional<torch::Tensor> tangential_dist;
 
         // Forward outputs (for gsplat backward)
-        torch::Tensor rendered_image;  // Save for clamp backward
+        torch::Tensor rendered_image; // Save for clamp backward
         torch::Tensor rendered_alpha;
         torch::Tensor last_ids;
         torch::Tensor tile_offsets;

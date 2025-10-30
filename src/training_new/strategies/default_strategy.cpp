@@ -6,9 +6,9 @@
 #include "Ops.h"
 #include "core_new/logger.hpp"
 #include "core_new/parameters.hpp"
+#include "kernels/densification_kernels.hpp"
 #include "optimizer/render_output.hpp"
 #include "strategy_utils.hpp"
-#include "kernels/densification_kernels.hpp"
 
 namespace lfs::training {
     DefaultStrategy::DefaultStrategy(lfs::core::SplatData&& splat_data)
@@ -56,7 +56,7 @@ namespace lfs::training {
         const int num_selected = sampled_idxs.shape()[0];
 
         if (num_selected == 0) {
-            return;  // Nothing to duplicate
+            return; // Nothing to duplicate
         }
 
         // Use optimized index_select + cat (same as OLD LibTorch approach, proven faster than custom kernel)
@@ -121,7 +121,7 @@ namespace lfs::training {
         const int num_keep = keep_idxs.shape()[0];
 
         if (num_split == 0) {
-            return;  // Nothing to split
+            return; // Nothing to split
         }
 
         constexpr int split_size = 2;
@@ -165,7 +165,7 @@ namespace lfs::training {
             num_keep,
             shN_dim,
             _params->revised_opacity,
-            nullptr  // default stream
+            nullptr // default stream
         );
 
         // Update SplatData with new tensors (already contiguous from kernel!)
@@ -255,8 +255,8 @@ namespace lfs::training {
         };
 
         const auto optimizer_fn = [&sampled_idxs](
-            AdamParamState& state,
-            const lfs::core::Tensor& new_param) {
+                                      AdamParamState& state,
+                                      const lfs::core::Tensor& new_param) {
             // For remove, we select only the surviving Gaussians' optimizer state
             state.exp_avg = state.exp_avg.index_select(0, sampled_idxs);
             state.exp_avg_sq = state.exp_avg_sq.index_select(0, sampled_idxs);

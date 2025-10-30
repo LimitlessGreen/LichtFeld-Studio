@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "trainer.hpp"
-#include "loader/filesystem_utils.hpp"
 #include "components/bilateral_grid.hpp"
 #include "components/poseopt.hpp"
 #include "components/sparsity_optimizer.hpp"
@@ -12,9 +11,10 @@
 #include "kernels/fused_ssim.cuh"
 #include "kernels/regularization.cuh"
 #include "loader/cache_image_loader.hpp"
+#include "loader/filesystem_utils.hpp"
+#include "losses/losses.hpp"
 #include "rasterization/fast_rasterizer.hpp"
 #include "rasterization/rasterizer.hpp"
-#include "losses/losses.hpp"
 
 #include <ATen/cuda/CUDAEvent.h>
 #include <atomic>
@@ -196,8 +196,7 @@ namespace gs::training {
         // Delegate to loss struct
         lfs::training::losses::SparsityLoss::Params params{
             .current_iteration = iter,
-            .optimizer_ptr = sparsity_optimizer_.get()
-        };
+            .optimizer_ptr = sparsity_optimizer_.get()};
         return lfs::training::losses::SparsityLoss::forward(splatData, params);
     }
 
@@ -881,7 +880,7 @@ namespace gs::training {
                             RenderOutput rendered_timelapse_output;
                             if (params_.optimization.gut) {
                                 rendered_timelapse_output = rasterize(*cam_to_use, strategy_->get_model(), bg, 1.0f, false,
-                                                                     false, RenderMode::RGB, nullptr);
+                                                                      false, RenderMode::RGB, nullptr);
                             } else {
                                 rendered_timelapse_output = fast_rasterize(*cam_to_use, strategy_->get_model(), background_);
                             }

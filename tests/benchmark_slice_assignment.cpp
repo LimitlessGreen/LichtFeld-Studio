@@ -4,15 +4,15 @@
  * and LibTorch, using identical data and operations.
  */
 
-#include "core_new/tensor.hpp"
 #include "core_new/logger.hpp"
-#include <gtest/gtest.h>
-#include <torch/torch.h>
+#include "core_new/tensor.hpp"
 #include <chrono>
+#include <gtest/gtest.h>
 #include <iomanip>
+#include <torch/torch.h>
 
-using lfs::core::Tensor;
 using lfs::core::Device;
+using lfs::core::Tensor;
 
 class SliceAssignmentBenchmark : public ::testing::Test {
 protected:
@@ -24,7 +24,7 @@ protected:
     }
 
     // Helper to measure time in microseconds
-    template<typename Func>
+    template <typename Func>
     double measure_time_us(Func&& func, int iterations = 100) {
         // Warm up
         func();
@@ -42,12 +42,13 @@ protected:
     }
 
     void print_comparison(const std::string& test_name, double lfs_time_us, double torch_time_us,
-                         size_t data_size_mb) {
+                          size_t data_size_mb) {
         double speedup = torch_time_us / lfs_time_us;
         double lfs_bandwidth = (data_size_mb / (lfs_time_us / 1e6));
         double torch_bandwidth = (data_size_mb / (torch_time_us / 1e6));
 
-        std::cout << "\n" << test_name << "\n";
+        std::cout << "\n"
+                  << test_name << "\n";
         std::cout << "  LFS Tensor:  " << std::fixed << std::setprecision(2)
                   << lfs_time_us << " μs  (" << lfs_bandwidth << " MB/s)\n";
         std::cout << "  LibTorch:    " << torch_time_us << " μs  ("
@@ -130,7 +131,8 @@ TEST_F(SliceAssignmentBenchmark, SmallTensor_MultipleSequential) {
         for (size_t i = 0; i < 10; ++i) {
             lfs_dst.slice(0, i * slice_size, (i + 1) * slice_size) = lfs_src;
         }
-    }, 10); // Fewer iterations since each run does 10 operations
+    },
+                                    10); // Fewer iterations since each run does 10 operations
 
     // LibTorch
     auto torch_dst = torch::zeros({N, 3}, torch::TensorOptions().device(torch::kCUDA));
@@ -140,7 +142,8 @@ TEST_F(SliceAssignmentBenchmark, SmallTensor_MultipleSequential) {
         for (size_t i = 0; i < 10; ++i) {
             torch_dst.slice(0, i * slice_size, (i + 1) * slice_size) = torch_src;
         }
-    }, 10);
+    },
+                                      10);
 
     print_comparison("Small Tensor Multiple Sequential (10x)", lfs_time, torch_time, data_mb);
 }
@@ -212,7 +215,8 @@ TEST_F(SliceAssignmentBenchmark, LargeTensor_1M) {
 
     auto lfs_time = measure_time_us([&]() {
         lfs_dst.slice(0, 0, slice_size) = lfs_src;
-    }, 50); // Fewer iterations for large tensors
+    },
+                                    50); // Fewer iterations for large tensors
 
     // LibTorch
     auto torch_dst = torch::zeros({N, 3}, torch::TensorOptions().device(torch::kCUDA));
@@ -220,7 +224,8 @@ TEST_F(SliceAssignmentBenchmark, LargeTensor_1M) {
 
     auto torch_time = measure_time_us([&]() {
         torch_dst.slice(0, 0, slice_size) = torch_src;
-    }, 50);
+    },
+                                      50);
 
     print_comparison("Large Tensor (1M elements, 100K slice)", lfs_time, torch_time, data_mb);
 }
@@ -236,7 +241,8 @@ TEST_F(SliceAssignmentBenchmark, LargeTensor_10M) {
 
     auto lfs_time = measure_time_us([&]() {
         lfs_dst.slice(0, 0, slice_size) = lfs_src;
-    }, 20);
+    },
+                                    20);
 
     // LibTorch
     auto torch_dst = torch::zeros({N, 3}, torch::TensorOptions().device(torch::kCUDA));
@@ -244,7 +250,8 @@ TEST_F(SliceAssignmentBenchmark, LargeTensor_10M) {
 
     auto torch_time = measure_time_us([&]() {
         torch_dst.slice(0, 0, slice_size) = torch_src;
-    }, 20);
+    },
+                                      20);
 
     print_comparison("Large Tensor (10M elements, 1M slice)", lfs_time, torch_time, data_mb);
 }
@@ -260,7 +267,8 @@ TEST_F(SliceAssignmentBenchmark, LargeTensor_HalfAssignment) {
 
     auto lfs_time = measure_time_us([&]() {
         lfs_dst.slice(0, 0, slice_size) = lfs_src;
-    }, 20);
+    },
+                                    20);
 
     // LibTorch
     auto torch_dst = torch::zeros({N, 3}, torch::TensorOptions().device(torch::kCUDA));
@@ -268,7 +276,8 @@ TEST_F(SliceAssignmentBenchmark, LargeTensor_HalfAssignment) {
 
     auto torch_time = measure_time_us([&]() {
         torch_dst.slice(0, 0, slice_size) = torch_src;
-    }, 20);
+    },
+                                      20);
 
     print_comparison("Large Tensor Half Assignment (10M -> 5M)", lfs_time, torch_time, data_mb);
 }
@@ -289,7 +298,8 @@ TEST_F(SliceAssignmentBenchmark, Tensor3D_GaussianSplatScenario) {
 
     auto lfs_time = measure_time_us([&]() {
         lfs_dst.slice(0, 0, slice_size) = lfs_src;
-    }, 50);
+    },
+                                    50);
 
     // LibTorch
     auto torch_dst = torch::zeros({N, 1, 3}, torch::TensorOptions().device(torch::kCUDA));
@@ -297,7 +307,8 @@ TEST_F(SliceAssignmentBenchmark, Tensor3D_GaussianSplatScenario) {
 
     auto torch_time = measure_time_us([&]() {
         torch_dst.slice(0, 0, slice_size) = torch_src;
-    }, 50);
+    },
+                                      50);
 
     print_comparison("3D Tensor Gaussian Splat sh0 (1M x 1 x 3)", lfs_time, torch_time, data_mb);
 }
@@ -314,7 +325,8 @@ TEST_F(SliceAssignmentBenchmark, Tensor3D_HighDimSH) {
 
     auto lfs_time = measure_time_us([&]() {
         lfs_dst.slice(0, 0, slice_size) = lfs_src;
-    }, 30);
+    },
+                                    30);
 
     // LibTorch
     auto torch_dst = torch::zeros({N, 15, 3}, torch::TensorOptions().device(torch::kCUDA));
@@ -322,7 +334,8 @@ TEST_F(SliceAssignmentBenchmark, Tensor3D_HighDimSH) {
 
     auto torch_time = measure_time_us([&]() {
         torch_dst.slice(0, 0, slice_size) = torch_src;
-    }, 30);
+    },
+                                      30);
 
     print_comparison("3D Tensor High-Dim SH (1M x 15 x 3)", lfs_time, torch_time, data_mb);
 }
@@ -372,7 +385,8 @@ TEST_F(SliceAssignmentBenchmark, WorstCase_TinySlices) {
         for (size_t i = 0; i < num_ops; ++i) {
             lfs_dst.slice(0, i * slice_size, (i + 1) * slice_size) = lfs_src;
         }
-    }, 5);
+    },
+                                    5);
 
     // LibTorch
     auto torch_dst = torch::zeros({N, 3}, torch::TensorOptions().device(torch::kCUDA));
@@ -382,7 +396,8 @@ TEST_F(SliceAssignmentBenchmark, WorstCase_TinySlices) {
         for (size_t i = 0; i < num_ops; ++i) {
             torch_dst.slice(0, i * slice_size, (i + 1) * slice_size) = torch_src;
         }
-    }, 5);
+    },
+                                      5);
 
     print_comparison("Worst Case: Tiny Slices (100 x 10 elements)", lfs_time, torch_time, data_mb);
 }
@@ -404,7 +419,8 @@ TEST_F(SliceAssignmentBenchmark, WorstCase_HighlyFragmented) {
             size_t offset = i * stride;
             lfs_dst.slice(0, offset, offset + slice_size) = lfs_src;
         }
-    }, 20);
+    },
+                                    20);
 
     // LibTorch
     auto torch_dst = torch::zeros({N, 3}, torch::TensorOptions().device(torch::kCUDA));
@@ -415,7 +431,8 @@ TEST_F(SliceAssignmentBenchmark, WorstCase_HighlyFragmented) {
             size_t offset = i * stride;
             torch_dst.slice(0, offset, offset + slice_size) = torch_src;
         }
-    }, 20);
+    },
+                                      20);
 
     print_comparison("Worst Case: Fragmented Access (10 x 1K, stride 10K)", lfs_time, torch_time, data_mb);
 }

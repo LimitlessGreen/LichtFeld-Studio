@@ -749,7 +749,7 @@ namespace lfs::core::tensor_ops {
         auto indices_ptr = thrust::device_pointer_cast(indices);
         auto counting = thrust::counting_iterator<int64_t>(0);
         auto end_it = thrust::copy_if(thrust::cuda::par.on(stream), counting, counting + n, data_ptr,
-                        indices_ptr, ops::nonzero_predicate<float>());
+                                      indices_ptr, ops::nonzero_predicate<float>());
         // Return actual count (fixes potential mismatch)
         return end_it - indices_ptr;
     }
@@ -761,7 +761,7 @@ namespace lfs::core::tensor_ops {
         auto indices_ptr = thrust::device_pointer_cast(indices);
         auto counting = thrust::counting_iterator<int64_t>(0);
         auto end_it = thrust::copy_if(thrust::cuda::par.on(stream), counting, counting + n, data_ptr,
-                        indices_ptr, ops::nonzero_bool_predicate());
+                                      indices_ptr, ops::nonzero_bool_predicate());
         // Return actual count (fixes potential mismatch)
         return end_it - indices_ptr;
     }

@@ -372,7 +372,7 @@ namespace lfs::core {
                                                    RandomGenerator::instance().get_next_cuda_seed(), 0);
 
                         tensor_ops::launch_convert_type<int, uint8_t>(temp_buffer, result.ptr<uint8_t>(),
-                                                                       result.numel(), 0);
+                                                                      result.numel(), 0);
                         // No sync - tensor operation
 
                         CudaMemoryPool::instance().deallocate(temp_buffer, nullptr);

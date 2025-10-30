@@ -924,12 +924,12 @@ namespace lfs::core {
                 // Get ACTUAL count from CUB (not Thrust which may differ!)
                 if (dtype_ == DataType::Bool) {
                     actual_count = tensor_ops::launch_nonzero_bool(ptr<unsigned char>(),
-                                                    reinterpret_cast<int64_t*>(temp.raw_ptr()),
-                                                    numel(), numel(), 0);
+                                                                   reinterpret_cast<int64_t*>(temp.raw_ptr()),
+                                                                   numel(), numel(), 0);
                 } else {
                     actual_count = tensor_ops::launch_nonzero(ptr<float>(),
-                                               reinterpret_cast<int64_t*>(temp.raw_ptr()),
-                                               numel(), numel(), 0);
+                                                              reinterpret_cast<int64_t*>(temp.raw_ptr()),
+                                                              numel(), numel(), 0);
                 }
 
                 // DEBUG: Check count mismatch

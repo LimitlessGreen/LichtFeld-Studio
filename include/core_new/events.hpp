@@ -23,11 +23,11 @@ namespace lfs::core {
         __VA_ARGS__                                        \
                                                            \
         void emit() const {                                \
-            ::lfs::core::event::bus().emit(*this);                \
+            ::lfs::core::event::bus().emit(*this);         \
         }                                                  \
                                                            \
         static auto when(auto&& handler) {                 \
-            return ::lfs::core::event::bus().when<Name>(          \
+            return ::lfs::core::event::bus().when<Name>(   \
                 std::forward<decltype(handler)>(handler)); \
         }                                                  \
     }
@@ -162,7 +162,7 @@ namespace lfs::core {
             EVENT(ConsoleResult, std::string command; std::string result;);
             EVENT(SplitPositionChanged, float position;);
             EVENT(GTComparisonModeChanged, bool enabled;); // NEW: GT comparison mode changed
-        } // namespace ui
+        }                                                  // namespace ui
 
         // ============================================================================
         // Internal - System coordination events (minimal)
@@ -172,7 +172,7 @@ namespace lfs::core {
             EVENT(TrainingReadyToStart, );
             EVENT(WindowFocusLost, );
         } // namespace internal
-    } // namespace events
+    }     // namespace events
 
     // ============================================================================
     // Convenience functions

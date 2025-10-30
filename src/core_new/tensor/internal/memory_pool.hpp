@@ -6,9 +6,9 @@
 #include "core_new/logger.hpp"
 #include "gpu_arena_allocator.hpp"
 #include <cuda_runtime.h>
-#include <unordered_map>
-#include <mutex>
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 
 namespace lfs::core {
 
@@ -17,7 +17,7 @@ namespace lfs::core {
     // Tensors ≥ 100MB use VMM or cudaMallocAsync (avoid arena fragmentation)
     static constexpr size_t ARENA_ALLOCATOR_THRESHOLD = 100 * 1024 * 1024; // 100MB
     static constexpr size_t VMM_ALLOCATOR_THRESHOLD = 100 * 1024 * 1024;   // 100MB - use VMM for ≥100MB (cuMemCreate overhead too high for smaller)
-    static constexpr size_t DIRECT_ALLOC_THRESHOLD = 1024 * 1024 * 1024;  // 1GB - bypass pool for very large allocations (fallback)
+    static constexpr size_t DIRECT_ALLOC_THRESHOLD = 1024 * 1024 * 1024;   // 1GB - bypass pool for very large allocations (fallback)
 
     /**
      * @brief Allocation method used for a pointer
@@ -31,9 +31,9 @@ namespace lfs::core {
      * Mixing these causes memory leaks!
      */
     enum class AllocMethod : uint8_t {
-        Arena,      // From GPUArenaAllocator
-        Async,      // From cudaMallocAsync (CUDA 12.8+)
-        Direct      // From cudaMalloc (large allocations, fallback)
+        Arena, // From GPUArenaAllocator
+        Async, // From cudaMallocAsync (CUDA 12.8+)
+        Direct // From cudaMalloc (large allocations, fallback)
     };
 
     /**
@@ -120,7 +120,7 @@ namespace lfs::core {
 
                     // CRITICAL: Free CUDA memory pool cache to release memory back to OS
                     // This releases memory from cudaMallocAsync pool that's cached but unused
-                    cudaDeviceSynchronize();  // Ensure all ops complete
+                    cudaDeviceSynchronize(); // Ensure all ops complete
 
 #if CUDART_VERSION >= 12080
                     // Trim the memory pool to release unused memory
@@ -128,7 +128,7 @@ namespace lfs::core {
                     cudaGetDevice(&device);
                     cudaMemPool_t pool;
                     cudaDeviceGetDefaultMemPool(&pool, device);
-                    cudaMemPoolTrimTo(pool, 0);  // Release all unused memory
+                    cudaMemPoolTrimTo(pool, 0); // Release all unused memory
                     printf("[POOL] Trimmed CUDA memory pool\n");
 #endif
 
@@ -177,7 +177,7 @@ namespace lfs::core {
                               bytes, cudaGetErrorString(err));
                     return nullptr;
                 }
-                method = AllocMethod::Direct;  // Fallback uses direct
+                method = AllocMethod::Direct; // Fallback uses direct
             }
 #else
             // Fallback to synchronous allocation (SLOW) for CUDA < 12.8
@@ -187,7 +187,7 @@ namespace lfs::core {
                           bytes, cudaGetErrorString(err));
                 return nullptr;
             }
-            method = AllocMethod::Direct;  // Old CUDA version uses direct
+            method = AllocMethod::Direct; // Old CUDA version uses direct
             LOG_WARN("Using cudaMalloc (CUDA < 12.8). Consider upgrading for 50-600× faster allocation");
 #endif
 
@@ -233,50 +233,50 @@ namespace lfs::core {
                     LOG_ERROR("Attempting to deallocate untracked pointer: {}", ptr);
                     LOG_ERROR("This likely means the pointer was allocated before tracking was added,");
                     LOG_ERROR("or there's a double-free bug. Attempting cudaFree as fallback.");
-                    cudaFree(ptr);  // Best-effort fallback
+                    cudaFree(ptr); // Best-effort fallback
                     return;
                 }
                 method = it->second;
-                allocation_map_.erase(it);  // Remove from tracking
+                allocation_map_.erase(it); // Remove from tracking
             }
 
             // CRITICAL: Use correct deallocation function based on allocation method!
             cudaError_t err;
             switch (method) {
-                case AllocMethod::Direct:
-                    // Direct cudaMalloc requires cudaFree (synchronous, returns to OS)
-                    err = cudaFree(ptr);
-                    if (err != cudaSuccess) {
-                        LOG_ERROR("cudaFree failed for Direct allocation: {}", cudaGetErrorString(err));
-                    }
-                    break;
+            case AllocMethod::Direct:
+                // Direct cudaMalloc requires cudaFree (synchronous, returns to OS)
+                err = cudaFree(ptr);
+                if (err != cudaSuccess) {
+                    LOG_ERROR("cudaFree failed for Direct allocation: {}", cudaGetErrorString(err));
+                }
+                break;
 
-                case AllocMethod::Async:
-                    // cudaMallocAsync requires cudaFreeAsync (returns to CUDA cache)
+            case AllocMethod::Async:
+                // cudaMallocAsync requires cudaFreeAsync (returns to CUDA cache)
 #if CUDART_VERSION >= 12080
-                    err = cudaFreeAsync(ptr, stream);
-                    if (err != cudaSuccess) {
-                        LOG_ERROR("cudaFreeAsync failed for Async allocation: {}", cudaGetErrorString(err));
-                    }
+                err = cudaFreeAsync(ptr, stream);
+                if (err != cudaSuccess) {
+                    LOG_ERROR("cudaFreeAsync failed for Async allocation: {}", cudaGetErrorString(err));
+                }
 #else
-                    // Shouldn't happen (Async not used on old CUDA), but fallback to cudaFree
-                    LOG_WARN("Unexpected Async allocation on CUDA < 12.8, using cudaFree");
-                    err = cudaFree(ptr);
-                    if (err != cudaSuccess) {
-                        LOG_ERROR("cudaFree failed: {}", cudaGetErrorString(err));
-                    }
+                // Shouldn't happen (Async not used on old CUDA), but fallback to cudaFree
+                LOG_WARN("Unexpected Async allocation on CUDA < 12.8, using cudaFree");
+                err = cudaFree(ptr);
+                if (err != cudaSuccess) {
+                    LOG_ERROR("cudaFree failed: {}", cudaGetErrorString(err));
+                }
 #endif
-                    break;
+                break;
 
-                case AllocMethod::Arena:
-                    // Should have been caught by owns_pointer check above
-                    LOG_ERROR("Arena allocation not caught by owns_pointer check!");
-                    GPUArenaAllocator::instance().deallocate(ptr);
-                    break;
+            case AllocMethod::Arena:
+                // Should have been caught by owns_pointer check above
+                LOG_ERROR("Arena allocation not caught by owns_pointer check!");
+                GPUArenaAllocator::instance().deallocate(ptr);
+                break;
 
-                default:
-                    LOG_ERROR("Unknown allocation method for pointer: {}", ptr);
-                    break;
+            default:
+                LOG_ERROR("Unknown allocation method for pointer: {}", ptr);
+                break;
             }
         }
 
@@ -388,7 +388,7 @@ namespace lfs::core {
          */
         void trim_cached_memory() {
 #if CUDART_VERSION >= 12080
-            cudaDeviceSynchronize();  // Ensure all operations complete
+            cudaDeviceSynchronize(); // Ensure all operations complete
 
             int device;
             cudaGetDevice(&device);
@@ -397,7 +397,7 @@ namespace lfs::core {
                 size_t before_free = 0, total = 0;
                 cudaMemGetInfo(&before_free, &total);
 
-                cudaMemPoolTrimTo(pool, 0);  // Release all unused cached memory
+                cudaMemPoolTrimTo(pool, 0); // Release all unused cached memory
 
                 size_t after_free = 0;
                 cudaMemGetInfo(&after_free, &total);

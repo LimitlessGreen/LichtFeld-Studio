@@ -4,92 +4,93 @@
 // Direct operation comparison: Compare individual operations between implementations
 // Focus on operations we can fully control without needing full rasterization
 
-#include "training_new/strategies/default_strategy.hpp"
-#include "training/strategies/default_strategy.hpp"
-#include "core_new/splat_data.hpp"
 #include "core/splat_data.hpp"
-#include "training_new/optimizer/render_output.hpp"
+#include "core_new/splat_data.hpp"
 #include "training/rasterization/rasterizer.hpp"
+#include "training/strategies/default_strategy.hpp"
+#include "training_new/optimizer/render_output.hpp"
+#include "training_new/strategies/default_strategy.hpp"
+#include <chrono>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
-#include <chrono>
 
 namespace {
 
-// Helper to convert torch to lfs tensor
-lfs::core::Tensor from_torch(const torch::Tensor& t) {
-    auto cpu_t = t.cpu().contiguous();
-    std::vector<size_t> shape;
-    for (int64_t i = 0; i < cpu_t.dim(); ++i) {
-        shape.push_back(cpu_t.size(i));
+    // Helper to convert torch to lfs tensor
+    lfs::core::Tensor from_torch(const torch::Tensor& t) {
+        auto cpu_t = t.cpu().contiguous();
+        std::vector<size_t> shape;
+        for (int64_t i = 0; i < cpu_t.dim(); ++i) {
+            shape.push_back(cpu_t.size(i));
+        }
+
+        if (cpu_t.dtype() == torch::kFloat32) {
+            std::vector<float> data(cpu_t.data_ptr<float>(),
+                                    cpu_t.data_ptr<float>() + cpu_t.numel());
+            return lfs::core::Tensor::from_vector(data, lfs::core::TensorShape(shape),
+                                                  lfs::core::Device::CUDA);
+        } else if (cpu_t.dtype() == torch::kBool) {
+            auto uint8_tensor = cpu_t.to(torch::kUInt8);
+            auto result = lfs::core::Tensor::zeros_bool(lfs::core::TensorShape(shape), lfs::core::Device::CPU);
+            auto ptr = result.ptr<unsigned char>();
+            std::memcpy(ptr, uint8_tensor.data_ptr<uint8_t>(), uint8_tensor.numel());
+            return result.to(lfs::core::Device::CUDA);
+        }
+        throw std::runtime_error("Unsupported dtype");
     }
 
-    if (cpu_t.dtype() == torch::kFloat32) {
-        std::vector<float> data(cpu_t.data_ptr<float>(),
-                                 cpu_t.data_ptr<float>() + cpu_t.numel());
-        return lfs::core::Tensor::from_vector(data, lfs::core::TensorShape(shape),
-                                               lfs::core::Device::CUDA);
-    } else if (cpu_t.dtype() == torch::kBool) {
-        auto uint8_tensor = cpu_t.to(torch::kUInt8);
-        auto result = lfs::core::Tensor::zeros_bool(lfs::core::TensorShape(shape), lfs::core::Device::CPU);
-        auto ptr = result.ptr<unsigned char>();
-        std::memcpy(ptr, uint8_tensor.data_ptr<uint8_t>(), uint8_tensor.numel());
-        return result.to(lfs::core::Device::CUDA);
-    }
-    throw std::runtime_error("Unsupported dtype");
-}
+    // Helper to convert lfs to torch tensor
+    torch::Tensor to_torch(const lfs::core::Tensor& t) {
+        auto cpu_tensor = t.to(lfs::core::Device::CPU);
+        std::vector<int64_t> sizes;
+        for (size_t i = 0; i < t.ndim(); ++i) {
+            sizes.push_back(t.shape()[i]);
+        }
 
-// Helper to convert lfs to torch tensor
-torch::Tensor to_torch(const lfs::core::Tensor& t) {
-    auto cpu_tensor = t.to(lfs::core::Device::CPU);
-    std::vector<int64_t> sizes;
-    for (size_t i = 0; i < t.ndim(); ++i) {
-        sizes.push_back(t.shape()[i]);
+        if (t.dtype() == lfs::core::DataType::Float32) {
+            auto ptr = cpu_tensor.ptr<float>();
+            return torch::from_blob(ptr, sizes, torch::kFloat32).clone().cuda();
+        }
+        throw std::runtime_error("Unsupported dtype");
     }
 
-    if (t.dtype() == lfs::core::DataType::Float32) {
-        auto ptr = cpu_tensor.ptr<float>();
-        return torch::from_blob(ptr, sizes, torch::kFloat32).clone().cuda();
+    bool tensors_close(const lfs::core::Tensor& a, const torch::Tensor& b, float rtol = 1e-4f, float atol = 1e-5f) {
+        auto a_torch = to_torch(a);
+        if (a_torch.sizes() != b.sizes())
+            return false;
+
+        auto diff = torch::abs(a_torch - b);
+        auto threshold = atol + rtol * torch::abs(b);
+        auto close = diff <= threshold;
+        return close.all().item<bool>();
     }
-    throw std::runtime_error("Unsupported dtype");
-}
 
-bool tensors_close(const lfs::core::Tensor& a, const torch::Tensor& b, float rtol = 1e-4f, float atol = 1e-5f) {
-    auto a_torch = to_torch(a);
-    if (a_torch.sizes() != b.sizes()) return false;
+    // Create matching splat data
+    std::pair<lfs::core::SplatData, gs::SplatData> create_matching_data(int n, int seed = 42) {
+        torch::manual_seed(seed);
 
-    auto diff = torch::abs(a_torch - b);
-    auto threshold = atol + rtol * torch::abs(b);
-    auto close = diff <= threshold;
-    return close.all().item<bool>();
-}
+        auto torch_means = torch::randn({n, 3}, torch::kCUDA) * 0.5f;
+        auto torch_sh0 = torch::randn({n, 3}, torch::kCUDA) * 0.3f;
+        auto torch_shN = torch::randn({n, 48}, torch::kCUDA) * 0.1f;
+        auto torch_scaling = torch::randn({n, 3}, torch::kCUDA) * 0.5f - 2.0f;
+        auto torch_rotation = torch::zeros({n, 4}, torch::kCUDA);
+        torch_rotation.index({torch::indexing::Slice(), 0}) = 1.0f;
+        auto torch_opacity = torch::randn({n, 1}, torch::kCUDA) * 0.5f;
 
-// Create matching splat data
-std::pair<lfs::core::SplatData, gs::SplatData> create_matching_data(int n, int seed = 42) {
-    torch::manual_seed(seed);
+        auto lfs_means = from_torch(torch_means);
+        auto lfs_sh0 = from_torch(torch_sh0);
+        auto lfs_shN = from_torch(torch_shN);
+        auto lfs_scaling = from_torch(torch_scaling);
+        auto lfs_rotation = from_torch(torch_rotation);
+        auto lfs_opacity = from_torch(torch_opacity);
 
-    auto torch_means = torch::randn({n, 3}, torch::kCUDA) * 0.5f;
-    auto torch_sh0 = torch::randn({n, 3}, torch::kCUDA) * 0.3f;
-    auto torch_shN = torch::randn({n, 48}, torch::kCUDA) * 0.1f;
-    auto torch_scaling = torch::randn({n, 3}, torch::kCUDA) * 0.5f - 2.0f;
-    auto torch_rotation = torch::zeros({n, 4}, torch::kCUDA);
-    torch_rotation.index({torch::indexing::Slice(), 0}) = 1.0f;
-    auto torch_opacity = torch::randn({n, 1}, torch::kCUDA) * 0.5f;
+        lfs::core::SplatData lfs_splat(3, lfs_means, lfs_sh0, lfs_shN, lfs_scaling, lfs_rotation, lfs_opacity, 1.0f);
+        gs::SplatData gs_splat(3, torch_means, torch_sh0, torch_shN, torch_scaling, torch_rotation, torch_opacity, 1.0f);
 
-    auto lfs_means = from_torch(torch_means);
-    auto lfs_sh0 = from_torch(torch_sh0);
-    auto lfs_shN = from_torch(torch_shN);
-    auto lfs_scaling = from_torch(torch_scaling);
-    auto lfs_rotation = from_torch(torch_rotation);
-    auto lfs_opacity = from_torch(torch_opacity);
+        return {std::move(lfs_splat), std::move(gs_splat)};
+    }
 
-    lfs::core::SplatData lfs_splat(3, lfs_means, lfs_sh0, lfs_shN, lfs_scaling, lfs_rotation, lfs_opacity, 1.0f);
-    gs::SplatData gs_splat(3, torch_means, torch_sh0, torch_shN, torch_scaling, torch_rotation, torch_opacity, 1.0f);
-
-    return {std::move(lfs_splat), std::move(gs_splat)};
-}
-
-}  // anonymous namespace
+} // anonymous namespace
 
 // Test: Initialization produces identical results
 TEST(OperationsComparison, Initialization) {
@@ -212,7 +213,8 @@ TEST(OperationsComparison, BenchmarkInitialization) {
     // Time new implementation
     cudaDeviceSynchronize();
     auto start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < n_runs; ++i) bench_lfs();
+    for (int i = 0; i < n_runs; ++i)
+        bench_lfs();
     cudaDeviceSynchronize();
     auto end = std::chrono::high_resolution_clock::now();
     double time_lfs = std::chrono::duration<double, std::milli>(end - start).count() / n_runs;
@@ -220,7 +222,8 @@ TEST(OperationsComparison, BenchmarkInitialization) {
     // Time reference
     cudaDeviceSynchronize();
     start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < n_runs; ++i) bench_gs();
+    for (int i = 0; i < n_runs; ++i)
+        bench_gs();
     cudaDeviceSynchronize();
     end = std::chrono::high_resolution_clock::now();
     double time_gs = std::chrono::duration<double, std::milli>(end - start).count() / n_runs;
@@ -240,7 +243,7 @@ TEST(OperationsComparison, BenchmarkRemove) {
     const int n_runs = 10;
 
     torch::manual_seed(999);
-    auto torch_mask = torch::rand({n_gaussians}, torch::kCUDA) > 0.9f;  // Remove ~10%
+    auto torch_mask = torch::rand({n_gaussians}, torch::kCUDA) > 0.9f; // Remove ~10%
     auto lfs_mask = from_torch(torch_mask);
 
     // Warmup and test
@@ -271,7 +274,8 @@ TEST(OperationsComparison, BenchmarkRemove) {
     // Time new
     cudaDeviceSynchronize();
     auto start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < n_runs; ++i) bench_lfs();
+    for (int i = 0; i < n_runs; ++i)
+        bench_lfs();
     cudaDeviceSynchronize();
     auto end = std::chrono::high_resolution_clock::now();
     double time_lfs = std::chrono::duration<double, std::milli>(end - start).count() / n_runs;
@@ -279,7 +283,8 @@ TEST(OperationsComparison, BenchmarkRemove) {
     // Time reference
     cudaDeviceSynchronize();
     start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < n_runs; ++i) bench_gs();
+    for (int i = 0; i < n_runs; ++i)
+        bench_gs();
     cudaDeviceSynchronize();
     end = std::chrono::high_resolution_clock::now();
     double time_gs = std::chrono::duration<double, std::milli>(end - start).count() / n_runs;
@@ -310,7 +315,7 @@ TEST(OperationsComparison, StressTestWithSHProgressionAndDensification) {
     gs::param::OptimizationParameters gs_params;
 
     lfs_params.iterations = 1000;
-    lfs_params.sh_degree_interval = 10;  // Increase SH degree every 10 iterations
+    lfs_params.sh_degree_interval = 10; // Increase SH degree every 10 iterations
     lfs_params.start_refine = 10;
     lfs_params.refine_every = 10;
     lfs_params.stop_refine = n_iterations;

@@ -4,15 +4,15 @@
 // Head-to-head comparison tests: DefaultStrategy (new) vs Reference (old)
 // These tests run BOTH implementations on identical inputs and compare outputs
 
-#include "training_new/strategies/default_strategy.hpp"
-#include "training/strategies/default_strategy.hpp"
-#include "training/rasterization/rasterizer.hpp"
-#include "training_new/optimizer/render_output.hpp"
+#include "core/parameters.hpp"
+#include "core/splat_data.hpp"
 #include "core_new/logger.hpp"
 #include "core_new/parameters.hpp"
 #include "core_new/splat_data.hpp"
-#include "core/parameters.hpp"
-#include "core/splat_data.hpp"
+#include "training/rasterization/rasterizer.hpp"
+#include "training/strategies/default_strategy.hpp"
+#include "training_new/optimizer/render_output.hpp"
+#include "training_new/strategies/default_strategy.hpp"
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
@@ -44,13 +44,13 @@ lfs::core::Tensor from_torch(const torch::Tensor& t) {
 
     if (cpu_t.dtype() == torch::kFloat32) {
         std::vector<float> data(cpu_t.data_ptr<float>(),
-                                 cpu_t.data_ptr<float>() + cpu_t.numel());
+                                cpu_t.data_ptr<float>() + cpu_t.numel());
         return lfs::core::Tensor::from_vector(data, lfs::core::TensorShape(shape),
-                                               lfs::core::Device::CUDA);
+                                              lfs::core::Device::CUDA);
     } else if (cpu_t.dtype() == torch::kBool) {
         auto uint8_t_tensor = cpu_t.to(torch::kUInt8);
         std::vector<uint8_t> data(uint8_t_tensor.data_ptr<uint8_t>(),
-                                   uint8_t_tensor.data_ptr<uint8_t>() + uint8_t_tensor.numel());
+                                  uint8_t_tensor.data_ptr<uint8_t>() + uint8_t_tensor.numel());
         // Create on CPU then convert
         auto result = lfs::core::Tensor::zeros_bool(lfs::core::TensorShape(shape), lfs::core::Device::CPU);
         auto ptr = result.ptr<unsigned char>();
@@ -67,11 +67,11 @@ bool tensors_close(const lfs::core::Tensor& a, const torch::Tensor& b,
     if (a_torch.sizes() != b.sizes()) {
         std::cout << "Shape mismatch: [";
         for (int i = 0; i < a_torch.dim(); ++i) {
-            std::cout << a_torch.size(i) << (i < a_torch.dim()-1 ? ", " : "");
+            std::cout << a_torch.size(i) << (i < a_torch.dim() - 1 ? ", " : "");
         }
         std::cout << "] vs [";
         for (int i = 0; i < b.dim(); ++i) {
-            std::cout << b.size(i) << (i < b.dim()-1 ? ", " : "");
+            std::cout << b.size(i) << (i < b.dim() - 1 ? ", " : "");
         }
         std::cout << "]" << std::endl;
         return false;

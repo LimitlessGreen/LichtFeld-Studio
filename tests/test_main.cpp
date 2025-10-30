@@ -4,10 +4,10 @@
 #include "core/logger.hpp"
 #include "core_new/pinned_memory_allocator.hpp"
 #include "core_new/tensor/internal/memory_pool.hpp"
-#include <gtest/gtest.h>
-#include <torch/torch.h>
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <cuda_runtime.h>
+#include <gtest/gtest.h>
+#include <torch/torch.h>
 
 // Custom event listener to clean GPU memory before AND after each test
 class MemoryCleanupListener : public ::testing::EmptyTestEventListener {
@@ -47,7 +47,7 @@ private:
 
         // Final sync
         cudaDeviceSynchronize();
-        cudaGetLastError();  // Clear any remaining errors
+        cudaGetLastError(); // Clear any remaining errors
     }
 
 public:

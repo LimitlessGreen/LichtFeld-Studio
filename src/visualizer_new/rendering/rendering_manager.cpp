@@ -922,8 +922,7 @@ namespace lfs::vis {
                 .gut = settings_.gut,
                 .show_dividers = true,
                 .divider_color = glm::vec4(1.0f, 0.85f, 0.0f, 1.0f),
-                .show_labels = true
-            };
+                .show_labels = true};
         }
 
         return std::nullopt;

@@ -5,8 +5,8 @@
 #include "internal/tensor_impl.hpp"
 #include "internal/tensor_ops.hpp"
 #include <cstring>
-#include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_runtime.h>
 #include <fstream>
 #include <iomanip>
 #include <numeric>
@@ -67,7 +67,7 @@ namespace lfs::core {
           is_contiguous_(true),
           device_(device),
           dtype_(dtype),
-          is_view_(true), // This is a view
+          is_view_(true),   // This is a view
           stream_(nullptr), // Use default stream (stream 0) for all operations
           id_(next_id_++) {
 
@@ -793,7 +793,7 @@ namespace lfs::core {
                 }
 
                 CHECK_CUDA(cudaMemcpy(result.ptr<unsigned char>(), result_cpu.ptr<unsigned char>(),
-                                     numel() * sizeof(unsigned char), cudaMemcpyHostToDevice));
+                                      numel() * sizeof(unsigned char), cudaMemcpyHostToDevice));
             } else {
                 const int* src = ptr<int>();
                 unsigned char* dst = result.ptr<unsigned char>();
@@ -863,7 +863,7 @@ namespace lfs::core {
                 }
 
                 CHECK_CUDA(cudaMemcpy(result.ptr<unsigned char>(), result_cpu.ptr<unsigned char>(),
-                                     numel() * sizeof(unsigned char), cudaMemcpyHostToDevice));
+                                      numel() * sizeof(unsigned char), cudaMemcpyHostToDevice));
             } else {
                 const int64_t* src = ptr<int64_t>();
                 unsigned char* dst = result.ptr<unsigned char>();
@@ -917,7 +917,7 @@ namespace lfs::core {
                 }
 
                 CHECK_CUDA(cudaMemcpy(result.ptr<unsigned char>(), result_cpu.ptr<unsigned char>(),
-                                     numel() * sizeof(unsigned char), cudaMemcpyHostToDevice));
+                                      numel() * sizeof(unsigned char), cudaMemcpyHostToDevice));
                 CHECK_CUDA(cudaDeviceSynchronize()); // Ensure copy completes
             } else {
                 const __half* src = ptr<__half>();

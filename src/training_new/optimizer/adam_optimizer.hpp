@@ -102,20 +102,20 @@ namespace lfs::training {
         float eps = 1e-8f;
 
         // Memory optimization settings (for optimizer state, not parameters)
-        float growth_factor = 1.5f;      // Multiply capacity by this when growing (like std::vector)
-                                         // Default 1.5x means ~50% fewer reallocations than exact-fit
-        size_t initial_capacity = 0;     // Initial capacity (0 = auto, >0 = pre-allocate to this size)
-                                         // Set to max expected Gaussians to avoid ALL reallocations
+        float growth_factor = 1.5f;  // Multiply capacity by this when growing (like std::vector)
+                                     // Default 1.5x means ~50% fewer reallocations than exact-fit
+        size_t initial_capacity = 0; // Initial capacity (0 = auto, >0 = pre-allocate to this size)
+                                     // Set to max expected Gaussians to avoid ALL reallocations
     };
 
     struct AdamParamState {
-        lfs::core::Tensor exp_avg;       // First moment estimate
-        lfs::core::Tensor exp_avg_sq;    // Second moment estimate
+        lfs::core::Tensor exp_avg;    // First moment estimate
+        lfs::core::Tensor exp_avg_sq; // Second moment estimate
         int64_t step_count = 0;
 
         // Capacity tracking for efficient growth
-        size_t capacity = 0;             // Total allocated capacity (first dimension)
-        size_t size = 0;                 // Currently used size (first dimension)
+        size_t capacity = 0; // Total allocated capacity (first dimension)
+        size_t size = 0;     // Currently used size (first dimension)
     };
 
     // Parameter type enum (public for state manipulation)

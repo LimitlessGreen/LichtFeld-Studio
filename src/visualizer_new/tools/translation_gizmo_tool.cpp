@@ -214,19 +214,19 @@ namespace lfs::vis::tools {
                 if (is_dragging_) {
                     ImGui::TextColored(ImVec4(0, 1, 0, 1), "Dragging: %s",
                                        selected_element_ == lfs::rendering::GizmoElement::XAxis ? "X Axis" : selected_element_ == lfs::rendering::GizmoElement::YAxis ? "Y Axis"
-                                                                                                        : selected_element_ == lfs::rendering::GizmoElement::ZAxis   ? "Z Axis"
-                                                                                                        : selected_element_ == lfs::rendering::GizmoElement::XYPlane ? "XY Plane"
-                                                                                                        : selected_element_ == lfs::rendering::GizmoElement::XZPlane ? "XZ Plane"
-                                                                                                        : selected_element_ == lfs::rendering::GizmoElement::YZPlane ? "YZ Plane"
-                                                                                                                                                                    : "Unknown");
+                                                                                                         : selected_element_ == lfs::rendering::GizmoElement::ZAxis   ? "Z Axis"
+                                                                                                         : selected_element_ == lfs::rendering::GizmoElement::XYPlane ? "XY Plane"
+                                                                                                         : selected_element_ == lfs::rendering::GizmoElement::XZPlane ? "XZ Plane"
+                                                                                                         : selected_element_ == lfs::rendering::GizmoElement::YZPlane ? "YZ Plane"
+                                                                                                                                                                      : "Unknown");
                 } else if (hovered_element_ != lfs::rendering::GizmoElement::None) {
                     ImGui::Text("Hovering: %s",
                                 hovered_element_ == lfs::rendering::GizmoElement::XAxis ? "X Axis" : hovered_element_ == lfs::rendering::GizmoElement::YAxis ? "Y Axis"
-                                                                                                : hovered_element_ == lfs::rendering::GizmoElement::ZAxis   ? "Z Axis"
-                                                                                                : hovered_element_ == lfs::rendering::GizmoElement::XYPlane ? "XY Plane"
-                                                                                                : hovered_element_ == lfs::rendering::GizmoElement::XZPlane ? "XZ Plane"
-                                                                                                : hovered_element_ == lfs::rendering::GizmoElement::YZPlane ? "YZ Plane"
-                                                                                                                                                           : "Unknown");
+                                                                                                 : hovered_element_ == lfs::rendering::GizmoElement::ZAxis   ? "Z Axis"
+                                                                                                 : hovered_element_ == lfs::rendering::GizmoElement::XYPlane ? "XY Plane"
+                                                                                                 : hovered_element_ == lfs::rendering::GizmoElement::XZPlane ? "XZ Plane"
+                                                                                                 : hovered_element_ == lfs::rendering::GizmoElement::YZPlane ? "YZ Plane"
+                                                                                                                                                             : "Unknown");
                 } else {
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "Ready");
                 }

@@ -49,4 +49,4 @@ std::pair<float, SSIMContext> ssim_forward(
 // Manual SSIM backward (no autograd) - computes gradient w.r.t. img1
 torch::Tensor ssim_backward(
     const SSIMContext& ctx,
-    float grad_loss);  // Gradient of loss w.r.t. SSIM value (scalar)
+    float grad_loss); // Gradient of loss w.r.t. SSIM value (scalar)

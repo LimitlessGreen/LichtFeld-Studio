@@ -1,12 +1,12 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <gtest/gtest.h>
-#include <iostream>
-#include <chrono>
-#include <iomanip>
+#include "training/dataset.hpp" // For comparison benchmarks only
 #include "training_new/dataset.hpp"
-#include "training/dataset.hpp"  // For comparison benchmarks only
+#include <chrono>
+#include <gtest/gtest.h>
+#include <iomanip>
+#include <iostream>
 
 using namespace std::chrono;
 using namespace lfs::training;
@@ -222,7 +222,8 @@ TEST(DataLoaderPerf, InfiniteSampler_30k_Samples) {
     size_t total = 0;
     for (size_t i = 0; i < num_samples; ++i) {
         auto batch = sampler.next(1);
-        if (batch) total += batch->size();
+        if (batch)
+            total += batch->size();
     }
 
     auto end = high_resolution_clock::now();
@@ -267,7 +268,7 @@ TEST(DataLoaderPerf, ThreadSafeQueue_10k_Ops) {
 class DataLoaderComparison : public ::testing::Test {
 protected:
     void print_comparison(const std::string& test_name,
-                         double libtorch_us, double lfs_us, size_t count) {
+                          double libtorch_us, double lfs_us, size_t count) {
         double speedup = libtorch_us / lfs_us;
         double libtorch_throughput = count * 1000000.0 / libtorch_us;
         double lfs_throughput = count * 1000000.0 / lfs_us;
@@ -321,7 +322,8 @@ TEST_F(DataLoaderComparison, InfiniteSampler_10k_Samples) {
     size_t total1 = 0;
     for (size_t i = 0; i < num_samples; ++i) {
         auto batch = sampler1.next(batch_size);
-        if (batch) total1 += batch->size();
+        if (batch)
+            total1 += batch->size();
     }
     auto end1 = high_resolution_clock::now();
     auto elapsed1 = duration_cast<microseconds>(end1 - start1).count();
@@ -332,7 +334,8 @@ TEST_F(DataLoaderComparison, InfiniteSampler_10k_Samples) {
     size_t total2 = 0;
     for (size_t i = 0; i < num_samples; ++i) {
         auto batch = sampler2.next(batch_size);
-        if (batch) total2 += batch->size();
+        if (batch)
+            total2 += batch->size();
     }
     auto end2 = high_resolution_clock::now();
     auto elapsed2 = duration_cast<microseconds>(end2 - start2).count();
@@ -414,6 +417,6 @@ TEST(DataLoaderMemory, ComponentSizes) {
     std::cout << "  sizeof(DataLoaderOptions): " << sizeof(DataLoaderOptions) << " bytes" << std::endl;
 
     // Verify sizes are reasonable
-    EXPECT_LT(sizeof(RandomSampler), 128);  // Should be compact
-    EXPECT_LT(sizeof(ThreadSafeQueue<int>), 256);  // Reasonable for thread-safe structure
+    EXPECT_LT(sizeof(RandomSampler), 128);        // Should be compact
+    EXPECT_LT(sizeof(ThreadSafeQueue<int>), 256); // Reasonable for thread-safe structure
 }

@@ -12,13 +12,14 @@ namespace lfs {
 
     // CUDA kernel to interleave position and color data
     __global__ void writeInterleavedPosColorKernel(
-        const float* __restrict__ positions,  // [N, 3]
-        const float* __restrict__ colors,     // [N, 3]
-        float* __restrict__ output,           // [N, 6] interleaved
+        const float* __restrict__ positions, // [N, 3]
+        const float* __restrict__ colors,    // [N, 3]
+        float* __restrict__ output,          // [N, 6] interleaved
         int num_points) {
 
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= num_points) return;
+        if (idx >= num_points)
+            return;
 
         // Read position (x, y, z)
         float px = positions[idx * 3 + 0];
@@ -48,7 +49,8 @@ namespace lfs {
         int num_points,
         cudaStream_t stream) {
 
-        if (num_points <= 0) return;
+        if (num_points <= 0)
+            return;
 
         const int threads = 256;
         const int blocks = (num_points + threads - 1) / threads;

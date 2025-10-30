@@ -34,8 +34,8 @@ namespace gs {
 
         // Context for manual bilateral grid slice forward/backward
         struct BilateralGridSliceContext {
-            torch::Tensor grid;  // [12, L, H, W]
-            torch::Tensor rgb;   // [H, W, 3]
+            torch::Tensor grid; // [12, L, H, W]
+            torch::Tensor rgb;  // [H, W, 3]
         };
 
         // Context for manual TV loss forward/backward

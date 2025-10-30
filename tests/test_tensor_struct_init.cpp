@@ -1,12 +1,12 @@
 /* Test to isolate tensor struct initialization bug */
 
-#include "core_new/tensor.hpp"
 #include "core_new/logger.hpp"
+#include "core_new/tensor.hpp"
 #include <gtest/gtest.h>
 
-using lfs::core::Tensor;
-using lfs::core::Device;
 using lfs::core::DataType;
+using lfs::core::Device;
+using lfs::core::Tensor;
 
 class TensorStructInitTest : public ::testing::Test {
 protected:
@@ -61,8 +61,7 @@ TEST_F(TensorStructInitTest, StructAggregateInitializationWithDtype) {
         Tensor t1, t2;
     } tensors{
         .t1 = Tensor::empty({N, 3}, device, dtype),
-        .t2 = Tensor::empty({N, 3}, device, dtype)
-    };
+        .t2 = Tensor::empty({N, 3}, device, dtype)};
 
     Tensor source = Tensor::ones({5, 3}, device);
 
@@ -85,8 +84,7 @@ TEST_F(TensorStructInitTest, StructAggregateInitializationWithoutDtype) {
         Tensor t1, t2;
     } tensors{
         .t1 = Tensor::empty({N, 3}, device),
-        .t2 = Tensor::empty({N, 3}, device)
-    };
+        .t2 = Tensor::empty({N, 3}, device)};
 
     Tensor source = Tensor::ones({5, 3}, device);
 
@@ -168,8 +166,7 @@ TEST_F(TensorStructInitTest, ComplexStructLikeOriginalScene) {
         .shN = Tensor::zeros({N, 15, 3}, device, dtype),
         .opacity = Tensor::empty({N, 1}, device, dtype),
         .scaling = Tensor::empty({N, 3}, device, dtype),
-        .rotation = Tensor::empty({N, 4}, device, dtype)
-    };
+        .rotation = Tensor::empty({N, 4}, device, dtype)};
 
     // Create source data
     Tensor source_sh0 = Tensor::ones({10, 1, 3}, device);
@@ -199,8 +196,7 @@ TEST_F(TensorStructInitTest, ComplexStructWithCopy) {
         .shN = Tensor::zeros({N, 15, 3}, device, dtype),
         .opacity = Tensor::empty({N, 1}, device, dtype),
         .scaling = Tensor::empty({N, 3}, device, dtype),
-        .rotation = Tensor::empty({N, 4}, device, dtype)
-    };
+        .rotation = Tensor::empty({N, 4}, device, dtype)};
 
     // Create source data
     Tensor source_sh0 = Tensor::ones({10, 1, 3}, device);
@@ -267,9 +263,9 @@ TEST_F(TensorStructInitTest, SliceAssignmentOffset) {
     auto ptr = cpu.ptr<float>();
 
     // Check that offset region was written
-    EXPECT_FLOAT_EQ(ptr[5*3 + 0], 2.0f) << "Slice assignment at offset failed";
-    EXPECT_FLOAT_EQ(ptr[5*3 + 1], 2.0f);
-    EXPECT_FLOAT_EQ(ptr[5*3 + 2], 2.0f);
+    EXPECT_FLOAT_EQ(ptr[5 * 3 + 0], 2.0f) << "Slice assignment at offset failed";
+    EXPECT_FLOAT_EQ(ptr[5 * 3 + 1], 2.0f);
+    EXPECT_FLOAT_EQ(ptr[5 * 3 + 2], 2.0f);
 
     // Check that beginning is still zero
     EXPECT_FLOAT_EQ(ptr[0], 0.0f) << "Slice assignment corrupted data before offset";
@@ -305,7 +301,7 @@ TEST_F(TensorStructInitTest, SliceAssignmentLargeTensor) {
     auto ptr = cpu.ptr<float>();
 
     EXPECT_FLOAT_EQ(ptr[0], 1.0f) << "Large tensor slice assignment failed at start";
-    EXPECT_FLOAT_EQ(ptr[99999*3 + 0], 1.0f) << "Large tensor slice assignment failed at end";
+    EXPECT_FLOAT_EQ(ptr[99999 * 3 + 0], 1.0f) << "Large tensor slice assignment failed at end";
 }
 
 TEST_F(TensorStructInitTest, MultipleSliceAssignments) {
@@ -324,10 +320,10 @@ TEST_F(TensorStructInitTest, MultipleSliceAssignments) {
     auto cpu = t1.cpu();
     auto ptr = cpu.ptr<float>();
 
-    EXPECT_FLOAT_EQ(ptr[0*3 + 0], 1.0f) << "First slice assignment failed";
-    EXPECT_FLOAT_EQ(ptr[10*3 + 0], 2.0f) << "Second slice assignment failed";
-    EXPECT_FLOAT_EQ(ptr[20*3 + 0], 3.0f) << "Third slice assignment failed";
-    EXPECT_FLOAT_EQ(ptr[30*3 + 0], 0.0f) << "Region after assignments should still be zero";
+    EXPECT_FLOAT_EQ(ptr[0 * 3 + 0], 1.0f) << "First slice assignment failed";
+    EXPECT_FLOAT_EQ(ptr[10 * 3 + 0], 2.0f) << "Second slice assignment failed";
+    EXPECT_FLOAT_EQ(ptr[20 * 3 + 0], 3.0f) << "Third slice assignment failed";
+    EXPECT_FLOAT_EQ(ptr[30 * 3 + 0], 0.0f) << "Region after assignments should still be zero";
 }
 
 TEST_F(TensorStructInitTest, SliceAssignmentFromView) {
@@ -438,12 +434,12 @@ TEST_F(TensorStructInitTest, SliceAssignmentPreservesOtherData) {
     auto ptr = cpu.ptr<float>();
 
     // Check that data before slice is preserved (should be 5.0)
-    EXPECT_FLOAT_EQ(ptr[0*3 + 0], 5.0f) << "Data before slice should be preserved";
-    EXPECT_FLOAT_EQ(ptr[2*3 + 0], 5.0f) << "Data before slice should be preserved";
+    EXPECT_FLOAT_EQ(ptr[0 * 3 + 0], 5.0f) << "Data before slice should be preserved";
+    EXPECT_FLOAT_EQ(ptr[2 * 3 + 0], 5.0f) << "Data before slice should be preserved";
 
     // Check that sliced region has new value (should be 7.0 if working, 0.0 if bug)
     // This documents the bug - assignment zeros the data
-    float sliced_value = ptr[3*3 + 0];
+    float sliced_value = ptr[3 * 3 + 0];
     if (sliced_value == 0.0f) {
         FAIL() << "CONFIRMED BUG: Slice assignment zeros data instead of copying (expected 7.0, got " << sliced_value << ")";
     } else if (sliced_value == 7.0f) {
@@ -453,6 +449,6 @@ TEST_F(TensorStructInitTest, SliceAssignmentPreservesOtherData) {
     }
 
     // Check that data after slice is preserved (should be 5.0)
-    EXPECT_FLOAT_EQ(ptr[7*3 + 0], 5.0f) << "Data after slice should be preserved";
-    EXPECT_FLOAT_EQ(ptr[9*3 + 0], 5.0f) << "Data after slice should be preserved";
+    EXPECT_FLOAT_EQ(ptr[7 * 3 + 0], 5.0f) << "Data after slice should be preserved";
+    EXPECT_FLOAT_EQ(ptr[9 * 3 + 0], 5.0f) << "Data after slice should be preserved";
 }

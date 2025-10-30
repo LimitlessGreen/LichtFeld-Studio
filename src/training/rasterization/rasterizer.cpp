@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "rasterizer.hpp"
-#include <torch/torch.h>
 #include "core/logger.hpp"
+#include <torch/torch.h>
 
 namespace gs::training {
     using torch::indexing::None;
@@ -79,7 +79,7 @@ namespace gs::training {
         // Rendering parameters
         ctx.eps2d = 0.3f;
         ctx.near_plane = 0.01f;
-        ctx.far_plane = 1e10f;  // Match FastGS
+        ctx.far_plane = 1e10f; // Match FastGS
         ctx.radius_clip = 0.0f;
         ctx.tile_size = 16;
         ctx.scaling_modifier = scaling_modifier;
@@ -116,11 +116,11 @@ namespace gs::training {
         // Apply activation functions manually (no autograd)
         {
             torch::NoGradGuard no_grad;
-            ctx.means = ctx.means_raw;  // No activation
-            ctx.opacities = torch::sigmoid(ctx.opacities_raw).squeeze(-1);  // sigmoid + squeeze
-            ctx.scales = torch::exp(ctx.scales_raw);  // exp
+            ctx.means = ctx.means_raw;                                     // No activation
+            ctx.opacities = torch::sigmoid(ctx.opacities_raw).squeeze(-1); // sigmoid + squeeze
+            ctx.scales = torch::exp(ctx.scales_raw);                       // exp
             ctx.rotations = torch::nn::functional::normalize(ctx.rotations_raw,
-                torch::nn::functional::NormalizeFuncOptions().dim(-1));  // normalize
+                                                             torch::nn::functional::NormalizeFuncOptions().dim(-1)); // normalize
         }
 
         // Call gsplat forward
@@ -132,10 +132,10 @@ namespace gs::training {
             ctx.sh_coeffs.contiguous(),
             static_cast<uint32_t>(ctx.sh_degree),
             ctx.bg_color,
-            std::nullopt,  // masks
+            std::nullopt, // masks
             ctx.width, ctx.height, ctx.tile_size,
             ctx.viewmat,
-            std::nullopt,  // viewmats1
+            std::nullopt, // viewmats1
             ctx.K,
             ctx.camera_model,
             ctx.eps2d, ctx.near_plane, ctx.far_plane, ctx.radius_clip,
@@ -146,12 +146,12 @@ namespace gs::training {
             ShutterType::GLOBAL,
             ctx.radial_dist,
             ctx.tangential_dist,
-            std::nullopt  // thin_prism
+            std::nullopt // thin_prism
         );
 
         // Extract results
-        auto rendered_image = std::get<0>(fwd_results);  // [1, H, W, channels]
-        ctx.rendered_image = rendered_image;  // Save for backward (needed for clamp backward)
+        auto rendered_image = std::get<0>(fwd_results); // [1, H, W, channels]
+        ctx.rendered_image = rendered_image;            // Save for backward (needed for clamp backward)
         ctx.rendered_alpha = std::get<1>(fwd_results);
         ctx.radii = std::get<2>(fwd_results);
         ctx.means2d = std::get<3>(fwd_results);
@@ -161,7 +161,7 @@ namespace gs::training {
         ctx.flatten_ids = std::get<7>(fwd_results);
         ctx.last_ids = std::get<8>(fwd_results);
         ctx.compensations = std::get<9>(fwd_results);
-        ctx.colors = v_means;  // Reusing v_means for colors
+        ctx.colors = v_means; // Reusing v_means for colors
 
         // Post-process based on render mode
         torch::Tensor final_image, final_depth;
@@ -234,8 +234,7 @@ namespace gs::training {
     void rasterize_backward(
         const RasterizeContext& ctx,
         const torch::Tensor& grad_image,
-        SplatData& gaussian_model
-    ) {
+        SplatData& gaussian_model) {
         // Step 1: Reverse the post-processing (permute, squeeze, clamp)
         // grad_image is [3, H, W] (or [1, H, W] for depth-only modes)
         // Need to convert back to [1, H, W, C] format for gsplat
@@ -251,13 +250,13 @@ namespace gs::training {
             // We need to reconstruct the unclamped output
             // Forward: result.image = clamp(final_image.squeeze(0).permute({2, 0, 1}), 0, 1)
             // We need final_image before clamp to know where to mask
-            auto unclamped = ctx.rendered_image.squeeze(0).permute({2, 0, 1});  // [3, H, W]
-            auto clamp_mask = (unclamped >= 0.0f) & (unclamped <= 1.0f);  // [3, H, W]
+            auto unclamped = ctx.rendered_image.squeeze(0).permute({2, 0, 1}); // [3, H, W]
+            auto clamp_mask = (unclamped >= 0.0f) & (unclamped <= 1.0f);       // [3, H, W]
 
             auto grad_after_clamp = grad_image * clamp_mask.to(grad_image.dtype());
 
             // Step 2: Reverse permute and unsqueeze
-            auto grad_permuted = grad_after_clamp.permute({1, 2, 0}).unsqueeze(0);  // [1, H, W, 3]
+            auto grad_permuted = grad_after_clamp.permute({1, 2, 0}).unsqueeze(0); // [1, H, W, 3]
             grad_rendered_image = grad_permuted.contiguous();
         } else {
             grad_rendered_image = torch::zeros({1, ctx.height, ctx.width, 3}, ctx.means.options());
@@ -270,10 +269,10 @@ namespace gs::training {
             ctx.means, ctx.rotations, ctx.scales, ctx.opacities, ctx.sh_coeffs,
             static_cast<uint32_t>(ctx.sh_degree),
             ctx.bg_color,
-            std::nullopt,  // masks
+            std::nullopt, // masks
             ctx.width, ctx.height, ctx.tile_size,
             ctx.viewmat,
-            std::nullopt,  // viewmats1
+            std::nullopt, // viewmats1
             ctx.K,
             ctx.camera_model,
             ctx.eps2d, ctx.near_plane, ctx.far_plane, ctx.radius_clip,
@@ -284,12 +283,11 @@ namespace gs::training {
             ShutterType::GLOBAL,
             ctx.radial_dist,
             ctx.tangential_dist,
-            std::nullopt,  // thin_prism
+            std::nullopt, // thin_prism
             ctx.rendered_alpha, ctx.last_ids, ctx.tile_offsets, ctx.flatten_ids,
             ctx.colors, ctx.radii, ctx.means2d, ctx.depths, ctx.compensations,
             grad_rendered_image.contiguous(),
-            grad_rendered_alpha.contiguous()
-        );
+            grad_rendered_alpha.contiguous());
 
         auto v_means = std::get<0>(grads);
         auto v_quats = std::get<1>(grads);
@@ -334,7 +332,7 @@ namespace gs::training {
 
         // Step 4: Accumulate gradients into parameters
         // Get REFERENCES (not copies!) to parameter tensors
-        auto& means = gaussian_model.means();  // Use reference getter!
+        auto& means = gaussian_model.means(); // Use reference getter!
         auto& opacity_raw = gaussian_model.opacity_raw();
         auto& scaling_raw = gaussian_model.scaling_raw();
         auto& rotation_raw = gaussian_model.rotation_raw();

@@ -15,7 +15,7 @@
  * - Static backward() method for computing gradients (if not done in-place)
  */
 
+#include "opacity_regularization.hpp"
 #include "photometric_loss.hpp"
 #include "scale_regularization.hpp"
-#include "opacity_regularization.hpp"
 #include "sparsity_loss.hpp"
