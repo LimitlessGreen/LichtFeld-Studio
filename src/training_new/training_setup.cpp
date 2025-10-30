@@ -79,7 +79,7 @@ namespace lfs::training {
                         // Generate random point cloud if needed
                         LOG_INFO("No point cloud provided, using random initialization");
                         // Need to generate random point cloud - this should be provided by the loader or a utility
-                        int numInitGaussian = 10000;
+                        size_t numInitGaussian = 10000;
                         uint64_t seed = 8128;
 
                         // Use lfs::core::Tensor for random generation

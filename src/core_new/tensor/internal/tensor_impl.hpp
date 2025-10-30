@@ -1908,7 +1908,14 @@ namespace lfs::core {
                 throw std::runtime_error(msg);
             }
             if (numel() != 1) {
-                std::string msg = std::format("item<T>() requires single-element tensor, got {} elements", numel());
+                char buf[128];
+                std::snprintf(
+                    buf,
+                    sizeof(buf),
+                    "item<T>() requires single-element tensor, got %zu elements",
+                    numel()
+                );
+                std::string msg = buf;
                 LOG_ERROR("{}", msg);
                 throw std::runtime_error(msg);
             }
@@ -1931,8 +1938,14 @@ namespace lfs::core {
             // Float16 tensors should be accessed through .to(Float32).item<float>()
 
             if (!dtype_matches) {
-                std::string msg = std::format("item<T>(): dtype mismatch - tensor is {}, but requested incompatible type T",
-                                              dtype_name(dtype_));
+                char buf[256];
+                std::snprintf(
+                    buf,
+                    sizeof(buf),
+                    "item<T>(): dtype mismatch - tensor is %s, but requested incompatible type T",
+                    dtype_name(dtype_)
+                );
+                std::string msg = buf;
                 LOG_ERROR("{}", msg);
                 throw std::runtime_error(msg);
             }

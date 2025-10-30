@@ -15,12 +15,18 @@ namespace lfs::training {
 
         // Initialize grids directly with zeros (fused allocation + initialization)
         // TODO: Implement proper initialization with identity transform
-        grids_ = lfs::core::Tensor::zeros({num_images, 12, grid_L, grid_H, grid_W},
+        grids_ = lfs::core::Tensor::zeros({static_cast<size_t>(num_images), 12,
+                                           static_cast<size_t>(grid_L),
+                                           static_cast<size_t>(grid_H),
+                                           static_cast<size_t>(grid_W)},
                                           lfs::core::Device::CUDA,
                                           lfs::core::DataType::Float32);
 
         // Initialize gradient buffer (fused allocation + initialization)
-        grids_grad_ = lfs::core::Tensor::zeros({num_images, 12, grid_L, grid_H, grid_W},
+        grids_grad_ = lfs::core::Tensor::zeros({static_cast<size_t>(num_images), 12,
+                                                static_cast<size_t>(grid_L),
+                                                static_cast<size_t>(grid_H),
+                                                static_cast<size_t>(grid_W)},
                                                lfs::core::Device::CUDA,
                                                lfs::core::DataType::Float32);
 
@@ -29,7 +35,7 @@ namespace lfs::training {
         size_t total_elements = num_images * grid_L * grid_H * grid_W;
         size_t num_blocks = (total_elements + 255) / 256;
         size_t temp_size = std::max(size_t(2048), num_blocks);
-        tv_temp_buffer_ = lfs::core::Tensor::empty({static_cast<int>(temp_size)},
+        tv_temp_buffer_ = lfs::core::Tensor::empty({temp_size},
                                                    lfs::core::Device::CUDA,
                                                    lfs::core::DataType::Float32);
 
@@ -45,8 +51,8 @@ namespace lfs::training {
 
         // Get dimensions
         auto rgb_shape = rgb.shape();
-        int h = rgb_shape[0];
-        int w = rgb_shape[1];
+        size_t h = rgb_shape[0];
+        size_t w = rgb_shape[1];
 
         // Allocate output
         lfs::core::Tensor output = lfs::core::Tensor::empty({h, w, 3},
@@ -69,8 +75,8 @@ namespace lfs::training {
         // Create minimal context for backward (no tensor copies, just pointers)
         BilateralGridSliceContext ctx{
             .rgb_ptr = rgb.template ptr<const float>(),
-            .h = h,
-            .w = w,
+            .h = static_cast<int>(h),
+            .w = static_cast<int>(w),
             .image_idx = image_idx};
 
         return {output, ctx};
@@ -81,8 +87,8 @@ namespace lfs::training {
         const lfs::core::Tensor& grad_output) {
 
         // Use dimensions from context (no tensor shape queries needed)
-        int h = ctx.h;
-        int w = ctx.w;
+        size_t h = ctx.h;
+        size_t w = ctx.w;
 
         // Allocate gradient output
         lfs::core::Tensor grad_rgb = lfs::core::Tensor::empty({h, w, 3},

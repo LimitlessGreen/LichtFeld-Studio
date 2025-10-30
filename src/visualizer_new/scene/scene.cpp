@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <print>
 #include <ranges>
+#include <numeric> //accumulate
 
 namespace lfs::vis {
 
