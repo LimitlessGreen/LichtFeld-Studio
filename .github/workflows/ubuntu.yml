@@ -115,3 +115,12 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release --parallel $(nproc)
+
+      - name: Upload build artifacts
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: lichtfeld-studio-ubuntu-${{ github.run_number }}
+          path: |
+            build/LichtFeld-Studio*
+          if-no-files-found: error
