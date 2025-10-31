@@ -82,3 +82,12 @@ jobs:
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           cmake --build build --config Release --parallel %NUMBER_OF_PROCESSORS%
+
+      - name: Upload build artifacts
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: lichtfeld-studio-windows-${{ github.run_number }}
+          path: |
+            build/LichtFeld-Studio.exe
+          if-no-files-found: error
