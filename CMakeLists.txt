@@ -254,7 +254,7 @@ else()
 endif()
 
 enable_language(CUDA)
-find_package(CUDAToolkit 12.8 REQUIRED)
+find_package(CUDAToolkit 12.9.1 REQUIRED)
 
 # Create nvToolsExt target BEFORE finding Torch (PyTorch expects this)
 if(NOT TARGET CUDA::nvToolsExt)
@@ -264,7 +264,7 @@ if(NOT TARGET CUDA::nvToolsExt)
             ${CUDAToolkit_LIBRARY_ROOT}
             ${CUDAToolkit_LIBRARY_DIR}
             ${CUDAToolkit_TARGET_DIR}/lib64
-            /usr/local/cuda-12.8/lib64
+            /usr/local/cuda-12.9.1/lib64
             PATH_SUFFIXES lib lib64
             NO_DEFAULT_PATH
     )

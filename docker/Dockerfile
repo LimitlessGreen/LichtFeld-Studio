@@ -98,9 +98,9 @@ RUN git clone https://github.com/microsoft/vcpkg.git ${HOME}/vcpkg && \
 RUN echo 'export VCPKG_ROOT=$HOME/vcpkg' >> $HOME/.bashrc && \
     echo 'export PATH=$VCPKG_ROOT:$PATH' >> $HOME/.bashrc
 
-RUN wget https://download.pytorch.org/libtorch/cu128/libtorch-cxx11-abi-shared-with-deps-2.7.1%2Bcu128.zip && \
-    unzip libtorch-cxx11-abi-shared-with-deps-2.7.1+cu128.zip -d ${HOME} && \
-    rm libtorch-cxx11-abi-shared-with-deps-2.7.1+cu128.zip
+RUN wget https://download.pytorch.org/libtorch/cu129/libtorch-cxx11-abi-shared-with-deps-2.7.1%2Bcu129.zip && \
+    unzip libtorch-cxx11-abi-shared-with-deps-2.7.1+cu129.zip -d ${HOME} && \
+    rm libtorch-cxx11-abi-shared-with-deps-2.7.1+cu129.zip
 
 RUN wget https://github.com/Kitware/CMake/releases/download/v4.0.3/cmake-4.0.3-linux-x86_64.sh && \
     chmod +x cmake-4.0.3-linux-x86_64.sh && \
