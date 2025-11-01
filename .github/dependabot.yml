@@ -1,18 +1,39 @@
 version: 2
 updates:
-- package-ecosystem: "vcpkg"
-  directory: "/"
-  schedule:
-    interval: "weekly"
-- package-ecosystem: "github-actions"
-  directory: "/"
-  schedule:
-    interval: "weekly"
-- package-ecosystem: "npm"
-  directory: "/docs"
-  schedule:
-    interval: "weekly"
-- package-ecosystem: "docker"
-  directory: "/docker"
-  schedule:
-    interval: "weekly"
+  - package-ecosystem: "vcpkg"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "vcpkg"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/docs"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "npm"
+    open-pull-requests-limit: 5
+    groups:
+      docs-runtime:
+        dependency-type: "production"
+      docs-dev:
+        dependency-type: "development"
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "docker"
+    open-pull-requests-limit: 5
