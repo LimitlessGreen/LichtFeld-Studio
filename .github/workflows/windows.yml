@@ -27,7 +27,7 @@ jobs:
       - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.28
         with:
-          cuda: '12.8.0'
+          cuda: '12.9.1'
           use-github-cache: true
           use-local-cache: true
 
@@ -45,14 +45,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: external/release/libtorch
-          key: libtorch-2.7.0-cu128-${{ runner.os }}
+          key: libtorch-2.7.0-cu129-${{ runner.os }}
 
-      - name: Download LibTorch 2.7.0 (CUDA 12.8 build)
+      - name: Download LibTorch 2.7.0 (CUDA 12.9 build)
         if: steps.cache-libtorch.outputs.cache-hit != 'true'
         run: |
           mkdir external\release
           cd ..
-          Invoke-WebRequest -Uri https://download.pytorch.org/libtorch/cu128/libtorch-win-shared-with-deps-2.7.0%2Bcu128.zip -OutFile libtorch.zip -Verbose
+          Invoke-WebRequest -Uri https://download.pytorch.org/libtorch/cu129/libtorch-win-shared-with-deps-2.7.0%2Bcu129.zip -OutFile libtorch.zip -Verbose
           Expand-Archive libtorch.zip -DestinationPath $env:GITHUB_WORKSPACE\external\release
 
       - name: Cache vcpkg binary archives

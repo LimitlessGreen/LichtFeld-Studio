@@ -322,7 +322,7 @@ TEST_F(MemoryPoolBenchmarkTest, SummaryReport) {
 
     std::cout << "\n🎯 OPTIMIZATION GOAL: Eliminate cudaMalloc overhead" << std::endl;
     std::cout << "\n📝 IMPLEMENTATION:" << std::endl;
-    std::cout << "  - CUDA 12.8+ cudaMallocAsync with memory pools" << std::endl;
+    std::cout << "  - CUDA 12.9.1+ cudaMallocAsync with memory pools" << std::endl;
     std::cout << "  - Stream-ordered allocation for near-instant reuse" << std::endl;
     std::cout << "  - Infinite cache threshold (memory stays in pool)" << std::endl;
 
