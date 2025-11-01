@@ -16,8 +16,6 @@ on:
 jobs:
   build-ubuntu:
     runs-on: ubuntu-24.04
-    container:
-      image: nvidia/cuda:12.8.0-devel-ubuntu24.04
     env:
       VCPKG_ROOT: ${{ github.workspace }}/../vcpkg
       CC: gcc-14
@@ -28,50 +26,52 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Free up disk space
-        run: |
-          df -h
-          apt-get clean
-          rm -rf /var/lib/apt/lists/*
-          df -h
+      - name: Install CUDA Toolkit 12.8
+        id: cuda
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: "12.8.0"
+          components: '["nvcc"]'
 
       - name: Install GCC 14 and dependencies
         run: |
-          apt-get update
+          sudo apt-get update
 
           # install cmake from https://apt.kitware.com to get cmake 3.30+
-          
-          apt-get install -y ca-certificates gpg wget 
 
-          test -f /usr/share/doc/kitware-archive-keyring/copyright ||
-          wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
-          
-          echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main' | tee /etc/apt/sources.list.d/kitware.list >/dev/null
-          apt-get update
+          sudo apt-get install -y ca-certificates gnupg wget
 
-          test -f /usr/share/doc/kitware-archive-keyring/copyright ||
-          rm /usr/share/keyrings/kitware-archive-keyring.gpg
+          if [ ! -f /usr/share/doc/kitware-archive-keyring/copyright ]; then
+            wget -qO- https://apt.kitware.com/keys/kitware-archive-latest.asc | gpg --dearmor | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
+          fi
 
-          apt-get install -y kitware-archive-keyring
+          echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
+          sudo apt-get update
 
-          apt-get install -y git curl unzip cmake gcc-14 g++-14 ccache ninja-build
-          update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 \
-                              --slave /usr/bin/g++ g++ /usr/bin/g++-14
+          if [ ! -f /usr/share/doc/kitware-archive-keyring/copyright ]; then
+            sudo rm /usr/share/keyrings/kitware-archive-keyring.gpg
+          fi
+
+          sudo apt-get install -y kitware-archive-keyring
+
+          sudo apt-get install -y git curl unzip cmake gcc-14 g++-14 ccache ninja-build
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 \
+                                   --slave /usr/bin/g++ g++ /usr/bin/g++-14
 
       - name: Setup vcpkg
         run: |
-          apt-get update
-          apt-get install -y zip tar pkg-config python3 python3-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev
+          sudo apt-get update
+          sudo apt-get install -y zip tar pkg-config python3 python3-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev
           cd ..
           git clone https://github.com/microsoft/vcpkg.git
           ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
-          
+
           # Configure vcpkg to only build release and reduce parallelism
           cat >> $VCPKG_ROOT/triplets/x64-linux.cmake << EOF
           set(VCPKG_BUILD_TYPE release)
           set(VCPKG_MAX_CONCURRENCY 2)
           EOF
-          
+
           cat $VCPKG_ROOT/triplets/x64-linux.cmake
 
       - name: Cache LibTorch
@@ -92,7 +92,7 @@ jobs:
       - name: Cache ccache
         uses: actions/cache@v4
         with:
-          path: /github/home/.cache/ccache
+          path: ~/.cache/ccache
           key: ccache-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
             ccache-${{ runner.os }}-
@@ -100,7 +100,7 @@ jobs:
       - name: Cache vcpkg binary archives
         uses: actions/cache@v4
         with:
-          path: /github/home/.cache/vcpkg/archives
+          path: ~/.cache/vcpkg/archives
           key: vcpkg-binary-archives-${{ runner.os }}-${{ hashFiles('**/vcpkg.json') }}
           restore-keys: |
             vcpkg-binary-archives-${{ runner.os }}-
@@ -111,7 +111,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -G Ninja \
             -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja \
-            -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+            -DCMAKE_CUDA_COMPILER=${{ steps.cuda.outputs.cuda-path }}/bin/nvcc
 
       - name: Build
         run: cmake --build build --config Release --parallel $(nproc)
