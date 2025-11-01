@@ -11,7 +11,7 @@ namespace lfs::core {
     /**
      * @brief CUDA memory pool for fast allocation/deallocation
      *
-     * Uses cudaMallocAsync with memory pools (CUDA 12.9.1+) for near-instant
+     * Uses cudaMallocAsync with memory pools (CUDA 12.8+) for near-instant
      * allocation from cached memory. Falls back to regular cudaMalloc on older
      * CUDA versions.
      *
@@ -41,7 +41,7 @@ namespace lfs::core {
 
             void* ptr = nullptr;
 
-#if CUDART_VERSION >= 12091
+#if CUDART_VERSION >= 12080
             // Use stream-ordered allocation with memory pool (FAST!)
             cudaError_t err = cudaMallocAsync(&ptr, bytes, stream);
             if (err != cudaSuccess) {
@@ -57,7 +57,7 @@ namespace lfs::core {
                           bytes, cudaGetErrorString(err));
                 return nullptr;
             }
-            LOG_WARN("Using cudaMalloc (CUDA < 12.9.1). Consider upgrading for 50-600× faster allocation");
+            LOG_WARN("Using cudaMalloc (CUDA < 12.8). Consider upgrading for 50-600× faster allocation");
 #endif
 
             return ptr;
@@ -73,7 +73,7 @@ namespace lfs::core {
                 return;
             }
 
-#if CUDART_VERSION >= 12091
+#if CUDART_VERSION >= 12080
             cudaError_t err = cudaFreeAsync(ptr, stream);
             if (err != cudaSuccess) {
                 LOG_ERROR("cudaFreeAsync failed: {}", cudaGetErrorString(err));
@@ -90,7 +90,7 @@ namespace lfs::core {
          * @brief Configure memory pool settings for optimal performance
          */
         void configure() {
-#if CUDART_VERSION >= 12091
+#if CUDART_VERSION >= 12080
             int device;
             cudaError_t err = cudaGetDevice(&device);
             if (err != cudaSuccess) {
@@ -119,7 +119,7 @@ namespace lfs::core {
                      device, CUDART_VERSION);
             LOG_INFO("Memory pool will cache allocations for maximum performance");
 #else
-            LOG_WARN("CUDA memory pooling not available (requires CUDA >= 12.9.1, current: {})",
+            LOG_WARN("CUDA memory pooling not available (requires CUDA >= 12.8, current: {})",
                      CUDART_VERSION);
             LOG_WARN("Performance will be 50-600× slower than with memory pooling");
 #endif
@@ -127,10 +127,10 @@ namespace lfs::core {
 
         /**
          * @brief Get statistics about the memory pool
-         * @return String with pool statistics (empty on CUDA < 12.9.1)
+         * @return String with pool statistics (empty on CUDA < 12.8)
          */
         std::string get_stats() const {
-#if CUDART_VERSION >= 12091
+#if CUDART_VERSION >= 12080
             int device;
             cudaGetDevice(&device);
 
@@ -152,7 +152,7 @@ namespace lfs::core {
             oss << "  Cached:   " << ((reserved_memory - used_memory) / 1024.0 / 1024.0) << " MB";
             return oss.str();
 #else
-            return "Memory pool statistics not available (CUDA < 12.9.1)";
+            return "Memory pool statistics not available (CUDA < 12.8)";
 #endif
         }
 
@@ -163,7 +163,7 @@ namespace lfs::core {
          * it's better to keep memory cached for performance.
          */
         void trim() {
-#if CUDART_VERSION >= 12091
+#if CUDART_VERSION >= 12080
             int device;
             cudaGetDevice(&device);
 
@@ -178,7 +178,7 @@ namespace lfs::core {
                 LOG_INFO("Memory pool trimmed successfully");
             }
 #else
-            LOG_DEBUG("Memory pool trim not available (CUDA < 12.9.1)");
+            LOG_DEBUG("Memory pool trim not available (CUDA < 12.8)");
 #endif
         }
 

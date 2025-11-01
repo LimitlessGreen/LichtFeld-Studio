@@ -7,7 +7,7 @@
 [![Website](https://img.shields.io/badge/Website-Lichtfeld%20Studio-blue)](https://mrnerf.github.io/lichtfeld-studio-web/)
 [![Papers](https://img.shields.io/badge/Papers-Awesome%203DGS-orange)](https://mrnerf.github.io/awesome-3D-gaussian-splatting/)
 [![License](https://img.shields.io/badge/License-GPLv3-green.svg)](LICENSE)
-[![CUDA](https://img.shields.io/badge/CUDA-12.9.1+-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-downloads)
+[![CUDA](https://img.shields.io/badge/CUDA-12.8+-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-downloads)
 [![C++](https://img.shields.io/badge/C++-23-00599C?logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/23)
 
 <img src="docs/viewer_demo.gif" alt="3D Gaussian Splatting Viewer" width="85%"/>
@@ -43,7 +43,7 @@ Whether you're using it for research, production, or learning, your support enab
 
 ## Overview
 
-LichtFeld Studio is a high-performance implementation of 3D Gaussian Splatting that leverages modern C++23 and CUDA 12.9.1+ for optimal performance. Built with a modular architecture, it provides both training and real-time visualization capabilities for neural rendering research and applications.
+LichtFeld Studio is a high-performance implementation of 3D Gaussian Splatting that leverages modern C++23 and CUDA 12.8+ for optimal performance. Built with a modular architecture, it provides both training and real-time visualization capabilities for neural rendering research and applications.
 
 ### Key Features
 
