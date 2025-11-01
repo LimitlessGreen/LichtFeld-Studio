@@ -700,7 +700,7 @@ namespace lfs::core::tensor_ops {
         // Cap grid size for efficiency (llm.c pattern)
         grid_size = min(grid_size, 2048);
 
-        // Allocate partial buffer using stream-ordered allocation (CUDA 12.9.1+)
+        // Allocate partial buffer using stream-ordered allocation (CUDA 12.8+)
         float* partial = partial_buffer;
         bool need_free = false;
 

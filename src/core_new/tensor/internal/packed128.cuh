@@ -41,7 +41,7 @@ namespace lfs::core {
         ElementType payload[size];
 
         // Constructors
-        // Note: Explicitly empty instead of = default to avoid nvcc 12.9.1 ICE
+        // Note: Explicitly empty instead of = default to avoid nvcc 12.8 ICE
         __device__ Packed128() {}
 
         __device__ explicit Packed128(int4 bits) {
