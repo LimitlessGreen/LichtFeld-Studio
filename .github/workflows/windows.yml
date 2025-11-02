@@ -29,7 +29,8 @@ jobs:
         with:
           cuda: '12.8.0'
           use-github-cache: false
-          use-local-cache: true
+          use-local-cache: false
+          method: network
 
       - name: Setup vcpkg
         run: |
