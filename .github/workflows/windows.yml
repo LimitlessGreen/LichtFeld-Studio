@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.28
